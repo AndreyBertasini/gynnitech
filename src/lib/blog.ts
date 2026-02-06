@@ -10,51 +10,51 @@ export interface BlogPost {
 export const blogPosts: BlogPost[] = [
   {
     id: '1',
-    title: 'Real llms.txt examples from leading tech companies (and what they got right)',
-    description: 'A practical look at real llms.txt files from leading developer platforms like Anthropic, Vercel, Stripe, and Cloudflare.',
-    category: 'Best Practices',
-    date: 'February 7, 2026',
-    slug: 'real-llms-txt-examples'
+    title: 'Trigger Analytics: Quando i dati ti avvisano',
+    description: 'Come impostare un sistema che notifica automaticamente anomalie o opportunità basate sui cambiamenti delle metriche chiave.',
+    category: 'Analisi Tecnica',
+    date: '12 Febbraio 2026',
+    slug: 'trigger-analytics'
   },
   {
     id: '2',
-    title: 'Mintlify + Claude Opus 4.6: Powering AI-native knowledge management',
-    description: 'How Mintlify is using Claude to deliver more concise, accurate documentation assistance.',
-    category: 'AI Trends',
-    date: 'February 5, 2026',
-    slug: 'mintlify-claude-opus'
+    title: 'Analisi dei Cluster per la Segmentazione Clienti',
+    description: 'Smetti di trattare tutti i clienti allo stesso modo. Scopri come identificare i segmenti più redditizi con il machine learning.',
+    category: 'Data Science',
+    date: '08 Febbraio 2026',
+    slug: 'cluster-analysis'
   },
   {
     id: '3',
-    title: 'Analytics for AI and agent traffic',
-    description: 'See how AI agents use your documentation and why building docs for agent consumption is becoming essential.',
-    category: 'Announcements',
-    date: 'February 2, 2026',
-    slug: 'analytics-for-ai-agents'
+    title: 'Le Trappole Analitiche più Comuni',
+    description: 'Correlazione non è causalità, bias di sopravvivenza e altri errori che ogni marketing manager commette almeno una volta.',
+    category: 'Best Practices',
+    date: '01 Febbraio 2026',
+    slug: 'analytic-traps'
   },
   {
     id: '4',
-    title: 'A better way to edit and publish in Mintlify',
-    description: 'A new web editor that brings publishing, editing, and previewing into one workflow for anyone on your team.',
-    category: 'Announcements',
-    date: 'January 30, 2026',
-    slug: 'better-way-to-edit'
+    title: 'Unit Economics: Dove stai perdendo budget?',
+    description: 'Come calcolare LTV e CAC correttamente per capire la vera profittabilità delle tue campagne di acquisizione.',
+    category: 'Strategia',
+    date: '28 Gennaio 2026',
+    slug: 'unit-economics'
   },
   {
     id: '5',
-    title: 'Improved agent experience with llms.txt and content negotiation',
-    description: 'Clear, accessible documentation is a prerequisite for agents to successfully perform real world tasks. By improving llms.txt discoverability, we reduce friction.',
-    category: 'Best Practices',
-    date: 'January 29, 2026',
-    slug: 'improved-agent-experience'
+    title: 'HADI Cycles: Il segreto della crescita rapida',
+    description: 'Hypothesis, Action, Data, Insight. Come applicare il metodo scientifico al marketing per iterare velocemente.',
+    category: 'Framework',
+    date: '20 Gennaio 2026',
+    slug: 'hadi-cycles'
   },
   {
     id: '6',
-    title: 'Your docs are now discoverable by agents',
-    description: 'Every Mintlify docs site now supports automatic skills discovery. Run npx skills add with any docs URL and the CLI finds and installs skills for you.',
-    category: 'Announcements',
-    date: 'January 28, 2026',
-    slug: 'docs-discoverable-by-agents'
+    title: 'NPS è una "Vanity Metric"?',
+    description: 'Analisi critica del Net Promoter Score. Quando è utile, quando è fuorviante e quali alternative considerare.',
+    category: 'Metriche',
+    date: '15 Gennaio 2026',
+    slug: 'nps-critique'
   }
 ];
 

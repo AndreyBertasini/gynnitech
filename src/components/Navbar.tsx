@@ -19,28 +19,26 @@ export const Navbar = () => {
       <div className="max-w-7xl mx-auto px-6 h-16 flex items-center justify-between">
         {/* Logo */}
         <a href="/" className="flex items-center gap-2 font-bold text-xl text-white tracking-tight group">
-          <div className="w-8 h-8 bg-mint-500 rounded-lg flex items-center justify-center text-brand-dark shadow-lg shadow-mint-500/20 group-hover:shadow-mint-500/40 transition-all">
+          <div className="w-8 h-8 bg-mint-500 rounded-lg flex items-center justify-center text-white shadow-lg shadow-mint-500/20 group-hover:shadow-mint-500/40 transition-all">
             <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round">
               <path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"/>
             </svg>
           </div>
-          Mintlify
+          GYNNITECH
         </a>
 
         {/* Desktop Menu */}
         <div className="hidden md:flex items-center gap-8">
-            <a href="#" className="text-sm font-medium text-slate-300 hover:text-white transition-colors">Product</a>
-            <a href="/docs/introduction" className="text-sm font-medium text-slate-300 hover:text-white transition-colors">Docs</a>
-            <a href="#" className="text-sm font-medium text-slate-300 hover:text-white transition-colors">Customers</a>
-            <a href="#" className="text-sm font-medium text-slate-300 hover:text-white transition-colors">Pricing</a>
+            <a href="/" className="text-sm font-medium text-slate-300 hover:text-white transition-colors">Home</a>
+            <a href="/docs/corso/1-introduzione/" className="text-sm font-medium text-slate-300 hover:text-white transition-colors">Corso Gratuito</a>
             <a href="/blog" className="text-sm font-medium text-slate-300 hover:text-white transition-colors">Blog</a>
         </div>
 
         {/* CTA */}
         <div className="hidden md:flex items-center gap-4">
-            <a href="#" className="text-sm font-medium text-slate-300 hover:text-white transition-colors">Sign In</a>
-            <a href="#" className="bg-mint-500 hover:bg-mint-400 text-brand-dark px-4 py-2 rounded-full text-sm font-semibold transition-all shadow-[0_0_15px_rgba(61,177,134,0.3)] hover:shadow-[0_0_20px_rgba(61,177,134,0.5)]">
-                Get Started
+            <a href="https://www.linkedin.com/in/andrii-dyshkantiuk/" target="_blank" rel="noreferrer" className="text-sm font-medium text-slate-300 hover:text-white transition-colors">Chi sono</a>
+            <a href="https://tidycal.com/andrii-d/15-minute-meeting" target="_blank" rel="noreferrer" className="bg-mint-500 hover:bg-mint-400 text-white px-4 py-2 rounded-full text-sm font-semibold transition-all shadow-[0_0_15px_rgba(61,177,134,0.3)] hover:shadow-[0_0_20px_rgba(61,177,134,0.5)]">
+                Prenota una call
             </a>
         </div>
 
@@ -60,14 +58,12 @@ export const Navbar = () => {
                 className="md:hidden bg-brand-dark border-b border-white/10 overflow-hidden"
             >
                 <div className="flex flex-col p-6 gap-4">
-                    <a href="#" className="text-slate-300 hover:text-white font-medium">Product</a>
-                    <a href="/docs/introduction" className="text-slate-300 hover:text-white font-medium">Docs</a>
-                    <a href="#" className="text-slate-300 hover:text-white font-medium">Customers</a>
-                    <a href="#" className="text-slate-300 hover:text-white font-medium">Pricing</a>
+                    <a href="/" className="text-slate-300 hover:text-white font-medium">Home</a>
+                    <a href="/docs/corso/1-introduzione/" className="text-slate-300 hover:text-white font-medium">Corso Gratuito</a>
                     <a href="/blog" className="text-slate-300 hover:text-white font-medium">Blog</a>
                     <hr className="border-white/10 my-2" />
-                    <a href="#" className="text-slate-300 hover:text-white font-medium">Sign In</a>
-                    <a href="#" className="bg-mint-500 text-brand-dark text-center py-3 rounded-lg font-semibold hover:bg-mint-400 transition-colors">Get Started</a>
+                    <a href="https://www.linkedin.com/in/andrii-dyshkantiuk/" target="_blank" rel="noreferrer" className="text-slate-300 hover:text-white font-medium">Chi sono</a>
+                    <a href="https://tidycal.com/andrii-d/15-minute-meeting" target="_blank" rel="noreferrer" className="bg-mint-500 text-white text-center py-3 rounded-lg font-semibold hover:bg-mint-400 transition-colors">Prenota una call</a>
                 </div>
             </motion.div>
         )}

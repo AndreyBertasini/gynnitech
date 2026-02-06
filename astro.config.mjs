@@ -12,7 +12,7 @@ export default defineConfig({
   integrations: [
     react(),
     starlight({
-      title: 'Mintlify Clone',
+      title: 'GYNNITECH',
       expressiveCode: {
         themes: ['github-dark', 'github-light'],
         styleOverrides: {
@@ -46,35 +46,41 @@ export default defineConfig({
       ],
       sidebar: [
         {
+          label: 'Corso Gratuito',
+          items: [
+            { label: 'Introduzione', link: '/docs/corso/1-introduzione/' },
+            {
+              label: 'Modulo 1: Fondamenti',
+              collapsed: false,
+              items: [
+                { label: 'Cosa è il Marketing Data-Driven', link: '/docs/corso/2-data-driven/' },
+                { label: 'Metriche che contano', link: '/docs/corso/3-metriche/' },
+              ],
+            },
+            {
+              label: 'Modulo 2: Strumenti',
+              collapsed: true,
+              items: [
+                { label: 'Google Analytics 4', link: '/docs/corso/4-ga4/' },
+                { label: 'Excel per Marketer', link: '/docs/corso/5-excel/' },
+              ],
+            },
+          ],
+        },
+        /*
+        {
           label: 'Start Here',
           items: [
             { label: 'Introduction', link: '/docs/introduction/' },
             { label: 'Quickstart', link: '/docs/quickstart/' },
           ],
         },
+        */
         {
-          label: 'Essentials',
+          label: 'Risorse',
           items: [
-             { label: 'Development', link: '/docs/guides/development/' },
-             { label: 'Configuration', link: '/docs/guides/configuration/' },
-             { label: 'Navigation', link: '/docs/guides/navigation/' },
-             { label: 'Global Settings', link: '/docs/guides/global-settings/' },
-          ],
-        },
-        {
-          label: 'API Components',
-          collapsed: true,
-          items: [
-             { label: 'API Playground', link: '/docs/guides/api-playground/' },
-             { label: 'Authentication', link: '/docs/guides/authentication/' },
-             { label: 'Parameters', link: '/docs/guides/parameters/' },
-          ],
-        },
-        {
-          label: 'Resources',
-          items: [
-            { label: 'Community', link: 'https://discord.gg/mintlify' },
-            { label: 'Blog', link: 'https://mintlify.com/blog' },
+            { label: 'Blog', link: '/blog' },
+            { label: 'Consulenza', link: '/consulting' },
           ]
         }
       ],
