@@ -23,7 +23,7 @@ export default defineConfig({
   integrations: [
     react(),
     starlight({
-      title: 'GYNNITECH',
+      title: 'GinnyTech',
       logo: {
         src: './src/assets/logo-ginnytech.png',
       },
