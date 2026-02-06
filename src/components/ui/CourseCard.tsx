@@ -30,12 +30,12 @@ export const CourseCard = ({ id, title, description, icon: Icon, color, lessonCo
             <div className="flex h-12 w-12 items-center justify-center rounded-xl bg-white/5 border border-white/10 text-white transition-transform duration-300 group-hover:scale-110 group-hover:border-acid-yellow/50 group-hover:text-acid-yellow shadow-[0_0_10px_rgba(0,0,0,0.5)]">
               <Icon className="h-6 w-6" />
             </div>
-            <span className="rounded-full border border-white/10 bg-white/5 px-3 py-1 text-[10px] font-orbitron font-medium tracking-widest text-slate-400 group-hover:text-acid-yellow group-hover:border-acid-yellow/30 transition-colors">
+            <span className="rounded-full border border-white/10 bg-white/5 px-3 py-1 text-[10px] font-ui font-medium tracking-widest text-slate-400 group-hover:text-acid-yellow group-hover:border-acid-yellow/30 transition-colors">
               MOD {index + 1}
             </span>
           </div>
 
-          <h3 className="mb-3 text-2xl font-bold text-white transition-colors group-hover:text-transparent group-hover:bg-clip-text group-hover:bg-gradient-to-r group-hover:from-white group-hover:to-acid-yellow font-audiowide tracking-wide">
+          <h3 className="mb-3 text-2xl font-bold text-white transition-colors group-hover:text-transparent group-hover:bg-clip-text group-hover:bg-gradient-to-r group-hover:from-white group-hover:to-acid-yellow font-heading tracking-tight">
             {title}
           </h3>
           
@@ -45,12 +45,12 @@ export const CourseCard = ({ id, title, description, icon: Icon, color, lessonCo
 
           <div className="mt-auto border-t border-white/5 pt-6">
             <div className="flex items-center justify-between">
-              <span className="flex items-center gap-2 text-xs font-medium text-slate-500 font-orbitron">
+              <span className="flex items-center gap-2 text-xs font-medium text-slate-500 font-ui">
                 <BookOpen className="h-3.5 w-3.5" />
                 {lessonCount} LEZIONI
               </span>
               
-              <div className="flex items-center gap-2 text-sm font-medium text-acid-yellow opacity-0 transition-all duration-300 -translate-x-2 group-hover:translate-x-0 group-hover:opacity-100 font-orbitron">
+              <div className="flex items-center gap-2 text-sm font-medium text-acid-yellow opacity-0 transition-all duration-300 -translate-x-2 group-hover:translate-x-0 group-hover:opacity-100 font-ui">
                 Piano delle Lezioni <ArrowRight className="h-4 w-4" />
               </div>
             </div>

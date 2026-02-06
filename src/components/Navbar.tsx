@@ -15,10 +15,10 @@ export const Navbar = () => {
   }, []);
 
   return (
-    <nav className={`fixed top-0 left-0 right-0 z-50 transition-all duration-300 ${isScrolled ? 'bg-brand-dark/80 backdrop-blur-md border-b border-white/5 shadow-lg' : 'bg-transparent'}`}>
+    <nav className={`fixed top-0 left-0 right-0 z-[100] transition-all duration-300 ${isScrolled ? 'bg-brand-dark shadow-2xl' : 'bg-transparent'}`}>
       <div className="max-w-7xl mx-auto px-6 h-16 flex items-center justify-between">
         {/* Logo */}
-        <a href="/" className="flex items-center gap-2 font-bold text-xl text-white tracking-tight group font-orbitron">
+        <a href="/" className="flex items-center gap-2 font-bold text-xl text-white tracking-tight group font-ui">
           <div className="w-10 h-10 bg-brand-dark rounded-lg flex items-center justify-center text-2xl shadow-[0_0_15px_rgba(204,255,0,0.3)] border border-white/10 group-hover:shadow-[0_0_25px_rgba(204,255,0,0.6)] group-hover:border-acid-yellow transition-all duration-300">
             🍐
           </div>
