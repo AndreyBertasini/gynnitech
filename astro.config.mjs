@@ -6,6 +6,17 @@ import react from '@astrojs/react';
 
 // https://astro.build/config
 export default defineConfig({
+  devToolbar: {
+    placement: 'bottom-left',
+  },
+  image: {
+    service: {
+      entrypoint: 'astro/assets/services/sharp',
+      config: {
+        kernel: 'lanczos3'
+      }
+    }
+  },
   vite: {
     plugins: [tailwindcss()]
   },
@@ -13,6 +24,14 @@ export default defineConfig({
     react(),
     starlight({
       title: 'GYNNITECH',
+      logo: {
+        src: './src/assets/logo-ginnytech.png',
+      },
+      favicon: '/logo-ginnytech.png',
+      components: {
+        Sidebar: './src/components/starlight/Sidebar.astro',
+        Search: './src/components/starlight/Empty.astro', // Remove from header
+      },
       expressiveCode: {
         themes: ['github-dark', 'github-light'],
         styleOverrides: {
@@ -46,51 +65,61 @@ export default defineConfig({
       ],
       sidebar: [
         {
-          label: 'Getting Started',
+            label: 'Menu',
+            items: [
+                { label: 'Home', link: '/' },
+                { label: 'Corso Analisi Dati', link: '/course' },
+                { label: 'Blog', link: '/blog' },
+                { label: 'Consulenza', link: '/consulting' },
+            ]
+        },
+        {
+          label: 'Data Collection & Tracking',
           items: [
-            { label: 'Introduction', link: '/docs/corso/getting-started/introduction/' },
-            { label: 'The Framework', link: '/docs/corso/getting-started/framework/' },
-            { label: 'Terminology', link: '/docs/corso/getting-started/terminology/' },
+            { label: 'Event Tracking Design', link: '/corso/data-collection/event-tracking/' },
+            { label: 'Third-Party Integrations', link: '/corso/data-collection/integrations/' },
+            { label: 'Data Privacy & Compliance', link: '/corso/data-collection/privacy/' },
           ],
         },
         {
-          label: 'Data-Driven Management',
+          label: 'Data Warehousing & Architecture',
           items: [
-            { label: 'Strategy Frameworks', link: '/docs/corso/management/strategy/' },
-            { label: 'User-Centricity', link: '/docs/corso/management/user-centricity/' },
+            { label: 'OLAP Strategy', link: '/corso/data-warehousing/olap/' },
+            { label: 'ClickHouse Advanced', link: '/corso/data-warehousing/clickhouse/' },
           ],
         },
         {
-          label: 'Product Analytics',
+          label: 'Analytics Engineering',
           items: [
-            { label: 'Product-Market Fit', link: '/docs/corso/analytics/pmf/' },
-            { label: 'Retention Deep-Dive', link: '/docs/corso/analytics/retention/' },
-            { label: 'Experimentation', link: '/docs/corso/analytics/experimentation/' },
+            { label: 'Data Modeling', link: '/corso/analytics-engineering/modeling/' },
+            { label: 'dbt Workflow', link: '/corso/analytics-engineering/dbt/' },
+            { label: 'Data Quality & Testing', link: '/corso/analytics-engineering/quality/' },
           ],
         },
         {
-          label: 'Marketing & Economics',
+          label: 'Real-Time Analytics & Streaming',
           items: [
-            { label: 'Unit Economics & LTV', link: '/docs/corso/marketing/economics/' },
-            { label: 'Attribution', link: '/docs/corso/marketing/attribution/' },
-            { label: 'Brand Health', link: '/docs/corso/marketing/brand/' },
+            { label: 'Streaming Ingestion', link: '/corso/real-time-analytics/streaming/' },
+            { label: 'ClickHouse Real-Time Features', link: '/corso/real-time-analytics/clickhouse-rt/' },
+            { label: 'Live Dashboards & Alerting', link: '/corso/real-time-analytics/dashboards/' },
           ],
         },
         {
-          label: 'Technical Infrastructure',
+          label: 'Marketing Data Science & Python',
           items: [
-            { label: 'High-Performance SQL', link: '/docs/corso/infrastructure/sql/' },
-            { label: 'ClickHouse Mastery', link: '/docs/corso/infrastructure/clickhouse/' },
-            { label: 'Python for Data', link: '/docs/corso/infrastructure/python/' },
+            { label: 'Advanced Customer Analytics', link: '/corso/data-science/customer-analytics/' },
+            { label: 'Python for Data Engineering', link: '/corso/data-science/python/' },
+            { label: 'Attribution Modeling', link: '/corso/data-science/attribution/' },
           ],
         },
         {
-          label: 'Risorse',
+          label: 'Infrastructure & Ops',
           items: [
-            { label: 'Blog', link: '/blog' },
-            { label: 'Consulenza', link: '/consulting' },
-          ]
-        }
+            { label: 'CI/CD for Data', link: '/corso/infrastructure-ops/cicd/' },
+            { label: 'Cost Management', link: '/corso/infrastructure-ops/costs/' },
+            { label: 'Documentation', link: '/corso/infrastructure-ops/documentation/' },
+          ],
+        },
       ],
     }),
   ],
