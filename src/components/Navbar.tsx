@@ -18,27 +18,27 @@ export const Navbar = () => {
     <nav className={`fixed top-0 left-0 right-0 z-50 transition-all duration-300 ${isScrolled ? 'bg-brand-dark/80 backdrop-blur-md border-b border-white/5' : 'bg-transparent'}`}>
       <div className="max-w-7xl mx-auto px-6 h-16 flex items-center justify-between">
         {/* Logo */}
-        <a href="/" className="flex items-center gap-2 font-bold text-xl text-white tracking-tight group">
-          <div className="w-8 h-8 bg-mint-500 rounded-lg flex items-center justify-center text-white shadow-lg shadow-mint-500/20 group-hover:shadow-mint-500/40 transition-all">
-            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round">
-              <path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"/>
-            </svg>
+        <a href="/" className="flex items-center gap-2 font-bold text-xl text-white tracking-tight group font-orbitron">
+          <div className="w-10 h-10 bg-brand-dark rounded-lg flex items-center justify-center text-2xl shadow-[0_0_15px_rgba(204,255,0,0.3)] border border-white/10 group-hover:shadow-[0_0_25px_rgba(204,255,0,0.6)] group-hover:border-acid-yellow transition-all duration-300">
+            🍐
           </div>
-          GYNNITECH
+          <span className="text-transparent bg-clip-text bg-gradient-to-r from-white to-slate-300 group-hover:text-acid-yellow group-hover:bg-none transition-colors drop-shadow-[0_0_5px_rgba(255,255,255,0.2)]">
+            GinnyTech
+          </span>
         </a>
 
         {/* Desktop Menu */}
         <div className="hidden md:flex items-center gap-8">
-            <a href="/" className="text-sm font-medium text-slate-300 hover:text-white transition-colors">Home</a>
-            <a href="/course" className="text-sm font-medium text-slate-300 hover:text-white transition-colors">Corso Analisi Dati</a>
-            <a href="/consulting" className="text-sm font-medium text-slate-300 hover:text-white transition-colors">Consulenza</a>
-            <a href="/blog" className="text-sm font-medium text-slate-300 hover:text-white transition-colors">Blog</a>
+            <a href="/" className="text-sm font-medium text-slate-300 hover:text-neon-blue transition-colors hover:drop-shadow-[0_0_8px_rgba(0,243,255,0.5)]">Home</a>
+            <a href="/course" className="text-sm font-medium text-slate-300 hover:text-neon-blue transition-colors hover:drop-shadow-[0_0_8px_rgba(0,243,255,0.5)]">Corso Analisi Dati</a>
+            <a href="/consulting" className="text-sm font-medium text-slate-300 hover:text-neon-blue transition-colors hover:drop-shadow-[0_0_8px_rgba(0,243,255,0.5)]">Consulenza</a>
+            <a href="/blog" className="text-sm font-medium text-slate-300 hover:text-neon-blue transition-colors hover:drop-shadow-[0_0_8px_rgba(0,243,255,0.5)]">Blog</a>
         </div>
 
         {/* CTA */}
         <div className="hidden md:flex items-center gap-4">
-            <a href="https://www.linkedin.com/in/andrii-dyshkantiuk/" target="_blank" rel="noreferrer" className="text-sm font-medium text-slate-300 hover:text-white transition-colors">Chi sono</a>
-            <a href="https://tidycal.com/andrii-d/15-minute-meeting" target="_blank" rel="noreferrer" className="bg-mint-500 hover:bg-mint-400 text-white px-4 py-2 rounded-full text-sm font-semibold transition-all shadow-[0_0_15px_rgba(61,177,134,0.3)] hover:shadow-[0_0_20px_rgba(61,177,134,0.5)]">
+            <a href="https://www.linkedin.com/in/andrii-dyshkantiuk/" target="_blank" rel="noreferrer" className="text-sm font-medium text-slate-300 hover:text-neon-pink transition-colors hover:drop-shadow-[0_0_8px_rgba(255,0,255,0.5)]">Chi sono</a>
+            <a href="https://tidycal.com/andrii-d/15-minute-meeting" target="_blank" rel="noreferrer" className="bg-acid-yellow/10 hover:bg-acid-yellow/20 text-acid-yellow border border-acid-yellow/50 hover:border-acid-yellow px-5 py-2 rounded-full text-sm font-semibold transition-all shadow-[0_0_15px_rgba(204,255,0,0.2)] hover:shadow-[0_0_25px_rgba(204,255,0,0.5)] backdrop-blur-sm">
                 Prenota una call
             </a>
         </div>
