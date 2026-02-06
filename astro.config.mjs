@@ -46,36 +46,44 @@ export default defineConfig({
       ],
       sidebar: [
         {
-          label: 'Corso Gratuito',
+          label: 'Getting Started',
           items: [
-            { label: 'Introduzione', link: '/docs/corso/1-introduzione/' },
-            {
-              label: 'Modulo 1: Fondamenti',
-              collapsed: false,
-              items: [
-                { label: 'Cosa è il Marketing Data-Driven', link: '/docs/corso/2-data-driven/' },
-                { label: 'Metriche che contano', link: '/docs/corso/3-metriche/' },
-              ],
-            },
-            {
-              label: 'Modulo 2: Strumenti',
-              collapsed: true,
-              items: [
-                { label: 'Google Analytics 4', link: '/docs/corso/4-ga4/' },
-                { label: 'Excel per Marketer', link: '/docs/corso/5-excel/' },
-              ],
-            },
+            { label: 'Introduction', link: '/docs/corso/getting-started/introduction/' },
+            { label: 'The Framework', link: '/docs/corso/getting-started/framework/' },
+            { label: 'Terminology', link: '/docs/corso/getting-started/terminology/' },
           ],
         },
-        /*
         {
-          label: 'Start Here',
+          label: 'Data-Driven Management',
           items: [
-            { label: 'Introduction', link: '/docs/introduction/' },
-            { label: 'Quickstart', link: '/docs/quickstart/' },
+            { label: 'Strategy Frameworks', link: '/docs/corso/management/strategy/' },
+            { label: 'User-Centricity', link: '/docs/corso/management/user-centricity/' },
           ],
         },
-        */
+        {
+          label: 'Product Analytics',
+          items: [
+            { label: 'Product-Market Fit', link: '/docs/corso/analytics/pmf/' },
+            { label: 'Retention Deep-Dive', link: '/docs/corso/analytics/retention/' },
+            { label: 'Experimentation', link: '/docs/corso/analytics/experimentation/' },
+          ],
+        },
+        {
+          label: 'Marketing & Economics',
+          items: [
+            { label: 'Unit Economics & LTV', link: '/docs/corso/marketing/economics/' },
+            { label: 'Attribution', link: '/docs/corso/marketing/attribution/' },
+            { label: 'Brand Health', link: '/docs/corso/marketing/brand/' },
+          ],
+        },
+        {
+          label: 'Technical Infrastructure',
+          items: [
+            { label: 'High-Performance SQL', link: '/docs/corso/infrastructure/sql/' },
+            { label: 'ClickHouse Mastery', link: '/docs/corso/infrastructure/clickhouse/' },
+            { label: 'Python for Data', link: '/docs/corso/infrastructure/python/' },
+          ],
+        },
         {
           label: 'Risorse',
           items: [

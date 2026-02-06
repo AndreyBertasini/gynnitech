@@ -30,7 +30,8 @@ export const Navbar = () => {
         {/* Desktop Menu */}
         <div className="hidden md:flex items-center gap-8">
             <a href="/" className="text-sm font-medium text-slate-300 hover:text-white transition-colors">Home</a>
-            <a href="/docs/corso/1-introduzione/" className="text-sm font-medium text-slate-300 hover:text-white transition-colors">Corso Gratuito</a>
+            <a href="/course" className="text-sm font-medium text-slate-300 hover:text-white transition-colors">Corso Analisi Dati</a>
+            <a href="/consulting" className="text-sm font-medium text-slate-300 hover:text-white transition-colors">Consulenza</a>
             <a href="/blog" className="text-sm font-medium text-slate-300 hover:text-white transition-colors">Blog</a>
         </div>
 
@@ -59,7 +60,8 @@ export const Navbar = () => {
             >
                 <div className="flex flex-col p-6 gap-4">
                     <a href="/" className="text-slate-300 hover:text-white font-medium">Home</a>
-                    <a href="/docs/corso/1-introduzione/" className="text-slate-300 hover:text-white font-medium">Corso Gratuito</a>
+                    <a href="/course" className="text-slate-300 hover:text-white font-medium">Corso Analisi Dati</a>
+                    <a href="/consulting" className="text-slate-300 hover:text-white font-medium">Consulenza</a>
                     <a href="/blog" className="text-slate-300 hover:text-white font-medium">Blog</a>
                     <hr className="border-white/10 my-2" />
                     <a href="https://www.linkedin.com/in/andrii-dyshkantiuk/" target="_blank" rel="noreferrer" className="text-slate-300 hover:text-white font-medium">Chi sono</a>
