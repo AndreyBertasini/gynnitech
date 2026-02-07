@@ -3,6 +3,19 @@ import { defineConfig } from 'astro/config';
 import tailwindcss from '@tailwindcss/vite';
 import starlight from '@astrojs/starlight';
 import react from '@astrojs/react';
+import fs from 'node:fs';
+
+const loadSidebar = () => {
+  try {
+    const data = fs.readFileSync('./src/data/sidebar-generated.json', 'utf-8');
+    const items = JSON.parse(data);
+    return Array.isArray(items) ? items : [];
+  } catch (e) {
+    return [];
+  }
+};
+
+const dynamicSidebar = loadSidebar();
 
 // https://astro.build/config
 export default defineConfig({
@@ -95,6 +108,7 @@ export default defineConfig({
                 { label: 'Consulenza', link: '/consulting' },
             ]
         },
+        ...(dynamicSidebar.length > 0 ? [{ label: 'Notion Content', items: dynamicSidebar }] : []),
         {
           label: 'Data Collection & Tracking',
           items: [
