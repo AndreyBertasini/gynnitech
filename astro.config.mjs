@@ -22,6 +22,19 @@ export default defineConfig({
   devToolbar: {
     placement: 'bottom-left',
   },
+  redirects: {
+    '/corso/marketing/brand': '/course/marketing-data-science/brand',
+    '/corso/marketing/economics': '/course/marketing-data-science/unit-economics',
+    '/corso/marketing/attribution': '/course/marketing-data-science/attribution',
+    '/corso/infrastructure/clickhouse': '/course/data-warehousing/clickhouse',
+    '/corso/infrastructure/sql': '/course/data-warehousing/sql',
+    '/corso/infrastructure/python': '/course/marketing-data-science/python',
+    '/corso/analytics/retention': '/course/marketing-data-science/retention',
+    '/corso/analytics/pmf': '/course/marketing-data-science/pmf',
+    '/corso/getting-started/introduction': '/course/data-collection/introduction',
+    '/corso/getting-started/framework': '/course/data-collection/framework',
+    '/corso/getting-started/terminology': '/course/data-collection/terminology',
+  },
   image: {
     service: {
       entrypoint: 'astro/assets/services/sharp',
@@ -112,48 +125,48 @@ export default defineConfig({
         {
           label: 'Data Collection & Tracking',
           items: [
-            { label: 'Event Tracking Design', link: '/corso/data-collection/event-tracking/' },
-            { label: 'Third-Party Integrations', link: '/corso/data-collection/integrations/' },
-            { label: 'Data Privacy & Compliance', link: '/corso/data-collection/privacy/' },
+            { label: 'Event Tracking Design', link: '/course/data-collection/event-tracking/' },
+            { label: 'Third-Party Integrations', link: '/course/data-collection/integrations/' },
+            { label: 'Data Privacy & Compliance', link: '/course/data-collection/privacy/' },
           ],
         },
         {
           label: 'Data Warehousing & Architecture',
           items: [
-            { label: 'OLAP Strategy', link: '/corso/data-warehousing/olap/' },
-            { label: 'ClickHouse Advanced', link: '/corso/data-warehousing/clickhouse/' },
+            { label: 'OLAP Strategy', link: '/course/data-warehousing/olap/' },
+            { label: 'ClickHouse Advanced', link: '/course/data-warehousing/clickhouse/' },
           ],
         },
         {
           label: 'Analytics Engineering',
           items: [
-            { label: 'Data Modeling', link: '/corso/analytics-engineering/modeling/' },
-            { label: 'dbt Workflow', link: '/corso/analytics-engineering/dbt/' },
-            { label: 'Data Quality & Testing', link: '/corso/analytics-engineering/quality/' },
+            { label: 'Data Modeling', link: '/course/analytics-engineering/modeling/' },
+            { label: 'dbt Workflow', link: '/course/analytics-engineering/dbt/' },
+            { label: 'Data Quality & Testing', link: '/course/analytics-engineering/quality/' },
           ],
         },
         {
           label: 'Real-Time Analytics & Streaming',
           items: [
-            { label: 'Streaming Ingestion', link: '/corso/real-time-analytics/streaming/' },
-            { label: 'ClickHouse Real-Time Features', link: '/corso/real-time-analytics/clickhouse-rt/' },
-            { label: 'Live Dashboards & Alerting', link: '/corso/real-time-analytics/dashboards/' },
+            { label: 'Streaming Ingestion', link: '/course/real-time-analytics/streaming/' },
+            { label: 'ClickHouse Real-Time Features', link: '/course/real-time-analytics/clickhouse-rt/' },
+            { label: 'Live Dashboards & Alerting', link: '/course/real-time-analytics/dashboards/' },
           ],
         },
         {
           label: 'Marketing Data Science & Python',
           items: [
-            { label: 'Advanced Customer Analytics', link: '/corso/data-science/customer-analytics/' },
-            { label: 'Python for Data Engineering', link: '/corso/data-science/python/' },
-            { label: 'Attribution Modeling', link: '/corso/data-science/attribution/' },
+            { label: 'Advanced Customer Analytics', link: '/course/marketing-data-science/customer-analytics/' },
+            { label: 'Python for Data Engineering', link: '/course/marketing-data-science/python/' },
+            { label: 'Attribution Modeling', link: '/course/marketing-data-science/attribution/' },
           ],
         },
         {
           label: 'Infrastructure & Ops',
           items: [
-            { label: 'CI/CD for Data', link: '/corso/infrastructure-ops/cicd/' },
-            { label: 'Cost Management', link: '/corso/infrastructure-ops/costs/' },
-            { label: 'Documentation', link: '/corso/infrastructure-ops/documentation/' },
+            { label: 'CI/CD for Data', link: '/course/infrastructure-ops/cicd/' },
+            { label: 'Cost Management', link: '/course/infrastructure-ops/costs/' },
+            { label: 'Documentation', link: '/course/infrastructure-ops/documentation/' },
           ],
         },
       ],

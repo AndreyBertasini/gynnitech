@@ -115,6 +115,7 @@ async function sync() {
         // Determine path
         let outDir = "";
         let collection = "";
+        let moduleDir = "";
         
         switch (metadata.type) {
             case "Blog":
@@ -122,7 +123,19 @@ async function sync() {
                 collection = "blog";
                 break;
             case "Course":
-                outDir = "src/content/corso";
+                // Determine module from category
+                moduleDir = "data-collection"; // Default
+                if (metadata.category) {
+                    const norm = metadata.category.toLowerCase().trim();
+                    if (norm.includes('marketing') || norm.includes('strategia')) moduleDir = 'marketing-data-science';
+                    else if (norm.includes('infrastructure') || norm.includes('ops')) moduleDir = 'infrastructure-ops';
+                    else if (norm.includes('warehousing') || norm.includes('sql') || norm.includes('db')) moduleDir = 'data-warehousing';
+                    else if (norm.includes('real-time') || norm.includes('streaming')) moduleDir = 'real-time-analytics';
+                    else if (norm.includes('engineering') || norm.includes('analytics')) moduleDir = 'analytics-engineering';
+                    else if (norm.includes('collection') || norm.includes('tracking') || norm.includes('getting started')) moduleDir = 'data-collection';
+                }
+                
+                outDir = `src/content/corso/${moduleDir}`;
                 collection = "corso";
                 break;
             default: // Page
@@ -140,12 +153,14 @@ async function sync() {
 
         // Sidebar logic
         if (metadata.inMenu) {
-            // Basic link generation. 
-            // Note: Starlight/Astro links might need prefix adjustment depending on config.
-            // Assuming default routing.
             // Remove leading slash from slug if present to avoid double slashes
             const cleanSlug = metadata.slug.startsWith('/') ? metadata.slug.substring(1) : metadata.slug;
-            const link = `/${collection}/${cleanSlug}`;
+            
+            let link = `/${collection}/${cleanSlug}`;
+            if (collection === 'corso') {
+                link = `/course/${moduleDir}/${cleanSlug}`;
+            }
+
             menuItems.push({
                 label: metadata.title,
                 link: link, 
