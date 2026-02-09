@@ -36,7 +36,7 @@ export const COURSE_MODULES: CourseModule[] = [
     color: 'from-yellow-400 to-orange-500'
   },
   {
-    id: 'data-science',
+    id: 'marketing-data-science',
     title: 'Marketing Data Science',
     description: 'Analisi predittiva, LTV, Churn prediction, Python ETL e modelli di attribuzione.',
     icon: 'BrainCircuit',
@@ -48,5 +48,12 @@ export const COURSE_MODULES: CourseModule[] = [
     description: 'CI/CD per i dati, gestione dei costi cloud, Docker e documentazione tecnica.',
     icon: 'Server',
     color: 'from-slate-500 to-slate-400'
+  },
+  {
+    id: 'management',
+    title: 'Data-Driven Management',
+    description: 'Framework decisionali, JTBD, OKR e gestione del team dati.',
+    icon: 'BrainCircuit',
+    color: 'from-indigo-500 to-purple-400'
   }
 ];
