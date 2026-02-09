@@ -20,6 +20,7 @@ const dynamicSidebar = loadSidebar();
 // https://astro.build/config
 export default defineConfig({
   devToolbar: {
+    enabled: true,
     placement: 'bottom-left',
   },
   redirects: {
@@ -172,7 +173,7 @@ export default defineConfig({
         {
           label: 'Data-Driven Management',
           items: [
-            { label: 'Framework JTBD', link: '/course/management/il-framework-jtbd/' },
+            { label: 'Framework JTBD', link: '/course/management/jtbd/' },
           ],
         },
       ],
