@@ -113,13 +113,13 @@ export default defineConfig({
       ],
       sidebar: [
         {
-            label: 'Menu',
-            items: [
-                { label: 'Home', link: '/' },
-                { label: 'Corso Analisi Dati', link: '/course' },
-                { label: 'Blog', link: '/blog' },
-                { label: 'Consulenza', link: '/consulting' },
-            ]
+          label: 'Menu',
+          items: [
+            { label: 'Home', link: '/' },
+            { label: 'Corso Analisi Dati', link: '/course' },
+            { label: 'Blog', link: '/blog' },
+            { label: 'Consulenza', link: '/consulting' },
+          ]
         },
         ...(dynamicSidebar.length > 0 ? [{ label: 'Notion Content', items: dynamicSidebar }] : []),
         {
@@ -167,6 +167,12 @@ export default defineConfig({
             { label: 'CI/CD for Data', link: '/course/infrastructure-ops/cicd/' },
             { label: 'Cost Management', link: '/course/infrastructure-ops/costs/' },
             { label: 'Documentation', link: '/course/infrastructure-ops/documentation/' },
+          ],
+        },
+        {
+          label: 'Data-Driven Management',
+          items: [
+            { label: 'Framework JTBD', link: '/course/management/il-framework-jtbd/' },
           ],
         },
       ],
