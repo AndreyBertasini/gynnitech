@@ -4,6 +4,9 @@ import tailwindcss from '@tailwindcss/vite';
 import starlight from '@astrojs/starlight';
 import react from '@astrojs/react';
 import fs from 'node:fs';
+import mermaid from 'astro-mermaid';
+import remarkMath from 'remark-math';
+import rehypeKatex from 'rehype-katex';
 
 const loadSidebar = () => {
   try {
@@ -47,8 +50,13 @@ export default defineConfig({
   vite: {
     plugins: [tailwindcss()]
   },
+  markdown: {
+    remarkPlugins: [remarkMath],
+    rehypePlugins: [rehypeKatex],
+  },
   integrations: [
     react(),
+    mermaid(),
     starlight({
       title: 'GinnyTech',
       logo: {
