@@ -17,19 +17,21 @@ export const SearchWidget = () => {
   const inputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
-    // Load pagefind script if not already loaded
-    if (!window.pagefind) {
-      const script = document.createElement('script');
-      script.src = '/pagefind/pagefind.js';
-      script.async = true;
-      script.onload = async () => {
-        await window.pagefind.init();
+    const loadPagefind = async () => {
+      try {
+        const pagefindUrl = "/pagefind/pagefind.js?url";
+        // @ts-ignore
+        const pagefind = await import(/* @vite-ignore */ pagefindUrl);
+        await pagefind.init();
+        window.pagefind = pagefind;
         setIsScriptLoaded(true);
-      };
-      script.onerror = () => {
-        console.error("Failed to load pagefind script. Is the site built?");
-      };
-      document.body.appendChild(script);
+      } catch (e) {
+        console.warn("Pagefind not loaded (likely in Dev mode or not built yet).", e);
+      }
+    };
+
+    if (!window.pagefind) {
+      loadPagefind();
     } else {
       setIsScriptLoaded(true);
     }
@@ -81,7 +83,7 @@ export const SearchWidget = () => {
         className="flex items-center gap-2 px-3 py-2 text-slate-300 hover:text-white transition-colors rounded-lg hover:bg-white/5 group"
         aria-label="Cerca"
       >
-        <Search className="w-5 h-5 group-hover:text-neon-blue transition-colors" />
+        <Search className="w-5 h-5 text-acid-yellow group-hover:text-acid-yellow/80 transition-colors" />
         <span className="hidden lg:inline text-sm font-medium">Cerca</span>
       </button>
 
@@ -148,6 +150,11 @@ export const SearchWidget = () => {
                         />
                       </a>
                     ))}
+                  </div>
+                ) : !isScriptLoaded ? (
+                  <div className="text-center py-12 text-slate-500">
+                    <p className="text-amber-500 mb-2">⚠️ Indice di ricerca non trovato.</p>
+                    <p className="text-xs">Se sei in modalità DEV, esegui la build.</p>
                   </div>
                 ) : query.length > 0 ? (
                   <div className="text-center py-12 text-slate-500">
