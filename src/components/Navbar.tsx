@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { Menu, X } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
+import { SearchWidget } from './ui/SearchWidget';
 
 export const Navbar = () => {
   const [isScrolled, setIsScrolled] = useState(false);
@@ -33,6 +34,7 @@ export const Navbar = () => {
           <a href="/course" className="text-sm font-medium text-slate-300 hover:text-neon-blue transition-colors hover:drop-shadow-[0_0_8px_rgba(0,243,255,0.5)]">Corso Analisi Dati</a>
           <a href="/blog" className="text-sm font-medium text-slate-300 hover:text-neon-blue transition-colors hover:drop-shadow-[0_0_8px_rgba(0,243,255,0.5)]">Blog</a>
           <a href="/consulting" className="text-sm font-medium text-slate-300 hover:text-neon-blue transition-colors hover:drop-shadow-[0_0_8px_rgba(0,243,255,0.5)]">Consulenza</a>
+          <SearchWidget />
         </div>
 
         {/* CTA */}
