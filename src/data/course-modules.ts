@@ -8,8 +8,8 @@ export interface CourseModule {
 
 export const COURSE_MODULES: CourseModule[] = [
   {
-    id: 'data-collection',
-    title: 'Data Collection & Tracking',
+    id: 'Marketing analytics',
+    title: 'Marketing analytics',
     description: 'Progettazione del tracciamento eventi, integrazioni ELT e conformità privacy (GDPR/Consent Mode).',
     icon: 'Activity',
     color: 'from-blue-500 to-cyan-400'
