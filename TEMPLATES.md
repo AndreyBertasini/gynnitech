@@ -2,11 +2,22 @@
 
 Usa questi template per aggiungere nuove lezioni o articoli al blog. Copia il contenuto del template, incollalo in un nuovo file `.mdx`, e compila i campi.
 
+## Novità: Componenti Interattivi
+
+Ora supportiamo nativamente i seguenti componenti per rendere i contenuti più ricchi:
+- **Tabs**: Per mostrare alternative (es. Codice Python vs SQL, o Mac vs Windows).
+- **Steps**: Per guide passo-passo visive.
+- **Aside**: Per note, warning, e tip in evidenza (sostituisce i blockquote standard).
+- **CardGrid**: Per layout a griglia di concetti.
+- **FileTree**: Per mostrare strutture di cartelle.
+- **Mermaid**: Per diagrammi di flusso e grafici (wrap con ` ```mermaid `).
+- **Math**: Formule matematiche LaTeX (usando `$$ ... $$` o `$ ... $`).
+
 ---
 
-## 1. 🎓 Template Corso (Lezione)
+## 1. 🎓 Template Corso (Lezione Avanzata)
 
-Questo template è ottimizzato per le lezioni del corso. Include campi per il titolo, la descrizione, l'ordine di apparizione e la categoria.
+Questo template è ottimizzato per le lezioni del corso e include esempi di tutti i nuovi componenti interattivi.
 
 **Dove salvare il file:** `src/content/corso/[nome-modulo]/[nome-lezione].mdx`
 *Esempio: `src/content/corso/marketing-data-science/intro-python.mdx`*
@@ -21,30 +32,94 @@ order: 10
 category: "Concetti Fondamentali"
 ---
 
+import { Tabs, TabItem, Steps, Aside, Card, CardGrid, FileTree } from '@astrojs/starlight/components';
+
 # Titolo della Lezione
 
 Scrivi qui l'introduzione della lezione. Spiega brevemente gli obiettivi e cosa verrà trattato.
 
-## Sottotitolo della Sezione
+<Aside type="tip" title="Obiettivo">
+In questa lezione imparerai a costruire una pipeline di dati da zero.
+</Aside>
 
-Qui inizia il contenuto principale. Puoi usare **grassetto**, *corsivo*, e liste puntate:
-- Punto chiave 1
-- Punto chiave 2
-- Punto chiave 3
+## Concetti Chiave
 
-### Esempio Pratico
+Usa le card per raggruppare concetti visivamente:
 
-```python
-# Puoi inserire blocchi di codice se necessario
-def esempio():
-    print("Codice Python o SQL")
+<CardGrid>
+  <Card title="Concetto 1" icon="rocket">
+    Spiegazione breve del primo concetto.
+  </Card>
+  <Card title="Concetto 2" icon="puzzle">
+    Spiegazione breve del secondo concetto, magari con un link.
+  </Card>
+</CardGrid>
+
+## Guida Passo-Passo
+
+Usa il componente Steps per tutorial numerati stilizzati:
+
+<Steps>
+
+1.  **Primo Passo**: Installa la libreria necessaria.
+    
+    ```bash
+    npm install pandas
+    ```
+
+2.  **Secondo Passo**: Configura il file.
+
+    <FileTree>
+    - src
+      - data
+        - **dataset.csv**
+      - scripts
+        - analysis.py
+    </FileTree>
+
+3.  **Terzo Passo**: Esegui lo script e analizza i risultati.
+
+</Steps>
+
+## Confronto Tecnologie
+
+Usa i Tabs per confrontare opzioni o mostrare codice in linguaggi diversi:
+
+<Tabs>
+  <TabItem label="Python" icon="seti:python">
+    ```python
+    import pandas as pd
+    df = pd.read_csv('data.csv')
+    print(df.head())
+    ```
+  </TabItem>
+  <TabItem label="SQL" icon="seti:db">
+    ```sql
+    SELECT * FROM dataset LIMIT 5;
+    ```
+  </TabItem>
+</Tabs>
+
+## Diagrammi e Formule
+
+Puoi inserire diagrammi Mermaid e formule matematiche complesse:
+
+```mermaid
+graph TD;
+    A[Sorgente Dati] --> B{Pulizia?};
+    B -- Sì --> C[Data Warehouse];
+    B -- No --> D[Log Errori];
 ```
 
-> **Nota Importante:** Usa questo stile per evidenziare note o concetti chiave che lo studente non deve dimenticare.
+La formula per il calcolo del **Lifetime Value** è:
+
+$$
+LTV = \frac{ARPU \times Margin}{Churn Rate}
+$$
 
 ## Conclusione
 
-Riassunto veloce di quanto appreso e link alla lezione successiva se necessario.
+Riassunto veloce di quanto appreso e link alla lezione successiva.
 ```
 
 ---
@@ -68,6 +143,8 @@ author: "GynniTech Team"
 image: "/images/blog/default-cover.jpg"
 ---
 
+import { Aside } from '@astrojs/starlight/components';
+
 # Titolo Principale dell'Articolo
 
 Introduzione coinvolgente che spiega il "perché" di questo articolo. Qual è il problema che stiamo risolvendo o l'opportunità da cogliere?
@@ -80,6 +157,10 @@ Approfondimento del tema.
 
 ![Descrizione immagine opzionale](/images/blog/grafico-esempio.jpg)
 *Didascalia dell'immagine*
+
+<Aside type="note">
+Ricorda che le immagini devono essere salvate in `public/images/blog/`.
+</Aside>
 
 ## Secondo Paragrafo
 
@@ -99,8 +180,11 @@ Cosa abbiamo imparato? Qual è la "Call to Action" o il prossimo passo per il le
 ## 🚀 Istruzioni Veloci per Astro
 
 1. **Creare il file**: Crea un nuovo file con estensione `.mdx` nella cartella corretta (`src/content/corso/...` o `src/content/blog/...`).
-2. **Frontmatter**: La parte tra i tre trattini `---` all'inizio del file è fondamentale. Non cancellarla e rispetta la sintassi (chiave: "valore").
+2. **Import**: Ricorda di importare i componenti all'inizio del file (sotto al frontmatter) se intendi usarli:
+   ```javascript
+   import { Tabs, TabItem, Steps, Aside, Card, CardGrid, FileTree } from '@astrojs/starlight/components';
+   ```
+3. **Frontmatter**: La parte tra i tre trattini `---` all'inizio del file è fondamentale.
    - `order`: Usa numeri interi (1, 2, 10, 20) per ordinare le lezioni.
    - `category`: Raggruppa le lezioni visivamente nella pagina del modulo.
-3. **Immagini**: Salva le tue immagini nella cartella `public/images/` e collegale usando il percorso assoluto (es. `/images/mia-foto.jpg`).
-4. **Link**: Per collegare altre pagine interne, usa percorsi relativi o assoluti (es. `[Vai al corso](/course)`).
+4. **Immagini**: Salva le tue immagini nella cartella `public/images/` e collegale usando il percorso assoluto (es. `/images/mia-foto.jpg`).
