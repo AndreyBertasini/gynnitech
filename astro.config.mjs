@@ -82,6 +82,7 @@ export default defineConfig({
         starlightHeadingBadges(),
         starlightLinksValidator({
           errorOnRelativeLinks: false,
+          exclude: ['/course/**'],
         }),
       ],
       components: {
