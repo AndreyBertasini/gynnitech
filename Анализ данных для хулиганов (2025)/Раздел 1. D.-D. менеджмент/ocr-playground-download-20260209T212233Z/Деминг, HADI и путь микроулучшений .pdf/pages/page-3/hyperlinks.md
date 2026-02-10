@@ -1,0 +1,12 @@
+https://www.tidydata.ru/rebelytics/jtbd
+https://www.tidydata.ru/rebelytics/jtbd
+https://www.tidydata.ru/rebelytics/interview
+https://www.tidydata.ru/rebelytics/interview
+https://www.tidydata.ru/rebelytics/quantitative-research
+https://www.tidydata.ru/rebelytics/quantitative-research
+https://www.tidydata.ru/rebelytics/desk-research
+https://www.tidydata.ru/rebelytics/desk-research
+https://www.tidydata.ru/rebelytics/desk-research
+https://www.tidydata.ru/rebelytics/desk-research
+https://www.tidydata.ru/rebelytics/abtests
+https://www.tidydata.ru/rebelytics/abtests

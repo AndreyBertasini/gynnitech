@@ -1,17 +1,123 @@
 ---
-title: ClickHouse Real-Time Features
-description: Leveraging ClickHouse for real-time analytics.
-
+title: "ClickHouse: Materialized Views e Aggregazioni Real-Time"
+description: "Sfruttare le Materialized Views e i motori di aggregazione per analisi in tempo reale."
+order: 2
+category: "ClickHouse"
 ---
 
-# ClickHouse Real-Time Features
+# ClickHouse Real-Time: Materialized Views
 
+Le Materialized Views (MV) sono la funzionalità killer di ClickHouse per il real-time analytics.
 
-The secret weapons for real-time aggregations.
+## Cos'è una Materialized View?
 
+Una MV è una query che si esegue automaticamente ogni volta che nuovi dati vengono inseriti nella tabella sorgente. I risultati vengono salvati in una tabella di destinazione.
 
-## Features
+```
+[Dati in arrivo] → INSERT in source_table
+                         ↓ (trigger automatico)
+                  [Materialized View esegue la query]
+                         ↓
+                  [Risultato salvato in target_table]
+```
 
-- **Materialized Views**
-- **AggregatingMergeTree & SummingMergeTree**
-- **Dictionary lookups for enrichment**
+### Esempio Pratico: Aggregazione Campagne per Ora
+
+```sql
+-- 1. Tabella sorgente: eventi raw
+CREATE TABLE raw_events (
+    event_time DateTime,
+    campaign_id UInt32,
+    event_type LowCardinality(String),
+    revenue Decimal(10,2)
+) ENGINE = MergeTree()
+ORDER BY (campaign_id, event_time);
+
+-- 2. Tabella di destinazione: aggregazioni orarie
+CREATE TABLE hourly_campaign_stats (
+    hour DateTime,
+    campaign_id UInt32,
+    impressions AggregateFunction(count, UInt8),
+    clicks AggregateFunction(sum, UInt32),
+    revenue AggregateFunction(sum, Decimal(10,2))
+) ENGINE = AggregatingMergeTree()
+ORDER BY (campaign_id, hour);
+
+-- 3. La Materialized View
+CREATE MATERIALIZED VIEW mv_hourly_stats
+TO hourly_campaign_stats
+AS SELECT
+    toStartOfHour(event_time) AS hour,
+    campaign_id,
+    countState() AS impressions,
+    sumState(if(event_type = 'click', 1, 0)) AS clicks,
+    sumState(revenue) AS revenue
+FROM raw_events
+GROUP BY hour, campaign_id;
+```
+
+### Leggere i risultati
+```sql
+SELECT
+    hour,
+    campaign_id,
+    countMerge(impressions) AS total_impressions,
+    sumMerge(clicks) AS total_clicks,
+    sumMerge(revenue) AS total_revenue
+FROM hourly_campaign_stats
+WHERE hour >= now() - INTERVAL 24 HOUR
+GROUP BY hour, campaign_id
+ORDER BY hour DESC;
+```
+
+## Motori di Storage Speciali
+
+### AggregatingMergeTree
+Per aggregazioni incrementali (somme, medie, count). Usa con le `*State()` / `*Merge()` functions.
+
+### SummingMergeTree
+Versione semplificata: somma automaticamente le colonne numeriche durante il merge.
+```sql
+CREATE TABLE daily_spend (
+    date Date,
+    channel LowCardinality(String),
+    spend Float64,
+    clicks UInt32
+) ENGINE = SummingMergeTree()
+ORDER BY (date, channel);
+```
+Inserendo più righe con la stessa `(date, channel)`, ClickHouse le sommerà automaticamente.
+
+### ReplacingMergeTree
+Per mantenere solo l'ultima versione di ogni riga (utile per CDC / dati che si aggiornano).
+```sql
+ENGINE = ReplacingMergeTree(updated_at)
+ORDER BY (user_id)
+```
+
+## Dictionary per l'Arricchimento
+
+I Dictionary sono tabelle in-memory per lookup veloci:
+```sql
+CREATE DICTIONARY campaign_dict (
+    campaign_id UInt32,
+    campaign_name String,
+    channel String,
+    budget Float64
+) PRIMARY KEY campaign_id
+SOURCE(CLICKHOUSE(TABLE 'dim_campaigns'))
+LAYOUT(FLAT())
+LIFETIME(MIN 300 MAX 600);
+```
+
+Uso nelle query:
+```sql
+SELECT
+    campaign_id,
+    dictGet('campaign_dict', 'campaign_name', campaign_id) AS name,
+    SUM(revenue) AS total_revenue
+FROM raw_events
+GROUP BY campaign_id;
+```
+
+> I Dictionary evitano JOIN costosi e rendono le query 10-100x più veloci per i lookup dimensionali.

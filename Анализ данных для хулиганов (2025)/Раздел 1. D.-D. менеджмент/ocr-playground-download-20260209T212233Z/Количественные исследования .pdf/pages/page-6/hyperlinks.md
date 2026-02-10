@@ -1,0 +1,12 @@
+https://www.tidydata.ru/rebelytics/template2
+https://www.tidydata.ru/rebelytics/template2
+https://tiburon-research.ru/
+https://tiburon-research.ru/
+https://fastuna.ru/
+https://fastuna.ru/
+https://docs.google.com/forms/u/0/?tgif=d
+https://docs.google.com/forms/u/0/?tgif=d
+https://www.cint.com/
+https://www.cint.com/
+https://tidydata.ru/survey_services
+https://tidydata.ru/survey_services

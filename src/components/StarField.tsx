@@ -8,6 +8,18 @@ interface Star {
   speed: number;
   twinkleSpeed: number;
   twinklePhase: number;
+  hue: number; // subtle color variation
+}
+
+interface Particle {
+  x: number;
+  y: number;
+  size: number;
+  opacity: number;
+  decay: number;
+  vx: number;
+  vy: number;
+  hue: number;
 }
 
 interface ShootingStar {
@@ -18,6 +30,9 @@ interface ShootingStar {
   angle: number;
   opacity: number;
   active: boolean;
+  trail: { x: number; y: number; opacity: number }[];
+  hue: number; // color of the comet (cyan, lime, etc.)
+  life: number;
 }
 
 export const StarField = () => {
@@ -31,13 +46,14 @@ export const StarField = () => {
     if (!ctx) return;
 
     let stars: Star[] = [];
-    let shootingStar: ShootingStar | null = null;
+    let particles: Particle[] = [];
+    let shootingStars: ShootingStar[] = [];
     let animationFrameId: number;
     let width = 0;
     let height = 0;
     let lastTime = 0;
-    let shootingStarInterval = Math.random() * 3000 + 2000; // Initial delay 2-5s
     let timeSinceLastShootingStar = 0;
+    let shootingStarInterval = Math.random() * 2000 + 1500;
 
     const resize = () => {
       width = window.innerWidth;
@@ -48,61 +64,100 @@ export const StarField = () => {
     };
 
     const initStars = () => {
-      const starCount = Math.floor((width * height) / 3000);
+      const starCount = Math.floor((width * height) / 2500);
       stars = [];
       for (let i = 0; i < starCount; i++) {
         stars.push({
           x: Math.random() * width,
           y: Math.random() * height,
-          size: Math.random() * 1.5 + 0.5,
+          size: Math.random() * 1.5 + 0.3,
           opacity: Math.random(),
-          speed: Math.random() * 0.2 + 0.05,
-          twinkleSpeed: Math.random() * 0.05 + 0.02,
+          speed: Math.random() * 0.15 + 0.03,
+          twinkleSpeed: Math.random() * 0.04 + 0.01,
           twinklePhase: Math.random() * Math.PI * 2,
+          hue: Math.random() > 0.85 ? (Math.random() > 0.5 ? 180 : 60) : 0, // some stars cyan or yellow
         });
       }
     };
 
+    const cometHues = [180, 160, 80, 300, 200]; // cyan, teal, lime, magenta, blue
+
     const createShootingStar = (): ShootingStar => {
-        // Start from random side (top or left)
-        const startX = Math.random() * width;
-        const startY = Math.random() * (height / 2); // Mostly upper half
-        
-        return {
-            x: startX,
-            y: startY,
-            length: Math.random() * 80 + 100, // Length of trail
-            speed: Math.random() * 2 + 1, // Much slower (was 15+10)
-            angle: Math.PI / 4 + (Math.random() * 0.2 - 0.1), // Diagonal down-right approx 45deg
-            opacity: 1,
-            active: true
-        };
+      const startX = Math.random() * width * 0.8;
+      const startY = Math.random() * (height * 0.4);
+
+      return {
+        x: startX,
+        y: startY,
+        length: Math.random() * 100 + 120,
+        speed: Math.random() * 3 + 2,
+        angle: Math.PI / 4 + (Math.random() * 0.3 - 0.15),
+        opacity: 1,
+        active: true,
+        trail: [],
+        hue: cometHues[Math.floor(Math.random() * cometHues.length)],
+        life: 0,
+      };
+    };
+
+    const spawnParticles = (x: number, y: number, hue: number) => {
+      const count = Math.random() > 0.6 ? 2 : 1;
+      for (let i = 0; i < count; i++) {
+        particles.push({
+          x,
+          y,
+          size: Math.random() * 2 + 0.5,
+          opacity: Math.random() * 0.8 + 0.2,
+          decay: Math.random() * 0.015 + 0.008,
+          vx: (Math.random() - 0.5) * 0.5,
+          vy: (Math.random() - 0.5) * 0.5 + 0.2,
+          hue: hue + (Math.random() * 30 - 15),
+        });
+      }
     };
 
     const drawShootingStar = (star: ShootingStar) => {
-        if (!star.active) return;
+      if (!star.active) return;
 
-        const tailX = star.x - Math.cos(star.angle) * star.length;
-        const tailY = star.y - Math.sin(star.angle) * star.length;
+      // Store trail points
+      star.trail.unshift({ x: star.x, y: star.y, opacity: star.opacity });
+      if (star.trail.length > 40) star.trail.pop();
 
-        const gradient = ctx.createLinearGradient(star.x, star.y, tailX, tailY);
-        gradient.addColorStop(0, `rgba(255, 255, 255, ${star.opacity})`); // Head bright
-        gradient.addColorStop(0.1, `rgba(255, 255, 255, ${star.opacity * 0.8})`); // Core
-        gradient.addColorStop(1, `rgba(255, 255, 255, 0)`); // Tail transparent
+      // Draw trail with gradient segments
+      for (let i = 0; i < star.trail.length - 1; i++) {
+        const p = star.trail[i];
+        const pNext = star.trail[i + 1];
+        const frac = 1 - i / star.trail.length;
+        const alpha = frac * frac * star.opacity;
+        const lineWidth = frac * 2.5 + 0.5;
 
-        ctx.strokeStyle = gradient;
-        ctx.lineWidth = 2;
+        ctx.strokeStyle = `hsla(${star.hue}, 100%, ${70 + frac * 30}%, ${alpha})`;
+        ctx.lineWidth = lineWidth;
         ctx.lineCap = 'round';
         ctx.beginPath();
-        ctx.moveTo(star.x, star.y);
-        ctx.lineTo(tailX, tailY);
+        ctx.moveTo(p.x, p.y);
+        ctx.lineTo(pNext.x, pNext.y);
         ctx.stroke();
+      }
 
-        // Optional: Glow effect
-        ctx.shadowBlur = 10;
-        ctx.shadowColor = "white";
-        ctx.stroke();
-        ctx.shadowBlur = 0;
+      // Bright head glow (outer)
+      const headGlow = ctx.createRadialGradient(star.x, star.y, 0, star.x, star.y, 20);
+      headGlow.addColorStop(0, `hsla(${star.hue}, 100%, 95%, ${star.opacity * 0.6})`);
+      headGlow.addColorStop(0.3, `hsla(${star.hue}, 100%, 70%, ${star.opacity * 0.2})`);
+      headGlow.addColorStop(1, `hsla(${star.hue}, 100%, 50%, 0)`);
+      ctx.fillStyle = headGlow;
+      ctx.beginPath();
+      ctx.arc(star.x, star.y, 20, 0, Math.PI * 2);
+      ctx.fill();
+
+      // Bright head core
+      const headCore = ctx.createRadialGradient(star.x, star.y, 0, star.x, star.y, 4);
+      headCore.addColorStop(0, `rgba(255, 255, 255, ${star.opacity})`);
+      headCore.addColorStop(1, `hsla(${star.hue}, 100%, 80%, 0)`);
+      ctx.fillStyle = headCore;
+      ctx.beginPath();
+      ctx.arc(star.x, star.y, 4, 0, Math.PI * 2);
+      ctx.fill();
     };
 
     const draw = (timestamp: number) => {
@@ -112,16 +167,28 @@ export const StarField = () => {
 
       ctx.clearRect(0, 0, width, height);
 
-      // Draw normal stars
+      // Draw stars
       stars.forEach((star) => {
         star.twinklePhase += star.twinkleSpeed;
         const twinkle = Math.sin(star.twinklePhase) * 0.8 + 0.5;
         const currentOpacity = star.opacity * (0.3 + twinkle * 0.7);
 
-        ctx.fillStyle = `rgba(255, 255, 255, ${currentOpacity})`;
+        if (star.hue > 0) {
+          ctx.fillStyle = `hsla(${star.hue}, 80%, 85%, ${currentOpacity})`;
+        } else {
+          ctx.fillStyle = `rgba(255, 255, 255, ${currentOpacity})`;
+        }
         ctx.beginPath();
         ctx.arc(star.x, star.y, star.size, 0, Math.PI * 2);
         ctx.fill();
+
+        // Subtle glow for brighter stars
+        if (star.size > 1.2 && currentOpacity > 0.6) {
+          ctx.fillStyle = `rgba(255, 255, 255, ${currentOpacity * 0.1})`;
+          ctx.beginPath();
+          ctx.arc(star.x, star.y, star.size * 3, 0, Math.PI * 2);
+          ctx.fill();
+        }
 
         star.y -= star.speed;
         if (star.y < 0) {
@@ -130,25 +197,57 @@ export const StarField = () => {
         }
       });
 
-      // Handle Shooting Star
+      // Spawn shooting stars
       timeSinceLastShootingStar += deltaTime;
       if (timeSinceLastShootingStar > shootingStarInterval) {
-          shootingStar = createShootingStar();
-          timeSinceLastShootingStar = 0;
-          shootingStarInterval = 10000; // Fixed interval of 10 seconds
+        shootingStars.push(createShootingStar());
+        timeSinceLastShootingStar = 0;
+        shootingStarInterval = Math.random() * 5000 + 6000; // 6-11s between comets
       }
 
-      if (shootingStar && shootingStar.active) {
-          shootingStar.x += Math.cos(shootingStar.angle) * shootingStar.speed;
-          shootingStar.y += Math.sin(shootingStar.angle) * shootingStar.speed;
-          
-          // Fade out near end
-          if (shootingStar.x > width || shootingStar.y > height) {
-              shootingStar.active = false;
-          }
+      // Update & draw shooting stars
+      shootingStars = shootingStars.filter((star) => {
+        if (!star.active) return false;
 
-          drawShootingStar(shootingStar);
-      }
+        star.x += Math.cos(star.angle) * star.speed;
+        star.y += Math.sin(star.angle) * star.speed;
+        star.life += deltaTime;
+
+        // Spawn sparkle particles along trail
+        if (Math.random() > 0.4) {
+          spawnParticles(
+            star.x - Math.cos(star.angle) * 5 + (Math.random() - 0.5) * 4,
+            star.y - Math.sin(star.angle) * 5 + (Math.random() - 0.5) * 4,
+            star.hue
+          );
+        }
+
+        // Fade out after leaving screen
+        if (star.x > width + 50 || star.y > height + 50 || star.x < -50) {
+          star.active = false;
+          return false;
+        }
+
+        drawShootingStar(star);
+        return true;
+      });
+
+      // Update & draw particles (sparkles)
+      particles = particles.filter((p) => {
+        p.opacity -= p.decay;
+        if (p.opacity <= 0) return false;
+
+        p.x += p.vx;
+        p.y += p.vy;
+        p.size *= 0.98;
+
+        ctx.fillStyle = `hsla(${p.hue}, 100%, 80%, ${p.opacity})`;
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, p.size, 0, Math.PI * 2);
+        ctx.fill();
+
+        return true;
+      });
 
       animationFrameId = requestAnimationFrame(draw);
     };
@@ -164,8 +263,8 @@ export const StarField = () => {
   }, []);
 
   return (
-    <canvas 
-      ref={canvasRef} 
+    <canvas
+      ref={canvasRef}
       className="absolute inset-0 z-1 pointer-events-none mix-blend-screen"
       style={{ width: '100%', height: '100%' }}
     />
