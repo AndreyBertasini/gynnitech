@@ -8,7 +8,7 @@ declare global {
   }
 }
 
-export const SearchWidget = () => {
+export const SearchWidget = ({ mobile = false }: { mobile?: boolean }) => {
   const [isOpen, setIsOpen] = useState(false);
   const [query, setQuery] = useState('');
   const [results, setResults] = useState<any[]>([]);
@@ -18,6 +18,9 @@ export const SearchWidget = () => {
 
   useEffect(() => {
     const loadPagefind = async () => {
+      if (import.meta.env.DEV) {
+        return;
+      }
       try {
         const pagefindUrl = "/pagefind/pagefind.js?url";
         // @ts-ignore
@@ -80,11 +83,11 @@ export const SearchWidget = () => {
       {/* Trigger Button */}
       <button
         onClick={() => setIsOpen(true)}
-        className="flex items-center gap-2 px-3 py-2 text-slate-300 hover:text-white transition-colors rounded-lg hover:bg-white/5 group"
+        className={`flex items-center gap-2 px-3 py-2 text-slate-300 hover:text-white transition-colors rounded-lg hover:bg-white/5 group ${mobile ? 'w-full justify-start' : ''}`}
         aria-label="Cerca"
       >
         <Search className="w-5 h-5 text-acid-yellow group-hover:text-acid-yellow/80 transition-colors" />
-        <span className="hidden lg:inline text-sm font-medium">Cerca</span>
+        <span className={`${mobile ? 'inline' : 'hidden lg:inline'} text-sm font-medium`}>Cerca</span>
       </button>
 
       {/* Modal Overlay */}

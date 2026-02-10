@@ -46,7 +46,11 @@ export const Navbar = () => {
         </div>
 
         {/* Mobile Toggle */}
-        <button className="md:hidden text-white p-2" onClick={() => setIsMobileMenuOpen(!isMobileMenuOpen)}>
+        <button 
+          className="md:hidden text-white p-2" 
+          onClick={() => setIsMobileMenuOpen(!isMobileMenuOpen)}
+          aria-label={isMobileMenuOpen ? "Chiudi menu" : "Apri menu"}
+        >
           {isMobileMenuOpen ? <X /> : <Menu />}
         </button>
       </div>
@@ -61,6 +65,7 @@ export const Navbar = () => {
             className="md:hidden bg-brand-dark border-b border-white/10 overflow-hidden"
           >
             <div className="flex flex-col p-6 gap-4">
+              <SearchWidget mobile />
               <a href="/" className="text-slate-300 hover:text-white font-medium">Home</a>
               <a href="/course" className="text-slate-300 hover:text-white font-medium">Corso Analisi Dati</a>
               <a href="/blog" className="text-slate-300 hover:text-white font-medium">Blog</a>

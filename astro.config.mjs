@@ -3,10 +3,17 @@ import { defineConfig } from 'astro/config';
 import tailwindcss from '@tailwindcss/vite';
 import starlight from '@astrojs/starlight';
 import react from '@astrojs/react';
+import sitemap from '@astrojs/sitemap';
 import fs from 'node:fs';
 import mermaid from 'astro-mermaid';
 import remarkMath from 'remark-math';
 import rehypeKatex from 'rehype-katex';
+
+// Starlight Plugins
+import starlightImageZoom from 'starlight-image-zoom';
+import starlightScrollToTop from 'starlight-scroll-to-top';
+import starlightHeadingBadges from 'starlight-heading-badges';
+import starlightLinksValidator from 'starlight-links-validator';
 
 const loadSidebar = () => {
   try {
@@ -22,6 +29,7 @@ const dynamicSidebar = loadSidebar();
 
 // https://astro.build/config
 export default defineConfig({
+  site: 'https://ginnytech.it',
   devToolbar: {
     enabled: true,
     placement: 'bottom-left',
@@ -57,12 +65,25 @@ export default defineConfig({
   integrations: [
     react(),
     mermaid(),
+    sitemap(),
     starlight({
       title: 'GinnyTech',
       logo: {
         src: './src/assets/logo-ginnytech.png',
       },
       favicon: '/logo-ginnytech.png',
+      plugins: [
+        starlightImageZoom(),
+        starlightScrollToTop({
+          showOnHover: false,
+          svgStrokeColor: 'var(--sl-color-accent)',
+          svgFillColor: 'var(--sl-color-accent)',
+        }),
+        starlightHeadingBadges(),
+        starlightLinksValidator({
+          errorOnRelativeLinks: false,
+        }),
+      ],
       components: {
         Sidebar: './src/components/starlight/Sidebar.astro',
         Search: './src/components/starlight/Empty.astro', // Remove from header
