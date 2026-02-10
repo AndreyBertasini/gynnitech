@@ -1,90 +1,177 @@
-# GinnyTech Design System & Style Guide (v2.1)
+# Style Guide & Componenti Interattivi
 
-## 1. Core Principles: "Neon-Glass"
-Il design system di GinnyTech combina l'estetica **Glassmorphism** (trasparenze, blur) con accenti **Neon** ad alto contrasto su sfondo scuro profondo. L'obiettivo è comunicare tecnologia avanzata, precisione e modernità.
-
----
-
-## 2. Color Palette
-
-### Base Colors
-| Nome | Valore Hex | Utilizzo |
-| :--- | :--- | :--- |
-| `brand-dark` | `#050505` | Sfondo principale (Deep Black) |
-| `brand-darker` | `#000000` | Sfondi secondari / Sidebar |
-| `white` | `#ffffff` | Testo primario, icone |
-| `slate-400` | `#94a3b8` | Testo secondario, descrizioni |
-
-### Neon Accents
-| Nome | Valore Hex | Utilizzo |
-| :--- | :--- | :--- |
-| `acid-yellow` | `#ccff00` | **Primary Accent**. CTA, badge, highlight, text-shadow |
-| `neon-blue` | `#00f3ff` | **Secondary Accent**. Link hover, glow, bordi focus |
-| `neon-pink` | `#ff00ff` | Accento terziario, dettagli creativi |
-| `neon-green` | `#39ff14` | Successo, elementi codice |
-
-### Mint Scale (Legacy/Support)
-Utilizzata per elementi UI più tenui o sfondi.
-- `mint-500`: `#02569B`
-- `mint-400`: `#26a69a`
+Questa guida definisce lo standard per la creazione di nuovi contenuti (Corso e Blog) su **GynniTech**. L'obiettivo è garantire consistenza, leggibilità e un'esperienza utente moderna e coinvolgente.
 
 ---
 
-## 3. Typography
+## 1. Principi Generali
 
-### Font Families
-1.  **Headings & UI**: `Montserrat` (Sans-serif)
-    *   Weights: 600 (SemiBold), 700 (Bold), 800 (ExtraBold)
-    *   Usage: Titoli (`h1`-`h6`), Bottoni, Badge, Navigation.
-2.  **Body Text**: `Inter` (Sans-serif)
-    *   Weights: 400 (Regular), 600 (SemiBold)
-    *   Usage: Paragrafi, liste, contenuto lungo.
-3.  **Code**: `Geist Mono` / `Menlo` (Monospace)
-    *   Usage: Blocchi di codice, snippet.
-
-### Styles
-*   **Headings**: `tracking-tight`, spesso accompagnati da `text-shadow` o gradienti.
-*   **Body**: `leading-relaxed` per leggibilità ottimale.
+*   **Tono di Voce:** Professionale ma accessibile. Diretto ("Fai questo"), non passivo ("Si consiglia di fare questo").
+*   **Struttura:** Usa paragrafi brevi (max 3-4 righe). Spezza i muri di testo.
+*   **Formattazione:** Usa **grassetto** per i concetti chiave, *corsivo* per enfasi leggera o termini stranieri.
+*   **Titoli:** Usa H2 (`##`) per le sezioni principali e H3 (`###`) per le sottosezioni. Mai H1 (riservato al titolo della pagina).
 
 ---
 
-## 4. UI Components & Effects
+## 2. Componenti Interattivi (Starlight)
 
-### Glassmorphism (Vetro)
-Utilizzato per card, sidebar e pannelli.
-*   **Background**: `bg-white/5` o `rgba(255, 255, 255, 0.03)`
-*   **Border**: `border-white/10` o `rgba(255, 255, 255, 0.08)`
-*   **Backdrop Filter**: `backdrop-blur-sm` o `blur(10px)`
-*   **Shadow**: `box-shadow: 0 0 20px rgba(0, 243, 255, 0.05)`
+Per usare questi componenti, devi **sempre** importarli all'inizio del file `.mdx` (dopo il frontmatter `---`):
 
-### Buttons (CTA)
-*   **Primary (Acid)**:
-    *   Bg: `bg-acid-yellow`
-    *   Text: `text-brand-dark`
-    *   Shadow: `shadow-[0_0_20px_rgba(204,255,0,0.4)]`
-    *   Hover: `hover:shadow-[0_0_30px_rgba(204,255,0,0.6)]`, `hover:scale-105`
-*   **Secondary (Glass)**:
-    *   Bg: `bg-white/5`
-    *   Border: `border-white/10`
-    *   Hover: `hover:border-neon-blue`, `hover:shadow-[0_0_15px_rgba(0,243,255,0.3)]`
+```javascript
+import { Tabs, TabItem, Steps, Aside, Card, CardGrid, FileTree } from '@astrojs/starlight/components';
+```
 
-### Glow Effects
-Utilizzati per dare profondità e "vita" agli elementi.
-*   **Text Glow**: `text-shadow: 0 0 10px var(--color-acid-yellow)`
-*   **Box Glow**: `box-shadow: 0 0 15px rgba(204, 255, 0, 0.2)`
-*   **Background Blurs**: Cerchi sfocati (`blur-[150px]`) posizionati dietro i contenuti principali (`neon-blue/20`, `neon-pink/10`).
+### 🔹 Tabs (Confronti e Codice)
 
----
+Usa `<Tabs>` per mostrare alternative (es. Mac vs Windows, Python vs SQL) o per raggruppare contenuti correlati salvando spazio verticale.
 
-## 5. Animations
-*   **Pulse**: `animate-pulse` per elementi di attenzione (badge, indicatori).
-*   **Fade In Up**: Entrata dal basso con dissolvenza per sezioni e card.
-*   **Hover Lift**: `hover:-translate-y-1` per interattività.
+**Quando usare:**
+*   Mostrare lo stesso concetto in due linguaggi diversi.
+*   Confrontare Pro e Contro.
+*   Mostrare Output vs Codice Sorgente.
+
+**Sintassi:**
+```jsx
+<Tabs>
+  <TabItem label="Python" icon="seti:python">
+    Codice o testo per Python.
+  </TabItem>
+  <TabItem label="SQL" icon="seti:db">
+    Codice o testo per SQL.
+  </TabItem>
+</Tabs>
+```
 
 ---
 
-## 6. Code Guidelines (Tailwind CSS v4)
-*   Utilizzare le variabili CSS definite in `@theme` nel file `src/styles/custom.css`.
-*   Esempio: `text-acid-yellow` invece di `#ccff00`.
-*   Mantenere la consistenza usando le classi di utilità per spaziature e layout.
-*   Per componenti complessi, estrarre in componenti React/Astro riutilizzabili.
+### 🔹 Steps (Tutorial e Processi)
+
+Usa `<Steps>` per guide passo-passo che hanno un ordine cronologico definito.
+
+**Quando usare:**
+*   Tutorial di installazione.
+*   Procedure di analisi (Fase 1, Fase 2...).
+*   Workflow operativi.
+
+**Sintassi:**
+```jsx
+<Steps>
+
+1.  **Primo Passo**: Descrizione.
+2.  **Secondo Passo**: Descrizione.
+    
+    Puoi inserire anche blocchi di codice qui dentro.
+
+3.  **Terzo Passo**: Conclusione.
+
+</Steps>
+```
+
+---
+
+### 🔹 Aside (Note, Attenzione, Consigli)
+
+Usa `<Aside>` per evidenziare informazioni che esulano dal flusso principale del testo. Sostituisce i vecchi blockquote (`>`).
+
+**Tipi disponibili:** `note` (default), `tip`, `caution`, `danger`.
+
+**Sintassi:**
+```jsx
+<Aside type="tip" title="Lo sapevi?">
+Questo è un consiglio utile che appare in un box verde.
+</Aside>
+
+<Aside type="danger">
+Attenzione: questa azione cancellerà il database.
+</Aside>
+```
+
+---
+
+### 🔹 Card & CardGrid (Raggruppamento Concetti)
+
+Usa `<CardGrid>` per presentare concetti non sequenziali in una griglia visiva.
+
+**Quando usare:**
+*   Elenchi di funzionalità.
+*   Risorse o strumenti consigliati.
+*   Concetti chiave (es. "I 4 pilastri del marketing").
+
+**Sintassi:**
+```jsx
+<CardGrid>
+  <Card title="Concetto A" icon="rocket">
+    Descrizione breve.
+  </Card>
+  <Card title="Concetto B" icon="pencil">
+    Descrizione breve.
+  </Card>
+</CardGrid>
+```
+
+*(Trovi la lista delle icone supportate nella documentazione ufficiale di Starlight).*
+
+---
+
+### 🔹 FileTree (Struttura Cartelle)
+
+Usa `<FileTree>` per mostrare la struttura di un progetto o di una directory.
+
+**Sintassi:**
+```jsx
+<FileTree>
+- src
+  - content
+    - **index.mdx**
+  - components
+    - Header.astro
+- package.json
+</FileTree>
+```
+
+---
+
+## 3. Diagrammi e Matematica (Plugin Esterni)
+
+Queste funzionalità sono abilitate tramite plugin (`astro-mermaid`, `remark-math`). Non serve importare nulla di specifico nel file MDX.
+
+### 🔹 Mermaid (Diagrammi di Flusso)
+
+Usa i blocchi di codice con linguaggio `mermaid` per creare diagrammi.
+
+**Sintassi:**
+````markdown
+```mermaid
+graph TD;
+    A[Start] --> B{Decisione?};
+    B -- Sì --> C[Ok];
+    B -- No --> D[Riprova];
+```
+````
+
+### 🔹 Math (Formule Scientifiche)
+
+Usa la sintassi LaTeX.
+*   `$ ... $` per formule in linea col testo.
+*   `$$ ... $$` per blocchi di formule centrati.
+
+**Sintassi:**
+```latex
+La formula della relatività è $E=mc^2$.
+
+Mentre l'integrale è:
+$$
+\int_0^\infty e^{-x^2} dx = \frac{\sqrt{\pi}}{2}
+$$
+```
+
+---
+
+## 4. Checklist Pubblicazione
+
+Prima di fare commit, verifica:
+
+1.  [ ] Il **Frontmatter** è corretto (titolo, descrizione, ordine)?
+2.  [ ] I componenti Starlight sono **importati** correttamente in cima al file?
+3.  [ ] Non ci sono blocchi di codice `mermaid` o `$$` non chiusi correttamente?
+4.  [ ] Le immagini sono nella cartella `public` e i percorsi iniziano con `/`?
