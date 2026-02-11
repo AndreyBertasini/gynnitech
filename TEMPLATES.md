@@ -57,7 +57,7 @@ Usa le card per raggruppare concetti visivamente:
 
 ## Guida Passo-Passo
 
-Usa il componente Steps per tutorial numerati stilizzati:
+Usa il componente Steps per tutorial numerati. **Importante:** all'interno usa una normale lista numerata Markdown (`1.`, `2.`). Non aggiungere numeri manualmente nel testo.
 
 <Steps>
 
@@ -119,7 +119,9 @@ $$
 
 ## Conclusione
 
-Riassunto veloce di quanto appreso e link alla lezione successiva.
+Riassunto veloce di quanto appreso. 
+
+**Nota:** NON aggiungere link manuali alla "Prossima Lezione". Il sito li genera automaticamente.
 ```
 
 ---
@@ -174,6 +176,20 @@ Dettagli tecnici o specifici.
 
 Cosa abbiamo imparato? Qual è la "Call to Action" o il prossimo passo per il lettore?
 ```
+
+## 3. ⚠️ Errori Comuni da Evitare
+
+### 1. Link "Prossima Lezione" Manuali
+**Errore**: Aggiungere una card o un link `Prossima Lezione: ...` alla fine del file.
+**Corretto**: Non aggiungere nulla. Il layout `[slug].astro` genera automaticamente i pulsanti di navigazione Previous/Next basandosi sull'ordine delle lezioni.
+
+### 2. Doppia Numerazione negli Steps
+**Errore**: Scrivere `1. 1. Titolo Step` dentro il componente `<Steps>`.
+**Corretto**: Scrivere semplicemente `1. Titolo Step`. Il CSS del sito si occupa dello stile.
+
+### 3. Tabelle non responsive
+**Errore**: Usare HTML complesso per le tabelle.
+**Corretto**: Usare la sintassi standard Markdown `| Col1 | Col2 |`. Il tema gestisce lo scroll orizzontale su mobile.
 
 ---
 
