@@ -6,6 +6,7 @@ export interface CourseModule {
   color: string;
 }
 
+
 export const COURSE_MODULES: CourseModule[] = [
   {
     id: 'data-collection',

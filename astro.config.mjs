@@ -64,7 +64,10 @@ export default defineConfig({
   },
   integrations: [
     react(),
-    mermaid(),
+    mermaid({
+      theme: 'dark',
+      fontFamily: 'Inter, sans-serif',
+    }),
     sitemap(),
     starlight({
       title: 'GinnyTech',

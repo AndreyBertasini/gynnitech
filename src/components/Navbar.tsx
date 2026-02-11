@@ -46,13 +46,16 @@ export const Navbar = () => {
         </div>
 
         {/* Mobile Toggle */}
-        <button 
-          className="md:hidden text-white p-2" 
-          onClick={() => setIsMobileMenuOpen(!isMobileMenuOpen)}
-          aria-label={isMobileMenuOpen ? "Chiudi menu" : "Apri menu"}
-        >
-          {isMobileMenuOpen ? <X /> : <Menu />}
-        </button>
+        <div className="flex items-center gap-4 md:hidden">
+            <SearchWidget />
+            <button 
+            className="text-white p-2" 
+            onClick={() => setIsMobileMenuOpen(!isMobileMenuOpen)}
+            aria-label={isMobileMenuOpen ? "Chiudi menu" : "Apri menu"}
+            >
+            {isMobileMenuOpen ? <X /> : <Menu />}
+            </button>
+        </div>
       </div>
 
       {/* Mobile Menu */}

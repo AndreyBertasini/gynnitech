@@ -83,11 +83,11 @@ export const SearchWidget = ({ mobile = false }: { mobile?: boolean }) => {
       {/* Trigger Button */}
       <button
         onClick={() => setIsOpen(true)}
-        className={`flex items-center gap-2 px-3 py-2 text-slate-300 hover:text-white transition-colors rounded-lg hover:bg-white/5 group ${mobile ? 'w-full justify-start' : ''}`}
+        className={`flex items-center gap-2 px-3 py-2 text-slate-300 hover:text-white transition-colors rounded-lg hover:bg-white/5 group ${mobile ? 'w-full justify-start py-3 px-4 bg-white/5 hover:bg-white/10' : ''}`}
         aria-label="Cerca"
       >
-        <Search className="w-5 h-5 text-acid-yellow group-hover:text-acid-yellow/80 transition-colors" />
-        <span className={`${mobile ? 'inline' : 'hidden lg:inline'} text-sm font-medium`}>Cerca</span>
+        <Search className={`text-acid-yellow group-hover:text-acid-yellow/80 transition-colors ${mobile ? 'w-5 h-5' : 'w-5 h-5'}`} />
+        <span className={`${mobile ? 'inline text-base' : 'hidden lg:inline text-sm'} font-medium`}>Cerca</span>
       </button>
 
       {/* Modal Overlay */}
