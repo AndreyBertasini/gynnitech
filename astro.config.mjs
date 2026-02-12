@@ -29,6 +29,7 @@ const dynamicSidebar = loadSidebar();
 
 // https://astro.build/config
 export default defineConfig({
+  output: 'static',
   site: 'https://ginnytech.it',
   devToolbar: {
     enabled: true,
@@ -78,9 +79,11 @@ export default defineConfig({
       plugins: [
         starlightImageZoom(),
         starlightScrollToTop({
-          showOnHover: false,
-          svgStrokeColor: 'var(--sl-color-accent)',
-          svgFillColor: 'var(--sl-color-accent)',
+          showOnHomepage: true,
+          svgStrokeColor: '#012b4d',
+          smoothScroll: true,
+          svgPath: 'M17 11 12 6 7 11 M17 18 12 13 7 18',
+          borderRadius: '50%',
         }),
         starlightHeadingBadges(),
         starlightLinksValidator({
@@ -100,6 +103,26 @@ export default defineConfig({
         },
       },
       head: [
+        {
+          tag: 'script',
+          attrs: {
+            type: 'text/partytown',
+            async: true,
+            src: 'https://www.googletagmanager.com/gtag/js?id=G-NXL5WZC0SR',
+          },
+        },
+        {
+          tag: 'script',
+          attrs: {
+            type: 'text/partytown',
+          },
+          content: `
+            window.dataLayer = window.dataLayer || [];
+            function gtag(){dataLayer.push(arguments);}
+            gtag('js', new Date());
+            gtag('config', 'G-NXL5WZC0SR');
+          `,
+        },
         {
           tag: 'link',
           attrs: {
