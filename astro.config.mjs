@@ -11,7 +11,7 @@ import rehypeKatex from 'rehype-katex';
 
 // Starlight Plugins
 import starlightImageZoom from 'starlight-image-zoom';
-import starlightScrollToTop from 'starlight-scroll-to-top';
+
 import starlightHeadingBadges from 'starlight-heading-badges';
 import starlightLinksValidator from 'starlight-links-validator';
 
@@ -78,13 +78,7 @@ export default defineConfig({
       favicon: '/favicon.svg',
       plugins: [
         starlightImageZoom(),
-        starlightScrollToTop({
-          showOnHomepage: true,
-          svgStrokeColor: 'transparent',
-          smoothScroll: true,
-          svgPath: 'M17 11 12 6 7 11 M17 18 12 13 7 18',
-          borderRadius: '50%',
-        }),
+
         starlightHeadingBadges(),
         starlightLinksValidator({
           errorOnRelativeLinks: false,
