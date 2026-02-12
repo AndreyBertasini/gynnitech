@@ -4,6 +4,7 @@ import tailwindcss from '@tailwindcss/vite';
 import starlight from '@astrojs/starlight';
 import react from '@astrojs/react';
 import sitemap from '@astrojs/sitemap';
+import partytown from '@astrojs/partytown';
 import fs from 'node:fs';
 import mermaid from 'astro-mermaid';
 import remarkMath from 'remark-math';
@@ -64,6 +65,11 @@ export default defineConfig({
     rehypePlugins: [rehypeKatex],
   },
   integrations: [
+    partytown({
+      config: {
+        forward: ['dataLayer.push'],
+      },
+    }),
     react(),
     mermaid({
       theme: 'dark',
