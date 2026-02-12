@@ -75,7 +75,7 @@ export default defineConfig({
       logo: {
         src: './src/assets/logo-ginnytech.png',
       },
-      favicon: '/logo-ginnytech.png',
+      favicon: '/favicon.svg',
       plugins: [
         starlightImageZoom(),
         starlightScrollToTop({
