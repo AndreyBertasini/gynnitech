@@ -18,6 +18,7 @@ export const collections = {
       title: z.string(),
       description: z.string(),
       order: z.number().optional(),
+      image: z.string().optional(), // Added for social sharing customization
     }),
   }),
 };
