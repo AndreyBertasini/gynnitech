@@ -1,0 +1,470 @@
+---
+title: "Schema Evolution e Migrazioni"
+description: "Come evolvere lo schema del data warehouse senza downtime: strategie di migrazione e backward compatibility."
+order: 5
+category: "Governance"
+---
+
+import { Aside, Steps } from '@astrojs/starlight/components';
+
+# Schema Evolution e Migrazioni
+
+<Aside type="tip">
+In un data warehouse di produzione, lo schema non e mai statico. Nuovi requisiti di business, nuove fonti dati e ottimizzazioni richiedono modifiche continue. La differenza tra un team dati maturo e uno in difficolta sta nella capacita di evolvere lo schema in modo sicuro, prevedibile e senza interrompere le pipeline e le dashboard a valle.
+</Aside>
+
+Lo schema evolution e la disciplina che governa come le strutture del data warehouse cambiano nel tempo mantenendo la compatibilita con tutti i sistemi che dipendono da esse. In questa lezione vedremo le strategie, i pattern e gli strumenti per gestire le migrazioni in modo professionale.
+
+---
+
+## 1. Perche gli Schemi Cambiano
+
+Le cause principali di evoluzione dello schema sono molteplici e inevitabili:
+
+| Causa | Esempio | Frequenza |
+|-------|---------|-----------|
+| **Nuovi requisiti di business** | Il team marketing vuole tracciare i video completions | Alta |
+| **Nuove fonti dati** | Integrazione con TikTok Ads (nuove colonne) | Media |
+| **Ottimizzazione performance** | Cambio ORDER BY, aggiunta partitioning | Media |
+| **Correzione errori** | Tipo di dato sbagliato (String → UInt32) | Bassa |
+| **Normative e compliance** | Rimozione colonne PII per GDPR | Bassa |
+| **Deprecazione** | Rimozione di colonne non piu utilizzate | Media |
+
+<Aside type="caution">
+Una modifica allo schema che sembra innocua -- come rinominare una colonna -- puo rompere decine di dashboard, pipeline dbt e job Airflow. Ogni modifica deve essere trattata come un potenziale breaking change fino a prova contraria.
+</Aside>
+
+---
+
+## 2. Compatibilita: Backward e Forward
+
+### Backward Compatibility
+
+Un cambiamento e **backward compatible** se i consumatori esistenti (dashboard, query, pipeline) continuano a funzionare senza modifiche.
+
+```
+Operazioni backward compatible:
+  ✓ Aggiungere una nuova colonna (con default)
+  ✓ Aggiungere una nuova tabella
+  ✓ Allargare un tipo di dato (UInt16 → UInt32)
+  ✓ Aggiungere un valore a un Enum
+
+Operazioni NON backward compatible:
+  ✗ Rinominare una colonna
+  ✗ Rimuovere una colonna
+  ✗ Cambiare il tipo di dato in modo restrittivo (String → UInt32)
+  ✗ Modificare la semantica di una colonna
+  ✗ Cambiare la granularita della tabella
+```
+
+### Forward Compatibility
+
+Un cambiamento e **forward compatible** se i nuovi produttori possono scrivere dati che i vecchi consumatori ignorano senza errori. Questo e rilevante soprattutto per le pipeline di ingestione:
+
+```
+Esempio: aggiunta colonna "video_completions"
+
+Producer v2 → scrive con video_completions
+Consumer v1 → legge senza video_completions (SELECT specifico, ignora la nuova colonna)
+                → FUNZIONA: forward compatible
+Consumer v1 → legge con SELECT * → ROTTO: la nuova colonna appare nel risultato
+```
+
+<Aside type="note">
+Evitare `SELECT *` nelle pipeline di produzione non e solo un consiglio di performance: e una necessita per la forward compatibility. Query con colonne esplicite sono immuni all'aggiunta di nuove colonne.
+</Aside>
+
+---
+
+## 3. Pattern di Migrazione: Expand and Contract
+
+Il pattern **Expand and Contract** (anche detto Parallel Change) e la strategia piu sicura per le migrazioni. Si compone di tre fasi:
+
+```
+Fase 1 - EXPAND                 Fase 2 - MIGRATE               Fase 3 - CONTRACT
+┌──────────────────┐            ┌──────────────────┐            ┌──────────────────┐
+│ old_column  ✓    │            │ old_column  ✓    │            │ old_column  ✗    │
+│ new_column  ✓    │            │ new_column  ✓    │            │ new_column  ✓    │
+│                  │            │ (dati migrati)   │            │                  │
+│ Vecchi consumer  │            │ Vecchi consumer  │            │ Nuovi consumer   │
+│ usano old_column │            │ migrati a        │            │ usano new_column │
+│                  │            │ new_column       │            │                  │
+└──────────────────┘            └──────────────────┘            └──────────────────┘
+```
+
+### Esempio Pratico: Rinominare una Colonna
+
+Supponiamo di voler rinominare `channel` in `channel_name`:
+
+**Fase 1 — EXPAND**: Aggiungi la nuova colonna `channel_name` come alias o colonna materializzata
+
+```sql
+ALTER TABLE fact_campaign_performance
+    ADD COLUMN channel_name String DEFAULT channel;
+```
+
+**Fase 2 — MIGRATE**: Aggiorna tutte le pipeline e dashboard per usare `channel_name` invece di `channel`. Verifica che tutti i consumatori siano stati aggiornati.
+
+**Fase 3 — CONTRACT**: Dopo un periodo di verifica (tipicamente 1-2 sprint), rimuovi la vecchia colonna
+
+```sql
+ALTER TABLE fact_campaign_performance
+    DROP COLUMN channel;
+```
+
+---
+
+## 4. ClickHouse ALTER TABLE: Capacita e Limiti
+
+ClickHouse supporta un'ampia gamma di operazioni ALTER TABLE, molte delle quali sono eseguite in modo **lazy** (non riscrivono i dati immediatamente):
+
+### Operazioni Supportate
+
+```sql
+-- Aggiungere una colonna (istantaneo, lazy)
+ALTER TABLE fact_campaign_performance
+    ADD COLUMN video_views UInt32 DEFAULT 0 AFTER clicks;
+
+-- Aggiungere piu colonne in un'unica operazione
+ALTER TABLE fact_campaign_performance
+    ADD COLUMN video_completions UInt32 DEFAULT 0,
+    ADD COLUMN engagement_rate Float32 DEFAULT 0.0;
+
+-- Rimuovere una colonna
+ALTER TABLE fact_campaign_performance
+    DROP COLUMN IF EXISTS legacy_metric;
+
+-- Modificare il tipo di dato (compatibile)
+ALTER TABLE fact_campaign_performance
+    MODIFY COLUMN campaign_id UInt64;  -- Da UInt32 a UInt64
+
+-- Modificare il valore di default
+ALTER TABLE fact_campaign_performance
+    MODIFY COLUMN video_views UInt32 DEFAULT 0;
+
+-- Aggiungere un commento alla colonna
+ALTER TABLE fact_campaign_performance
+    COMMENT COLUMN spend 'Spesa in EUR, 4 decimali';
+
+-- Modificare il TTL
+ALTER TABLE fact_campaign_performance
+    MODIFY TTL event_date + INTERVAL 36 MONTH;
+
+-- Aggiungere un valore a un Enum
+ALTER TABLE fact_events
+    MODIFY COLUMN event_type Enum8(
+        'impression' = 1,
+        'click' = 2,
+        'conversion' = 3,
+        'video_view' = 4   -- Nuovo valore aggiunto
+    );
+```
+
+### Operazioni Non Supportate o Rischiose
+
+```sql
+-- ✗ Rinominare una colonna (non supportato direttamente)
+-- Workaround: aggiungi nuova colonna + migra + rimuovi vecchia
+
+-- ✗ Cambiare l'ORDER BY (richiede ricreazione della tabella)
+-- Workaround: crea nuova tabella + INSERT INTO ... SELECT + RENAME TABLE
+
+-- ✗ Cambiare il PARTITION BY (richiede ricreazione)
+-- Come sopra: nuova tabella + migrazione dati + swap
+
+-- ✗ Restringere un tipo di dato (UInt64 → UInt16) puo troncare i dati
+-- Verifica prima: SELECT MAX(colonna) per assicurarti che i dati rientrino
+```
+
+---
+
+## 5. Migrazioni Zero-Downtime
+
+Per tabelle critiche che non possono avere downtime, la strategia e la **migrazione con tabella shadow**:
+
+```
+┌─────────────────────────────┐
+│ 1. Crea tabella shadow      │
+│    con il nuovo schema      │
+│                             │
+│ 2. Popola con              │
+│    INSERT INTO ... SELECT   │
+│                             │
+│ 3. Verifica i dati          │
+│                             │
+│ 4. RENAME TABLE atomico     │
+│    old → old_backup         │
+│    shadow → old (produzione)│
+│                             │
+│ 5. Dopo verifica, droppa    │
+│    old_backup               │
+└─────────────────────────────┘
+```
+
+```sql
+-- 1. Crea la tabella shadow con il nuovo schema
+CREATE TABLE fact_campaign_performance_v2 (
+    event_date       Date,
+    campaign_id      UInt64,       -- Tipo allargato
+    channel_id       UInt16,
+    geo_id           UInt16,
+    impressions      UInt64,
+    clicks           UInt32,
+    video_views      UInt32,       -- Nuova colonna
+    spend            Decimal(10, 4),
+    conversions      UInt32,
+    conversion_value Decimal(12, 2)
+) ENGINE = SummingMergeTree()
+ORDER BY (channel_id, campaign_id, event_date)
+PARTITION BY toYYYYMM(event_date);
+
+-- 2. Migra i dati
+INSERT INTO fact_campaign_performance_v2
+SELECT
+    event_date,
+    toUInt64(campaign_id),
+    channel_id,
+    geo_id,
+    impressions,
+    clicks,
+    0 AS video_views,
+    spend,
+    conversions,
+    conversion_value
+FROM fact_campaign_performance;
+
+-- 3. Verifica (confronta conteggi)
+SELECT
+    (SELECT COUNT(*) FROM fact_campaign_performance) AS old_count,
+    (SELECT COUNT(*) FROM fact_campaign_performance_v2) AS new_count;
+
+-- 4. Swap atomico
+RENAME TABLE
+    fact_campaign_performance TO fact_campaign_performance_backup,
+    fact_campaign_performance_v2 TO fact_campaign_performance;
+
+-- 5. Dopo verifica completa (24-48h), rimuovi il backup
+DROP TABLE fact_campaign_performance_backup;
+```
+
+<Aside type="caution">
+Durante il passo 2 (INSERT INTO ... SELECT), i nuovi dati che arrivano nella vecchia tabella non verranno copiati nella shadow. Per tabelle con ingestione continua, pianifica la migrazione durante una finestra di basso traffico o usa una strategia con Materialized View temporanea per catturare i dati in transito.
+</Aside>
+
+---
+
+## 6. Data Contracts e Versionamento
+
+Un **data contract** e un accordo formale tra il produttore dei dati e i consumatori. Definisce lo schema, la semantica e le garanzie di qualita.
+
+### Struttura di un Data Contract
+
+```yaml
+# contracts/fact_campaign_performance.yml
+contract:
+  name: fact_campaign_performance
+  version: "2.1.0"
+  owner: team-data-engineering
+  description: "Performance giornaliera delle campagne marketing"
+
+  schema:
+    - name: event_date
+      type: Date
+      nullable: false
+      description: "Data dell'evento"
+
+    - name: campaign_id
+      type: UInt64
+      nullable: false
+      description: "ID univoco della campagna"
+
+    - name: spend
+      type: Decimal(10, 4)
+      nullable: false
+      description: "Spesa in EUR con 4 decimali"
+      constraints:
+        min_value: 0
+
+  sla:
+    freshness: "< 2 hours"
+    completeness: "> 99.5%"
+    availability: "99.9%"
+
+  breaking_changes:
+    notification: "2 sprint in anticipo"
+    channel: "#data-contracts-changes"
+```
+
+### Versionamento Semantico per gli Schemi
+
+Applicare il **Semantic Versioning** agli schemi dati:
+
+```
+MAJOR.MINOR.PATCH
+
+MAJOR: Breaking change (rimozione colonna, cambio tipo incompatibile)
+       → Richiede coordinamento con TUTTI i consumatori
+       → Esempio: 1.0.0 → 2.0.0
+
+MINOR: Backward compatible addition (nuova colonna, nuovo Enum value)
+       → I consumatori esistenti continuano a funzionare
+       → Esempio: 2.0.0 → 2.1.0
+
+PATCH: Backward compatible fix (correzione default, aggiunta commento)
+       → Nessun impatto sui consumatori
+       → Esempio: 2.1.0 → 2.1.1
+```
+
+---
+
+## 7. Testing delle Migrazioni
+
+Ogni migrazione deve essere testata prima di essere applicata in produzione:
+
+### Test Automatici Pre-Migrazione
+
+```sql
+-- Test 1: Verifica che la colonna da rimuovere non sia usata nelle MV
+SELECT
+    name AS materialized_view,
+    as_select
+FROM system.tables
+WHERE engine = 'MaterializedView'
+  AND as_select LIKE '%legacy_column%';
+
+-- Test 2: Verifica compatibilita dei tipi
+SELECT
+    MAX(campaign_id) AS max_value,
+    max_value <= 4294967295 AS fits_uint32,
+    max_value <= 65535 AS fits_uint16
+FROM fact_campaign_performance;
+
+-- Test 3: Conta i NULL prima di rendere una colonna NOT NULL
+SELECT
+    countIf(channel_id = 0) AS zero_values,
+    countIf(channel_id IS NULL) AS null_values,
+    COUNT(*) AS total
+FROM fact_campaign_performance;
+```
+
+### Checklist di Migrazione Sicura
+
+<Steps>
+1. **Documenta il cambiamento**: Cosa cambia, perche, quali consumatori sono impattati
+2. **Verifica le dipendenze**: Controlla Materialized Views, Dictionary, dbt models, dashboard
+3. **Testa in staging**: Esegui la migrazione sull'ambiente staging e valida i risultati
+4. **Comunica il cambiamento**: Notifica i team impattati con almeno 1 sprint di anticipo per breaking change
+5. **Esegui in finestra di basso traffico**: Preferibilmente fuori dall'orario lavorativo per le migrazioni pesanti
+6. **Monitora dopo la migrazione**: Verifica che le pipeline funzionino, i conteggi siano corretti, le dashboard si carichino
+7. **Mantieni il backup**: Non eliminare la vecchia tabella per almeno 48 ore
+8. **Aggiorna il data contract**: Incrementa la versione e documenta il cambiamento
+</Steps>
+
+---
+
+## 8. Gestione delle Breaking Changes nelle Pipeline
+
+Quando un breaking change e inevitabile, segui questo workflow:
+
+```
+┌──────────────┐    ┌──────────────┐    ┌──────────────┐
+│  ANNUNCIO    │    │  PERIODO     │    │  ESECUZIONE  │
+│              │    │  TRANSIZIONE │    │              │
+│ Comunica il  │───→│ Entrambe le  │───→│ Rimuovi il   │
+│ cambiamento  │    │ versioni     │    │ vecchio      │
+│ 2+ sprint    │    │ coesistono   │    │ schema       │
+│ in anticipo  │    │              │    │              │
+└──────────────┘    └──────────────┘    └──────────────┘
+```
+
+### Esempio: Cambio Granularita della Fact Table
+
+Se devi passare dalla granularita giornaliera a quella oraria:
+
+```sql
+-- 1. Crea la nuova tabella con granularita oraria
+CREATE TABLE fact_campaign_hourly (
+    event_date       Date,
+    event_hour       DateTime,
+    campaign_id      UInt64,
+    channel_id       UInt16,
+    impressions      UInt64,
+    clicks           UInt32,
+    spend            Decimal(10, 4)
+) ENGINE = SummingMergeTree()
+ORDER BY (channel_id, campaign_id, event_hour)
+PARTITION BY toYYYYMM(event_date);
+
+-- 2. Crea una view che mantiene la compatibilita con il vecchio schema
+CREATE VIEW fact_campaign_performance_compat AS
+SELECT
+    event_date,
+    campaign_id,
+    channel_id,
+    SUM(impressions) AS impressions,
+    SUM(clicks) AS clicks,
+    SUM(spend) AS spend
+FROM fact_campaign_hourly
+GROUP BY event_date, campaign_id, channel_id;
+
+-- 3. Migra i consumatori gradualmente dalla vecchia tabella alla nuova
+-- 4. Dopo che tutti i consumatori sono migrati, rimuovi la view e la vecchia tabella
+```
+
+---
+
+## 9. Automazione delle Migrazioni
+
+Per i team maturi, le migrazioni possono essere automatizzate con script versionati:
+
+```
+migrations/
+├── V001__create_fact_campaign_performance.sql
+├── V002__add_video_views_column.sql
+├── V003__widen_campaign_id_to_uint64.sql
+├── V004__add_ttl_25_months.sql
+└── V005__add_engagement_columns.sql
+```
+
+Ogni file di migrazione contiene:
+
+```sql
+-- V002__add_video_views_column.sql
+-- Author: data-team
+-- Date: 2024-06-15
+-- Description: Aggiunta colonna video_views per tracciare le visualizzazioni video
+-- Impact: Backward compatible (nuova colonna con default)
+
+ALTER TABLE fact_campaign_performance
+    ADD COLUMN video_views UInt32 DEFAULT 0 AFTER clicks;
+
+-- Verifica post-migrazione
+SELECT
+    name,
+    type,
+    default_expression
+FROM system.columns
+WHERE table = 'fact_campaign_performance'
+  AND name = 'video_views';
+```
+
+---
+
+## Esercizio Pratico
+
+Il team marketing chiede di aggiungere il tracciamento delle campagne TikTok alla tabella `fact_campaign_performance`. Questo richiede:
+
+1. Una nuova colonna `video_completions` (UInt32)
+2. Un nuovo valore nell'Enum del tipo di canale
+3. L'allargamento di `campaign_id` da UInt32 a UInt64 (TikTok usa ID molto grandi)
+
+Scrivi il piano di migrazione completo:
+- Classifica ogni cambiamento come backward compatible o breaking
+- Scrivi le istruzioni SQL ALTER TABLE per i cambiamenti compatibili
+- Progetta la strategia di migrazione con tabella shadow per il breaking change
+- Scrivi i test di verifica post-migrazione
+- Aggiorna il data contract con la nuova versione
+
+---
+
+*Uno schema che non evolve e uno schema che muore. La capacita di gestire il cambiamento in modo sicuro e prevedibile e cio che distingue un data warehouse di produzione da un prototipo.*

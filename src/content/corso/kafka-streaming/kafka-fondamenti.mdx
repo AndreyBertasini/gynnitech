@@ -1,0 +1,395 @@
+---
+title: "Apache Kafka: Architettura e Fondamenti"
+description: "Architettura distribuita di Kafka: broker, topic, partizioni, replicazione, ZooKeeper vs KRaft e strategie di partizionamento per dati marketing."
+order: 2
+category: "Fondamenti"
+---
+
+import { Aside, Steps } from '@astrojs/starlight/components';
+
+# Apache Kafka: Architettura e Fondamenti
+
+<Aside type="tip">
+Kafka non e' solo un message broker: e' un **distributed commit log** che permette di costruire pipeline dati affidabili e scalabili. In questa lezione esploriamo l'architettura interna che lo rende il sistema di streaming piu' adottato al mondo.
+</Aside>
+
+## Breve Storia di Kafka
+
+Apache Kafka e' stato creato nel 2010 da LinkedIn per gestire il flusso di centinaia di miliardi di eventi al giorno. Il nome deriva dallo scrittore Franz Kafka, scelto perche' il sistema e' stato progettato per la scrittura (di dati).
+
+Timeline essenziale:
+- **2010**: Sviluppo interno a LinkedIn
+- **2011**: Open source sotto Apache Software Foundation
+- **2014**: Jay Kreps, Neha Narkhede e Jun Rao fondano **Confluent** per supporto enterprise
+- **2019**: Introduzione di KRaft per sostituire ZooKeeper
+- **2023-2024**: KRaft diventa production-ready, ZooKeeper deprecato
+- **Oggi**: Kafka gestisce trilioni di messaggi al giorno in aziende come Netflix, Uber, Airbnb e nella maggior parte delle piattaforme adtech
+
+## L'Ecosistema Kafka
+
+```
++--------------------------------------------------------------+
+|                    ECOSISTEMA KAFKA                           |
+|                                                              |
+|  +------------------+  +------------------+  +-----------+   |
+|  | Kafka Broker     |  | Schema Registry  |  | Kafka     |   |
+|  | (Core)           |  | (Avro/Protobuf)  |  | Connect   |   |
+|  +------------------+  +------------------+  +-----------+   |
+|                                                              |
+|  +------------------+  +------------------+  +-----------+   |
+|  | Kafka Streams    |  | ksqlDB           |  | REST      |   |
+|  | (Java library)   |  | (SQL streaming)  |  | Proxy     |   |
+|  +------------------+  +------------------+  +-----------+   |
+|                                                              |
+|  +------------------+  +------------------+  +-----------+   |
+|  | MirrorMaker 2    |  | Kafka Manager    |  | Kafka     |   |
+|  | (replicazione)   |  | (UI monitoring)  |  | CLI Tools |   |
+|  +------------------+  +------------------+  +-----------+   |
++--------------------------------------------------------------+
+
+Alternative compatibili:
+- Redpanda (C++, niente JVM, API-compatible)
+- Confluent Cloud (Kafka managed)
+- Amazon MSK (Kafka managed su AWS)
+- Azure Event Hubs (API Kafka-compatible)
+```
+
+## Il Distributed Commit Log
+
+Il concetto centrale di Kafka e' il **log distribuito**: una sequenza ordinata, immutabile e append-only di record.
+
+```
+Log per una singola partizione:
+
+Offset:  0     1     2     3     4     5     6     7     8
+       +-----+-----+-----+-----+-----+-----+-----+-----+-----+
+       | ev1 | ev2 | ev3 | ev4 | ev5 | ev6 | ev7 | ev8 | ... |
+       +-----+-----+-----+-----+-----+-----+-----+-----+-----+
+       ^                                               ^
+       |                                               |
+   Primo messaggio                              Ultimo messaggio
+   ancora disponibile                           scritto (HEAD)
+   (in base a retention)
+```
+
+Proprieta' del log:
+- **Append-only**: i nuovi messaggi vengono aggiunti solo alla fine
+- **Immutabile**: un messaggio scritto non viene mai modificato
+- **Ordinato**: ogni messaggio ha un offset numerico univoco e crescente
+- **Persistente**: i messaggi vengono salvati su disco, non solo in memoria
+- **Replay**: un consumer puo' rileggere da qualsiasi offset
+
+## Architettura del Cluster
+
+### Broker
+
+Un **broker** e' un singolo server Kafka. Un cluster e' composto da piu' broker che lavorano insieme.
+
+```
+                    KAFKA CLUSTER
++----------------------------------------------------------+
+|                                                          |
+|  +------------------+  +------------------+              |
+|  |   Broker 1       |  |   Broker 2       |             |
+|  |   (Controller)   |  |                  |             |
+|  |                  |  |                  |             |
+|  | Topic A - P0 (L) |  | Topic A - P0 (F) |            |
+|  | Topic A - P1 (F) |  | Topic A - P1 (L) |            |
+|  | Topic B - P0 (L) |  | Topic A - P2 (F) |            |
+|  +------------------+  +------------------+              |
+|                                                          |
+|  +------------------+                                    |
+|  |   Broker 3       |    L = Leader                      |
+|  |                  |    F = Follower                    |
+|  | Topic A - P1 (F) |                                    |
+|  | Topic A - P2 (L) |    Replication Factor = 2          |
+|  | Topic B - P0 (F) |    (ogni partizione ha 1 leader    |
+|  +------------------+     + 1 follower)                  |
+|                                                          |
++----------------------------------------------------------+
+```
+
+Ogni broker:
+- Ha un **ID univoco** (broker.id)
+- Memorizza un sottoinsieme delle partizioni
+- Gestisce le richieste di lettura e scrittura per le partizioni di cui e' leader
+- Replica i dati dalle partizioni di cui e' follower
+
+### Topic
+
+Un **topic** e' un canale logico dove i messaggi vengono pubblicati. E' l'equivalente di una tabella in un database, ma append-only.
+
+Convenzione di naming per il marketing:
+
+| Topic | Contenuto | Volume stimato |
+|---|---|---|
+| `marketing.pageviews` | Visualizzazioni pagina | ~500K/giorno |
+| `marketing.clicks` | Click su ads e CTA | ~50K/giorno |
+| `marketing.conversions` | Acquisti, signup, lead | ~5K/giorno |
+| `marketing.sessions` | Sessioni utente (aggregate) | ~100K/giorno |
+| `crm.contacts` | Aggiornamenti dal CRM | ~10K/giorno |
+| `ads.spend` | Spesa pubblicitaria da API | ~1K/giorno |
+| `ads.impressions` | Impression ads | ~2M/giorno |
+
+<Aside type="note">
+Usa un naming gerarchico con il punto come separatore: `dominio.entita.versione` (es. `marketing.clicks.v2`). Questo facilita le ACL di sicurezza e l'organizzazione dei connector.
+</Aside>
+
+### Partizioni: il Cuore della Scalabilita'
+
+Ogni topic e' diviso in **partizioni**. Le partizioni sono l'unita' di parallelismo di Kafka.
+
+```
+Topic: marketing.clicks (3 partizioni)
+
+Partizione 0:  [click1] [click4] [click7] [click10] ...
+Partizione 1:  [click2] [click5] [click8] [click11] ...
+Partizione 2:  [click3] [click6] [click9] [click12] ...
+
+Regola fondamentale:
+- L'ordine e' garantito SOLO all'interno di una singola partizione
+- NON c'e' garanzia di ordine tra partizioni diverse
+```
+
+#### Quante partizioni servono?
+
+Formula pratica:
+
+```
+Partizioni = max(T/P, T/C)
+
+Dove:
+  T = Throughput target (messaggi/secondo)
+  P = Throughput di un singolo producer per partizione
+  C = Throughput di un singolo consumer per partizione
+```
+
+Linee guida:
+- **< 10K msg/sec**: 3-6 partizioni
+- **10K - 100K msg/sec**: 6-12 partizioni
+- **100K - 1M msg/sec**: 12-30 partizioni
+- **> 1M msg/sec**: 30+ partizioni (attenzione ai costi di metadata)
+
+<Aside type="caution">
+Puoi sempre **aumentare** il numero di partizioni, ma **non puoi diminuirlo** senza ricreare il topic. Inizia con un numero ragionevole e scala quando necessario.
+</Aside>
+
+### Strategia di Partizionamento per il Marketing
+
+La scelta della chiave di partizionamento determina quali messaggi finiscono nella stessa partizione:
+
+| Chiave | Garanzia | Caso d'uso marketing |
+|---|---|---|
+| `user_id` | Tutti gli eventi di un utente nella stessa partizione | Sessionizzazione, journey analysis |
+| `campaign_id` | Tutti gli eventi di una campagna insieme | Aggregazioni per campagna in tempo reale |
+| `null` (round-robin) | Distribuzione uniforme, nessuna garanzia di ordine | Massimo throughput, ordine non necessario |
+| `event_type` | Tutti gli eventi dello stesso tipo insieme | Consumer specializzati per tipo |
+| `country_code` | Eventi raggruppati per paese | Compliance GDPR, analytics regionali |
+
+## Replicazione e Affidabilita'
+
+### Replication Factor
+
+Ogni partizione puo' avere piu' **repliche** distribuite su broker diversi. Una replica e' il **leader** (gestisce letture e scritture), le altre sono **follower** (copiano i dati dal leader).
+
+```
+Replication Factor = 3
+
+Broker 1          Broker 2          Broker 3
++-----------+     +-----------+     +-----------+
+| P0 LEADER |---->| P0 FOLLOW |---->| P0 FOLLOW |
++-----------+     +-----------+     +-----------+
+
+Se Broker 1 cade:
+Broker 1 (DOWN)   Broker 2          Broker 3
++-----------+     +-----------+     +-----------+
+|   XXXX    |     | P0 LEADER |     | P0 FOLLOW |
++-----------+     +-----------+     +-----------+
+                  (promosso a leader automaticamente)
+```
+
+### In-Sync Replicas (ISR)
+
+Le **ISR** sono le repliche che sono "al passo" con il leader. Un follower e' in-sync se ha replicato tutti i messaggi entro un certo ritardo (`replica.lag.time.max.ms`, default 30 secondi).
+
+```
+Scenario con Replication Factor = 3:
+
+Leader:    [msg1] [msg2] [msg3] [msg4] [msg5]
+Follower1: [msg1] [msg2] [msg3] [msg4] [msg5]  <-- IN SYNC (ISR)
+Follower2: [msg1] [msg2] [msg3]                  <-- OUT OF SYNC (non ISR)
+
+ISR = {Leader, Follower1}
+min.insync.replicas = 2 --> le scritture possono procedere
+```
+
+Configurazioni chiave:
+
+| Parametro | Valore consigliato | Effetto |
+|---|---|---|
+| `replication.factor` | 3 | Ogni partizione ha 3 copie |
+| `min.insync.replicas` | 2 | Le scritture richiedono almeno 2 repliche sincronizzate |
+| `unclean.leader.election.enable` | false | Previene la perdita di dati (no promozione di repliche non sincronizzate) |
+
+<Aside type="caution">
+La combinazione `replication.factor=3` + `min.insync.replicas=2` + `acks=all` nel producer garantisce che nessun messaggio vada perso anche se un broker fallisce. Questa e' la configurazione minima consigliata per dati di produzione.
+</Aside>
+
+## ZooKeeper vs KRaft
+
+### ZooKeeper (Architettura Legacy)
+
+Fino al 2023, Kafka dipendeva da **Apache ZooKeeper** per:
+- Elezione del controller
+- Gestione dei metadata del cluster (topic, partizioni, broker)
+- Membership dei broker
+
+```
+Architettura con ZooKeeper:
+
++-----------+     +-----------+     +-----------+
+| ZK Node 1 |     | ZK Node 2 |     | ZK Node 3 |
++-----------+     +-----------+     +-----------+
+      |                 |                 |
+      +--------+--------+--------+--------+
+               |                 |
+        +-----------+     +-----------+
+        | Broker 1  |     | Broker 2  |
+        +-----------+     +-----------+
+```
+
+Problemi di ZooKeeper:
+- Componente aggiuntivo da gestire e monitorare
+- Scalabilita' limitata (~200K partizioni per cluster)
+- Riavvio del controller lento (minuti)
+- Configurazione complessa
+
+### KRaft (Architettura Moderna)
+
+**KRaft** (Kafka Raft) elimina ZooKeeper. I metadata sono gestiti internamente dai broker stessi tramite il protocollo Raft.
+
+```
+Architettura con KRaft:
+
++-----------+     +-----------+     +-----------+
+| Broker 1  |     | Broker 2  |     | Broker 3  |
+| (Voter)   |     | (Voter)   |     | (Voter)   |
++-----------+     +-----------+     +-----------+
+      |                 |                 |
+      +--------+--------+--------+--------+
+               |
+        Metadata gestiti
+        internamente via
+        protocollo Raft
+```
+
+Vantaggi di KRaft:
+- **Nessuna dipendenza esterna**: meno componenti da gestire
+- **Scalabilita'**: supporta milioni di partizioni per cluster
+- **Recovery piu' veloce**: secondi invece di minuti
+- **Deployment semplificato**: meno container/VM da gestire
+
+### Migrazione
+
+| Aspetto | ZooKeeper | KRaft |
+|---|---|---|
+| Componenti | Kafka + ZooKeeper (3+3 nodi minimo) | Solo Kafka (3 nodi minimo) |
+| Partizioni max | ~200K | Milioni |
+| Tempo di failover | Minuti | Secondi |
+| Complessita' ops | Alta | Media |
+| Stato | Deprecato (Kafka 3.5+) | Default (Kafka 3.6+) |
+
+<Aside type="tip">
+Per nuove installazioni, usa sempre KRaft. Non c'e' ragione di partire con ZooKeeper nel 2025. Se hai un cluster esistente con ZooKeeper, pianifica la migrazione a KRaft.
+</Aside>
+
+## Come i Dati Fluiscono Attraverso Kafka
+
+<Steps>
+
+1. **Il Producer invia un messaggio** - Il producer serializza il messaggio (JSON, Avro, Protobuf), calcola la partizione target (basata sulla chiave o round-robin), e invia il messaggio al broker leader di quella partizione.
+
+2. **Il Broker Leader scrive su disco** - Il leader appende il messaggio al log della partizione su disco. Il messaggio riceve un offset numerico univoco e crescente.
+
+3. **I Follower replicano** - I follower della partizione fanno fetch del nuovo messaggio dal leader e lo scrivono nel loro log locale. Quando la replica e' confermata, entrano nell'ISR.
+
+4. **Il Producer riceve l'acknowledgment** - In base alla configurazione `acks`, il producer riceve la conferma: `acks=0` (nessun ack), `acks=1` (solo il leader), `acks=all` (tutti gli ISR).
+
+5. **Il Consumer legge il messaggio** - Il consumer fa una richiesta di fetch al broker leader specificando il suo offset corrente. Il broker restituisce i messaggi a partire da quell'offset.
+
+6. **Il Consumer aggiorna l'offset** - Dopo aver processato il messaggio, il consumer salva il suo offset (auto-commit o manual commit) nel topic interno `__consumer_offsets`.
+
+</Steps>
+
+```
+Flusso completo di un evento di click:
+
+[Utente clicca ad] --> [Frontend SDK]
+                            |
+                            v
+                     [Producer API]
+                     key: "user_123"
+                     value: { click_data }
+                            |
+                     hash("user_123") % 6 = partizione 3
+                            |
+                            v
+                     [Broker 2 - Leader P3]
+                     offset 15847 assegnato
+                            |
+                     +------+------+
+                     |             |
+                     v             v
+              [Broker 1]    [Broker 3]
+              Follower P3   Follower P3
+              replica OK    replica OK
+                     |
+                     v
+              ack=all inviato al producer
+                     |
+                     v
+              [Consumer Group: clickhouse_ingestion]
+              Consumer 1 legge P3 da offset 15847
+                     |
+                     v
+              INSERT in ClickHouse
+                     |
+                     v
+              commit offset 15848
+```
+
+## Redpanda e Confluent
+
+### Redpanda
+
+Redpanda e' un'alternativa a Kafka con compatibilita' API completa:
+
+| Caratteristica | Kafka | Redpanda |
+|---|---|---|
+| Linguaggio | Java/Scala (JVM) | C++ (no JVM) |
+| Dipendenze | ZK/KRaft | Nessuna |
+| Latenza p99 | ~10ms | ~2ms |
+| Risorse necessarie | Alte (JVM heap) | Basse (no GC) |
+| Complessita' ops | Alta | Bassa |
+| Ecosistema | Enorme | Compatibile con Kafka |
+| Costo | Piu' infrastruttura | Meno infrastruttura |
+| Consigliato per | Enterprise, alto volume | Startup, team piccoli |
+
+### Confluent
+
+Confluent offre Kafka come servizio gestito con componenti aggiuntivi:
+- **Confluent Cloud**: Kafka fully managed
+- **Schema Registry**: gestione degli schemi Avro/Protobuf
+- **ksqlDB**: SQL streaming in tempo reale
+- **Connectors managed**: 200+ connectors pre-built
+- **Cluster Linking**: replica tra cluster in multi-cloud
+
+## Riepilogo
+
+- Kafka e' un **distributed commit log**: append-only, immutabile, ordinato per partizione
+- I **broker** formano un cluster; ogni partizione ha un **leader** e dei **follower**
+- Le **partizioni** sono l'unita' di parallelismo; la chiave di partizionamento determina la distribuzione
+- La **replicazione** (RF=3, min.insync.replicas=2) garantisce durabilita'
+- **KRaft** sostituisce ZooKeeper: meno componenti, piu' scalabilita'
+- Scegli la chiave di partizionamento in base al tuo caso d'uso: `user_id` per journey analysis, `campaign_id` per aggregazioni real-time
+- Valuta **Redpanda** se cerchi semplicita' e bassa latenza con team piccoli

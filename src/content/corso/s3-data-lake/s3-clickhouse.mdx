@@ -1,0 +1,250 @@
+---
+title: "S3 + ClickHouse: Tiered Storage e Query Esterne"
+description: "Architettura tiered storage con ClickHouse e S3: query su dati esterni, cold storage e ottimizzazione delle performance."
+order: 6
+category: "Integrazione"
+---
+
+import { Aside, Steps } from '@astrojs/starlight/components';
+
+# S3 + ClickHouse: Tiered Storage e Query Esterne
+
+<Aside type="tip">
+Questa lezione combina le conoscenze di S3 e ClickHouse per costruire un'architettura di storage a livelli. È il pattern più usato per bilanciare performance e costi nelle piattaforme di marketing analytics.
+</Aside>
+
+## Perché Combinare S3 e ClickHouse
+
+ClickHouse è velocissimo quando i dati sono su disco locale (SSD/NVMe). Ma i dischi locali sono costosi e limitati. S3 è praticamente illimitato e costa una frazione. La soluzione è un'architettura **tiered**:
+
+```
+┌─────────────────────────────────────────────────┐
+│                  QUERY LAYER                     │
+│              ClickHouse Engine                   │
+├─────────────────────────────────────────────────┤
+│  HOT (SSD locale)    │  COLD (S3)               │
+│  Ultimi 30 giorni    │  Dati storici             │
+│  ~500 GB             │  ~50 TB                   │
+│  Latenza: <100ms     │  Latenza: 1-5s            │
+│  Costo: $$$          │  Costo: $                 │
+└─────────────────────────────────────────────────┘
+```
+
+| Livello | Storage | Latenza | Costo/TB/mese | Use Case |
+|---------|---------|---------|---------------|----------|
+| **Hot** | NVMe/SSD locale | < 100ms | ~$100 | Dashboard real-time, query frequenti |
+| **Warm** | S3 Standard | 1-3s | ~$23 | Analisi ad-hoc ultimo trimestre |
+| **Cold** | S3 Glacier | 3-12h | ~$4 | Compliance, audit, analisi annuali |
+
+## Funzione s3() di ClickHouse
+
+ClickHouse può leggere direttamente da S3 senza importare i dati:
+
+```sql
+-- Leggere un singolo file Parquet da S3
+SELECT
+    campaign_id,
+    sum(clicks) AS total_clicks,
+    sum(conversions) AS total_conversions
+FROM s3(
+    'https://my-bucket.s3.eu-west-1.amazonaws.com/marketing/events/2025/*.parquet',
+    'AWS_ACCESS_KEY', 'AWS_SECRET_KEY',
+    'Parquet'
+)
+WHERE event_date >= '2025-01-01'
+GROUP BY campaign_id
+ORDER BY total_clicks DESC
+LIMIT 20;
+```
+
+### Pattern con Glob
+
+```sql
+-- Leggere tutti i file di un mese specifico
+SELECT count(*)
+FROM s3(
+    'https://bucket.s3.amazonaws.com/data/year=2025/month=06/day=*/events_*.parquet',
+    'KEY', 'SECRET', 'Parquet'
+);
+
+-- Leggere da più anni
+SELECT *
+FROM s3(
+    'https://bucket.s3.amazonaws.com/data/year={2024,2025}/month=*/events.parquet',
+    'KEY', 'SECRET', 'Parquet'
+);
+```
+
+## s3Cluster() per Query Distribuite
+
+Per query su grandi dataset S3, distribuisci il lavoro su tutto il cluster:
+
+```sql
+-- Distribuisce la lettura su tutti i nodi del cluster
+SELECT
+    toStartOfMonth(event_date) AS month,
+    campaign_id,
+    uniq(user_id) AS unique_users,
+    sum(revenue) AS total_revenue
+FROM s3Cluster(
+    'default',  -- nome del cluster
+    'https://bucket.s3.amazonaws.com/events/year=*/month=*/data_*.parquet',
+    'KEY', 'SECRET',
+    'Parquet'
+)
+GROUP BY month, campaign_id
+ORDER BY month, total_revenue DESC;
+```
+
+## S3-Backed MergeTree (Cold Storage)
+
+Il pattern più potente: usare S3 come storage per le tabelle MergeTree standard.
+
+### Configurazione Storage Policy
+
+```xml
+<!-- /etc/clickhouse-server/config.d/storage.xml -->
+<clickhouse>
+  <storage_configuration>
+    <disks>
+      <s3_disk>
+        <type>s3</type>
+        <endpoint>https://my-bucket.s3.eu-west-1.amazonaws.com/clickhouse/</endpoint>
+        <access_key_id>YOUR_KEY</access_key_id>
+        <secret_access_key>YOUR_SECRET</secret_access_key>
+      </s3_disk>
+    </disks>
+    <policies>
+      <tiered>
+        <volumes>
+          <hot>
+            <disk>default</disk>  <!-- SSD locale -->
+          </hot>
+          <cold>
+            <disk>s3_disk</disk>  <!-- S3 -->
+          </cold>
+        </volumes>
+        <move_factor>0.1</move_factor>
+      </tiered>
+    </policies>
+  </storage_configuration>
+</clickhouse>
+```
+
+### Tabella con TTL per Tiered Storage
+
+```sql
+CREATE TABLE marketing_events (
+    event_date Date,
+    event_time DateTime,
+    user_id UInt64,
+    campaign_id UInt32,
+    channel LowCardinality(String),
+    event_type LowCardinality(String),
+    revenue Decimal(10, 2)
+) ENGINE = MergeTree()
+PARTITION BY toYYYYMM(event_date)
+ORDER BY (campaign_id, user_id, event_time)
+TTL
+    event_date + INTERVAL 1 MONTH TO VOLUME 'hot',
+    event_date + INTERVAL 6 MONTH TO VOLUME 'cold'
+SETTINGS storage_policy = 'tiered';
+```
+
+<Aside type="note">
+Con questo setup, i dati dell'ultimo mese restano su SSD (veloci), poi migrano automaticamente su S3 dopo 6 mesi. Le query funzionano in modo trasparente su entrambi i livelli.
+</Aside>
+
+## INSERT INTO ... SELECT FROM s3()
+
+Per importare dati da S3 in una tabella ClickHouse:
+
+```sql
+-- Importare dati storici da un data lake S3
+INSERT INTO marketing_events
+SELECT
+    event_date,
+    event_time,
+    user_id,
+    campaign_id,
+    channel,
+    event_type,
+    revenue
+FROM s3(
+    'https://data-lake.s3.amazonaws.com/marketing/year=2025/month=01/*.parquet',
+    'KEY', 'SECRET',
+    'Parquet'
+);
+```
+
+### Backfill Intelligente
+
+```sql
+-- Importa solo dati mancanti
+INSERT INTO marketing_events
+SELECT *
+FROM s3('https://bucket.s3.amazonaws.com/data/2025-01-*.parquet', 'KEY', 'SECRET', 'Parquet')
+WHERE event_date NOT IN (
+    SELECT DISTINCT event_date FROM marketing_events WHERE toYYYYMM(event_date) = 202501
+);
+```
+
+## Performance Tuning per S3
+
+### Parallelismo di Lettura
+
+```sql
+-- Aumentare il parallelismo per query S3
+SET max_threads = 16;
+SET max_download_threads = 16;
+SET max_download_buffer_size = 52428800;  -- 50MB buffer
+
+SELECT count(*) FROM s3('https://bucket.s3.amazonaws.com/large_dataset/*.parquet', ...);
+```
+
+### Best Practices
+
+| Pratica | Impatto | Dettaglio |
+|---------|---------|-----------|
+| Usa Parquet, non CSV | 5-10x più veloce | Compressione colonnare + predicate pushdown |
+| File da 100-500MB | Ottimale | Troppo piccoli = overhead, troppo grandi = no parallelismo |
+| Partiziona per data | Query mirate | `year=YYYY/month=MM/day=DD/` |
+| Usa s3Cluster | 3-5x su cluster | Distribuisce I/O su tutti i nodi |
+| Predicate pushdown | Riduce I/O | ClickHouse filtra prima di scaricare |
+
+## Architettura Completa
+
+```
+                    ┌──────────────────┐
+                    │   Dashboard /    │
+                    │   Grafana / App  │
+                    └────────┬─────────┘
+                             │ SQL
+                    ┌────────▼─────────┐
+                    │    ClickHouse    │
+                    │   Query Engine   │
+                    ├──────────────────┤
+                    │ HOT: SSD locale  │◄── Kafka (real-time)
+                    │ (ultimi 30 gg)   │
+                    ├──────────────────┤
+                    │ COLD: S3 bucket  │◄── ETL batch (storico)
+                    │ (storico 2+ anni)│
+                    └──────────────────┘
+                             │
+                    ┌────────▼─────────┐
+                    │   S3 Data Lake   │
+                    │  (Parquet files) │
+                    │  Backup + Audit  │
+                    └──────────────────┘
+```
+
+## Checklist Implementazione
+
+<Steps>
+1. Configura un bucket S3 dedicato con lifecycle policies
+2. Aggiungi la disk configuration S3 a ClickHouse
+3. Definisci la storage policy con volumi hot/cold
+4. Crea le tabelle con TTL per la migrazione automatica
+5. Testa le query su entrambi i livelli di storage
+6. Monitora i costi S3 con CloudWatch o strumenti equivalenti
+</Steps>
