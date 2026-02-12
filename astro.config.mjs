@@ -80,7 +80,7 @@ export default defineConfig({
         starlightImageZoom(),
         starlightScrollToTop({
           showOnHomepage: true,
-          svgStrokeColor: '#012b4d',
+          svgStrokeColor: 'transparent',
           smoothScroll: true,
           svgPath: 'M17 11 12 6 7 11 M17 18 12 13 7 18',
           borderRadius: '50%',
