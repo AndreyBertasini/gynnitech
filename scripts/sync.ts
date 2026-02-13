@@ -5,9 +5,7 @@ import { promises as fs } from "fs";
 import path from "path";
 import { validatePath } from "./validation";
 import matter from "gray-matter";
-import dotenv from "dotenv";
 
-dotenv.config();
 
 // Concurrency Control Helper
 const pLimit = (limit: number) => {

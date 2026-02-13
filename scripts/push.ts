@@ -2,12 +2,10 @@ import { markdownToBlocks } from "@tryfabric/martian";
 import { promises as fs } from "fs";
 import path from "path";
 import matter from "gray-matter";
-import dotenv from "dotenv";
 import { glob } from "glob";
 import { SITE_URL } from "../src/consts";
 import { getFormattedDatabaseId, getNotionClient } from "../src/lib/notion/client";
 
-dotenv.config();
 
 // Retry Helper
 async function withRetry<T>(operation: () => Promise<T>, retries = 3, delay = 1000): Promise<T> {
