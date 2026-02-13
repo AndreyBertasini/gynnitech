@@ -21,6 +21,8 @@ export const collections = {
             title: z.string(),
             description: z.string(),
             order: z.number().optional(),
+            tags: z.array(z.string()).optional(),
+            image: z.string().optional(),
         }),
     }),
     // Example of async parser usage
