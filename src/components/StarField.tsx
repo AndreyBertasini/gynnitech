@@ -35,6 +35,16 @@ interface ShootingStar {
   life: number;
 }
 
+// Optimization constants
+const OPACITY_STEP = 0.05;
+// Max opacity ~ 1.25 -> 25 steps + 1 safety
+const NUM_OPACITY_BUCKETS = Math.ceil(1.3 / OPACITY_STEP) + 1;
+// Hues: 0 (white), 60 (yellow), 180 (cyan) -> indices 0, 1, 2
+// NOTE: This optimization assumes stars only use these 3 hues as defined in initStars.
+// If new hues are added, they must be added to this map or they will default to index 0 (white).
+const HUE_MAP: Record<number, number> = { 0: 0, 60: 1, 180: 2 };
+const TOTAL_BUCKETS = 3 * NUM_OPACITY_BUCKETS;
+
 export const StarField = () => {
   const canvasRef = useRef<HTMLCanvasElement>(null);
 
@@ -54,6 +64,22 @@ export const StarField = () => {
     let lastTime = 0;
     let timeSinceLastShootingStar = 0;
     let shootingStarInterval = Math.random() * 2000 + 1500;
+
+    // Pre-allocated buckets for batching draw calls
+    // Using simple arrays of Star references to avoid object allocation per frame
+    const starBuckets: Star[][] = Array.from({ length: TOTAL_BUCKETS }, () => []);
+    // Glow buckets only need to track stars that have glow (Hue 0, low opacity)
+    // But we reuse the same bucket structure for simplicity in indexing
+    // (though only Hue 0 buckets will likely be used for glow as it's white)
+    const glowBuckets: Star[][] = Array.from({ length: TOTAL_BUCKETS }, () => []);
+
+    const getBucketIndex = (hue: number, opacity: number): number => {
+      const hueIdx = HUE_MAP[hue] || 0;
+      let opacityIdx = Math.floor(opacity / OPACITY_STEP);
+      if (opacityIdx < 0) opacityIdx = 0;
+      if (opacityIdx >= NUM_OPACITY_BUCKETS) opacityIdx = NUM_OPACITY_BUCKETS - 1;
+      return hueIdx * NUM_OPACITY_BUCKETS + opacityIdx;
+    };
 
     const resize = () => {
       width = window.innerWidth;
@@ -167,35 +193,91 @@ export const StarField = () => {
 
       ctx.clearRect(0, 0, width, height);
 
-      // Draw stars
+      // --- Optimized Star Rendering ---
+
+      // 1. Update and Bucket Stars
+      // Clear buckets
+      for (let i = 0; i < TOTAL_BUCKETS; i++) {
+        starBuckets[i].length = 0;
+        glowBuckets[i].length = 0;
+      }
+
       stars.forEach((star) => {
+        // Update physics/animation
         star.twinklePhase += star.twinkleSpeed;
         const twinkle = Math.sin(star.twinklePhase) * 0.8 + 0.5;
         const currentOpacity = star.opacity * (0.3 + twinkle * 0.7);
 
-        if (star.hue > 0) {
-          ctx.fillStyle = `hsla(${star.hue}, 80%, 85%, ${currentOpacity})`;
-        } else {
-          ctx.fillStyle = `rgba(255, 255, 255, ${currentOpacity})`;
-        }
-        ctx.beginPath();
-        ctx.arc(star.x, star.y, star.size, 0, Math.PI * 2);
-        ctx.fill();
+        // Bucket for main star draw
+        const bucketIdx = getBucketIndex(star.hue, currentOpacity);
+        starBuckets[bucketIdx].push(star);
 
-        // Subtle glow for brighter stars
+        // Bucket for glow draw (if applicable)
         if (star.size > 1.2 && currentOpacity > 0.6) {
-          ctx.fillStyle = `rgba(255, 255, 255, ${currentOpacity * 0.1})`;
-          ctx.beginPath();
-          ctx.arc(star.x, star.y, star.size * 3, 0, Math.PI * 2);
-          ctx.fill();
+          const glowOpacity = currentOpacity * 0.1;
+          // Glow is always white (hue 0)
+          const glowIdx = getBucketIndex(0, glowOpacity);
+          glowBuckets[glowIdx].push(star);
         }
 
+        // Update position for next frame
         star.y -= star.speed;
         if (star.y < 0) {
           star.y = height;
           star.x = Math.random() * width;
         }
       });
+
+      // 2. Draw Star Buckets
+      for (let i = 0; i < TOTAL_BUCKETS; i++) {
+        if (starBuckets[i].length === 0) continue;
+
+        const hueIdx = Math.floor(i / NUM_OPACITY_BUCKETS);
+        const opacityIdx = i % NUM_OPACITY_BUCKETS;
+
+        const hue = hueIdx === 0 ? 0 : (hueIdx === 1 ? 60 : 180);
+        // Use midpoint of opacity step to average out
+        const opacity = (opacityIdx * OPACITY_STEP) + (OPACITY_STEP / 2);
+
+        if (hue > 0) {
+          ctx.fillStyle = `hsla(${hue}, 80%, 85%, ${opacity})`;
+        } else {
+          ctx.fillStyle = `rgba(255, 255, 255, ${opacity})`;
+        }
+
+        ctx.beginPath();
+        const bucket = starBuckets[i];
+        for (let j = 0; j < bucket.length; j++) {
+          const s = bucket[j];
+          ctx.moveTo(s.x + s.size, s.y);
+          ctx.arc(s.x, s.y, s.size, 0, Math.PI * 2);
+        }
+        ctx.fill();
+      }
+
+      // 3. Draw Glow Buckets
+      for (let i = 0; i < TOTAL_BUCKETS; i++) {
+        if (glowBuckets[i].length === 0) continue;
+
+        const opacityIdx = i % NUM_OPACITY_BUCKETS;
+        const opacity = (opacityIdx * OPACITY_STEP) + (OPACITY_STEP / 2);
+
+        // Glow is always white
+        ctx.fillStyle = `rgba(255, 255, 255, ${opacity})`;
+
+        ctx.beginPath();
+        const bucket = glowBuckets[i];
+        for (let j = 0; j < bucket.length; j++) {
+          const s = bucket[j];
+          // Glow is 3x larger
+          const glowSize = s.size * 3;
+          ctx.moveTo(s.x + glowSize, s.y);
+          ctx.arc(s.x, s.y, glowSize, 0, Math.PI * 2);
+        }
+        ctx.fill();
+      }
+
+      // --- End Optimized Star Rendering ---
 
       // Spawn shooting stars
       timeSinceLastShootingStar += deltaTime;
