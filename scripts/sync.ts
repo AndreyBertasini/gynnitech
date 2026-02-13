@@ -2,6 +2,7 @@ import { NotionParser } from "../src/lib/notion/parser";
 import { getFormattedDatabaseId, getNotionClient } from "../src/lib/notion/client";
 import { promises as fs } from "fs";
 import path from "path";
+import { validatePath } from "./validation";
 import matter from "gray-matter";
 import dotenv from "dotenv";
 
@@ -176,7 +177,14 @@ async function sync() {
         }
 
         // Ensure directory exists (handling nested slugs)
-        const fullPath = path.join(process.cwd(), outDir, `${metadata.slug}.mdx`);
+        let fullPath = "";
+        try {
+            fullPath = validatePath(path.join(process.cwd(), outDir), `${metadata.slug}.mdx`);
+        } catch (error) {
+            console.error(`Skipping invalid slug for "${metadata.title}": ${metadata.slug}`, error);
+            continue;
+        }
+
         await fs.mkdir(path.dirname(fullPath), { recursive: true });
         
         await fs.writeFile(fullPath, fileContent);
