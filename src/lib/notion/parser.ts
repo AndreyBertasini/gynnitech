@@ -22,6 +22,7 @@ export class NotionParser {
         const getText = (prop: any) => prop?.rich_text?.[0]?.plain_text || '';
         const getTitle = (prop: any) => prop?.title?.[0]?.plain_text || 'Untitled';
         const getSelect = (prop: any) => prop?.select?.name;
+        const getStatus = (prop: any) => prop?.status?.name || prop?.select?.name;
         const getMultiSelect = (prop: any) => prop?.multi_select?.map((i: any) => i.name) || [];
         const getDate = (prop: any) => prop?.date?.start || new Date().toISOString();
         const getCheckbox = (prop: any) => prop?.checkbox || false;
@@ -45,7 +46,7 @@ export class NotionParser {
             title: getTitle(props.Name),
             slug: getText(props.Slug) || page.id, // Fallback to ID if slug missing
             type: getSelect(props.Type) || 'Page',
-            status: getSelect(props.Status) || 'Draft',
+            status: getStatus(props.Status) || 'Draft',
             date: getDate(props.Date),
             description: getText(props.Summary),
             category: getSelect(props.Category),
