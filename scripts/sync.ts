@@ -10,6 +10,42 @@ import dotenv from "dotenv";
 
 dotenv.config();
 
+// Concurrency Control Helper
+const pLimit = (limit: number) => {
+    const queue: (() => void)[] = [];
+    let activeCount = 0;
+
+    const next = () => {
+        activeCount--;
+        if (queue.length > 0) {
+            queue.shift()!();
+        }
+    };
+
+    const run = async <T>(fn: () => Promise<T>): Promise<T> => {
+        const execute = async (resolve: (value: T | PromiseLike<T>) => void, reject: (reason?: any) => void) => {
+            activeCount++;
+            try {
+                const result = await fn();
+                resolve(result);
+            } catch (err) {
+                reject(err);
+            } finally {
+                next();
+            }
+        };
+
+        if (activeCount < limit) {
+            return new Promise(execute);
+        } else {
+            return new Promise((resolve, reject) => {
+                queue.push(() => execute(resolve, reject));
+            });
+        }
+    };
+    return run;
+};
+
 // Retry Helper
 async function withRetry<T>(operation: () => Promise<T>, retries = 3, delay = 1000): Promise<T> {
     try {
@@ -75,7 +111,7 @@ async function sync() {
 
     // Use standard client.databases.query (should be available in v2.2.15)
     console.log("Querying database...");
-    const response = await withRetry(() => client.databases.query({
+    const response: any = await withRetry(() => client.databases.query({
         database_id: formattedDbId,
         filter: {
             property: "Status",
@@ -89,7 +125,10 @@ async function sync() {
 
     const menuItems: any[] = [];
 
-    for (const page of response.results) {
+    // Concurrency limit (5 concurrent requests)
+    const limit = pLimit(5);
+
+    await Promise.all(response.results.map((page: any) => limit(async () => {
         // Use retry for content fetching too (fetching children blocks can hit rate limits)
         const metadata = parser.extractMetadata(page);
         const content = await withRetry(() => parser.getPageContent(page.id));
@@ -167,7 +206,7 @@ async function sync() {
                 order: metadata.order || 99,
             });
         }
-    }
+    })));
 
     // Sort and write sidebar
     menuItems.sort((a, b) => a.order - b.order);
