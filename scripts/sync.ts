@@ -1,4 +1,5 @@
 import { NotionParser } from "../src/lib/notion/parser";
+import type { Client } from "@notionhq/client";
 import { getFormattedDatabaseId, getNotionClient } from "../src/lib/notion/client";
 import { promises as fs } from "fs";
 import path from "path";
@@ -67,7 +68,7 @@ async function withRetry<T>(operation: () => Promise<T>, retries = 3, delay = 10
 }
 
 async function sync() {
-    let client;
+    let client: Client;
     let formattedDbId;
 
     try {
@@ -85,7 +86,8 @@ async function sync() {
     // Verify client connection
     try {
         const me = await client.users.me({});
-        console.log("Notion Connected as:", me.bot ? "Bot" : "User");
+        const isBot = 'bot' in me;
+        console.log("Notion Connected as:", isBot ? "Bot" : "User");
     } catch (e) {
         console.error("Failed to authenticate with Notion:", e);
         process.exit(1);
@@ -96,7 +98,8 @@ async function sync() {
     // First, try to retrieve the database to verify ID and permissions
     try {
         const db = await client.databases.retrieve({ database_id: formattedDbId });
-        console.log(`Database retrieved successfully: ${db.title[0]?.plain_text || "Untitled"}`);
+        const title = 'title' in db ? db.title[0]?.plain_text : "Untitled";
+        console.log(`Database retrieved successfully: ${title || "Untitled"}`);
     } catch (e) {
         console.error("Failed to retrieve database. Please check ID and permissions.", e);
         process.exit(1);
@@ -182,7 +185,7 @@ async function sync() {
             fullPath = validatePath(path.join(process.cwd(), outDir), `${metadata.slug}.mdx`);
         } catch (error) {
             console.error(`Skipping invalid slug for "${metadata.title}": ${metadata.slug}`, error);
-            continue;
+            return;
         }
 
         await fs.mkdir(path.dirname(fullPath), { recursive: true });
