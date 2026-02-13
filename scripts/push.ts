@@ -5,6 +5,7 @@ import path from "path";
 import matter from "gray-matter";
 import dotenv from "dotenv";
 import { glob } from "glob";
+import { SITE_URL } from "../src/consts";
 
 dotenv.config();
 
@@ -110,7 +111,7 @@ async function push() {
         }
 
         // Construct Live URL
-        const baseUrl = "https://ginnytech.it";
+        const baseUrl = SITE_URL;
         let livePath = "";
         
         // normalizedFile is already available here
