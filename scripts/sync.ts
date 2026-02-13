@@ -1,11 +1,11 @@
-import { NotionParser } from "../src/lib/notion/parser";
-import type { Client } from "@notionhq/client";
-import { getFormattedDatabaseId, getNotionClient } from "../src/lib/notion/client";
-import { promises as fs } from "fs";
+import fs from "fs/promises";
 import path from "path";
-import { validatePath } from "./validation";
-import matter from "gray-matter";
 import dotenv from "dotenv";
+import matter from "gray-matter";
+import type { Client } from "@notionhq/client";
+import { NotionParser } from "../src/lib/notion/parser";
+import { getFormattedDatabaseId, getNotionClient } from "../src/lib/notion/client";
+import { validatePath } from "./validation";
 
 dotenv.config();
 
