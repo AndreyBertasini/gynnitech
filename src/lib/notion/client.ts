@@ -23,3 +23,10 @@ export const getDatabaseId = () => {
     }
     return dbId;
 };
+
+export const getFormattedDatabaseId = () => {
+    const dbId = getDatabaseId();
+    return dbId.length === 32
+        ? `${dbId.slice(0, 8)}-${dbId.slice(8, 12)}-${dbId.slice(12, 16)}-${dbId.slice(16, 20)}-${dbId.slice(20)}`
+        : dbId;
+};

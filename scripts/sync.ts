@@ -1,8 +1,5 @@
-import { createRequire } from "module";
-const require = createRequire(import.meta.url);
-const { Client } = require("@notionhq/client");
-
 import { NotionParser } from "../src/lib/notion/parser";
+import { getFormattedDatabaseId, getNotionClient } from "../src/lib/notion/client";
 import { promises as fs } from "fs";
 import path from "path";
 import matter from "gray-matter";
@@ -33,21 +30,16 @@ async function withRetry<T>(operation: () => Promise<T>, retries = 3, delay = 10
 }
 
 async function sync() {
-    const token = process.env.NOTION_TOKEN;
-    const dbId = process.env.NOTION_DATABASE_ID;
+    let client;
+    let formattedDbId;
 
-    if (!token || !dbId) {
-        console.error("Missing NOTION_TOKEN or NOTION_DATABASE_ID");
+    try {
+        client = getNotionClient();
+        formattedDbId = getFormattedDatabaseId();
+    } catch (e: any) {
+        console.error(e.message);
         process.exit(1);
     }
-
-    // Format DB ID to UUID if it's not already (insert dashes)
-    const formattedDbId = dbId.length === 32 
-        ? `${dbId.slice(0, 8)}-${dbId.slice(8, 12)}-${dbId.slice(12, 16)}-${dbId.slice(16, 20)}-${dbId.slice(20)}`
-        : dbId;
-
-    // Direct instantiation with imported Class
-    const client = new Client({ auth: token });
     
     const parser = new NotionParser(client);
 

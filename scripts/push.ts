@@ -1,4 +1,3 @@
-import { Client } from "@notionhq/client";
 import { markdownToBlocks } from "@tryfabric/martian";
 import { promises as fs } from "fs";
 import path from "path";
@@ -6,6 +5,7 @@ import matter from "gray-matter";
 import dotenv from "dotenv";
 import { glob } from "glob";
 import { SITE_URL } from "../src/consts";
+import { getFormattedDatabaseId, getNotionClient } from "../src/lib/notion/client";
 
 dotenv.config();
 
@@ -26,20 +26,17 @@ async function withRetry<T>(operation: () => Promise<T>, retries = 3, delay = 10
 }
 
 async function push() {
-    const token = process.env.NOTION_TOKEN;
-    const dbId = process.env.NOTION_DATABASE_ID;
+    let client;
+    let formattedDbId;
 
-    if (!token || !dbId) {
-        console.error("Missing NOTION_TOKEN or NOTION_DATABASE_ID");
+    try {
+        client = getNotionClient();
+        formattedDbId = getFormattedDatabaseId();
+    } catch (e: any) {
+        console.error(e.message);
         process.exit(1);
     }
 
-    // Format DB ID
-    const formattedDbId = dbId.length === 32 
-        ? `${dbId.slice(0, 8)}-${dbId.slice(8, 12)}-${dbId.slice(12, 16)}-${dbId.slice(16, 20)}-${dbId.slice(20)}`
-        : dbId;
-
-    const client = new Client({ auth: token });
     console.log(`Pushing FULL content to Notion Database: ${formattedDbId}`);
 
     // 0. Ensure 'Live URL' property exists in the database
