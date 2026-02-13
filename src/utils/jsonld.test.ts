@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { serializeJsonLd } from "./security";
+import { serializeJsonLd } from "./jsonld";
 
 describe("serializeJsonLd", () => {
   test("escapes <, >, and & characters", () => {
