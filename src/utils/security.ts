@@ -1,6 +1,8 @@
 /**
  * Serializes an object to a JSON string safe for embedding in HTML.
  * Escapes characters that could be used to break out of a script tag.
+ *
+ * Prevents Stored XSS by escaping <, >, and & characters.
  */
 export function serializeJsonLd(data: unknown): string {
   const json = JSON.stringify(data);
