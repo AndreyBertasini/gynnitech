@@ -15,30 +15,32 @@ export const SearchWidget = ({ mobile = false }: { mobile?: boolean }) => {
   const [isLoading, setIsLoading] = useState(false);
   const [isScriptLoaded, setIsScriptLoaded] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
+  const isLoadingScript = useRef(false);
 
-  useEffect(() => {
-    const loadPagefind = async () => {
-      if (import.meta.env.DEV) {
-        return;
-      }
-      try {
-        const pagefindUrl = "/pagefind/pagefind.js?url";
-        // @ts-ignore
-        const pagefind = await import(/* @vite-ignore */ pagefindUrl);
-        await pagefind.init();
-        window.pagefind = pagefind;
-        setIsScriptLoaded(true);
-      } catch (e) {
-        console.warn("Pagefind not loaded (likely in Dev mode or not built yet).", e);
-      }
-    };
-
-    if (!window.pagefind) {
-      loadPagefind();
-    } else {
-      setIsScriptLoaded(true);
+  const loadPagefind = async () => {
+    if (import.meta.env.DEV) {
+      return;
     }
-  }, []);
+    if (window.pagefind) {
+      setIsScriptLoaded(true);
+      return;
+    }
+    if (isLoadingScript.current) return;
+
+    isLoadingScript.current = true;
+    try {
+      const pagefindUrl = "/pagefind/pagefind.js?url";
+      // @ts-ignore
+      const pagefind = await import(/* @vite-ignore */ pagefindUrl);
+      await pagefind.init();
+      window.pagefind = pagefind;
+      setIsScriptLoaded(true);
+    } catch (e) {
+      console.warn("Pagefind not loaded (likely in Dev mode or not built yet).", e);
+    } finally {
+      isLoadingScript.current = false;
+    }
+  };
 
   useEffect(() => {
     if (isOpen && inputRef.current) {
@@ -82,7 +84,12 @@ export const SearchWidget = ({ mobile = false }: { mobile?: boolean }) => {
     <>
       {/* Trigger Button */}
       <button
-        onClick={() => setIsOpen(true)}
+        onClick={() => {
+          loadPagefind();
+          setIsOpen(true);
+        }}
+        onMouseEnter={loadPagefind}
+        onFocus={loadPagefind}
         className={`flex items-center gap-2 px-3 py-2 text-slate-300 hover:text-white transition-colors rounded-lg hover:bg-white/5 group ${mobile ? 'w-full justify-start py-3 px-4 bg-white/5 hover:bg-white/10' : ''}`}
         aria-label="Cerca"
       >
