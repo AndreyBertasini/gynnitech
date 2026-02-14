@@ -4,44 +4,9 @@ import { getFormattedDatabaseId, getNotionClient } from "../src/lib/notion/clien
 import { promises as fs } from "fs";
 import path from "path";
 import { validatePath } from "./validation";
+import { pLimit } from "./concurrency";
 import matter from "gray-matter";
 
-
-// Concurrency Control Helper
-const pLimit = (limit: number) => {
-    const queue: (() => void)[] = [];
-    let activeCount = 0;
-
-    const next = () => {
-        activeCount--;
-        if (queue.length > 0) {
-            queue.shift()!();
-        }
-    };
-
-    const run = async <T>(fn: () => Promise<T>): Promise<T> => {
-        const execute = async (resolve: (value: T | PromiseLike<T>) => void, reject: (reason?: any) => void) => {
-            activeCount++;
-            try {
-                const result = await fn();
-                resolve(result);
-            } catch (err) {
-                reject(err);
-            } finally {
-                next();
-            }
-        };
-
-        if (activeCount < limit) {
-            return new Promise(execute);
-        } else {
-            return new Promise((resolve, reject) => {
-                queue.push(() => execute(resolve, reject));
-            });
-        }
-    };
-    return run;
-};
 
 // Retry Helper
 async function withRetry<T>(operation: () => Promise<T>, retries = 3, delay = 1000): Promise<T> {
@@ -122,7 +87,7 @@ async function sync() {
     // Concurrency limit (5 concurrent requests)
     const limit = pLimit(5);
 
-    await Promise.all(response.results.map((page: any) => limit(async () => {
+    const results = await Promise.allSettled(response.results.map((page: any) => limit(async () => {
         // Use retry for content fetching too (fetching children blocks can hit rate limits)
         const metadata = parser.extractMetadata(page);
         const content = await withRetry(() => parser.getPageContent(page.id));
@@ -208,6 +173,21 @@ async function sync() {
             });
         }
     })));
+
+    let hasFailures = false;
+    results.forEach((result: any, index: number) => {
+        if (result.status === "rejected") {
+            hasFailures = true;
+            const pageId = response.results[index]?.id || `Index ${index}`;
+            console.error(`Failed to sync page ${pageId}:`, result.reason);
+        }
+    });
+
+    if (hasFailures) {
+        console.warn("Some pages failed to sync. Checking logs for details.");
+        // We exit with error code to signal CI failure, but at least we tried all pages
+        process.exitCode = 1;
+    }
 
     // Sort and write sidebar
     menuItems.sort((a, b) => a.order - b.order);
