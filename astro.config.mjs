@@ -59,7 +59,7 @@ export default defineConfig({
     }
   },
   vite: {
-    plugins: [tailwindcss()]
+    plugins: [/** @type {any} */ (tailwindcss())]
   },
   markdown: {
     remarkPlugins: [remarkMath],
@@ -70,7 +70,6 @@ export default defineConfig({
     react(),
     mermaid({
       theme: 'dark',
-      fontFamily: 'Inter, sans-serif',
     }),
     sitemap(),
     starlight({

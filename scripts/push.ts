@@ -54,13 +54,13 @@ async function push() {
 
     // 1. Get existing pages to avoid duplicates and map Slug -> PageID
     const existingPages = new Map();
-    let cursor = undefined;
+    let cursor: string | undefined = undefined;
     do {
         const response: any = await withRetry(() => client.databases.query({
             database_id: formattedDbId,
             start_cursor: cursor,
         }));
-        
+
         for (const page of response.results) {
             if ('properties' in page) {
                 // @ts-ignore
@@ -80,11 +80,11 @@ async function push() {
     for (const file of files) {
         const content = await fs.readFile(file, "utf-8");
         const { data: frontmatter, content: markdownBody } = matter(content);
-        
+
         // Determine Slug from filename or frontmatter
         const filename = path.basename(file, ".mdx");
         const slug = frontmatter.slug || filename;
-        
+
         // Get Type and Live URL using shared utility
         const { type, url: liveUrl } = getLiveUrlInfo(file, slug);
 
@@ -109,7 +109,7 @@ async function push() {
         if (existingPages.has(slug)) {
             const pageId = existingPages.get(slug);
             console.log(`  -> Page exists (${pageId}). Updating metadata (Live URL)...`);
-            
+
             // Update Live URL even if page exists
             try {
                 await withRetry(() => client.pages.update({
@@ -121,7 +121,7 @@ async function push() {
                     },
                 }));
             } catch (e) {
-                 console.error(`  -> Failed to update Live URL:`, e);
+                console.error(`  -> Failed to update Live URL:`, e);
             }
 
             console.log(`  -> Metadata updated.`);
@@ -133,7 +133,7 @@ async function push() {
         try {
             // Create page with first chunk
             const firstChunk = blockChunks[0] || [];
-            
+
             const properties: any = {
                 Name: { title: [{ text: { content: frontmatter.title || slug } }] },
                 Slug: { rich_text: [{ text: { content: slug } }] },
@@ -153,7 +153,7 @@ async function push() {
             // Append remaining chunks
             for (let i = 1; i < blockChunks.length; i++) {
                 await withRetry(() => client.blocks.children.append({
-                    block_id: response.id,
+                    block_id: (response as any).id,
                     children: blockChunks[i],
                 }));
             }

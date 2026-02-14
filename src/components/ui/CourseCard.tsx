@@ -1,6 +1,5 @@
 import React from 'react';
 import { ArrowRight, BookOpen } from 'lucide-react';
-import { cn } from './Tooltip';
 
 interface CourseCardProps {
   id: string;
@@ -21,7 +20,7 @@ export const CourseCard = ({ id, title, description, icon: Icon, color, lessonCo
     >
       <div className="absolute inset-0 rounded-2xl bg-gradient-to-br from-white/5 to-white/0 opacity-0 transition-opacity duration-500 group-hover:opacity-100" />
       <div className="relative h-full overflow-hidden rounded-2xl border border-white/10 bg-[#0a0e14]/80 p-8 transition-all duration-300 group-hover:border-acid-yellow group-hover:shadow-[0_0_30px_-10px_rgba(204,255,0,0.2)] backdrop-blur-md">
-        
+
         {/* Glow effect */}
         <div className={`absolute -right-20 -top-20 h-64 w-64 rounded-full bg-gradient-to-br ${color} opacity-[0.05] blur-3xl transition-opacity duration-500 group-hover:opacity-20`} />
 
@@ -38,7 +37,7 @@ export const CourseCard = ({ id, title, description, icon: Icon, color, lessonCo
           <h3 className="mb-3 text-2xl font-bold text-white transition-colors group-hover:text-transparent group-hover:bg-clip-text group-hover:bg-gradient-to-r group-hover:from-white group-hover:to-acid-yellow font-heading tracking-tight">
             {title}
           </h3>
-          
+
           <p className="mb-8 flex-grow text-sm leading-relaxed text-slate-400 font-sans">
             {description}
           </p>
@@ -49,7 +48,7 @@ export const CourseCard = ({ id, title, description, icon: Icon, color, lessonCo
                 <BookOpen className="h-3.5 w-3.5" />
                 {lessonCount} LEZIONI
               </span>
-              
+
               <div className="flex items-center gap-2 text-sm font-medium text-acid-yellow opacity-0 transition-all duration-300 -translate-x-2 group-hover:translate-x-0 group-hover:opacity-100 font-ui">
                 Piano delle Lezioni <ArrowRight className="h-4 w-4" />
               </div>

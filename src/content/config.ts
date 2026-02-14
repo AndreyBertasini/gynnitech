@@ -17,6 +17,7 @@ export const collections = {
     schema: z.object({
       title: z.string(),
       description: z.string(),
+      category: z.string().optional(),
       order: z.number().optional(),
       image: z.string().optional(), // Added for social sharing customization
     }),
