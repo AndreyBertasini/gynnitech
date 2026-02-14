@@ -3,8 +3,8 @@ import { promises as fs } from "fs";
 import path from "path";
 import matter from "gray-matter";
 import { glob } from "glob";
-import { SITE_URL } from "../src/consts";
 import { getFormattedDatabaseId, getNotionClient } from "../src/lib/notion/client";
+import { getLiveUrlInfo } from "./push-utils";
 
 
 // Retry Helper
@@ -85,63 +85,8 @@ async function push() {
         const filename = path.basename(file, ".mdx");
         const slug = frontmatter.slug || filename;
         
-        // Determine Type based on folder
-        let type = "Page";
-        let urlPrefix = "docs"; // Default for generic pages
-        
-        // Normalize file path to forward slashes for consistent handling
-        const normalizedFile = file.replace(/\\/g, '/');
-
-        if (normalizedFile.includes("src/content/blog")) {
-            type = "Blog";
-            urlPrefix = "blog";
-        }
-        if (normalizedFile.includes("src/content/corso")) {
-            type = "Course";
-            urlPrefix = "corso"; // Based on sidebar config, course items are under /corso/category/slug? 
-            // Actually, let's look at the file path to be precise.
-            // file: src/content/corso/marketing/brand.mdx -> /corso/marketing/brand
-            // But sidebar says: /corso/data-collection/event-tracking/
-            // So we need to preserve the subdirectory structure for courses.
-        }
-
-        // Construct Live URL
-        const baseUrl = SITE_URL;
-        let livePath = "";
-        
-        // normalizedFile is already available here
-        
-        if (type === "Course") {
-            // src/content/corso/marketing/brand.mdx -> marketing/brand
-            // We want to capture the part AFTER src/content/corso/
-            const match = normalizedFile.match(/src\/content\/corso\/(.*)\.mdx$/);
-            if (match) {
-                 livePath = `/corso/${match[1]}`;
-            } else {
-                 livePath = `/corso/${slug}`;
-            }
-        } else if (type === "Blog") {
-            livePath = `/blog/${slug}`;
-        } else {
-            // Docs
-            // src/content/docs/docs/guides/text-generation.mdx -> docs/guides/text-generation
-            const match = normalizedFile.match(/src\/content\/docs\/(.*)\.mdx$/);
-            if (match) {
-                // Starlight maps src/content/docs/X -> /X
-                // If match[1] is "docs/guides/text-generation", we want /docs/guides/text-generation
-                // Wait, starlight config says src/content/docs -> /
-                // So src/content/docs/index.mdx -> /
-                // src/content/docs/guides/foo.mdx -> /guides/foo
-                // My previous logic had relative path logic.
-                livePath = `/${match[1]}`;
-            } else {
-                livePath = `/${slug}`;
-            }
-        }
-
-        // Clean up double slashes just in case
-        livePath = livePath.replace(/\/+/g, '/');
-        const liveUrl = `${baseUrl}${livePath}`;
+        // Get Type and Live URL using shared utility
+        const { type, url: liveUrl } = getLiveUrlInfo(file, slug);
 
         console.log(`Processing: ${slug} (${type}) -> ${liveUrl}`);
 
