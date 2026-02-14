@@ -1,5 +1,6 @@
 // @ts-check
 import { defineConfig } from 'astro/config';
+import partytown from '@astrojs/partytown';
 import tailwindcss from '@tailwindcss/vite';
 import starlight from '@astrojs/starlight';
 import react from '@astrojs/react';
@@ -65,6 +66,7 @@ export default defineConfig({
     rehypePlugins: [rehypeKatex],
   },
   integrations: [
+    partytown({ config: { forward: ["dataLayer.push"] } }),
     react(),
     mermaid({
       theme: 'dark',
@@ -101,12 +103,16 @@ export default defineConfig({
         {
           tag: 'script',
           attrs: {
+            type: 'text/partytown',
             async: true,
             src: 'https://www.googletagmanager.com/gtag/js?id=G-NXL5WZC0SR',
           },
         },
         {
           tag: 'script',
+          attrs: {
+            type: 'text/partytown',
+          },
           content: `
             window.dataLayer = window.dataLayer || [];
             function gtag(){dataLayer.push(arguments);}
