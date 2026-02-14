@@ -35,3 +35,36 @@ describe("serializeJsonLd", () => {
     expect(serializeJsonLd(() => {})).toBe("{}");
   });
 });
+
+  describe("security", () => {
+    test("prevents script tag injection", () => {
+      const input = {
+        title: "</script><script>alert('xss')</script>"
+      };
+      const output = serializeJsonLd(input);
+      expect(output).toContain("\\u003c/script\\u003e");
+      expect(output).not.toContain("</script>");
+    });
+
+    test("prevents HTML comment injection", () => {
+      const input = {
+        comment: "<!-- malicious comment -->"
+      };
+      const output = serializeJsonLd(input);
+      expect(output).toContain("\\u003c!--");
+      expect(output).toContain("--\\u003e");
+      expect(output).not.toContain("<!--");
+      expect(output).not.toContain("-->");
+    });
+
+    test("prevents CDATA injection", () => {
+      const input = {
+        cdata: "<![CDATA[ malicious data ]]>"
+      };
+      const output = serializeJsonLd(input);
+      expect(output).toContain("\\u003c![CDATA[");
+      expect(output).toContain("]]\\u003e");
+      expect(output).not.toContain("<![CDATA[");
+      expect(output).not.toContain("]]>");
+    });
+  });
