@@ -13,10 +13,11 @@ export const corsoSchema = z.object({
     title: z.string(),
     description: z.string(),
     order: z.number().optional(),
+    category: z.string().optional(),
 });
 
 export const productsSchema = z.object({
     id: z.string(),
     name: z.string(),
-    processedAt: z.string()
+    processedAt: z.string().datetime()
 });
