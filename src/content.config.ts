@@ -1,6 +1,12 @@
 import { defineCollection, z } from 'astro:content';
-
 import { glob, file } from 'astro/loaders';
+
+const corsoSchema = z.object({
+    title: z.string(),
+    description: z.string(),
+    order: z.number().optional(),
+    category: z.string().optional(),
+});
 
 export const collections = {
 
@@ -17,12 +23,7 @@ export const collections = {
     }),
     corso: defineCollection({
         loader: glob({ pattern: "**/*.{md,mdx}", base: "./src/content/corso", retainBody: false }),
-        schema: z.object({
-            title: z.string(),
-            description: z.string(),
-            order: z.number().optional(),
-            category: z.string().optional(),
-        }),
+        schema: corsoSchema,
     }),
     // Example of async parser usage
     products: defineCollection({
