@@ -87,6 +87,7 @@ export default defineConfig({
           exclude: ['/course/**'],
         }),
       ],
+      disable404Route: true,
       components: {
         Sidebar: './src/components/starlight/Sidebar.astro',
         Search: './src/components/starlight/Empty.astro', // Remove from header
