@@ -35,6 +35,21 @@ describe("Content Schemas", () => {
             }
         });
 
+        test("coerces date strings correctly", () => {
+            const valid = {
+                title: "Test Post",
+                description: "Test Description",
+                date: "2023-01-01T10:00:00Z",
+                category: "Test Category",
+            };
+            const result = blogSchema.safeParse(valid);
+            expect(result.success).toBe(true);
+            if (result.success) {
+                expect(result.data.date).toBeInstanceOf(Date);
+                expect(result.data.date.toISOString()).toBe("2023-01-01T10:00:00.000Z");
+            }
+        });
+
         test("invalidates missing required fields", () => {
             const invalid = {
                 title: "Test Post",
@@ -73,13 +88,30 @@ describe("Content Schemas", () => {
             expect(result.success).toBe(true);
         });
 
-        test("validates valid corso item without order", () => {
+        test("validates valid corso item with category", () => {
+            const valid = {
+                title: "Lesson 1",
+                description: "Intro",
+                category: "Fondamenti"
+            };
+            const result = corsoSchema.safeParse(valid);
+            expect(result.success).toBe(true);
+            if (result.success) {
+                expect(result.data.category).toBe("Fondamenti");
+            }
+        });
+
+        test("validates valid corso item without order and category", () => {
              const valid = {
                 title: "Lesson 1",
                 description: "Intro"
             };
             const result = corsoSchema.safeParse(valid);
             expect(result.success).toBe(true);
+            if (result.success) {
+                expect(result.data.order).toBeUndefined();
+                expect(result.data.category).toBeUndefined();
+            }
         });
 
         test("invalidates missing fields", () => {
@@ -92,7 +124,7 @@ describe("Content Schemas", () => {
     });
 
     describe("productsSchema", () => {
-         test("validates valid product", () => {
+         test("validates valid product with ISO datetime", () => {
             const valid = {
                 id: "p1",
                 name: "Product 1",
@@ -100,6 +132,17 @@ describe("Content Schemas", () => {
             };
             const result = productsSchema.safeParse(valid);
             expect(result.success).toBe(true);
+        });
+
+        test("invalidates invalid datetime string", () => {
+            const invalid = {
+                id: "p1",
+                name: "Product 1",
+                processedAt: "2023-01-01" // Not a full ISO datetime (requires time part for strict datetime usually?)
+            };
+            // z.string().datetime() expects ISO 8601 with time
+            const result = productsSchema.safeParse(invalid);
+            expect(result.success).toBe(false);
         });
 
         test("invalidates missing fields", () => {
