@@ -1,0 +1,267 @@
+---
+title: Data Lifecycle e Cost Optimization
+description: >-
+  Retention policies, lifecycle rules S3, ottimizzazione costi e compliance GDPR
+  per la piattaforma dati.
+date: '2026-02-15T06:20:25.900Z'
+author: GynniTech Team
+notionId: 305ed540-0642-817c-99d0-d68634c647b2
+---
+
+import { Aside, Steps } from '@astrojs/starlight/components';
+
+
+# Data Lifecycle e Cost Optimization
+
+
+## Il Ciclo di Vita dei Dati
+
+
+Ogni dato attraversa fasi distinte, e ogni fase ha requisiti diversi di storage, accesso e costo:
+
+
+```plain text
+CREAZIONE → UTILIZZO ATTIVO → ARCHIVIAZIONE → ELIMINAZIONE
+   (hot)       (hot/warm)        (cold)         (delete)
+
+  0-30 gg     1-6 mesi        6-24 mesi        > 24 mesi
+  SSD/NVMe    S3 Standard     S3 Glacier        Eliminato
+  ~$100/TB    ~$23/TB         ~$4/TB            $0
+```
+
+
+### Matrice di Retention per Marketing Analytics
+
+
+| Tipo di Dato          | Hot (SSD) | Warm (S3 Std) | Cold (Glacier) | Elimina           |
+| --------------------- | --------- | ------------- | -------------- | ----------------- |
+| Eventi click/pageview | 30 giorni | 6 mesi        | 2 anni         | Dopo 2 anni       |
+| Conversioni           | 90 giorni | 1 anno        | 5 anni         | Dopo 5 anni       |
+| Dati CRM/utente       | 90 giorni | 1 anno        | Per compliance | Su richiesta GDPR |
+| Aggregati giornalieri | 1 anno    | 3 anni        | Indefinito     | Mai               |
+| Log di sistema        | 7 giorni  | 30 giorni     | 90 giorni      | Dopo 90 giorni    |
+| Campagne ads raw      | 30 giorni | 1 anno        | 2 anni         | Dopo 2 anni       |
+
+
+## S3 Lifecycle Rules
+
+
+Le lifecycle rules automatizzano la transizione tra storage classes e l'eliminazione.
+
+
+### Configurazione JSON
+
+
+```json
+{
+  "Rules": [
+    {
+      "ID": "marketing-events-lifecycle",
+      "Status": "Enabled",
+      "Filter": {
+        "Prefix": "marketing/events/"
+      },
+      "Transitions": [
+        {
+          "Days": 30,
+          "StorageClass": "STANDARD_IA"
+        },
+        {
+          "Days": 180,
+          "StorageClass": "GLACIER"
+        }
+      ],
+      "Expiration": {
+        "Days": 730
+      }
+    },
+    {
+      "ID": "aggregated-data-keep-longer",
+      "Status": "Enabled",
+      "Filter": {
+        "Prefix": "marketing/aggregated/"
+      },
+      "Transitions": [
+        {
+          "Days": 365,
+          "StorageClass": "GLACIER"
+        }
+      ]
+    },
+    {
+      "ID": "cleanup-incomplete-uploads",
+      "Status": "Enabled",
+      "Filter": {
+        "Prefix": ""
+      },
+      "AbortIncompleteMultipartUpload": {
+        "DaysAfterInitiation": 7
+      }
+    }
+  ]
+}
+```
+
+
+### Applicare via CLI
+
+
+```bash
+aws s3api put-bucket-lifecycle-configuration \
+  --bucket my-marketing-data-lake \
+  --lifecycle-configuration file://lifecycle-policy.json
+```
+
+
+## Stima dei Costi
+
+
+### Scenario: Piattaforma Marketing Analytics
+
+
+| Componente               | Volume   | Storage Class  | Costo/mese   |
+| ------------------------ | -------- | -------------- | ------------ |
+| Eventi raw (ultimi 30gg) | 500 GB   | S3 Standard    | ~$11.50      |
+| Eventi raw (1-6 mesi)    | 2.5 TB   | S3 Standard-IA | ~$31.25      |
+| Eventi raw (6-24 mesi)   | 8 TB     | S3 Glacier     | ~$32.00      |
+| Aggregati                | 200 GB   | S3 Standard    | ~$4.60       |
+| Totale S3                | ~11.2 TB | Mix            | **~$79.35**  |
+| ClickHouse SSD (hot)     | 500 GB   | gp3 EBS        | ~$40.00      |
+| **Totale Storage**       |          |                | **~$119.35** |
+
+
+### Costi Nascosti da Monitorare
+
+
+| Costo             | Causa                       | Come Evitarlo                                 |
+| ----------------- | --------------------------- | --------------------------------------------- |
+| API calls GET/PUT | Milioni di piccoli file     | Compatta in file da 100-500MB                 |
+| Data transfer     | Cross-region reads          | Tieni bucket e compute nella stessa region    |
+| Early deletion    | Eliminare da Glacier < 90gg | Pianifica retention accuratamente             |
+| Versioning        | Ogni versione occupa spazio | Lifecycle rule per eliminare vecchie versioni |
+
+
+## Monitoring dei Costi
+
+
+### S3 Storage Lens
+
+
+```bash
+# Abilita S3 Storage Lens per analisi dettagliata
+aws s3control put-storage-lens-configuration \
+  --account-id YOUR_ACCOUNT_ID \
+  --config-id marketing-data-lens \
+  --storage-lens-configuration '{
+    "Id": "marketing-data-lens",
+    "IsEnabled": true,
+    "StorageLensConfiguration": {
+      "AccountLevel": {
+        "BucketLevel": {
+          "PrefixLevel": {
+            "StorageMetrics": {
+              "IsEnabled": true,
+              "SelectionCriteria": {
+                "MaxDepth": 3,
+                "MinStorageBytesPercentage": 1.0
+              }
+            }
+          }
+        }
+      }
+    }
+  }'
+```
+
+
+### Query di Monitoraggio in ClickHouse
+
+
+```sql
+-- Monitorare la dimensione delle parti per tabella
+SELECT
+    table,
+    partition,
+    formatReadableSize(sum(bytes_on_disk)) AS size,
+    sum(rows) AS total_rows,
+    count() AS parts
+FROM system.parts
+WHERE active AND database = 'marketing'
+GROUP BY table, partition
+ORDER BY sum(bytes_on_disk) DESC;
+
+-- Verificare distribuzione hot/cold
+SELECT
+    table,
+    disk_name,
+    formatReadableSize(sum(bytes_on_disk)) AS size,
+    count() AS parts
+FROM system.parts
+WHERE active AND database = 'marketing'
+GROUP BY table, disk_name
+ORDER BY table, disk_name;
+```
+
+
+## Compliance GDPR e Diritto alla Cancellazione
+
+
+Il GDPR richiede la possibilita' di cancellare i dati personali su richiesta. Su S3 e ClickHouse questo e' una sfida.
+
+
+### Strategia per la Cancellazione
+
+
+```plain text
+Richiesta GDPR → Identifica user_id → Cancella da:
+  1. ClickHouse (hot): ALTER TABLE DELETE WHERE user_id = X
+  2. S3 Standard (warm): Sovrascrivi file Parquet senza l'utente
+  3. S3 Glacier (cold): Registra richiesta, applica al prossimo unfreeze
+  4. Backup: Flag per esclusione nei futuri restore
+```
+
+
+### Implementazione in ClickHouse
+
+
+```sql
+-- Cancellazione leggera (mutation asincrona)
+ALTER TABLE marketing_events
+DELETE WHERE user_id = 12345;
+
+-- Verifica completamento
+SELECT *
+FROM system.mutations
+WHERE table = 'marketing_events' AND is_done = 0;
+```
+
+
+### Pseudonimizzazione come Alternativa
+
+
+```sql
+-- Invece di cancellare, anonimizza
+ALTER TABLE marketing_events
+UPDATE user_id = sipHash64(user_id)
+WHERE user_id = 12345;
+```
+
+
+## Decision Tree: Scelta della Storage Class
+
+
+```plain text
+Il dato è acceduto frequentemente? (> 1 volta/settimana)
+├── SÌ → S3 Standard
+└── NO → È acceduto almeno 1 volta/mese?
+    ├── SÌ → S3 Standard-IA
+    └── NO → Deve essere disponibile in minuti?
+        ├── SÌ → S3 Glacier Instant Retrieval
+        └── NO → Può aspettare ore?
+            ├── SÌ → S3 Glacier Flexible Retrieval
+            └── NO → S3 Glacier Deep Archive (12h)
+```
+
+
+## Checklist Data Lifecycle
+
