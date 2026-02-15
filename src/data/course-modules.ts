@@ -9,6 +9,13 @@ export interface CourseModule {
 
 export const COURSE_MODULES: CourseModule[] = [
   {
+    id: 'panoramica',
+    title: 'Panoramica del Corso',
+    description: 'Visione d\'insieme, mappe concettuali e struttura del percorso formativo.',
+    icon: 'Map',
+    color: 'from-blue-500 to-indigo-500'
+  },
+  {
     id: 'data-collection',
     title: 'Data Collection & Tracking',
     description: 'Event Tracking, Privacy, Integrazioni e Framework per la raccolta dati strutturata.',
