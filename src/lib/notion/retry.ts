@@ -10,7 +10,7 @@ export async function withRetry<T>(operation: () => Promise<T>, retries = 3, del
                 ? parseInt(error.headers["retry-after"]) * 1000
                 : delay;
 
-            console.log(`Rate limited or server error. Retrying in ${waitTime}ms... (${retries} retries left)`);
+            // console.log(`Rate limited or server error. Retrying in ${waitTime}ms... (${retries} retries left)`);
             await new Promise(resolve => setTimeout(resolve, waitTime));
             return withRetry(operation, retries - 1, delay * 2); // Exponential backoff
         }
