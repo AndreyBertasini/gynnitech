@@ -1,19 +1,16 @@
 import React, { useState } from 'react';
 import { ThumbsUp, ThumbsDown } from 'lucide-react';
-import { motion } from 'framer-motion';
 
 export const Feedback = () => {
   const [voted, setVoted] = useState<'up' | 'down' | null>(null);
 
   if (voted) {
     return (
-      <motion.div 
-        initial={{ opacity: 0, y: 10 }}
-        animate={{ opacity: 1, y: 0 }}
-        className="mt-12 p-4 rounded-lg bg-mint-500/10 border border-mint-500/20 text-mint-400 text-sm font-medium text-center"
+      <div
+        className="mt-12 p-4 rounded-lg bg-mint-500/10 border border-mint-500/20 text-mint-400 text-sm font-medium text-center animate-fade-in-up"
       >
         Thanks for your feedback!
-      </motion.div>
+      </div>
     );
   }
 

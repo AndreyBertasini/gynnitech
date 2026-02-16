@@ -341,12 +341,24 @@ export const StarField = () => {
       animationFrameId = requestAnimationFrame(draw);
     };
 
+    // Pause animation when tab is hidden to save CPU
+    const handleVisibility = () => {
+      if (document.hidden) {
+        cancelAnimationFrame(animationFrameId);
+      } else {
+        lastTime = 0;
+        animationFrameId = requestAnimationFrame(draw);
+      }
+    };
+
     window.addEventListener('resize', resize);
+    document.addEventListener('visibilitychange', handleVisibility);
     resize();
     animationFrameId = requestAnimationFrame(draw);
 
     return () => {
       window.removeEventListener('resize', resize);
+      document.removeEventListener('visibilitychange', handleVisibility);
       cancelAnimationFrame(animationFrameId);
     };
   }, []);
