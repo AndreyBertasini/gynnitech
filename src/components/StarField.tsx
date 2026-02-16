@@ -116,7 +116,7 @@ export const StarField = () => {
         x: startX,
         y: startY,
         length: Math.random() * 100 + 120,
-        speed: Math.random() * 3 + 2,
+        speed: Math.random() * 300 + 250, // pixels per second (time-based)
         angle: Math.PI / 4 + (Math.random() * 0.3 - 0.15),
         opacity: 1,
         active: true,
@@ -147,49 +147,55 @@ export const StarField = () => {
 
       // Store trail points
       star.trail.unshift({ x: star.x, y: star.y, opacity: star.opacity });
-      if (star.trail.length > 40) star.trail.pop();
+      if (star.trail.length > 30) star.trail.pop();
 
-      // Draw trail with gradient segments
-      for (let i = 0; i < star.trail.length - 1; i++) {
-        const p = star.trail[i];
-        const pNext = star.trail[i + 1];
-        const frac = 1 - i / star.trail.length;
-        const alpha = frac * frac * star.opacity;
-        const lineWidth = frac * 2.5 + 0.5;
+      // Draw trail using a single linear gradient line for performance
+      if (star.trail.length > 1) {
+        const last = star.trail[star.trail.length - 1];
+        const gradient = ctx.createLinearGradient(star.x, star.y, last.x, last.y);
+        gradient.addColorStop(0, `hsla(${star.hue}, 100%, 95%, ${star.opacity})`);
+        gradient.addColorStop(0.3, `hsla(${star.hue}, 100%, 80%, ${star.opacity * 0.6})`);
+        gradient.addColorStop(1, `hsla(${star.hue}, 100%, 70%, 0)`);
 
-        ctx.strokeStyle = `hsla(${star.hue}, 100%, ${70 + frac * 30}%, ${alpha})`;
-        ctx.lineWidth = lineWidth;
+        ctx.strokeStyle = gradient;
+        ctx.lineWidth = 2.5;
         ctx.lineCap = 'round';
+        ctx.lineJoin = 'round';
         ctx.beginPath();
-        ctx.moveTo(p.x, p.y);
-        ctx.lineTo(pNext.x, pNext.y);
+        ctx.moveTo(star.trail[0].x, star.trail[0].y);
+        for (let i = 1; i < star.trail.length; i++) {
+          ctx.lineTo(star.trail[i].x, star.trail[i].y);
+        }
         ctx.stroke();
       }
 
       // Bright head glow (outer)
-      const headGlow = ctx.createRadialGradient(star.x, star.y, 0, star.x, star.y, 20);
-      headGlow.addColorStop(0, `hsla(${star.hue}, 100%, 95%, ${star.opacity * 0.6})`);
-      headGlow.addColorStop(0.3, `hsla(${star.hue}, 100%, 70%, ${star.opacity * 0.2})`);
+      const headGlow = ctx.createRadialGradient(star.x, star.y, 0, star.x, star.y, 18);
+      headGlow.addColorStop(0, `hsla(${star.hue}, 100%, 95%, ${star.opacity * 0.5})`);
+      headGlow.addColorStop(0.4, `hsla(${star.hue}, 100%, 70%, ${star.opacity * 0.15})`);
       headGlow.addColorStop(1, `hsla(${star.hue}, 100%, 50%, 0)`);
       ctx.fillStyle = headGlow;
       ctx.beginPath();
-      ctx.arc(star.x, star.y, 20, 0, Math.PI * 2);
+      ctx.arc(star.x, star.y, 18, 0, Math.PI * 2);
       ctx.fill();
 
       // Bright head core
-      const headCore = ctx.createRadialGradient(star.x, star.y, 0, star.x, star.y, 4);
+      const headCore = ctx.createRadialGradient(star.x, star.y, 0, star.x, star.y, 3.5);
       headCore.addColorStop(0, `rgba(255, 255, 255, ${star.opacity})`);
       headCore.addColorStop(1, `hsla(${star.hue}, 100%, 80%, 0)`);
       ctx.fillStyle = headCore;
       ctx.beginPath();
-      ctx.arc(star.x, star.y, 4, 0, Math.PI * 2);
+      ctx.arc(star.x, star.y, 3.5, 0, Math.PI * 2);
       ctx.fill();
     };
 
     const draw = (timestamp: number) => {
       if (!lastTime) lastTime = timestamp;
-      const deltaTime = timestamp - lastTime;
+      let deltaTime = timestamp - lastTime;
       lastTime = timestamp;
+
+      // Cap deltaTime to prevent huge jumps when tab regains focus
+      if (deltaTime > 100) deltaTime = 16;
 
       ctx.clearRect(0, 0, width, height);
 
@@ -288,15 +294,16 @@ export const StarField = () => {
       }
 
       // Update & draw shooting stars
+      const dt = deltaTime / 1000; // convert to seconds
       shootingStars = shootingStars.filter((star) => {
         if (!star.active) return false;
 
-        star.x += Math.cos(star.angle) * star.speed;
-        star.y += Math.sin(star.angle) * star.speed;
+        star.x += Math.cos(star.angle) * star.speed * dt;
+        star.y += Math.sin(star.angle) * star.speed * dt;
         star.life += deltaTime;
 
-        // Spawn sparkle particles along trail
-        if (Math.random() > 0.4) {
+        // Spawn sparkle particles along trail (reduced frequency)
+        if (Math.random() > 0.7) {
           spawnParticles(
             star.x - Math.cos(star.angle) * 5 + (Math.random() - 0.5) * 4,
             star.y - Math.sin(star.angle) * 5 + (Math.random() - 0.5) * 4,
@@ -316,12 +323,12 @@ export const StarField = () => {
 
       // Update & draw particles (sparkles)
       particles = particles.filter((p) => {
-        p.opacity -= p.decay;
+        p.opacity -= p.decay * deltaTime * 0.06;
         if (p.opacity <= 0) return false;
 
-        p.x += p.vx;
-        p.y += p.vy;
-        p.size *= 0.98;
+        p.x += p.vx * deltaTime * 0.06;
+        p.y += p.vy * deltaTime * 0.06;
+        p.size *= 1 - 0.02 * deltaTime * 0.06;
 
         ctx.fillStyle = `hsla(${p.hue}, 100%, 80%, ${p.opacity})`;
         ctx.beginPath();
