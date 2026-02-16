@@ -116,7 +116,7 @@ export const StarField = () => {
         x: startX,
         y: startY,
         length: Math.random() * 100 + 120,
-        speed: Math.random() * 300 + 250, // pixels per second (time-based)
+        speed: Math.random() * 150 + 100, // pixels per second (time-based)
         angle: Math.PI / 4 + (Math.random() * 0.3 - 0.15),
         opacity: 1,
         active: true,
