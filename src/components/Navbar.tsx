@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { HamburgerMenuIcon, Cross2Icon, CookieIcon } from '@radix-ui/react-icons';
+import { HamburgerMenuIcon, Cross2Icon } from '@radix-ui/react-icons';
 import { SearchWidget } from './ui/SearchWidget';
 
 export const Navbar = () => {
@@ -19,10 +19,7 @@ export const Navbar = () => {
     <nav className={`fixed top-0 left-0 right-0 z-[100] transition-[background-color,box-shadow] duration-300 ${isScrolled ? 'bg-brand-dark shadow-2xl' : 'bg-transparent'}`}>
       <div className="max-w-7xl mx-auto px-6 h-16 flex items-center justify-between">
         {/* Logo */}
-        <a href="/" className="flex items-center gap-2 font-bold text-xl text-white tracking-tight group font-ui">
-          <div className="w-10 h-10 bg-brand-dark rounded-lg flex items-center justify-center text-2xl shadow-[0_0_15px_rgba(204,255,0,0.3)] border border-white/10 group-hover:shadow-[0_0_25px_rgba(204,255,0,0.6)] group-hover:border-acid-yellow transition-[box-shadow,border-color] duration-300">
-            <CookieIcon className="w-6 h-6 text-[#ccff00] drop-shadow-[0_0_5px_rgba(204,255,0,0.5)]" />
-          </div>
+        <a href="/" className="flex items-center font-bold text-xl text-white tracking-tight group font-ui">
           <span className="text-transparent bg-clip-text bg-gradient-to-r from-white to-slate-300 group-hover:text-acid-yellow group-hover:bg-none transition-colors drop-shadow-[0_0_5px_rgba(255,255,255,0.2)]">
             GinnyTech
           </span>
