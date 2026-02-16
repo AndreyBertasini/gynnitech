@@ -15,11 +15,11 @@ export const CourseCard = ({ id, title, description, icon: Icon, color, lessonCo
   return (
     <a
       href={`/course/${id}/`}
-      className="group relative block h-full animate-fade-in-up opacity-0"
+      className="group relative block h-full animate-fade-in-up opacity-0 rounded-2xl focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-acid-yellow focus-visible:ring-offset-2 focus-visible:ring-offset-[#050505]"
       style={{ animationDelay: `${index * 100}ms`, animationFillMode: 'forwards' }}
     >
       <div className="absolute inset-0 rounded-2xl bg-gradient-to-br from-white/5 to-white/0 opacity-0 transition-opacity duration-500 group-hover:opacity-100" />
-      <div className="relative h-full overflow-hidden rounded-2xl border border-white/10 bg-[#0a0e14]/80 p-8 transition-all duration-300 group-hover:border-acid-yellow group-hover:shadow-[0_0_30px_-10px_rgba(204,255,0,0.2)] backdrop-blur-md">
+      <div className="relative h-full overflow-hidden rounded-2xl border border-white/10 bg-[#0a0e14]/80 p-8 transition-all duration-300 group-hover:border-acid-yellow group-hover:shadow-[0_0_30px_-10px_rgba(204,255,0,0.2)] group-hover:-translate-y-1 backdrop-blur-md">
 
         {/* Glow effect */}
         <div className={`absolute -right-20 -top-20 h-64 w-64 rounded-full bg-gradient-to-br ${color} opacity-[0.05] blur-3xl transition-opacity duration-500 group-hover:opacity-20`} />
@@ -38,18 +38,18 @@ export const CourseCard = ({ id, title, description, icon: Icon, color, lessonCo
             {title}
           </h3>
 
-          <p className="mb-8 flex-grow text-sm leading-relaxed text-slate-400 font-sans">
+          <p className="mb-8 flex-grow text-sm leading-relaxed text-slate-300 font-sans">
             {description}
           </p>
 
           <div className="mt-auto border-t border-white/5 pt-6">
             <div className="flex items-center justify-between">
-              <span className="flex items-center gap-2 text-xs font-medium text-slate-500 font-ui">
+              <span className="flex items-center gap-2 text-xs font-medium text-slate-400 font-ui">
                 <BookOpen className="h-3.5 w-3.5" />
                 {lessonCount} LEZIONI
               </span>
 
-              <div className="flex items-center gap-2 text-sm font-medium text-acid-yellow opacity-0 transition-all duration-300 -translate-x-2 group-hover:translate-x-0 group-hover:opacity-100 font-ui">
+              <div className="flex items-center gap-2 text-sm font-medium text-acid-yellow/85 opacity-80 transition-all duration-300 -translate-x-1 group-hover:translate-x-0 group-hover:opacity-100 font-ui">
                 Piano delle Lezioni <ArrowRight className="h-4 w-4" />
               </div>
             </div>
