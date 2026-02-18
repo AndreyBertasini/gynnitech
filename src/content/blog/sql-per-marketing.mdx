@@ -1,0 +1,297 @@
+---
+title: "SQL per Marketing: Le 10 Query Che Ogni Marketer Dovrebbe Conoscere"
+description: "Non serve essere un data engineer. Con queste 10 query SQL puoi rispondere all'80% delle domande che il tuo team si pone ogni giorno."
+category: "Tutorial"
+date: "2026-02-08"
+---
+
+# SQL per Marketing: Le 10 Query Che Ogni Marketer Dovrebbe Conoscere
+
+"Posso avere il breakdown per canale del mese scorso?" — e il data analyst ti guarda con gli occhi stanchi perché è la terza richiesta del giorno.
+
+La soluzione non è assumere più analyst. È dare al team marketing la capacità di pescare i propri dati. L'SQL non è un linguaggio per programmatori — è il linguaggio per fare domande ai dati. E queste 10 query coprono l'80% delle domande quotidiane.
+
+## Prerequisiti
+
+Queste query sono scritte per **BigQuery** (Google Cloud), ma funzionano con minimi adattamenti su PostgreSQL, Snowflake, e Redshift. Presuppongono tabelle tipiche di un e-commerce:
+- `orders` (order_id, user_id, order_date, revenue, utm_source, utm_medium, utm_campaign)
+- `sessions` (session_id, user_id, session_date, channel_grouping, landing_page)
+- `ga4_events` (event_name, event_timestamp, user_pseudo_id, page_location)
+- `marketing_spend` (date, source, medium, campaign, spend, impressions, clicks)
+
+## Query 1: Revenue per Canale (Questo Mese vs Mese Scorso)
+
+La domanda più frequente in assoluto.
+
+```sql
+SELECT
+  utm_source,
+  utm_medium,
+  SUM(CASE WHEN order_date >= DATE_TRUNC(CURRENT_DATE(), MONTH)
+           THEN revenue ELSE 0 END) AS revenue_questo_mese,
+  SUM(CASE WHEN order_date >= DATE_SUB(DATE_TRUNC(CURRENT_DATE(), MONTH), INTERVAL 1 MONTH)
+            AND order_date < DATE_TRUNC(CURRENT_DATE(), MONTH)
+           THEN revenue ELSE 0 END) AS revenue_mese_scorso,
+  -- Variazione percentuale
+  ROUND(
+    SAFE_DIVIDE(
+      SUM(CASE WHEN order_date >= DATE_TRUNC(CURRENT_DATE(), MONTH) THEN revenue ELSE 0 END) -
+      SUM(CASE WHEN order_date >= DATE_SUB(DATE_TRUNC(CURRENT_DATE(), MONTH), INTERVAL 1 MONTH)
+                AND order_date < DATE_TRUNC(CURRENT_DATE(), MONTH) THEN revenue ELSE 0 END),
+      SUM(CASE WHEN order_date >= DATE_SUB(DATE_TRUNC(CURRENT_DATE(), MONTH), INTERVAL 1 MONTH)
+                AND order_date < DATE_TRUNC(CURRENT_DATE(), MONTH) THEN revenue ELSE 0 END)
+    ) * 100, 1
+  ) AS variazione_pct
+FROM orders
+WHERE order_date >= DATE_SUB(DATE_TRUNC(CURRENT_DATE(), MONTH), INTERVAL 1 MONTH)
+GROUP BY 1, 2
+ORDER BY revenue_questo_mese DESC;
+```
+
+## Query 2: CAC per Canale
+
+Quanto costa acquisire un nuovo cliente da ogni canale?
+
+```sql
+WITH new_customers AS (
+  SELECT
+    user_id,
+    MIN(order_date) AS first_order_date,
+    MIN(utm_source) AS source,
+    MIN(utm_medium) AS medium
+  FROM orders
+  GROUP BY user_id
+  HAVING first_order_date >= DATE_TRUNC(CURRENT_DATE(), MONTH)
+)
+
+SELECT
+  nc.source,
+  nc.medium,
+  COUNT(DISTINCT nc.user_id) AS nuovi_clienti,
+  COALESCE(SUM(ms.spend), 0) AS spesa,
+  ROUND(SAFE_DIVIDE(COALESCE(SUM(ms.spend), 0), COUNT(DISTINCT nc.user_id)), 2) AS cac
+FROM new_customers nc
+LEFT JOIN marketing_spend ms
+  ON nc.source = ms.source
+  AND nc.medium = ms.medium
+  AND ms.date >= DATE_TRUNC(CURRENT_DATE(), MONTH)
+GROUP BY 1, 2
+ORDER BY cac DESC;
+```
+
+## Query 3: Cohort Retention (Quanti Clienti Tornano?)
+
+La retention è il batterio cardiaco del business. Questa query mostra quanti clienti del mese X tornano a comprare nei mesi successivi.
+
+```sql
+WITH first_purchase AS (
+  SELECT
+    user_id,
+    DATE_TRUNC(MIN(order_date), MONTH) AS cohort_month
+  FROM orders
+  GROUP BY user_id
+),
+
+subsequent_orders AS (
+  SELECT
+    fp.user_id,
+    fp.cohort_month,
+    DATE_DIFF(DATE_TRUNC(o.order_date, MONTH), fp.cohort_month, MONTH) AS months_since_first
+  FROM first_purchase fp
+  JOIN orders o ON fp.user_id = o.user_id
+)
+
+SELECT
+  cohort_month,
+  months_since_first,
+  COUNT(DISTINCT user_id) AS clienti_attivi,
+  ROUND(
+    COUNT(DISTINCT user_id) * 100.0 /
+    FIRST_VALUE(COUNT(DISTINCT user_id)) OVER (
+      PARTITION BY cohort_month ORDER BY months_since_first
+    ), 1
+  ) AS retention_pct
+FROM subsequent_orders
+WHERE cohort_month >= DATE_SUB(CURRENT_DATE(), INTERVAL 12 MONTH)
+  AND months_since_first <= 6
+GROUP BY 1, 2
+ORDER BY 1, 2;
+```
+
+## Query 4: ROAS per Campagna
+
+Il ritorno sulla spesa pubblicitaria è la metrica più importante per il performance marketing.
+
+```sql
+SELECT
+  ms.campaign,
+  ms.source,
+  SUM(ms.spend)       AS spesa_totale,
+  SUM(ms.clicks)      AS click_totali,
+  COUNT(DISTINCT o.order_id)  AS conversioni,
+  SUM(o.revenue)       AS revenue,
+  -- ROAS
+  ROUND(SAFE_DIVIDE(SUM(o.revenue), SUM(ms.spend)), 2) AS roas,
+  -- CPA
+  ROUND(SAFE_DIVIDE(SUM(ms.spend), COUNT(DISTINCT o.order_id)), 2) AS cpa,
+  -- CPC
+  ROUND(SAFE_DIVIDE(SUM(ms.spend), SUM(ms.clicks)), 2) AS cpc
+FROM marketing_spend ms
+LEFT JOIN orders o
+  ON ms.campaign = o.utm_campaign
+  AND ms.date = o.order_date
+WHERE ms.date >= DATE_SUB(CURRENT_DATE(), INTERVAL 30 DAY)
+GROUP BY 1, 2
+HAVING spesa_totale > 100  -- Ignora campagne con budget trascurabile
+ORDER BY roas DESC;
+```
+
+## Query 5: Top 10 Landing Page per Conversione
+
+Quali pagine generano più conversioni dal traffico organico?
+
+```sql
+SELECT
+  landing_page,
+  COUNT(DISTINCT session_id)   AS sessioni,
+  COUNT(DISTINCT CASE WHEN has_purchase THEN session_id END) AS sessioni_con_acquisto,
+  ROUND(
+    COUNT(DISTINCT CASE WHEN has_purchase THEN session_id END) * 100.0 /
+    NULLIF(COUNT(DISTINCT session_id), 0), 2
+  ) AS conversion_rate_pct
+FROM sessions
+WHERE session_date >= DATE_SUB(CURRENT_DATE(), INTERVAL 30 DAY)
+  AND channel_grouping = 'Organic Search'
+GROUP BY 1
+HAVING sessioni >= 100
+ORDER BY conversion_rate_pct DESC
+LIMIT 10;
+```
+
+## Query 6: AOV (Average Order Value) Trend Settimanale
+
+L'andamento del valore medio dell'ordine racconta la storia del pricing e del cross-sell.
+
+```sql
+SELECT
+  DATE_TRUNC(order_date, WEEK(MONDAY)) AS settimana,
+  COUNT(DISTINCT order_id)     AS ordini,
+  ROUND(AVG(revenue), 2)       AS aov,
+  ROUND(STDDEV(revenue), 2)    AS stddev_revenue,
+  ROUND(PERCENTILE_CONT(revenue, 0.5) OVER (), 2) AS mediana_revenue
+FROM orders
+WHERE order_date >= DATE_SUB(CURRENT_DATE(), INTERVAL 90 DAY)
+GROUP BY 1
+ORDER BY 1;
+```
+
+## Query 7: Funnel di Conversione (Page View → Cart → Purchase)
+
+Dove perdi gli utenti?
+
+```sql
+WITH funnel AS (
+  SELECT
+    COUNT(DISTINCT CASE WHEN event_name = 'page_view'      THEN user_pseudo_id END) AS step_1_viewers,
+    COUNT(DISTINCT CASE WHEN event_name = 'add_to_cart'     THEN user_pseudo_id END) AS step_2_cart,
+    COUNT(DISTINCT CASE WHEN event_name = 'begin_checkout'  THEN user_pseudo_id END) AS step_3_checkout,
+    COUNT(DISTINCT CASE WHEN event_name = 'purchase'        THEN user_pseudo_id END) AS step_4_purchase
+  FROM ga4_events
+  WHERE event_timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 30 DAY)
+)
+
+SELECT
+  step_1_viewers,
+  step_2_cart,
+  step_3_checkout,
+  step_4_purchase,
+  ROUND(step_2_cart * 100.0 / NULLIF(step_1_viewers, 0), 1) AS view_to_cart_pct,
+  ROUND(step_3_checkout * 100.0 / NULLIF(step_2_cart, 0), 1) AS cart_to_checkout_pct,
+  ROUND(step_4_purchase * 100.0 / NULLIF(step_3_checkout, 0), 1) AS checkout_to_purchase_pct,
+  ROUND(step_4_purchase * 100.0 / NULLIF(step_1_viewers, 0), 1) AS overall_conversion_pct
+FROM funnel;
+```
+
+## Query 8: Clienti a Rischio Churn
+
+Chi non compra da troppo tempo? Intervieni prima che sia tardi.
+
+```sql
+SELECT
+  user_id,
+  MAX(order_date) AS ultimo_acquisto,
+  DATE_DIFF(CURRENT_DATE(), MAX(order_date), DAY) AS giorni_inattivita,
+  COUNT(DISTINCT order_id) AS ordini_totali,
+  SUM(revenue) AS revenue_totale,
+  CASE
+    WHEN DATE_DIFF(CURRENT_DATE(), MAX(order_date), DAY) BETWEEN 30 AND 60 THEN 'A rischio'
+    WHEN DATE_DIFF(CURRENT_DATE(), MAX(order_date), DAY) BETWEEN 61 AND 90 THEN 'Quasi perso'
+    WHEN DATE_DIFF(CURRENT_DATE(), MAX(order_date), DAY) > 90 THEN 'Perso'
+  END AS churn_status
+FROM orders
+GROUP BY user_id
+HAVING ordini_totali >= 2  -- Solo clienti ripetuti (più valore recuperabile)
+  AND giorni_inattivita > 30
+ORDER BY revenue_totale DESC
+LIMIT 100;
+```
+
+## Query 9: Best Seller e Worst Seller del Mese
+
+Cosa spingere e cosa smettere di promuovere.
+
+```sql
+SELECT
+  product_name,
+  COUNT(DISTINCT order_id) AS ordini,
+  SUM(quantity)            AS unita_vendute,
+  SUM(revenue)             AS revenue,
+  ROUND(AVG(revenue / NULLIF(quantity, 0)), 2) AS prezzo_medio,
+  RANK() OVER (ORDER BY SUM(revenue) DESC) AS rank_revenue,
+  RANK() OVER (ORDER BY COUNT(DISTINCT order_id) DESC) AS rank_ordini
+FROM order_items
+WHERE order_date >= DATE_TRUNC(CURRENT_DATE(), MONTH)
+GROUP BY product_name
+ORDER BY revenue DESC;
+```
+
+## Query 10: Email Performance — Revenue per Campagna
+
+Quanto genera ogni campagna email?
+
+```sql
+SELECT
+  e.campaign_name,
+  e.send_date,
+  e.emails_sent,
+  e.emails_opened,
+  e.emails_clicked,
+  ROUND(e.emails_opened * 100.0 / NULLIF(e.emails_sent, 0), 1) AS open_rate,
+  ROUND(e.emails_clicked * 100.0 / NULLIF(e.emails_sent, 0), 1) AS ctr,
+  COUNT(DISTINCT o.order_id) AS conversioni,
+  COALESCE(SUM(o.revenue), 0) AS revenue,
+  ROUND(COALESCE(SUM(o.revenue), 0) / NULLIF(e.emails_sent, 0), 4) AS revenue_per_email
+FROM email_campaigns e
+LEFT JOIN orders o
+  ON o.utm_campaign = e.campaign_id
+  AND o.order_date BETWEEN e.send_date AND DATE_ADD(e.send_date, INTERVAL 7 DAY)
+WHERE e.send_date >= DATE_SUB(CURRENT_DATE(), INTERVAL 90 DAY)
+GROUP BY 1, 2, 3, 4, 5
+ORDER BY revenue DESC;
+```
+
+## Come Iniziare
+
+Non serve installare nulla. Se usi GA4 con BigQuery export, hai già tutto:
+
+1. **Attiva l'export BigQuery** in GA4 (Amministrazione → BigQuery Linking)
+2. **Apri la console BigQuery** (console.cloud.google.com)
+3. **Copia una query** da questo articolo e adatta i nomi delle tabelle
+4. **Salva le query** che usi più spesso come "Saved Queries"
+5. **Automatizza** con scheduled queries per avere report settimanali via email
+
+## Conclusione
+
+L'SQL non è più una competenza "tecnica" — è una competenza di marketing. Un marketing manager che sa scrivere query SQL ha un vantaggio enorme: non dipende più dai tempi del data team per avere risposte, e può esplorare i dati con la curiosità di chi capisce il business, non solo di chi capisce le tabelle.
+
+Queste 10 query non sono esaustive, ma risolvono l'80% delle domande quotidiane. Salvale, adattale ai tuoi dati, e inizia a pescare le risposte da solo.
