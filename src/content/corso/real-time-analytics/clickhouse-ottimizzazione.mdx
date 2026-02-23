@@ -1,158 +1,146 @@
 ---
-title: 'ClickHouse: Ottimizzazione e Best Practices'
-description: >-
-  Partitioning, compressione, ottimizzazione query e pattern avanzati per
-  ClickHouse.
-date: '2026-02-23T06:27:23.064Z'
-author: GynniTech Team
-notionId: 303ed540-0642-81d8-9522-c291ac259b8e
+title: "ClickHouse: Ottimizzazione e Tuning Estremo"
+description: "Non ti basta che sia veloce? Scopri i segreti della compressione Codec ZSTD, l'Ordine Primario e il trucco spietato del PREWHERE per far scattare miliardi di righe sotto il millisecondo."
+module: "Modulo 4: Real-Time Streaming"
+order: 5
+prerequisites: ["real-time-analytics/clickhouse-fondamenti", "real-time-analytics/cdc-pattern"]
+category: "Database Tuning"
 ---
 
-# ClickHouse: Ottimizzazione
+import { Aside, Steps, Tabs, TabItem, CardGrid, Card } from '@astrojs/starlight/components'
 
+# ClickHouse: Ingegneria dell'Ottimizzazione
 
-ClickHouse è veloce di default, ma con le giuste ottimizzazioni può diventare 10-100x più veloce.
+Un istanza di ClickHouse Cloud (o self-hosted) standard polverizza le latenze della concorrenza fin dal primo avvio. Ma quando il tuo traffico e-commerce raggiunge i 10 Miliardi di record di visite annue, una query scritta male consumerà centinaia di Gigabyte di scansione. In cloud, la scansione ignorante si traduce in **Migliaia di Euro svaniti in un click di dashboard**.
 
+Questa lezione trasforma i semplici "utilizzatori" di SQL in **Database Architects**.
+Le pedine fondamentali del tuning estremo in un database colonnare sono tre: L'Identità del disco, i Dizionari Nativi, e lo skipping intelligente.
 
-## 1. Scelta dell'ORDER BY
+---
 
+## 1. L'Arte Oscura dell'ORDER BY 
 
-La decisione più importante. L'ORDER BY determina come i dati sono organizzati fisicamente su disco.
+Nei database PostgreSQL sei abituato a creare infiniti "Index" (Indici) separati per ogni colonna che vorrai cercare velocemente. Ognuno di questi Indici, di fatto, rallenta l'inserimento.
+In ClickHouse, non crei indici classici (B-Tree). La dichiarazione che fa le veci dell'indice supremo **l'`ORDER BY` della creazione della tabella**.
 
+Esso stabilisce l'ordine fisiologico (fisico e metallico) dei pacchetti salvati nel disco.
 
-### Regole:
+<CardGrid>
+  <Card title="La Regola della Bassa Cardinalità (A Sinistra)" icon="warning">
+    ClickHouse cerca velocemente da sinistra verso destra nella tua chiave. 
+    L'elemento più a "Sinistra" dell'ORDER BY deve **SEMRE** essere la colonna con *meno* varianti possibili (es: ID del negozio `Store_ID` = 30 opzioni al mondo, o Nazione `Country` = 5 opzioni).
+  </Card>
+  <Card title="L'Unicità Massima (A Destra)" icon="approve-check">
+    Più vai verso destra tra le stringhe dell'Order By, più aumenti le variabili uniche. Alla fine (all'estrema destra) piazzerai la colonna iper-unica e iper-variabile. (L'`User_ID` o il Timestamp milliseconidiale dell'evento).
+  </Card>
+</CardGrid>
 
-- Metti prima le colonne con **bassa cardinalità** (es. `country`, `channel`)
-- Poi le colonne usate frequentemente nei **filtri** (es. `campaign_id`)
-- Infine l'**ordinamento temporale** (es. `event_date`)
+<Tabs>
+  <TabItem label="Codice Killer (Da Licenziamento)" icon="close">
+    ```sql
+    -- Ordine distruttivo per le performance Clickhouse:
+    ORDER BY (user_id, timestamp_visita, nome_campagna)
+    ```
+    *Se ordini per ID_Utente (10 milioni di varianti disordinate), l'indice Primario di Clickhouse diventerà un mostro da 50 Megabyte impossibile da tenere nella RAM della CPU. Lo skip dei dati sarà inefficace.*
+  </TabItem>
+  <TabItem label="Architettura Ottimale (Master)" icon="approve-check">
+    ```sql
+    -- Ordine geometrico calcolato per scarti progressivi:
+    ORDER BY (id_sito, utm_medium, timestamp_visita)
+    ```
+    *Meno di 5 Siti Web aziendali. Meno di 10 Sorgenti di traffico (cpc, organic). Un sacco di timestamp finali.
+    Quando cerchi "Mostrami visite Organiche del Modulo 3", ClickHouse trova istantaneamente il grosso blocco "Organic", scarta il 90% del disco in un millisecondo, e processa solo le ultime variabili.*
+  </TabItem>
+</Tabs>
+
+---
+
+## 2. CODEC: Compressione Militare Spinta (ZSTD)
+
+Dato che i dati colonnari raggruppano elementi dello stesso tipo (`20€, 30€, 12€...`), non solo comprimono meglio, ma ti consentono di iniettare "algoritmi matematici difensivi" (CODEC) per singola colonna e non sull'intero database.
+
+Puoi comandare brutalmente l'algoritmo alla radice del `CREATE TABLE`.
+
+| Algoritmo CODEC   | Caso d'Uso Analitico                                     | Rapporto Potere   |
+| :---------------- | :------------------------------------------------------- | :---------------- |
+| `LZ4` (Standard)      | L'algoritmo di default di Clickhouse. Bilanciatissimo per CPU.     | Medio             |
+| `ZSTD(3)`         | Compressione spaventosa (Standard di Facebook). Rallenta la fase di Scrittura ma miniaturizza il file salvando l'80% dei costi di Object Storage aziendali. Ottimo per campi testo prolissi.  | Supremo           |
+| `DoubleDelta`     | Applicalo ai `Timestamp`. I log Web avvengono a orari consequenziali (12:00:01, 12:00:02). Invece di salvare il tempismo per intero... lui salva solo la "differenza minuscola" in ms. Peso azzerato. | Master            |
 
 ```sql
--- ✅ Buono: country ha pochi valori, poi campaign_id filtrato spesso
-ORDER BY (country, campaign_id, event_date)
-
--- ❌ Cattivo: user_id ha milioni di valori → indice inutile
-ORDER BY (user_id, event_date)
+-- Ecco come scrive la dichiarazione uno staff DataOps Esperto
+CREATE TABLE tracciamenti_web_live (
+    timestamp DateTime CODEC(DoubleDelta, ZSTD(1)), -- Doppio incantesimo! 
+    json_payload String CODEC(ZSTD(5)),             -- Il json è gigante, stringilo ferocemente.
+    utente_id _UInt64 CODEC(LZ4)                    -- L'ID serve veloce e spesso, lascialo in LZ4.
+) ...
 ```
 
+---
 
-## 2. Partitioning
+## 3. L'Arma Segreta: PREWHERE
 
+Nel mondo SQL obsoleto, quando usi `WHERE nazione = 'IT' AND importo > 100`, il database carica le due intere colonne dalla memoria per poi farci dei filtri comparativi.
+Su ClickHouse, i dati sono Terabyte. Caricarli simultaneamente soffocherebbe i circuiti.
 
-Divide fisicamente i dati in cartelle separate:
+Esiste una keyword esclusiva del mondo colonnare russo inventata per gli Analytics massicci: **`PREWHERE`**.
 
+<Aside type="tip">
+Quando usi **PREWHERE**, imponi fisicamente al processore del Database di usare *prima* quella singola, minuscola colonna (come il Filter-Gate). ClickHouse troverà prima le 10 righe Italiane corrispondenti e **solo per quelle 10 righe** andrà a caricare dal disco fisico del server il resto del documento (Es: gli importi, i json utente, gli url lunghi). 
+</Aside>
 
 ```sql
-PARTITION BY toYYYYMM(event_date)
--- Crea una partizione per ogni mese: 202501, 202502, etc.
+SELECT 
+    nome_campagna, 
+    SUM(importo) as spesa
+FROM tracciamenti_web_live
+-- 1. ESTRAI PRIMA SOLO LE DATE VALIDE E DROPPA IL RESTO DELLA TERRA
+PREWHERE data = today()
+-- 2. SOLO SUL RESIDUO ESTRATTO (5% ORIGINALE) APPLICA LA LETTURA INTERA DEL CAMPO TRANSAZIONE
+WHERE tipo_transazione = 'acquisti_in_app' 
+GROUP BY nome_campagna
 ```
 
+*Nota: Nelle ultimissime versioni (dal 2024), ClickHouse è diventato così intelligente da promuovere da solo molte clausole `WHERE` a `PREWHERE` dietro le quinte qualora lo dimenticassi, tramite il suo Query Optimizer interno. Ma la dichiarazione forzata del programmatore fa ancora la differenza negli use-case ambigui complessi!*
 
-### Vantaggi:
+---
 
-- Query con filtri su data leggono solo le partizioni rilevanti
-- `ALTER TABLE DROP PARTITION` per cancellare vecchi dati istantaneamente
-- Backup/restore per partizione
-> 
->
-> **Attenzione:** Non creare troppe partizioni (>1000). Una per mese è ideale per la maggior parte dei casi.
->
->
+## 4. Query di Diagnostica Sistemica (SRE)
 
-## 3. Compressione
+Hai scritto un'architettura fenomenale. Ma ti accorgi che il server è lento. Cosa c'è che non va?
+I veri professionisti usano ClickHouse stesse funzionalità di autodiagnostica analitica. Usa queste Query di Sistema Reali per rilevare l'anomalia istantaneamente al terminale:
 
-
-ClickHouse comprime automaticamente, ma puoi scegliere il codec:
-
-
+**1. Controllare i divoratori di spazio Hard-Disk:**
 ```sql
-CREATE TABLE events (
-    event_time DateTime CODEC(Delta, ZSTD(3)),
-    user_id UInt64 CODEC(ZSTD(1)),
-    page_url String CODEC(ZSTD(5)),
-    revenue Float64 CODEC(Gorilla, ZSTD(1))
-)
-```
-
-
-| Codec             | Ideale per                            | Rapporto            |
-| ----------------- | ------------------------------------- | ------------------- |
-| **LZ4** (default) | Uso generico, velocità massima        | Buono               |
-| **ZSTD**          | Compressione migliore, poco più lento | Ottimo              |
-| **Delta**         | Timestamp e valori incrementali       | Eccellente con ZSTD |
-| **Gorilla**       | Float/Double con poca variazione      | Eccellente          |
-| **T64**           | Interi con valori in range limitato   | Eccellente          |
-
-
-## 4. Ottimizzazione Query
-
-
-### Usa PREWHERE invece di WHERE
-
-
-```sql
--- ClickHouse legge prima solo la colonna del PREWHERE
--- poi filtra e legge il resto
-SELECT * FROM events
-PREWHERE event_date = today()
-WHERE campaign_id = 123;
-```
-
-
-### Evita SELECT *
-
-
-```sql
--- ❌ Legge TUTTE le colonne
-SELECT * FROM events WHERE ...
-
--- ✅ Legge solo le colonne necessarie
-SELECT campaign_id, SUM(revenue) FROM events WHERE ...
-```
-
-
-### Usa LowCardinality
-
-
-```sql
--- Prima: String normale (es. 'google', 'meta', 'email')
-source String  -- ~20 byte per valore
-
--- Dopo: LowCardinality (dictionary encoding)
-source LowCardinality(String)  -- ~1-2 byte per valore
-```
-
-
-## 5. Monitoring
-
-
-### Query di sistema utili:
-
-
-```sql
--- Spazio usato per tabella
 SELECT
     table,
-    formatReadableSize(sum(bytes_on_disk)) AS size,
-    sum(rows) AS total_rows
+    formatReadableSize(sum(bytes_on_disk)) AS Size_Disco,
+    formatReadableSize(sum(data_uncompressed_bytes)) AS Size_Puro_Originale,
+    round(sum(data_uncompressed_bytes) / sum(bytes_on_disk), 2) AS Tasso_di_Compressione
 FROM system.parts
 WHERE active
 GROUP BY table
 ORDER BY sum(bytes_on_disk) DESC;
+```
+*(Questa query ti svelerà se il codice `ZSTD` che hai applicato sta funzionando frantumando la dimensione reale in un peso disco irrisorio).*
 
--- Query lente
+**2. Scovare in diretta il collega o il software che sta distruggendo la RAM e CPU (Slow Log):**
+```sql
 SELECT
     query,
     query_duration_ms,
-    read_rows,
-    formatReadableSize(read_bytes) AS data_read
+    formatReadableSize(read_bytes) AS Dati_Letti_da_Disco,
+    formatReadableSize(memory_usage) AS RAM_Occupata
 FROM system.query_log
-WHERE type = 'QueryFinish'
+WHERE type = 'QueryFinish' AND event_date = today()
 ORDER BY query_duration_ms DESC
-LIMIT 10;
+LIMIT 5;
 ```
 
-> 
->
-> **Regola pratica:** Se una query su ClickHouse impiega più di 5 secondi su miliardi di righe, probabilmente c'è un problema di schema o di query, non di ClickHouse.
->
->
+## Takeaway: Le 3 Regioni di Tuning
+1. Scegli le chiavi della `PARTIZIONE` saggiamente (Generalmente diviso `Per Mese YYYYMM` va più che bene all'80% delle aziende SaaS europee).
+2. L'`ORDER BY` stabilisce chi vince la corsa allo skipping dei blocchi: Cardinalità bassa a Sinistra, Identità Unica a Destra.
+3. Se hai Campi Testo pesanti Json/Url scatenagli addosso `CODEC(ZSTD)` risparmiando fatture mensili vertiginose al CFO.
+
+Abbiamo lo schema ottimizzato, ma in questo momento la visualizzazione delle Dashboard (PowerBI/Looker) sarebbe ancora calcolata su dati sparsi giganti. 
+È ora di generare un "Proiettore Magico" che faccia le somme aggregative dei click per le dashboard Live prima ancora che vengano richieste in memoria: Passiamo alla letale **Materialized Views in ClickHouse**.
