@@ -1,537 +1,330 @@
 ---
 title: "Quick Start: Costruisci il Tuo Tracker"
-description: "Guida pratica per costruire un tracker di eventi da zero in TypeScript e capire cosa succede sotto il cofano degli SDK di analytics."
+description: "Guida pratica per costruire un tracker di eventi da zero in TypeScript. Scopri come funzionano gli SDK di analytics sotto il cofano."
 module: "Modulo 2: Data Collection & Tracking"
 order: 2
 prerequisites: ["data-collection/introduction"]
 category: "Pratico"
 ---
-## Quick Start: Costruisci il Tuo Tracker
 
-> **Consiglio:**
-> Questa è una lezione pratica. Costruiremo un sistema di event tracking da zero per capire esattamente come funzionano gli SDK come Segment, Rudderstack e Amplitude sotto il cofano. Non userai questo codice in produzione — userai una CDP — ma capirai profondamente cosa fa.
+import { Aside, Steps, Tabs, TabItem, FileTree, Card, CardGrid } from '@astrojs/starlight/components'
+
+# Quick Start: Costruisci il Tuo Tracker
+
+<Aside type="tip" title="Obiettivo Pratico della Lezione">
+In questa lezione non ci limiteremo alla teoria. **Costruiremo un sistema di event tracking da zero in TypeScript**. 
+
+Non userai questo codice in produzione (per quello esistono le CDP come Segment o Rudderstack), ma capirai *esattamente* cosa succede tra il click di un utente sul browser e l'inserimento del dato nel tuo Data Warehouse.
+</Aside>
 
 ## Perché Costruire un Tracker da Zero?
 
-Ogni marketer usa Google Analytics. Ogni product manager conosce Mixpanel. Ogni data engineer ha configurato Segment. Ma quasi nessuno sa cosa succede **tra il click dell'utente e il dato nel warehouse**. Questa lacuna crea problemi reali:
+Ogni digital marketer usa Google Analytics. Ogni product manager conosce Mixpanel. Ogni data engineer ha configurato Segment. Ma quasi nessuno sa cosa succede **tra l'azione dell'utente e il dato nel warehouse**. 
 
-- Non sai debuggare quando il tracking si rompe
-- Non capisci perché i numeri non tornano tra due sistemi
-- Non sai quali dati vengono persi per colpa di AdBlockers
-- Non riesci a comunicare efficacemente con l'engineering
+Questa lacuna ("magia nera" del frontend) crea problemi reali e quotidiani:
+- Non sai debuggare quando i numeri tra Stripe e Google Analytics non tornano.
+- Non capisci quanti e quali dati vengono persi a causa degli AdBlockers.
+- Si crea un muro di incomprensione comunicativa con il team di engineering.
 
-Costruire un tracker da zero colma questa lacuna. Alla fine di questa lezione, saprai esattamente:
-Come un evento viene catturato nel browser
-Come viene arricchito con contesto (device, page, user)
-Come viene inviato al server
-Come viene bufferizzato e gestito in caso di errori
-Come viene persistito nel warehouse
+Alla fine di questo tutorial pratico padroneggerai:
+1. Come un evento viene catturato nel browser.
+2. Come viene arricchito con il contesto (Device, Page, User).
+3. Come viene "bufferizzato" (Queue) e gestito in caso di assenza di rete.
+4. Come viene inviato al server e persistito in ClickHouse.
 
-## L'Architettura di un SDK di Analytics
+---
 
-Ogni SDK di analytics — che sia Segment, Rudderstack, Amplitude o Snowplow — segue la stessa architettura fondamentale:
+## 1. L'Architettura di un SDK di Analytics
 
+Ogni SDK di analytics professionale (Segment, Amplitude, Snowplow) segue la stessa architettura fondamentale. Analizziamola:
+
+```mermaid
+graph LR;
+    subgraph Browser
+        A[API Pubblica<br><small>track(), identify()</small>] --> B[Context Enricher<br><small>Aggiunge UserAgent, URL</small>];
+        B --> C[Queue / Buffer<br><small>Accumula eventi in lotti</small>];
+        C <--> D[(Storage<br>localStorage)];
+        C --> E[Transport Layer<br><small>Fetch, Beacon API</small>];
+    end
+    
+    E -->|Rete| F[Server / CDP];
+    
+    style A fill:#e1f5fe,stroke:#03a9f4
+    style C fill:#fff3e0,stroke:#ff9800
+    style D fill:#f3e5f5,stroke:#9c27b0
 ```
-┌─────────────────────────────────────────────────┐
-│                    BROWSER                       │
-│                                                  │
-│  ┌──────────┐   ┌──────────┐   ┌─────────────┐ │
-│  │  track()  │──▶│  Queue   │──▶│  Transport  │─┼──▶ Server
-│  │identify() │   │ (Buffer) │   │  (Fetch/XHR)│ │
-│  │  page()   │   └──────────┘   └─────────────┘ │
-│  └──────────┘         │                          │
-│       │          ┌────┴─────┐                    │
-│       ▼          │ Storage  │                    │
-│  ┌──────────┐    │(localStorage)                 │
-│  │ Context  │    └──────────┘                    │
-│  │ Enricher │                                    │
-│  └──────────┘                                    │
-└─────────────────────────────────────────────────┘
-```
 
-I componenti chiave sono:
+I componenti chiave che andremo a sviluppare sono:
+- **API Pubblica**: I comandi che lo sviluppatore lancia nel codice.
+- **Context Enricher**: Il "detective" che capisce che device/browser sta usando l'utente.
+- **Queue**: L'ammortizzatore che raggruppa gli eventi (Batching) per non sovraccaricare la rete.
+- **Storage**: Il salvataggio locale per evitare di perdere dati se cade la connessione.
 
-**API Pubblica**: I metodi che lo sviluppatore chiama (`track`, `identify`, `page`)
-**Context Enricher**: Aggiunge automaticamente informazioni contestuali (browser, device, page URL)
-**Queue/Buffer**: Accumula gli eventi e li invia in batch per efficienza
-**Transport Layer**: Il meccanismo di invio (Fetch API, XMLHttpRequest, Beacon API)
-**Storage**: Persistenza locale per gestire retry e offline
+---
 
-## Step 1: La Struttura Base
+## 2. Implementazione: Step-by-Step
 
-Iniziamo con la struttura TypeScript del nostro tracker:
+Iniziamo a scrivere il nostro codice TypeScript. Struttureremo il progetto in questo modo:
+
+<FileTree>
+- src
+  - **types.ts** (Le interfacce TypeScript)
+  - **tracker.ts** (Il cuore del nostro SDK)
+  - **server.ts** (Il backend che riceve i dati)
+</FileTree>
+
+### Step 1: Le Fondamenta (types.ts)
+
+Definiamo la struttura matematica del nostro evento. Nota come separiamo le `properties` (dinamiche) dal `context` (automatico).
 
 ```typescript
-// types.ts
-interface EventPayload {
+// src/types.ts
+
+export interface EventPayload {
   event: string;
   properties: Record<string, unknown>;
-  timestamp: string;
-  messageId: string;
+  timestamp: string;      // ISO 8601
+  messageId: string;      // Per deduplicazione lato server
   context: EventContext;
-  userId?: string;
-  anonymousId: string;
+  userId?: string;        // Se l'utente è loggato
+  anonymousId: string;    // L'identificatore base (cookie)
 }
 
-interface EventContext {
+export interface EventContext {
   page: {
     url: string;
     path: string;
-    title: string;
     referrer: string;
   };
   userAgent: string;
-  locale: string;
-  screen: {
-    width: number;
-    height: number;
-  };
-  library: {
-    name: string;
-    version: string;
-  };
+  screen: { width: number; height: number };
 }
 
-interface TrackerConfig {
+export interface TrackerConfig {
   endpoint: string;
   batchSize: number;
-  flushInterval: number; // millisecondi
-  debug: boolean;
+  flushIntervalMs: number;
 }
 ```
 
-Nota come ogni evento ha:
-- Un **messageId** unico per la deduplicazione
-- Un **timestamp** ISO 8601 per l'ordinamento temporale
-- Un **anonymousId** per tracciare utenti non autenticati
-- Un **context** ricco con informazioni sul dispositivo e la pagina
+### Step 2: Il Cuore del Tracker (tracker.ts)
 
-## Step 2: Il Core del Tracker
+Costruiamo la classe principale. Questa classe gestirà l'accodamento e l'arricchimento dei dati.
 
-```typescript
-// tracker.ts
-class EventTracker {
-  private config: TrackerConfig;
-  private queue: EventPayload[] = [];
-  private anonymousId: string;
-  private userId: string | null = null;
-  private flushTimer: ReturnType<typeof setInterval> | null = null;
+<Tabs>
+  <TabItem label="tracker.ts" icon="seti:typescript">
+    ```typescript
+    import { EventPayload, TrackerConfig, EventContext } from './types';
 
-  constructor(config: Partial<TrackerConfig> = {}) {
-    this.config = {
-      endpoint: config.endpoint || '/api/events',
-      batchSize: config.batchSize || 10,
-      flushInterval: config.flushInterval || 5000,
-      debug: config.debug || false,
-    };
+    export class EventTracker {
+      private queue: EventPayload[] = [];
+      private anonymousId: string;
+      private userId: string | null = null;
+      private config: TrackerConfig;
 
-    // Recupera o genera l'anonymousId
-    this.anonymousId = this.getOrCreateAnonymousId();
-
-    // Avvia il flush periodico
-    this.startFlushTimer();
-
-    // Flush prima che l'utente chiuda la pagina
-    window.addEventListener('beforeunload', () => this.flush());
-
-    if (this.config.debug) {
-      console.log('[Tracker] Inizializzato', this.config);
-    }
-  }
-
-  /**
-   * Traccia un evento con proprietà opzionali.
-   * Equivalente a analytics.track() di Segment.
-   */
-  track(event: string, properties: Record<string, unknown> = {}): void {
-    const payload: EventPayload = {
-      event,
-      properties,
-      timestamp: new Date().toISOString(),
-      messageId: this.generateMessageId(),
-      context: this.getContext(),
-      anonymousId: this.anonymousId,
-      ...(this.userId && { userId: this.userId }),
-    };
-
-    this.enqueue(payload);
-
-    if (this.config.debug) {
-      console.log('[Tracker] Event tracked:', event, properties);
-    }
-  }
-
-  /**
-   * Identifica un utente autenticato.
-   * Collega l'anonymousId al userId per unificare le sessioni.
-   */
-  identify(userId: string, traits: Record<string, unknown> = {}): void {
-    this.userId = userId;
-    localStorage.setItem('tracker_userId', userId);
-
-    // L'identify è esso stesso un evento
-    this.track('$identify', { userId, ...traits });
-
-    if (this.config.debug) {
-      console.log('[Tracker] User identified:', userId);
-    }
-  }
-
-  /**
-   * Traccia una pageview.
-   * Chiamato automaticamente o manualmente nelle SPA.
-   */
-  page(properties: Record<string, unknown> = {}): void {
-    this.track('$pageview', {
-      url: window.location.href,
-      path: window.location.pathname,
-      title: document.title,
-      referrer: document.referrer,
-      ...properties,
-    });
-  }
-
-  // --- Metodi privati ---
-
-  private getOrCreateAnonymousId(): string {
-    const stored = localStorage.getItem('tracker_anonymousId');
-    if (stored) return stored;
-
-    const newId = this.generateUUID();
-    localStorage.setItem('tracker_anonymousId', newId);
-    return newId;
-  }
-
-  private getContext(): EventContext {
-    return {
-      page: {
-        url: window.location.href,
-        path: window.location.pathname,
-        title: document.title,
-        referrer: document.referrer,
-      },
-      userAgent: navigator.userAgent,
-      locale: navigator.language,
-      screen: {
-        width: window.screen.width,
-        height: window.screen.height,
-      },
-      library: {
-        name: 'custom-tracker',
-        version: '1.0.0',
-      },
-    };
-  }
-
-  private enqueue(payload: EventPayload): void {
-    this.queue.push(payload);
-
-    // Se la coda raggiunge il batchSize, flush immediato
-    if (this.queue.length ≥ this.config.batchSize) {
-      this.flush();
-    }
-  }
-
-  private async flush(): Promise<void> {
-    if (this.queue.length === 0) return;
-
-    // Prendi tutti gli eventi dalla coda
-    const batch = [...this.queue];
-    this.queue = [];
-
-    try {
-      const response = await fetch(this.config.endpoint, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ batch }),
-        // keepalive permette l'invio anche durante beforeunload
-        keepalive: true,
-      });
-
-      if (!response.ok) {
-        throw new Error(`HTTP ${response.status}`);
+      constructor(config: TrackerConfig) {
+        this.config = config;
+        this.anonymousId = this.getOrCreateAnonymousId();
+        
+        // Avvia il timer per svuotare la coda periodicamente
+        setInterval(() => this.flush(), this.config.flushIntervalMs);
+        
+        // Salva i dati se l'utente chiude il tab improvvisamente
+        window.addEventListener('beforeunload', () => this.flush());
       }
 
-      if (this.config.debug) {
-        console.log(`[Tracker] Flushed ${batch.length} events`);
-      }
-    } catch (error) {
-      // In caso di errore, rimetti gli eventi in coda
-      this.queue = [...batch, ...this.queue];
+      /**
+       * Il Metodo Principale
+       */
+      public track(eventName: string, properties: Record<string, unknown> = {}): void {
+        const payload: EventPayload = {
+          event: eventName,
+          properties,
+          timestamp: new Date().toISOString(),
+          messageId: crypto.randomUUID(),
+          context: this.buildContext(),
+          anonymousId: this.anonymousId,
+          ...(this.userId && { userId: this.userId }),
+        };
 
-      if (this.config.debug) {
-        console.error('[Tracker] Flush failed, events re-queued', error);
+        this.queue.push(payload);
+
+        // Se la coda è piena, invia subito al server
+        if (this.queue.length >= this.config.batchSize) {
+          this.flush();
+        }
+      }
+
+      public identify(userId: string): void {
+        this.userId = userId;
+        localStorage.setItem('tracker_userId', userId);
+        this.track('$identify', { userId });
+      }
+
+      // --- Metodi Privati di Supporto --- //
+
+      private buildContext(): EventContext {
+        return {
+          page: {
+            url: window.location.href,
+            path: window.location.pathname,
+            referrer: document.referrer,
+          },
+          userAgent: navigator.userAgent,
+          screen: {
+            width: window.innerWidth,
+            height: window.innerHeight,
+          }
+        };
+      }
+
+      private getOrCreateAnonymousId(): string {
+        let anonId = localStorage.getItem('tracker_anonymousId');
+        if (!anonId) {
+          anonId = crypto.randomUUID();
+          localStorage.setItem('tracker_anonymousId', anonId);
+        }
+        return anonId;
+      }
+
+      private async flush(): Promise<void> {
+        if (this.queue.length === 0) return;
+
+        // Estrae gli eventi dalla coda
+        const batch = [...this.queue];
+        this.queue = [];
+
+        try {
+          // keepalive: true è FONDAMENTALE per i cambi pagina
+          await fetch(this.config.endpoint, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ batch }),
+            keepalive: true, 
+          });
+        } catch (error) {
+          // Se fallisce (es: no internet), rimettili in coda per dopo
+          this.queue = [...batch, ...this.queue];
+        }
       }
     }
-  }
+    ```
+  </TabItem>
+</Tabs>
 
-  private startFlushTimer(): void {
-    this.flushTimer = setInterval(() => this.flush(), this.config.flushInterval);
-  }
+---
 
-  private generateMessageId(): string {
-    return `${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
-  }
+## 3. Dissezioniamo il Codice: Cosa abbiamo appena scritto?
 
-  private generateUUID(): string {
-    return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (c) => {
-      const r = (Math.random() * 16) | 0;
-      const v = c === 'x' ? r : (r & 0x3) | 0x8;
-      return v.toString(16);
-    });
-  }
-}
-```
+Se leggi attentamente il codice TypeScript qui sopra, noterai soluzioni a problemi di cui raramente si parla nel marketing.
 
-## Step 3: Comprendere Ogni Componente
+### A. L'importanza del `keepalive: true`
+Hai notato l'impostazione `keepalive: true` nella funzione `fetch()`? 
+Quando un utente clicca su un link e cambia pagina, il browser "uccide" spietatamente tutte le richieste di rete in corso. Se il tuo evento di click stava partendo, va perso. Il `keepalive` (o in alternativa lo standard `navigator.sendBeacon`) dice al browser: *"Ehi, prosegui pure con il caricamento della nuova pagina, ma finisci di inviare questo payload in background"*. 
 
-### 3.1 L'AnonymousId
+### B. Il Meccanismo di Riprova (Retry Backoff)
+Guarda il blocco `catch` nella funzione `flush()`. Se il server non risponde o l'utente entra in una galleria e perde la connessione 4G, noi prendiamo il *batch* di eventi falliti e li concateniamo nuovamente all'inizio della `queue`. Nessun dato viene perso. 
 
-L'`anonymousId` è il concetto più importante dell'identity resolution. Quando un utente visita il tuo sito per la prima volta:
+<Aside type="note" title="L'Identity Resolution: anonymousId vs userId">
+Nel codice abbiamo generato un `anonymousId` salvato in *localStorage*. 
+Un visitatore arriva sul tuo sito: è l'utente anonimo `abc-123`. Clicca, guarda i prezzi, poi si iscrive. In quel momento chiamiamo `tracker.identify('userID_999')`. 
 
-Non sai chi sia (non è autenticato)
-Generi un UUID casuale e lo salvi in `localStorage`
-Ogni evento viene associato a questo ID
-Quando l'utente si autentica, chiami `identify(userId)`
-Il backend può ora **collegare** tutti gli eventi pre-login all'utente reale
+Il backend ora sa che l'entità anonima `abc-123` e l'entità loggata `userID_999` **sono la stessa persona**. Questa operazione si chiama *Identity Stitching* (Cucitura dell'Identità) ed è ciò che ti permette di sapere quante volte un utente guarda i prezzi nei giorni precedenti all'acquisto effettivo.
+</Aside>
 
-Questo processo è chiamato **identity stitching** ed è fondamentale per avere una visione completa del customer journey.
+---
 
-```
-Sessione 1 (anonima):
-  anonymousId: "abc-123"
-  → Page Viewed (homepage)
-  → Button Clicked (pricing)
-  → Page Viewed (signup)
+## 4. Come Utilizzare il Tracker nel Frontend
 
-Sessione 2 (autenticata):
-  anonymousId: "abc-123" + userId: "user-456"
-  → $identify
-  → Feature Used (dashboard)
-  → Order Completed
+Ora che abbiamo costruito l'architettura, usarla nel nostro sito (ad esempio in un'app React o Vanilla JS) è semplicissimo:
 
-→ Il backend ora sa che "abc-123" = "user-456"
-→ Può ricostruire il journey completo
-```
-
-### 3.2 Il Batch Queue
-
-Perché non inviare ogni evento immediatamente? Per tre ragioni:
-
-**Performance**: Ogni richiesta HTTP ha un overhead (DNS lookup, TCP handshake, TLS). Raggruppare 10 eventi in una richiesta è 10x più efficiente.
-**Rate Limiting**: I server hanno limiti sulle richieste al secondo. Il batching rispetta questi limiti naturalmente.
-**Resilienza**: Se il network è temporaneamente indisponibile, la coda accumula gli eventi e li invia quando la connessione torna.
-
-Il nostro tracker usa due meccanismi di flush:
-- **Size-based**: Quando la coda raggiunge `batchSize` eventi
-- **Time-based**: Ogni `flushInterval` millisecondi (anche se la coda non è piena)
-
-### 3.3 Il Context Enrichment
-
-Il context enrichment è ciò che trasforma un semplice `{ event: "click" }` in un dato ricco e utile per l'analisi. Il nostro tracker raccoglie automaticamente:
-
-| Proprietà | Sorgente | Utilità |
-|-----------|----------|---------|
-| `page.url` | `window.location.href` | Sapere dove è avvenuto l'evento |
-| `page.referrer` | `document.referrer` | Capire da dove arriva l'utente |
-| `page.title` | `document.title` | Leggibilità nei report |
-| `userAgent` | `navigator.userAgent` | Device, browser, OS |
-| `locale` | `navigator.language` | Lingua dell'utente |
-| `screen.*` | `window.screen` | Dimensioni dello schermo |
-
-Gli SDK professionali raccolgono molto di più: timezone, connection type, ad blocker status, campaign parameters (UTMs), e altro.
-
-### 3.4 Il Meccanismo di Retry
-
-Nota come nel nostro `flush()`, se la richiesta fallisce, gli eventi vengono **rimessi in coda**:
-
-```typescript
-} catch (error) {
-  this.queue = [...batch, ...this.queue];
-}
-```
-
-In un SDK di produzione, questo meccanismo è molto più sofisticato:
-- **Exponential Backoff**: Il retry avviene con intervalli crescenti (1s, 2s, 4s, 8s...)
-- **Max Retries**: Dopo N tentativi, gli eventi vengono salvati in `localStorage` e ritentati alla prossima sessione
-- **Dead Letter Queue**: Eventi che falliscono ripetutamente vengono loggati per debug
-
-### 3.5 Il `beforeunload` Handler
-
-```typescript
-window.addEventListener('beforeunload', () => this.flush());
-```
-
-Questa è una delle sfide più sottili del tracking client-side. Quando l'utente chiude il tab o naviga via, il browser cancella tutte le richieste in corso. Il `keepalive: true` nella Fetch API dice al browser di completare la richiesta anche se la pagina viene chiusa.
-
-Un'alternativa è la **Beacon API**:
-
-```typescript
-navigator.sendBeacon(this.config.endpoint, JSON.stringify({ batch }));
-```
-
-La Beacon API è progettata specificamente per questo caso d'uso: inviare dati al server senza bloccare la chiusura della pagina. Il limite è che non puoi gestire la risposta (è fire-and-forget).
-
-## Step 4: Uso nel Codice
-
-Ecco come useresti il tracker in un'applicazione reale:
-
-```typescript
-// Inizializzazione (una volta, all'avvio dell'app)
+```javascript
+// 1. Inizializza al caricamento dell'app
 const tracker = new EventTracker({
-  endpoint: 'https://collect.example.com/v1/batch',
+  endpoint: 'https://data.tuosito.com/collect',
   batchSize: 10,
-  flushInterval: 5000,
-  debug: true,
+  flushIntervalMs: 5000 // Invia i lotti ogni 5 secondi
 });
 
-// Traccia una pageview
-tracker.page();
-
-// Traccia eventi utente
-tracker.track('Button Clicked', {
-  button_name: 'Add to Cart',
-  product_id: 'P-123',
-  product_name: 'Corso Data Engineering',
-  price: 99.99,
-  currency: 'EUR',
-});
-
-// Quando l'utente si autentica
-tracker.identify('user-456', {
-  email: 'mario@example.com',
-  plan: 'pro',
-  company: 'Acme Corp',
-});
-
-// Traccia un acquisto (server-side sarebbe meglio per questo!)
-tracker.track('Order Completed', {
-  order_id: 'ORD-789',
-  total: 99.99,
-  currency: 'EUR',
-  products: [
-    { product_id: 'P-123', name: 'Corso Data Engineering', price: 99.99, quantity: 1 },
-  ],
+// 2. Traccia azioni specifiche (es. nel bottone onClick)
+document.getElementById('checkout-btn').addEventListener('click', () => {
+  tracker.track('checkout_started', {
+    cart_total: 129.50,
+    currency: 'EUR',
+    items_count: 2
+  });
 });
 ```
 
-## Step 5: Il Lato Server
+---
 
-Il nostro tracker invia i dati a un endpoint. Ecco un semplice server Express che li riceve e li invia a ClickHouse:
+## 5. Il Backend: Ricevere i dati per ClickHouse
 
-```typescript
-// server.ts (Node.js + Express)
-import express from 'express';
-import { createClient } from '@clickhouse/client';
+Il nostro browser sta ora sparando JSON verso il nostro server. Abbiamo bisogno di un ricevitore super-veloce che prenda questi pacchetti e li scarichi nel nostro Data Warehouse (come ClickHouse).
 
-const app = express();
-app.use(express.json({ limit: '1mb' }));
+<Steps>
 
-const clickhouse = createClient({
-  url: 'http://localhost:8123',
-  database: 'analytics',
-});
+1. **Crea l'endpoint Express (Node.js)**
+   Questo endpoint riceve il payload `batch` dal client e lo formatta.
 
-app.post('/v1/batch', async (req, res) => {
-  const { batch } = req.body;
+   ```typescript
+   // src/server.ts
+   import express from 'express';
+   import { createClient } from '@clickhouse/client';
 
-  if (!Array.isArray(batch) || batch.length === 0) {
-    return res.status(400).json({ error: 'Invalid batch' });
-  }
+   const app = express();
+   app.use(express.json());
 
-  try {
-    // Trasforma il batch nel formato ClickHouse
-    const rows = batch.map((event) => ({
-      event_name: event.event,
-      properties: JSON.stringify(event.properties),
-      timestamp: event.timestamp,
-      message_id: event.messageId,
-      user_id: event.userId || '',
-      anonymous_id: event.anonymousId,
-      page_url: event.context?.page?.url || '',
-      page_path: event.context?.page?.path || '',
-      user_agent: event.context?.userAgent || '',
-      received_at: new Date().toISOString(),
-    }));
+   const clickhouse = createClient({
+     url: 'http://localhost:8123',
+     database: 'analytics',
+   });
 
-    await clickhouse.insert({
-      table: 'raw_events',
-      values: rows,
-      format: 'JSONEachRow',
-    });
+   app.post('/collect', async (req, res) => {
+     const { batch } = req.body;
 
-    res.status(200).json({ success: true, count: batch.length });
-  } catch (error) {
-    console.error('Insert failed:', error);
-    res.status(500).json({ error: 'Internal server error' });
-  }
-});
+     // Formattiamo velocemente per ClickHouse
+     const rows = batch.map((ev: any) => ({
+       event_name: ev.event,
+       properties: JSON.stringify(ev.properties),
+       session_time: ev.timestamp,
+       user_id: ev.userId || ev.anonymousId,
+       page_url: ev.context.page.url
+     }));
 
-app.listen(3000, () => console.log('Collector running on :3000'));
-```
+     await clickhouse.insert({
+       table: 'raw_events',
+       values: rows,
+       format: 'JSONEachRow',
+     });
 
-### La Tabella ClickHouse
+     res.sendStatus(200);
+   });
+   ```
 
-```sql
-CREATE TABLE analytics.raw_events (
-    event_name    String,
-    properties    String,  -- JSON come stringa
-    timestamp     DateTime64(3),
-    message_id    String,
-    user_id       String,
-    anonymous_id  String,
-    page_url      String,
-    page_path     String,
-    user_agent    String,
-    received_at   DateTime64(3)
-) ENGINE = MergeTree()
-ORDER BY (event_name, timestamp)
-PARTITION BY toYYYYMM(timestamp);
-```
+2. **La Tabella SQL su ClickHouse**
+   ClickHouse è immensamente superiore a Postgres per gli eventi. Ecco come si crea la tabella di atterraggio:
 
-## Step 6: Cosa Manca per la Produzione
+   ```sql
+   CREATE TABLE analytics.raw_events (
+       event_name    String,
+       properties    String,      -- Manterremo il JSON codificato per flessibilità
+       session_time  DateTime64(3),
+       user_id       String,
+       page_url      String
+   ) ENGINE = MergeTree()
+   ORDER BY (event_name, session_time)
+   PARTITION BY toYYYYMM(session_time);
+   ```
 
-Il nostro tracker è didattico. Un SDK di produzione aggiunge:
+</Steps>
 
-| Feature | Descrizione | Perché serve |
-|---------|-------------|-------------|
-| **Schema Validation** | Validazione dei tipi delle proprietà | Previene dati corrotti |
-| **Consent Management** | Rispetto dei flag di consenso GDPR | Compliance legale |
-| **Plugin Architecture** | Sistema di plugin per estensioni | Flessibilità |
-| **Session Management** | Gestione delle sessioni utente | Analisi per sessione |
-| **UTM Capture** | Cattura automatica dei parametri UTM | Attribuzione marketing |
-| **Cross-domain Tracking** | Tracking tra domini diversi | Customer journey completo |
-| **Offline Support** | Queue persistente in IndexedDB | Affidabilità mobile |
-| **Compression** | gzip dei payload | Riduzione bandwidth |
-| **Sampling** | Invio di una percentuale degli eventi | Controllo costi |
+---
 
-## Confronto: Il Nostro Tracker vs SDK Professionali
+## Esercizio Pratico
 
-| Aspetto | Nostro Tracker | Segment Analytics.js | Rudderstack JS SDK |
-|---------|---------------|---------------------|-------------------|
-| Dimensione | ~2KB | ~30KB | ~25KB |
-| Destinazioni | 1 (il nostro server) | 300+ (cloud mode) | 150+ (cloud mode) |
-| Identity | anonymousId + userId | + alias, group | + alias, group |
-| Queue | In-memory | localStorage persist | localStorage persist |
-| Consent | No | Consent Manager | Consent Manager |
-| Plugins | No | Middleware + Integrations | Plugins |
+Ora che hai compreso l'architettura, prova a rispondere mentalmente, o nel tuo ambiente locale, a queste sfide:
+1. Come modificheresti `tracker.ts` per raccogliere e includere automaticamente i parametri `UTM` (es. `?utm_source=facebook`) presi dall'URL dentro il `context`?
+2. Se l'utente abilita un *AdBlocker* aggressivo come uBlock Origin, la tua richiesta `fetch()` verso l'endpoint `https://data.tuosito.com/collect` potrebbe essere bloccata. Qual è una potenziale soluzione infrastrutturale a livello di DNS/Proxy?
 
-## Lezioni Chiave
-
-1. **Un SDK di analytics è un prodotto software complesso**. Non è "un po' di JavaScript che manda dati". È un sistema con queue, retry, identity management, consent, e context enrichment.
-2. **Il batching è fondamentale per la performance**. Non inviare mai un evento alla volta in produzione.
-3. **L'identity resolution è il problema più difficile**. Collegare sessioni anonime a utenti noti richiede un design accurato sia client-side che server-side.
-4. **Il tracking client-side è fragile**. AdBlockers, ITP di Safari, e connessioni instabili rendono necessario il tracking server-side per eventi critici.
-5. **La persistenza locale è necessaria**. Senza `localStorage` (o `IndexedDB`), perdi eventi quando l'utente chiude il browser prima che il batch venga inviato.
-
-## Esercizio
-
-1. Prendi il codice del tracker e aggiungilo a una pagina HTML locale
-2. Apri il browser DevTools → Network tab
-3. Fai qualche azione e osserva le richieste in uscita
-4. Modifica il `batchSize` a 1 e confronta il comportamento
-5. Simula un network error (endpoint inesistente) e osserva il retry
-
-Questo esercizio ti darà un'intuizione profonda di come funziona il tracking — un'intuizione che ti sarà utile ogni volta che dovrai debuggare problemi di dati.
-
-*Nella prossima lezione, affronteremo un tema critico: Privacy, GDPR e Consent Mode — perché raccogliere dati senza rispettare la legge non è un'opzione.*
+*Nella prossima lezione ("Event Tracking Design"), smetteremo di scrivere codice infrastrutturale e inizieremo a progettare LA METODOLOGIA: capire come dare i nomi corretti agli eventi senza trasformare il database in una discarica inutilizzabile.*

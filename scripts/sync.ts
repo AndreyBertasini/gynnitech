@@ -1,7 +1,7 @@
 import { NotionParser } from "../src/lib/notion/parser";
 import type { Client } from "@notionhq/client";
 import { getFormattedDatabaseId, getNotionClient } from "../src/lib/notion/client";
-import { promises as fs } from "fs";
+import { promises as fs, existsSync, readdirSync } from "fs";
 import path from "path";
 import { validatePath } from "./validation";
 import { pLimit } from "./concurrency";
@@ -20,7 +20,7 @@ async function sync() {
         console.error(e.message);
         process.exit(1);
     }
-    
+
     const parser = new NotionParser(client);
 
     console.log(`Syncing from Notion Database: ${formattedDbId}`);
@@ -36,7 +36,7 @@ async function sync() {
     }
 
     // Use client.request directly because databases.query seems missing in this version
-    
+
     // First, try to retrieve the database to verify ID and permissions
     try {
         const db = await client.databases.retrieve({ database_id: formattedDbId });
@@ -70,7 +70,7 @@ async function sync() {
         // Use retry for content fetching too (fetching children blocks can hit rate limits)
         const metadata = parser.extractMetadata(page);
         const content = await withRetry(() => parser.getPageContent(page.id));
-        
+
         // Frontmatter construction
         const frontmatter: any = {
             title: metadata.title,
@@ -83,7 +83,7 @@ async function sync() {
         if (metadata.category) frontmatter.category = metadata.category;
         if (metadata.tags && metadata.tags.length > 0) frontmatter.tags = metadata.tags;
         if (metadata.order) frontmatter.order = metadata.order;
-        
+
         // Notion ID for back-sync reference
         frontmatter.notionId = metadata.notionId;
 
@@ -93,25 +93,51 @@ async function sync() {
         let outDir = "";
         let collection = "";
         let moduleDir = "";
-        
+
         switch (metadata.type) {
             case "Blog":
                 outDir = "src/content/blog";
                 collection = "blog";
                 break;
             case "Course":
-                // Determine module from category
-                moduleDir = "data-collection"; // Default
-                if (metadata.category) {
-                    const norm = metadata.category.toLowerCase().trim();
-                    if (norm.includes('marketing') || norm.includes('strategia')) moduleDir = 'marketing-data-science';
-                    else if (norm.includes('infrastructure') || norm.includes('ops')) moduleDir = 'infrastructure-ops';
-                    else if (norm.includes('warehousing') || norm.includes('sql') || norm.includes('db')) moduleDir = 'data-warehousing';
-                    else if (norm.includes('real-time') || norm.includes('streaming')) moduleDir = 'real-time-analytics';
-                    else if (norm.includes('engineering') || norm.includes('analytics')) moduleDir = 'analytics-engineering';
-                    else if (norm.includes('collection') || norm.includes('tracking') || norm.includes('getting started')) moduleDir = 'data-collection';
+                // First, check if this page already exists in one of the subdirectories
+                // to avoid inadvertently moving existing files to data-collection fallback.
+                let foundExistingDir = null;
+                const corsoBase = path.join(process.cwd(), 'src/content/corso');
+
+                if (existsSync(corsoBase)) {
+                    // Only get directories
+                    const dirs = readdirSync(corsoBase, { withFileTypes: true })
+                        .filter(d => d.isDirectory())
+                        .map(d => d.name);
+
+                    const cleanSlug = metadata.slug.startsWith('/') ? metadata.slug.substring(1) : metadata.slug;
+
+                    for (const dir of dirs) {
+                        const testPath = path.join(corsoBase, dir, `${cleanSlug}.mdx`);
+                        if (existsSync(testPath)) {
+                            foundExistingDir = dir;
+                            break;
+                        }
+                    }
                 }
-                
+
+                if (foundExistingDir) {
+                    moduleDir = foundExistingDir;
+                } else {
+                    // Determine module from category as fallback for new files
+                    moduleDir = "data-collection"; // Default
+                    if (metadata.category) {
+                        const norm = metadata.category.toLowerCase().trim();
+                        if (norm.includes('marketing') || norm.includes('strategia')) moduleDir = 'marketing-data-science';
+                        else if (norm.includes('infrastructure') || norm.includes('ops')) moduleDir = 'infrastructure-ops';
+                        else if (norm.includes('warehousing') || norm.includes('sql') || norm.includes('db')) moduleDir = 'data-warehousing';
+                        else if (norm.includes('real-time') || norm.includes('streaming')) moduleDir = 'real-time-analytics';
+                        else if (norm.includes('engineering') || norm.includes('analytics')) moduleDir = 'analytics-engineering';
+                        else if (norm.includes('collection') || norm.includes('tracking') || norm.includes('getting started')) moduleDir = 'data-collection';
+                    }
+                }
+
                 outDir = `src/content/corso/${moduleDir}`;
                 collection = "corso";
                 break;
@@ -131,7 +157,7 @@ async function sync() {
         }
 
         await fs.mkdir(path.dirname(fullPath), { recursive: true });
-        
+
         await fs.writeFile(fullPath, fileContent);
         console.log(`Synced: ${metadata.title} -> ${fullPath}`);
 
@@ -139,7 +165,7 @@ async function sync() {
         if (metadata.inMenu) {
             // Remove leading slash from slug if present to avoid double slashes
             const cleanSlug = metadata.slug.startsWith('/') ? metadata.slug.substring(1) : metadata.slug;
-            
+
             let link = `/${collection}/${cleanSlug}`;
             if (collection === 'corso') {
                 link = `/course/${moduleDir}/${cleanSlug}`;
@@ -147,7 +173,7 @@ async function sync() {
 
             menuItems.push({
                 label: metadata.title,
-                link: link, 
+                link: link,
                 order: metadata.order || 99,
             });
         }
@@ -172,7 +198,7 @@ async function sync() {
     menuItems.sort((a, b) => a.order - b.order);
     const sidebarPath = path.join(process.cwd(), "src/data/sidebar-generated.json");
     await fs.mkdir(path.dirname(sidebarPath), { recursive: true });
-    
+
     // We only write the items array. The config will wrap it if needed.
     await fs.writeFile(sidebarPath, JSON.stringify(menuItems, null, 2));
     console.log(`Sidebar updated: ${sidebarPath}`);
