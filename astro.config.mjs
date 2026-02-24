@@ -62,6 +62,17 @@ export default defineConfig({
     react(),
     mermaid({
       theme: 'dark',
+      themeVariables: {
+        fontFamily: 'Montserrat, sans-serif',
+        fontSize: '14px',
+        textColor: '#ffffff',
+        mainBkg: '#1e293b',
+        nodeBorder: '#ccff00',
+        lineColor: '#ccff00',
+        labelBackground: '#050505',
+        edgeLabelBackground: '#050505',
+        tertiaryColor: '#050505'
+      }
     }),
     sitemap(),
     starlight({
