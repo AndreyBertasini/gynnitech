@@ -62,17 +62,6 @@ export default defineConfig({
     react(),
     mermaid({
       theme: 'dark',
-      themeVariables: {
-        fontFamily: 'Montserrat, sans-serif',
-        fontSize: '14px',
-        textColor: '#ffffff',
-        mainBkg: '#1e293b',
-        nodeBorder: '#ccff00',
-        lineColor: '#ccff00',
-        labelBackground: '#050505',
-        edgeLabelBackground: '#050505',
-        tertiaryColor: '#050505'
-      }
     }),
     sitemap(),
     starlight({
@@ -80,14 +69,14 @@ export default defineConfig({
       logo: {
         src: './src/assets/logo-ginnytech.png',
       },
-      favicon: '/favicon-48x48.png',
+      favicon: '/favicon-32x32.png',
       plugins: [
         starlightImageZoom(),
 
         starlightHeadingBadges(),
         starlightLinksValidator({
           errorOnRelativeLinks: false,
-          exclude: ['/course/**', '/blog/', '/blog/**'],
+          exclude: ['/course/**'],
         }),
       ],
       disable404Route: true,
