@@ -1,0 +1,570 @@
+---
+title: "Caso Studio — Data Warehousing Moderno"
+description: "Caso studio pratico sulla migrazione da un Data Warehouse tradizionale a ClickHouse per analytics in tempo reale."
+module: "Modulo 3: Infrastructure & Engineering"
+order: 7
+prerequisites: ["s3-data-lake/caso-studio"]
+tags: ["caso-studio", "pratica", "data-warehouse", "clickhouse", "olap", "sql", "data-modeling"]
+---
+
+## Caso Studio: Buildmetrics — Da PostgreSQL a ClickHouse
+
+**Buildmetrics** è una startup italiana che offre una piattaforma SaaS per il monitoring delle build e delle pipeline CI/CD. I loro clienti — team di sviluppo software di medie e grandi dimensioni — hanno bisogno di dashboard real-time su:
+
+- Tempo medio di build per branch e autore
+- Tasso di fallimento per step della pipeline
+- Trend di regressione nelle ultime 24 ore
+- Comparazione performance tra ambienti (staging vs produzione)
+
+---
+
+## Fase 1: Il Problema — PostgreSQL al Limite
+
+### Situazione iniziale
+
+Buildmetrics ha iniziato con un'architettura classica: tutto su **PostgreSQL 14**. Per 18 mesi ha funzionato bene. Poi il volume di dati ha iniziato a crescere esponenzialmente.
+
+**Metriche al momento della crisi** (luglio 2024):
+
+| Metrica | Valore |
+|---|---|
+| Clienti attivi | 340 team |
+| Build registrate/giorno | ~2,8 milioni |
+| Dati totali nella tabella `build_logs` | 4,2 miliardi di righe |
+| Dimensione database | 2,1 TB |
+| Tempo query dashboard (P95) | 47 secondi |
+| Query timeout rate | 23% |
+| Costo AWS RDS (db.r6g.4xlarge) | $4.200/mese |
+
+La query principale della dashboard — aggregazione delle build per team nelle ultime 24 ore — impiegava in media 43 secondi. I clienti stavano abbandonando il prodotto.
+
+### La Struttura Originale (PostgreSQL)
+
+```sql
+-- Tabella principale in PostgreSQL (4,2 miliardi di righe)
+CREATE TABLE build_logs (
+    id              BIGSERIAL PRIMARY KEY,
+    tenant_id       VARCHAR(50) NOT NULL,
+    build_id        UUID NOT NULL,
+    pipeline_id     VARCHAR(100),
+    branch          VARCHAR(200),
+    commit_sha      CHAR(40),
+    author_email    VARCHAR(200),
+    step_name       VARCHAR(200),
+    status          VARCHAR(20),   -- 'success', 'failure', 'cancelled'
+    started_at      TIMESTAMPTZ NOT NULL,
+    finished_at     TIMESTAMPTZ,
+    duration_ms     INTEGER,
+    exit_code       SMALLINT,
+    runner_tags     TEXT[],
+    metadata        JSONB,
+    created_at      TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX idx_tenant_started ON build_logs (tenant_id, started_at DESC);
+CREATE INDEX idx_build_id ON build_logs (build_id);
+```
+
+### Il Query Plan che uccide le performance
+
+```sql
+-- Query della dashboard principale (43 secondi su PostgreSQL)
+SELECT
+    DATE_TRUNC('hour', started_at) AS hour,
+    pipeline_id,
+    COUNT(*) AS total_builds,
+    COUNT(*) FILTER (WHERE status = 'success') AS successful,
+    COUNT(*) FILTER (WHERE status = 'failure') AS failed,
+    PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY duration_ms) AS p95_ms,
+    AVG(duration_ms) AS avg_ms
+FROM build_logs
+WHERE
+    tenant_id = 'acme-corp'
+    AND started_at ≥ NOW() - INTERVAL '24 hours'
+GROUP BY hour, pipeline_id
+ORDER BY hour DESC, total_builds DESC;
+```
+
+EXPLAIN ANALYZE mostra:
+- Seq Scan su 4,2 miliardi di righe (l'indice viene ignorato per il volume)
+- Sort + HashAgg in memoria da 8 GB
+- Parallel workers: 8 (massimo configurato)
+
+---
+
+## Fase 2: La Decisione Architetturale
+
+### Opzioni valutate
+
+Il team di Buildmetrics ha valutato 4 opzioni:
+
+| Opzione | Pro | Contro | Costo stimato/mese |
+|---|---|---|---|
+| PostgreSQL + TimescaleDB | Zero migrazione, same stack | Scala a fatica oltre 10B righe | $5.500 |
+| BigQuery | Serverless, zero ops | Latenza alta, costoso a query | $3.800 - $8.000 variabile |
+| Snowflake | Ottimo per BI, data sharing | Costoso, latenza non real-time | $6.000 |
+| **ClickHouse Cloud** | **Latenza bassa, compressione ottima** | **Curva di apprendimento** | **$1.200** |
+
+### Decisione: ClickHouse Cloud
+
+ClickHouse viene scelto per tre ragioni specifiche al caso di Buildmetrics:
+1. **Latenza sub-secondo** su query di aggregazione — critica per le dashboard real-time
+2. **Compressione 12-15x** — 2,1 TB diventano ~160 GB (riduce drasticamente i costi storage)
+3. **Funzioni analitiche native** — `windowFunnel`, `quantile`, `uniq` coprono tutti i casi d'uso senza pre-aggregazioni manuali
+
+---
+
+## Fase 3: Progettazione dello Schema
+
+### Analisi delle Query Patterns
+
+Prima di disegnare lo schema, il team ha censito le 10 query più frequenti e ha estratto i pattern di filtro:
+
+| Pattern di filtro | Frequenza | Impatto |
+|---|---|---|
+| `tenant_id + started_at range` | 78% delle query | Critico |
+| `tenant_id + pipeline_id` | 45% delle query | Alto |
+| `tenant_id + branch` | 31% delle query | Medio |
+| `tenant_id + status` | 28% delle query | Medio |
+| `build_id` (lookup puntuale) | 12% delle query | Basso |
+
+### Schema ClickHouse — Prima Versione
+
+```sql
+CREATE TABLE build_logs (
+    -- Chiavi di partizione e ordinamento
+    tenant_id       LowCardinality(String),
+    build_date      Date,                          -- colonna materializzata per partitioning
+    started_at      DateTime64(3),
+
+    -- Identificatori
+    build_id        String,
+    pipeline_id     LowCardinality(String),
+    branch          String,
+    commit_sha      FixedString(40),
+    author_email    LowCardinality(String),
+
+    -- Metriche di build
+    step_name       LowCardinality(String),
+    status          LowCardinality(String),        -- 'success', 'failure', 'cancelled'
+    duration_ms     UInt32,
+    exit_code       Int8,
+
+    -- Metadata
+    runner_tags     Array(LowCardinality(String)),
+    env             LowCardinality(String)         -- 'production', 'staging', 'dev'
+)
+ENGINE = MergeTree()
+PARTITION BY (tenant_id, toYYYYMM(build_date))   -- una partizione per tenant per mese
+ORDER BY (tenant_id, pipeline_id, build_date, started_at)
+TTL build_date + INTERVAL 1 YEAR DELETE           -- retention 1 anno
+SETTINGS index_granularity = 8192;
+```
+
+### Perché questo schema?
+
+**`LowCardinality(String)` per status, pipeline_id, author_email:**
+Questi campi hanno meno di 10.000 valori distinti. `LowCardinality` memorizza un dizionario interno e usa interi invece di stringhe — 3-5x più veloce nei GROUP BY e nei filtri.
+
+**`ORDER BY (tenant_id, pipeline_id, build_date, started_at)`:**
+Le due query più frequenti filtrano su `tenant_id + range di date` e `tenant_id + pipeline_id`. L'ordine è progettato attorno a questi pattern: ClickHouse può saltare tutti i granuli per gli altri tenant e, dentro lo stesso tenant, saltare le pipeline non richieste.
+
+**`PARTITION BY (tenant_id, toYYYYMM(build_date))`:**
+Ogni tenant ha partizioni mensili separate. Quando si cancella o si archivia un tenant, si droppa la partizione — operazione istantanea invece di una DELETE costosa.
+
+---
+
+## Fase 4: Migrazione Zero-Downtime
+
+### Strategia di migrazione
+
+Buildmetrics non può permettersi downtime: i clienti usano le dashboard 24/7. La strategia è il **dual-write con catch-up**:
+
+```
+Settimana 1-2:  Setup ClickHouse Cloud + schema
+Settimana 3-4:  Backfill storico (4,2B righe da PostgreSQL)
+Settimana 5:    Dual-write (scrivi su entrambi i database)
+Settimana 6:    Verifica consistenza dei dati
+Settimana 7:    Switch lettura → ClickHouse
+Settimana 8:    Stop write su PostgreSQL, dismissione
+```
+
+### Backfill: 4,2 miliardi di righe
+
+```python
+# Script di migrazione in batch (Python + clickhouse-driver)
+import clickhouse_driver
+import psycopg2
+from datetime import datetime, timedelta
+
+def migrate_batch(pg_conn, ch_client, start_date, end_date):
+    """Migra un batch di dati da PostgreSQL a ClickHouse."""
+
+    # Leggi da PostgreSQL
+    with pg_conn.cursor() as cur:
+        cur.execute("""
+            SELECT
+                tenant_id, build_id, pipeline_id, branch,
+                commit_sha, author_email, step_name, status,
+                started_at, finished_at, duration_ms, exit_code
+            FROM build_logs
+            WHERE started_at ≥ %s AND started_at < %s
+            ORDER BY started_at
+        """, (start_date, end_date))
+        rows = cur.fetchall()
+
+    if not rows:
+        return 0
+
+    # Trasforma per ClickHouse
+    ch_rows = [(
+        row[0],                                    # tenant_id
+        row[8].date(),                             # build_date (materializzata)
+        row[8],                                    # started_at
+        row[1], row[2], row[3], row[4], row[5],   # build_id, pipeline_id, branch, ...
+        row[6], row[7],                            # step_name, status
+        row[10] or 0,                              # duration_ms (NULL → 0)
+        row[11] or -1,                             # exit_code
+        [],                                        # runner_tags (non disponibile)
+        'production',                              # env default
+    ) for row in rows]
+
+    # Inserisci in ClickHouse in un unico batch
+    ch_client.execute(
+        "INSERT INTO build_logs VALUES",
+        ch_rows
+    )
+
+    return len(ch_rows)
+
+# Esegui il backfill per periodi di 1 giorno
+start = datetime(2023, 1, 1)
+end = datetime(2024, 7, 1)
+current = start
+total_migrated = 0
+
+while current < end:
+    next_day = current + timedelta(days=1)
+    migrated = migrate_batch(pg_conn, ch_client, current, next_day)
+    total_migrated += migrated
+    print(f"{current.date()}: migrated {migrated:,} rows (total: {total_migrated:,})")
+    current = next_day
+```
+
+**Risultato backfill:**
+- 4,2 miliardi di righe migrate in **72 ore** (batch di 1 giorno per volta)
+- 2,1 TB PostgreSQL → **148 GB** ClickHouse (compressione 14.2x)
+- Zero errori di integrità
+
+---
+
+## Fase 5: Le Query Ottimizzate
+
+### Query della Dashboard Principale (riscritta per ClickHouse)
+
+```sql
+-- La stessa query che impiegava 43s su PostgreSQL
+-- Su ClickHouse: 180ms
+SELECT
+    toStartOfHour(started_at) AS hour,
+    pipeline_id,
+    count() AS total_builds,
+    countIf(status = 'success') AS successful,
+    countIf(status = 'failure') AS failed,
+    round(countIf(status = 'failure') / count() * 100, 1) AS failure_rate_pct,
+    quantile(0.95)(duration_ms) AS p95_ms,
+    round(avg(duration_ms)) AS avg_ms
+FROM build_logs
+WHERE
+    tenant_id = 'acme-corp'
+    AND build_date ≥ today() - 1            -- usa la colonna materializzata
+    AND started_at ≥ now() - INTERVAL 24 HOUR
+GROUP BY hour, pipeline_id
+ORDER BY hour DESC, total_builds DESC;
+```
+
+### Analisi del Funnel di Pipeline
+
+```sql
+-- Dove si fermano le build che falliscono?
+-- windowFunnel per analisi del flusso di step
+SELECT
+    pipeline_id,
+    level,
+    count() AS builds_at_level
+FROM (
+    SELECT
+        build_id,
+        pipeline_id,
+        windowFunnel(3600)(   -- step devono avvenire entro 1 ora
+            started_at,
+            step_name = 'checkout',
+            step_name = 'install-deps',
+            step_name = 'lint',
+            step_name = 'test',
+            step_name = 'build',
+            step_name = 'deploy'
+        ) AS level
+    FROM build_logs
+    WHERE
+        tenant_id = 'acme-corp'
+        AND build_date ≥ today() - 7
+    GROUP BY build_id, pipeline_id
+)
+GROUP BY pipeline_id, level
+ORDER BY pipeline_id, level;
+```
+
+### Analisi delle Regressioni (confronto settimana precedente)
+
+```sql
+-- Confronta i tempi di build questa settimana vs settimana scorsa
+WITH
+this_week AS (
+    SELECT
+        pipeline_id,
+        branch,
+        count() AS builds,
+        quantile(0.95)(duration_ms) AS p95_ms,
+        countIf(status = 'failure') / count() AS failure_rate
+    FROM build_logs
+    WHERE
+        tenant_id = 'acme-corp'
+        AND build_date ≥ toMonday(today())
+    GROUP BY pipeline_id, branch
+),
+last_week AS (
+    SELECT
+        pipeline_id,
+        branch,
+        quantile(0.95)(duration_ms) AS p95_ms_prev,
+        countIf(status = 'failure') / count() AS failure_rate_prev
+    FROM build_logs
+    WHERE
+        tenant_id = 'acme-corp'
+        AND build_date ≥ toMonday(today()) - 7
+        AND build_date < toMonday(today())
+    GROUP BY pipeline_id, branch
+)
+SELECT
+    tw.pipeline_id,
+    tw.branch,
+    tw.builds,
+    tw.p95_ms,
+    lw.p95_ms_prev,
+    round((tw.p95_ms - lw.p95_ms_prev) / lw.p95_ms_prev * 100, 1) AS p95_change_pct,
+    round(tw.failure_rate * 100, 1) AS failure_rate_pct,
+    round(lw.failure_rate_prev * 100, 1) AS failure_rate_prev_pct,
+    -- Segnala regressioni significative
+    multiIf(
+        tw.p95_ms > lw.p95_ms_prev * 1.2, 'REGRESSIONE PERFORMANCE',
+        tw.failure_rate > lw.failure_rate_prev * 1.5, 'REGRESSIONE STABILITA',
+        'OK'
+    ) AS alert_status
+FROM this_week tw
+LEFT JOIN last_week lw
+    ON tw.pipeline_id = lw.pipeline_id
+    AND tw.branch = lw.branch
+WHERE alert_status != 'OK'
+ORDER BY p95_change_pct DESC;
+```
+
+### Trend degli Autori (chi rallenta le build?)
+
+```sql
+-- Top autori per impatto negativo sulle build negli ultimi 30 giorni
+SELECT
+    author_email,
+    count() AS total_builds,
+    countIf(status = 'failure') AS failed_builds,
+    round(countIf(status = 'failure') / count() * 100, 1) AS failure_rate_pct,
+    round(avg(duration_ms) / 1000, 1) AS avg_duration_sec,
+    round(quantile(0.95)(duration_ms) / 1000, 1) AS p95_duration_sec
+FROM build_logs
+WHERE
+    tenant_id = 'acme-corp'
+    AND build_date ≥ today() - 30
+    AND branch NOT IN ('main', 'master', 'develop')  -- solo feature branch
+GROUP BY author_email
+HAVING total_builds ≥ 10  -- solo autori con abbastanza build
+ORDER BY failure_rate_pct DESC
+LIMIT 20;
+```
+
+---
+
+## Fase 6: Materialized Views per Dashboard Real-Time
+
+Le dashboard dei clienti vengono aggiornate ogni 60 secondi. Query ripetute ogni minuto su miliardi di righe non sono sostenibili anche per ClickHouse. La soluzione: **Materialized Views**.
+
+### MV per Aggregazioni Orarie
+
+```sql
+-- MV di supporto: aggrega ogni batch di INSERT in statistiche orarie
+CREATE MATERIALIZED VIEW mv_hourly_build_stats
+ENGINE = AggregatingMergeTree()
+PARTITION BY (tenant_id, toYYYYMM(hour))
+ORDER BY (tenant_id, pipeline_id, hour)
+AS SELECT
+    tenant_id,
+    pipeline_id,
+    toStartOfHour(started_at) AS hour,
+
+    -- Contatori (stati parziali per merge)
+    countState() AS builds_count,
+    countIfState(status = 'success') AS success_count,
+    countIfState(status = 'failure') AS failure_count,
+
+    -- Aggregazioni di durata
+    quantileState(0.50)(duration_ms) AS duration_p50,
+    quantileState(0.95)(duration_ms) AS duration_p95,
+    avgState(duration_ms) AS avg_duration
+FROM build_logs
+GROUP BY tenant_id, pipeline_id, hour;
+
+-- Query sulla MV: usa le funzioni *Merge() per unire gli stati parziali
+SELECT
+    hour,
+    pipeline_id,
+    countMerge(builds_count) AS total_builds,
+    countMerge(failure_count) AS failures,
+    round(countMerge(failure_count) / countMerge(builds_count) * 100, 1) AS failure_pct,
+    round(quantileMerge(0.95)(duration_p95) / 1000, 1) AS p95_sec,
+    round(avgMerge(avg_duration) / 1000, 1) AS avg_sec
+FROM mv_hourly_build_stats
+WHERE
+    tenant_id = 'acme-corp'
+    AND hour ≥ now() - INTERVAL 24 HOUR
+GROUP BY hour, pipeline_id
+ORDER BY hour DESC;
+```
+
+**Risultato**: la query sulla MV impiega **12ms** invece di 180ms sulla tabella raw. Sui dati delle ultime 24 ore (le più richieste), il miglioramento è di 3.600x rispetto al PostgreSQL originale.
+
+---
+
+## Fase 7: Schema Evolution in Produzione
+
+Tre mesi dopo il go-live, il product team di Buildmetrics vuole aggiungere una feature: il tracking dei **test coverage** per ogni build.
+
+### La Nuova Colonna: Expand-Contract in Action
+
+```sql
+-- FASE 1: EXPAND — aggiungi la colonna con valore di default (operazione metadata, istantanea)
+ALTER TABLE build_logs ADD COLUMN test_coverage_pct Nullable(Float32) DEFAULT NULL;
+
+-- Verifica che la colonna sia stata aggiunta
+SELECT name, type, default_expression
+FROM system.columns
+WHERE table = 'build_logs' AND name = 'test_coverage_pct';
+```
+
+```python
+# FASE 2: MIGRATE — il producer di dati inizia a popolare il nuovo campo
+# Nei build log recenti (ultimi 7 giorni), backfill dai log del CI runner
+ch_client.execute("""
+    ALTER TABLE build_logs
+    UPDATE test_coverage_pct = toFloat32(coverage_data)
+    WHERE build_date ≥ today() - 7
+    AND coverage_data IS NOT NULL
+""")
+
+# Monitor la mutation
+# SELECT * FROM system.mutations WHERE is_done = 0;
+```
+
+```sql
+-- FASE 3: SWITCH — deploy del codice che legge il nuovo campo
+-- Le query della dashboard ora possono includere coverage
+
+SELECT
+    author_email,
+    round(avg(test_coverage_pct), 1) AS avg_coverage,
+    countIf(test_coverage_pct < 80) AS builds_below_threshold
+FROM build_logs
+WHERE
+    tenant_id = 'acme-corp'
+    AND build_date ≥ today() - 30
+    AND test_coverage_pct IS NOT NULL
+GROUP BY author_email
+ORDER BY avg_coverage ASC;
+```
+
+---
+
+## Risultati Finali: Prima vs Dopo
+
+### Performance
+
+| Metrica | PostgreSQL (prima) | ClickHouse (dopo) | Miglioramento |
+|---|---|---|---|
+| Dashboard query P95 | 47 secondi | 180ms | **261x più veloce** |
+| Dashboard query P99 | timeout (>60s) | 420ms | Da timeout a sub-secondo |
+| Query sulla MV | N/A | 12ms | — |
+| Timeout rate | 23% | 0% | **Eliminati** |
+
+### Costi e Storage
+
+| Metrica | PostgreSQL (prima) | ClickHouse (dopo) | Risparmio |
+|---|---|---|---|
+| Storage grezzo | 2,1 TB | 148 GB | -93% |
+| Costo infrastruttura/mese | $4.200 | $1.200 | **-$3.000/mese** |
+| Costo annuale | $50.400 | $14.400 | **-$36.000/anno** |
+
+### Business Impact
+
+| Metrica | Prima | Dopo 90 giorni |
+|---|---|---|
+| Churn mensile | 6,8% | 3,2% |
+| NPS | 24 | 51 |
+| Trial-to-paid conversion | 11% | 18% |
+| Nuovi clienti enterprise | 2/mese | 7/mese |
+
+Il CTO di Buildmetrics: "La migrazione a ClickHouse non è stata solo un'ottimizzazione tecnica — è diventata un vantaggio competitivo. I nostri competitor su PostgreSQL non riescono a offrire dashboard real-time su grandi volumi."
+
+---
+
+## Lezioni Apprese
+
+### Cosa ha funzionato bene
+
+1. **Dual-write con catch-up**: zero downtime, zero perdita dati. La complessità di mantenere due sistemi in sync per 2 settimane valeva la tranquillità.
+
+2. **Schema pensato per i query patterns**: l'`ORDER BY` è la decisione più critica in ClickHouse. Dedicare 3 giorni ad analizzare le query reali prima di definirlo ha evitato una rischema completa dopo.
+
+3. **Materialized Views per le hot query**: le query delle dashboard vengono eseguite centinaia di volte al minuto. Senza MV, anche ClickHouse avrebbe sofferto. La MV ha ridotto i costi di compute del 70%.
+
+4. **`LowCardinality` sistematicamente**: ogni campo con meno di 10K valori distinti usa `LowCardinality`. Sembra un dettaglio, ma su miliardi di righe fa una differenza di 3-5x nelle aggregazioni.
+
+### Errori commessi (e come li hanno corretti)
+
+1. **Primo schema senza PARTITION BY per tenant**: le operazioni di delete (GDPR right-to-forget) erano lente. Soluzione: schema v2 con `PARTITION BY (tenant_id, toYYYYMM(build_date))` — ora il drop di un tenant è istantaneo.
+
+2. **`Float32` per duration_ms**: nella prima versione usavano Float per i millisecondi. Problemi di arrotondamento nelle somme cumulative. Soluzione: migrato a `UInt32` (i millisecondi sono sempre interi positivi).
+
+3. **Insert sincroni dall'applicazione**: il primo adapter Node.js faceva un INSERT per ogni build completata. ClickHouse non è progettato per insert singoli frequenti. Soluzione: buffer in Redis, batch insert ogni 5 secondi.
+
+---
+
+## Domande di Analisi per lo Studente
+
+### Domanda 1 — Schema Design
+Lo schema usa `PARTITION BY (tenant_id, toYYYYMM(build_date))` ma un alternativa sarebbe `PARTITION BY toYYYYMM(build_date)` (senza il tenant). Quali sono i trade-off? In quale scenario la prima opzione è migliore? In quale la seconda?
+
+### Domanda 2 — Query Optimization
+La query dell'analisi delle regressioni usa due CTE (`this_week` e `last_week`) con un LEFT JOIN. Suggerisci un approccio alternativo usando window functions (`lagInFrame`) che possa essere più efficiente. Scrivi la query.
+
+### Domanda 3 — Materialized Views
+La MV `mv_hourly_build_stats` usa `AggregatingMergeTree` con `countState`/`countMerge`. Perché non usare `SummingMergeTree` con colonne `UInt64` per i contatori? Quando `AggregatingMergeTree` è necessario rispetto a `SummingMergeTree`?
+
+### Domanda 4 — Schema Evolution
+Il team vuole rinominare la colonna `step_name` in `job_name` per allinearsi alla terminologia GitHub Actions. Come gestiresti questa modifica breaking con l'approccio Expand-Contract? Descrivi le 4 fasi e le query SQL corrispondenti.
+
+### Domanda 5 — Business Analysis
+Guardando i risultati finali, il churn mensile è sceso dal 6,8% al 3,2% dopo la migrazione. Come distingueresti l'impatto della migrazione tecnica da altri fattori (nuove feature, pricing, stagionalità)? Quali dati raccoglieresti per rispondere a questa domanda?
+
+### Domanda 6 — Cost Optimization
+Con 340 clienti attivi e una crescita del 15% mese su mese, proietta il volume di dati e i costi ClickHouse tra 12 mesi. Quali strategie di ottimizzazione dei costi implementeresti preventivamente? (Suggerimento: considera TTL, tiered storage, Materialized Views per aggregazioni pre-calcolate)
+
+### Domanda 7 — SCD e Storicizzazione
+Un cliente enterprise chiede di poter analizzare i dati storici basandosi sul piano di abbonamento che aveva al momento della build (non quello attuale). Come modelleresti questa dimensione? Scrivi la DDL di una `dim_tenants` SCD Type 2 e la query per fare join con `build_logs` rispettando la storicizzazione.

@@ -1,0 +1,521 @@
+---
+title: 'Pipeline Real-Time: S3 + ClickHouse in Produzione'
+description: >-
+  Architetture streaming per analisi marketing in tempo reale: da file su S3 a
+  dashboard live con aggregazioni incrementali, Materialized Views a catena e
+  monitoraggio.
+order: 11
+date: '2026-02-17'
+author: GynniTech Team
+---
+
+import { Aside, Steps } from '@astrojs/starlight/components';
+
+
+# Pipeline Real-Time: S3 + ClickHouse in Produzione
+
+
+Nella lezione precedente abbiamo costruito una pipeline incrementale con S3Queue. Ora la evolviamo in un sistema di produzione completo: aggregazioni multi-livello, dashboard real-time, monitoraggio e gestione degli errori.
+
+
+## Architettura di Produzione
+
+
+```plain text
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                        Pipeline Real-Time Completa                          │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  ┌──────────┐    ┌──────────┐    ┌───────────┐    ┌──────────────────┐     │
+│  │ API/     │───▶│ S3 Raw   │───▶│ S3Queue   │───▶│ events           │     │
+│  │ Webhook  │    │ Parquet  │    │           │    │ (ReplacingMT)    │     │
+│  └──────────┘    └──────────┘    └───────────┘    └────────┬─────────┘     │
+│                                                             │               │
+│                                        ┌────────────────────┼────────┐      │
+│                                        │                    │        │      │
+│                                        ▼                    ▼        ▼      │
+│                                  ┌───────────┐    ┌──────────┐  ┌───────┐  │
+│                                  │ events    │    │ events   │  │ funnel│  │
+│                                  │ _hourly   │    │ _daily   │  │ _conv │  │
+│                                  │ (Summing) │    │ (Summing)│  │ (Agg) │  │
+│                                  └─────┬─────┘    └──────────┘  └───────┘  │
+│                                        │                                    │
+│                                        ▼                                    │
+│                                  ┌───────────┐                              │
+│                                  │ Dashboard │                              │
+│                                  │ Real-Time │                              │
+│                                  └───────────┘                              │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+
+L'idea chiave: ogni Materialized View e' un livello di aggregazione. I dati fluiscono dalla sorgente attraverso le aggregazioni **automaticamente**, senza job schedulati.
+
+
+## Aggregazioni Incrementali con SummingMergeTree
+
+
+### Il Problema delle Aggregazioni su Grandi Volumi
+
+
+Query diretta su miliardi di righe:
+
+```sql
+-- Lenta! Scansiona tutti i record raw ogni volta
+SELECT
+    toStartOfHour(event_timestamp) AS hour,
+    event_name,
+    count() AS events,
+    uniq(user_id) AS users
+FROM events
+WHERE event_timestamp ≥ now() - INTERVAL 24 HOUR
+GROUP BY hour, event_name;
+-- Tempo: 5-15 secondi su 100M+ righe
+```
+
+
+### La Soluzione: Aggregazione Incrementale
+
+
+Materialized Views che aggregano **al momento dell'inserimento**, non al momento della query:
+
+
+```sql
+-- Aggregazione oraria: pre-calcola le metriche
+CREATE MATERIALIZED VIEW events_hourly_mv TO events_hourly AS
+SELECT
+    toStartOfHour(event_timestamp) AS event_hour,
+    event_name,
+    utm_source,
+    device_type,
+    country_code,
+    count() AS event_count,
+    uniqState(user_id) AS unique_users_state,
+    uniqState(anonymous_id) AS unique_visitors_state,
+    sumState(revenue) AS revenue_state,
+    minState(event_timestamp) AS first_event_state,
+    maxState(event_timestamp) AS last_event_state
+FROM events
+GROUP BY event_hour, event_name, utm_source, device_type, country_code;
+
+-- Tabella destinazione
+CREATE TABLE events_hourly (
+    event_hour DateTime,
+    event_name String,
+    utm_source Nullable(String),
+    device_type String,
+    country_code String,
+    event_count UInt64,
+    unique_users_state AggregateFunction(uniq, String),
+    unique_visitors_state AggregateFunction(uniq, String),
+    revenue_state AggregateFunction(sum, Nullable(Decimal(10, 2))),
+    first_event_state AggregateFunction(min, DateTime64(3)),
+    last_event_state AggregateFunction(max, DateTime64(3))
+) ENGINE = AggregatingMergeTree
+PARTITION BY toYYYYMM(event_hour)
+ORDER BY (event_hour, event_name, utm_source, device_type, country_code);
+```
+
+
+<Aside type="tip">
+Le funzioni `-State` (es. `uniqState`, `sumState`) salvano lo stato intermedio dell'aggregazione. Le funzioni `-Merge` (es. `uniqMerge`, `sumMerge`) lo finalizzano al momento della query. Questo permette di aggiungere dati incrementalmente senza ricalcolare tutto.
+</Aside>
+
+
+### Query sulla Tabella Aggregata
+
+
+```sql
+-- Dashboard real-time: 10x piu' veloce della query su raw
+SELECT
+    event_hour,
+    event_name,
+    sum(event_count) AS events,
+    uniqMerge(unique_users_state) AS unique_users,
+    uniqMerge(unique_visitors_state) AS unique_visitors,
+    sumMerge(revenue_state) AS total_revenue
+FROM events_hourly
+WHERE event_hour ≥ now() - INTERVAL 24 HOUR
+GROUP BY event_hour, event_name
+ORDER BY event_hour DESC, events DESC;
+-- Tempo: < 100 ms (vs 5-15 secondi su raw)
+```
+
+
+### Perche' State/Merge e Non Semplici count/sum?
+
+
+```sql
+-- SBAGLIATO: con SummingMergeTree semplice
+-- Se due batch inseriscono dati per la stessa ora,
+-- i count() vengono sommati (corretto),
+-- ma gli uniq() vengono sommati (SBAGLIATO! non sono additivi)
+
+-- CORRETTO: con AggregatingMergeTree + State/Merge
+-- uniqState salva gli HyperLogLog sketches
+-- uniqMerge li fonde correttamente, anche con batch multipli
+```
+
+
+## Aggregazione Giornaliera per Report
+
+
+```sql
+-- Tabella aggregazione giornaliera
+CREATE TABLE events_daily (
+    event_date Date,
+    event_name String,
+    utm_source Nullable(String),
+    utm_campaign Nullable(String),
+    event_count UInt64,
+    unique_users_state AggregateFunction(uniq, String),
+    revenue_state AggregateFunction(sum, Nullable(Decimal(10, 2)))
+) ENGINE = AggregatingMergeTree
+PARTITION BY toYYYYMM(event_date)
+ORDER BY (event_date, event_name, utm_source, utm_campaign);
+
+-- Materialized View: si attiva su ogni INSERT nella tabella events
+CREATE MATERIALIZED VIEW events_daily_mv TO events_daily AS
+SELECT
+    toDate(event_timestamp) AS event_date,
+    event_name,
+    utm_source,
+    utm_campaign,
+    count() AS event_count,
+    uniqState(user_id) AS unique_users_state,
+    sumState(revenue) AS revenue_state
+FROM events
+GROUP BY event_date, event_name, utm_source, utm_campaign;
+```
+
+
+### Query per Report Settimanale
+
+
+```sql
+SELECT
+    event_date,
+    event_name,
+    sum(event_count) AS events,
+    uniqMerge(unique_users_state) AS unique_users,
+    sumMerge(revenue_state) AS revenue
+FROM events_daily
+WHERE event_date ≥ today() - 7
+GROUP BY event_date, event_name
+ORDER BY event_date, events DESC;
+```
+
+
+## Funnel di Conversione Real-Time
+
+
+Un caso d'uso classico: tracciare il funnel page_view → add_to_cart → purchase in tempo reale.
+
+
+### Tabella Funnel per Sessione
+
+
+```sql
+-- Aggregazione per sessione utente
+CREATE TABLE funnel_sessions (
+    event_date Date,
+    user_id String,
+    utm_source Nullable(String),
+    has_page_view UInt8,
+    has_add_to_cart UInt8,
+    has_purchase UInt8,
+    total_revenue AggregateFunction(sum, Nullable(Decimal(10, 2)))
+) ENGINE = AggregatingMergeTree
+PARTITION BY toYYYYMM(event_date)
+ORDER BY (event_date, user_id);
+
+CREATE MATERIALIZED VIEW funnel_sessions_mv TO funnel_sessions AS
+SELECT
+    toDate(event_timestamp) AS event_date,
+    user_id,
+    any(utm_source) AS utm_source,
+    maxState(if(event_name = 'page_view', 1, 0)) AS has_page_view,
+    maxState(if(event_name = 'add_to_cart', 1, 0)) AS has_add_to_cart,
+    maxState(if(event_name = 'purchase', 1, 0)) AS has_purchase,
+    sumState(if(event_name = 'purchase', revenue, 0)) AS total_revenue
+FROM events
+GROUP BY event_date, user_id;
+```
+
+
+### Query Funnel
+
+
+```sql
+-- Funnel di conversione per sorgente
+SELECT
+    utm_source,
+    countIf(has_page_view > 0) AS viewers,
+    countIf(has_add_to_cart > 0) AS added_to_cart,
+    countIf(has_purchase > 0) AS purchasers,
+    round(countIf(has_add_to_cart > 0) / countIf(has_page_view > 0) * 100, 2) AS cart_rate,
+    round(countIf(has_purchase > 0) / countIf(has_add_to_cart > 0) * 100, 2) AS purchase_rate,
+    round(countIf(has_purchase > 0) / countIf(has_page_view > 0) * 100, 2) AS overall_conv_rate
+FROM funnel_sessions
+WHERE event_date ≥ today() - 7
+GROUP BY utm_source
+ORDER BY viewers DESC;
+```
+
+
+Risultato:
+
+```plain text
+┌─utm_source──┬─viewers─┬─added_to_cart─┬─purchasers─┬─cart_rate─┬─purchase_rate─┬─overall_conv_rate─┐
+│ google      │  45230  │     8142      │    1628    │   18.00   │    19.99      │      3.60         │
+│ meta        │  28150  │     3941      │     591    │   14.00   │    15.00      │      2.10         │
+│ email       │  12400  │     3720      │    1116    │   30.00   │    30.00      │      9.00         │
+│ direct      │   8900  │     1335      │     356    │   15.00   │    26.67      │      4.00         │
+└─────────────┴─────────┴───────────────┴────────────┴───────────┴───────────────┴───────────────────┘
+```
+
+
+## Refreshable Materialized Views per S3
+
+
+Per dati che restano su S3 senza S3Queue (query dirette periodiche):
+
+
+```sql
+-- Ricalcola automaticamente ogni ora leggendo solo i file nuovi
+CREATE MATERIALIZED VIEW s3_hourly_refresh
+REFRESH EVERY 1 HOUR
+ENGINE = SummingMergeTree
+PARTITION BY toYYYYMM(event_date)
+ORDER BY (event_date, event_name)
+AS SELECT
+    toDate(event_timestamp) AS event_date,
+    event_name,
+    count() AS event_count,
+    uniq(user_id) AS unique_users
+FROM s3(
+    'https://s3.eu-west-1.amazonaws.com/marketing-lake/cleaned/events/**/*.parquet',
+    'Parquet'
+)
+WHERE _time > now() - INTERVAL 2 HOUR  -- Solo file recenti
+GROUP BY event_date, event_name;
+```
+
+
+```sql
+-- Controllare lo stato del refresh
+SELECT
+    view,
+    status,
+    last_refresh_time,
+    next_refresh_time,
+    last_refresh_result
+FROM system.view_refreshes
+WHERE view = 's3_hourly_refresh';
+
+-- Forzare un refresh manuale
+SYSTEM REFRESH VIEW s3_hourly_refresh;
+```
+
+
+## Monitoraggio della Pipeline
+
+
+### Dashboard di Salute
+
+
+```sql
+-- Vista unificata sulla salute della pipeline
+SELECT
+    'S3Queue Files' AS metric,
+    count() AS total,
+    countIf(status = 'Processed') AS success,
+    countIf(status = 'Failed') AS failed,
+    round(countIf(status = 'Failed') / count() * 100, 2) AS error_rate_pct,
+    max(processing_end_time) AS last_activity
+FROM system.s3queue_log
+WHERE event_time ≥ now() - INTERVAL 24 HOUR
+  AND table = 'marketing_events_queue'
+
+UNION ALL
+
+SELECT
+    'Hourly Aggregation' AS metric,
+    count() AS total,
+    0 AS success,
+    0 AS failed,
+    0 AS error_rate_pct,
+    max(event_hour) AS last_activity
+FROM events_hourly
+
+UNION ALL
+
+SELECT
+    'Daily Aggregation' AS metric,
+    count() AS total,
+    0 AS success,
+    0 AS failed,
+    0 AS error_rate_pct,
+    max(event_date) AS last_activity
+FROM events_daily;
+```
+
+
+### Rilevare il Lag della Pipeline
+
+
+```sql
+-- Quanto ritardo ha la pipeline?
+SELECT
+    now() AS current_time,
+    max(event_timestamp) AS latest_event,
+    dateDiff('minute', max(event_timestamp), now()) AS lag_minutes,
+    CASE
+        WHEN dateDiff('minute', max(event_timestamp), now()) < 5 THEN 'HEALTHY'
+        WHEN dateDiff('minute', max(event_timestamp), now()) < 30 THEN 'WARNING'
+        ELSE 'CRITICAL'
+    END AS status
+FROM events;
+```
+
+
+### Verificare la Consistenza dei Dati
+
+
+```sql
+-- Confrontare conteggi tra S3 raw e tabella ClickHouse
+-- Step 1: Conta righe nei file S3 (lento ma preciso)
+SELECT count() AS s3_raw_count
+FROM s3(
+    'https://s3.eu-west-1.amazonaws.com/marketing-lake/raw/events/date=2024-01-15/*.parquet',
+    'Parquet'
+);
+
+-- Step 2: Conta righe nella tabella ClickHouse
+SELECT count() AS ch_count
+FROM events
+WHERE event_date = '2024-01-15';
+
+-- Se i numeri non corrispondono: file non processati o duplicati
+```
+
+
+## Pattern: Hot Data in ClickHouse, Cold Data su S3
+
+
+La strategia piu' efficiente per gestire anni di dati con budget limitato:
+
+
+```sql
+-- Tabella principale: ultimi 90 giorni in MergeTree (veloce)
+CREATE TABLE events (...)
+ENGINE = MergeTree
+PARTITION BY toYYYYMM(event_timestamp)
+ORDER BY (event_date, event_name, user_id)
+TTL event_timestamp + INTERVAL 90 DAY DELETE;
+
+-- Vista unificata: combina dati caldi e freddi
+CREATE VIEW events_all AS
+-- Dati caldi: ultimi 90 giorni (query rapide)
+SELECT *
+FROM events
+WHERE event_date ≥ today() - 90
+
+UNION ALL
+
+-- Dati freddi: precedenti su S3 (query piu' lente)
+SELECT *
+FROM s3(
+    'https://s3.eu-west-1.amazonaws.com/marketing-lake/archive/events/**/*.parquet',
+    'Parquet'
+)
+WHERE toDate(event_timestamp) < today() - 90;
+```
+
+
+```sql
+-- Query trasparente: ClickHouse ottimizza automaticamente
+SELECT
+    toYYYYMM(event_timestamp) AS month,
+    count() AS events,
+    uniq(user_id) AS users
+FROM events_all
+WHERE event_timestamp ≥ '2023-01-01'
+GROUP BY month
+ORDER BY month;
+```
+
+
+<Aside type="caution">
+La `UNION ALL` con S3 funziona ma non e' trasparente come il tiered storage MergeTree. Per query frequenti su dati storici, preferisci l'architettura tiered storage della lezione precedente.
+</Aside>
+
+
+## Gestione degli Errori in Produzione
+
+
+### Riprocessare File Falliti
+
+
+Se un file fallisce ripetutamente:
+
+
+```sql
+-- 1. Identifica i file falliti
+SELECT file_name, exception
+FROM system.s3queue_log
+WHERE table = 'marketing_events_queue' AND status = 'Failed'
+ORDER BY event_time DESC;
+
+-- 2. Opzione A: Importazione manuale del file problematico
+INSERT INTO events
+SELECT *
+FROM s3(
+    'https://s3.eu-west-1.amazonaws.com/marketing-lake/raw/events/problematic_file.parquet',
+    'Parquet'
+);
+
+-- 3. Opzione B: Ricreare la tabella S3Queue
+-- (resetta lo stato ZooKeeper e riprocessa tutto)
+DROP TABLE marketing_events_queue;
+-- Ricrea con la stessa definizione
+```
+
+
+### Backfill di Dati Storici
+
+
+Quando hai dati storici su S3 che devono essere importati una tantum:
+
+
+```sql
+-- Importazione batch per mese (non usa S3Queue)
+INSERT INTO events
+SELECT *
+FROM s3(
+    'https://s3.eu-west-1.amazonaws.com/marketing-lake/archive/events/year=2023/**/*.parquet',
+    'Parquet'
+)
+SETTINGS max_threads = 32, max_insert_threads = 16;
+```
+
+
+<Aside type="tip">
+Per il backfill, usa `INSERT INTO ... SELECT FROM s3()` diretto — e' piu' veloce di S3Queue perche' non ha l'overhead del tracking ZooKeeper.
+</Aside>
+
+
+## Riepilogo
+
+
+Una pipeline real-time di produzione richiede:
+
+- **S3Queue + Materialized View** per ingestione automatica e incrementale
+- **AggregatingMergeTree** con funzioni `-State/-Merge` per aggregazioni corrette
+- **Materialized Views a catena** per aggregazioni multi-livello (oraria, giornaliera, funnel)
+- **Refreshable Materialized Views** per dati S3 senza S3Queue
+- **Monitoraggio** del lag, error rate e consistenza dati
+- **Hot-Cold pattern** per bilanciare costi e performance
+- **Gestione errori** con riprocessamento manuale e backfill
+
+_Prossima lezione: Architetture Avanzate — Lambda Architecture, Change Data Capture e pattern di produzione._

@@ -1,0 +1,393 @@
+---
+title: 'Amazon S3: Fondamenti e Architettura'
+description: >-
+  Architettura S3 in dettaglio: bucket, oggetti, storage classes, policy di
+  accesso, versioning, lifecycle rules e alternative S3-compatible.
+order: 2
+date: '2026-02-17'
+author: GynniTech Team
+---
+
+import { Aside, Steps } from '@astrojs/starlight/components';
+
+
+# Amazon S3: Fondamenti e Architettura
+
+
+Amazon S3 (Simple Storage Service) e' il servizio di object storage piu' usato al mondo. In questa lezione impariamo la sua architettura, i concetti chiave e come configurarlo per un data lake marketing.
+
+
+## Concetti Fondamentali
+
+
+### Bucket
+
+
+Un bucket e' il contenitore di primo livello in S3. Pensa a un bucket come a un "disco virtuale" con un nome unico globale.
+
+
+```plain text
+s3://marketing-lake/        ← nome del bucket (unico in tutto AWS)
+├── raw/                    ← prefisso (non e' una vera directory)
+│   ├── events/
+│   │   └── 2024-01-15.json
+│   └── campaigns/
+│       └── meta_ads.csv
+└── cleaned/
+    └── events/
+        └── year=2024/month=01/day=15/part-00000.parquet
+```
+
+
+**Regole dei bucket:**
+- Il nome deve essere **unico globalmente** in tutto AWS (non solo nel tuo account)
+- Lunghezza: 3-63 caratteri, solo lettere minuscole, numeri e trattini
+- Ogni bucket appartiene a una **regione AWS** specifica (es. `eu-west-1`)
+- Non puoi spostare un bucket in un'altra regione dopo la creazione
+
+
+### Oggetti
+
+
+Un oggetto e' un singolo file all'interno di un bucket. Ogni oggetto ha:
+
+
+| Componente    | Descrizione                              | Esempio                                                |
+| ------------- | ---------------------------------------- | ------------------------------------------------------ |
+| **Key**       | Identificatore unico dentro il bucket    | `cleaned/events/year=2024/month=01/day=15/part-00000.parquet` |
+| **Value**     | I dati del file (fino a 5 TB)            | Contenuto binario del file Parquet                     |
+| **Metadata**  | Coppie chiave-valore                     | `Content-Type: application/parquet`, `x-amz-meta-pipeline: v2` |
+| **Version ID**| Identificatore della versione (se attivo)| `3sL4kqtJlcpXroDTDmJ+rmSpXd3dIbrHY+MTRCxf3vjVBH40Nr8X8gdRQBpUMLUo` |
+
+
+<Aside type="caution">
+S3 non ha vere directory. Il carattere `/` nella key e' solo una convenzione. `raw/events/file.json` e' un oggetto con key completa, non un file in una sottocartella.
+</Aside>
+
+
+### Prefissi (Pseudo-Directory)
+
+
+Anche se S3 e' flat, i prefissi simulano una struttura a directory:
+
+
+```plain text
+Questi sono tre oggetti separati con key diverse:
+1. raw/events/2024-01-15.json
+2. raw/events/2024-01-16.json
+3. raw/campaigns/meta_ads.csv
+
+La "directory" raw/events/ non esiste — e' solo il prefisso comune
+che S3 usa per raggruppare gli oggetti nel listing.
+```
+
+
+Questo e' importante per capire il **partition pruning**: quando ClickHouse fa una query con glob pattern `year=2024/month=01/*`, S3 filtra usando il prefisso e restituisce solo gli oggetti rilevanti.
+
+
+## Storage Classes
+
+
+S3 offre diverse classi di storage con costi e caratteristiche diverse. La scelta della classe giusta puo' ridurre i costi del 70-90%.
+
+
+| Classe                     | Costo/GB/mese | Latenza retrieval | Costo retrieval    | Caso d'uso                        |
+| -------------------------- | ------------- | ----------------- | ------------------ | --------------------------------- |
+| **S3 Standard**            | $0.023        | Millisecondi      | $0                 | Dati attivi, query frequenti      |
+| **S3 Intelligent-Tiering** | $0.023 + fee  | Millisecondi      | $0                 | Pattern di accesso imprevedibili  |
+| **S3 Infrequent Access**   | $0.0125       | Millisecondi      | $0.01/GB           | Dati consultati < 1 volta/mese   |
+| **S3 One Zone-IA**         | $0.01         | Millisecondi      | $0.01/GB           | Dati riproducibili, meno critici  |
+| **S3 Glacier Instant**     | $0.004        | Millisecondi      | $0.03/GB           | Archivio con accesso immediato    |
+| **S3 Glacier Flexible**    | $0.0036       | 1-5 minuti        | $0.03/GB           | Archivio, tempo di recupero OK    |
+| **S3 Glacier Deep Archive**| $0.00099      | 12-48 ore         | $0.02/GB           | Archivio a lungo termine, GDPR    |
+
+
+### Strategia per Marketing Data Lake
+
+
+```plain text
+Tipo di Dato             Storage Class          Costo 10 TB/mese
+────────────────────────────────────────────────────────────────
+Raw events (ultimi 30g)  S3 Standard            $230
+Raw events (30-90g)      S3 Infrequent Access   $125
+Raw events (90g-1 anno)  S3 Glacier Instant     $40
+Raw events (> 1 anno)    S3 Glacier Deep        $10
+Cleaned Parquet (attivi) S3 Standard            $230
+Curated (dashboard)      S3 Standard            $230
+```
+
+
+## Operazioni S3 e Costi
+
+
+Ogni operazione su S3 ha un costo. Per un data lake e' importante capire l'impatto:
+
+
+| Operazione | Tipo      | Costo (Standard)        | Cosa fa                                   |
+| ---------- | --------- | ----------------------- | ----------------------------------------- |
+| **PUT**    | Scrittura | $0.005 per 1.000 req    | Upload di un oggetto                      |
+| **GET**    | Lettura   | $0.0004 per 1.000 req   | Download di un oggetto                    |
+| **LIST**   | Listing   | $0.005 per 1.000 req    | Elencare oggetti (per glob pattern)       |
+| **DELETE** | Cancella  | Gratis                  | Rimuovere un oggetto                      |
+| **COPY**   | Copia     | $0.005 per 1.000 req    | Copiare tra bucket/prefissi               |
+
+
+<Aside type="caution">
+Le operazioni **LIST** sono le piu' costose e spesso sottovalutate. Un glob pattern come `**/*.parquet` su 1 milione di file genera migliaia di LIST request. Usa prefissi specifici per ridurre i costi.
+</Aside>
+
+
+### Impatto sul Data Lake
+
+
+```plain text
+Scenario: query ClickHouse su 1 mese di dati
+
+Con glob specifico (year=2024/month=01/**/*.parquet):
+  LIST: ~30 request → $0.00015
+  GET:  ~750 file   → $0.0003
+  Totale: ~$0.0005
+
+Con glob generico (**/*.parquet):
+  LIST: ~10.000 request → $0.05
+  GET:  ~750 file       → $0.0003
+  Totale: ~$0.05 (100x di piu'!)
+```
+
+
+## Versioning
+
+
+Il versioning mantiene tutte le versioni precedenti di un oggetto. Utile per proteggere i dati da cancellazioni accidentali.
+
+
+```plain text
+Oggetto: cleaned/events/2024-01-15.parquet
+
+Versioni:
+  v3 (corrente): 150 MB — upload 2024-01-16 09:00 (dopo fix)
+  v2:            148 MB — upload 2024-01-15 20:00 (con errore)
+  v1:            145 MB — upload 2024-01-15 14:00 (prima versione)
+```
+
+
+**Quando attivare il versioning:**
+- Zona cleaned/curated del data lake (dati processati, costosi da ricreare)
+- File di configurazione e schema
+
+**Quando non attivare:**
+- Zona raw (i file originali esistono gia' nel sistema sorgente)
+- File temporanei e staging area
+
+
+<Aside type="tip">
+Il versioning aumenta i costi di storage perche' mantiene tutte le versioni. Combina versioning con lifecycle rules per cancellare le versioni vecchie dopo N giorni.
+</Aside>
+
+
+## Lifecycle Rules
+
+
+Le lifecycle rules automatizzano la transizione degli oggetti tra storage classes e la cancellazione.
+
+
+### Regole Tipiche per un Marketing Data Lake
+
+
+```plain text
+Regola 1: "raw-to-ia"
+  Scope:     prefisso raw/
+  Azione:    dopo 30 giorni → S3 Infrequent Access
+  Azione:    dopo 90 giorni → S3 Glacier Instant
+  Azione:    dopo 365 giorni → S3 Glacier Deep Archive
+  Azione:    dopo 730 giorni → Cancella
+
+Regola 2: "processed-cleanup"
+  Scope:     prefisso processed/    (file spostati da S3Queue)
+  Azione:    dopo 90 giorni → Cancella
+
+Regola 3: "old-versions"
+  Scope:     tutto il bucket, versioni non correnti
+  Azione:    dopo 30 giorni → Cancella versioni non correnti
+
+Regola 4: "incomplete-uploads"
+  Scope:     tutto il bucket
+  Azione:    dopo 7 giorni → Cancella multipart upload incompleti
+```
+
+
+### Configurazione JSON
+
+
+```json
+{
+  "Rules": [
+    {
+      "ID": "raw-to-ia",
+      "Filter": {"Prefix": "raw/"},
+      "Status": "Enabled",
+      "Transitions": [
+        {"Days": 30, "StorageClass": "STANDARD_IA"},
+        {"Days": 90, "StorageClass": "GLACIER_IR"},
+        {"Days": 365, "StorageClass": "DEEP_ARCHIVE"}
+      ],
+      "Expiration": {"Days": 730}
+    },
+    {
+      "ID": "processed-cleanup",
+      "Filter": {"Prefix": "processed/"},
+      "Status": "Enabled",
+      "Expiration": {"Days": 90}
+    },
+    {
+      "ID": "incomplete-uploads",
+      "Filter": {},
+      "Status": "Enabled",
+      "AbortIncompleteMultipartUpload": {"DaysAfterInitiation": 7}
+    }
+  ]
+}
+```
+
+
+## Controllo degli Accessi
+
+
+S3 offre diversi livelli di controllo accesso. Per un data lake e' fondamentale configurarli correttamente.
+
+
+### IAM Policies (Consigliato)
+
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "ClickHouseReadCleaned",
+      "Effect": "Allow",
+      "Action": ["s3:GetObject", "s3:ListBucket"],
+      "Resource": [
+        "arn:aws:s3:::marketing-lake",
+        "arn:aws:s3:::marketing-lake/cleaned/*"
+      ]
+    }
+  ]
+}
+```
+
+
+Questa policy permette a ClickHouse di leggere solo i dati nella zona cleaned. Non puo' scrivere, non puo' accedere alla zona raw.
+
+
+### Principio del Minimo Privilegio
+
+
+| Ruolo          | Permessi                           | Prefisso consentito           |
+| -------------- | ---------------------------------- | ----------------------------- |
+| Pipeline ETL   | Read raw, Write cleaned            | `raw/*`, `cleaned/*`          |
+| ClickHouse     | Read cleaned e curated             | `cleaned/*`, `curated/*`      |
+| Data analyst   | Read curated                       | `curated/*`                   |
+| Admin          | Full access                        | `*`                           |
+| S3Queue        | Read raw, Write processed          | `raw/*`, `processed/*`        |
+
+
+<Aside type="tip">
+Blocca sempre l'accesso pubblico sul bucket. Per un data lake marketing non c'e' mai motivo di rendere i dati pubblici.
+</Aside>
+
+
+## Configurazione per Data Lake
+
+
+### Struttura Consigliata del Bucket
+
+
+```plain text
+s3://marketing-lake/
+├── raw/                         ← Dati originali (JSON, CSV)
+│   ├── events/                  ← Eventi web (GA4, Segment)
+│   │   └── date=2024-01-15/
+│   │       └── events_001.json.gz
+│   ├── campaigns/               ← Dati campagne (Meta, Google Ads)
+│   │   └── date=2024-01-15/
+│   │       └── meta_campaigns.csv
+│   └── crm/                     ← Export CRM (HubSpot, Salesforce)
+│       └── contacts_2024-01-15.json.gz
+│
+├── cleaned/                     ← Dati validati (Parquet + ZSTD)
+│   └── events/
+│       └── year=2024/month=01/day=15/
+│           ├── part-00000.parquet
+│           └── part-00001.parquet
+│
+├── curated/                     ← Dati aggregati per dashboard
+│   ├── daily_metrics/
+│   └── funnel_analysis/
+│
+├── processed/                   ← File processati da S3Queue
+│   └── events/
+│       └── events_001.json.gz   ← Spostati qui dopo processing
+│
+└── exports/                     ← Report esportati
+    └── monthly/
+```
+
+
+### Configurazione S3 per il Bucket
+
+
+```plain text
+Bucket: marketing-lake
+Region: eu-west-1 (stessa del ClickHouse)
+
+Settings:
+  Block Public Access:     ON (tutto bloccato)
+  Versioning:              ON per cleaned/ e curated/
+  Default Encryption:      SSE-S3 (AES-256)
+  Object Lock:             OFF (non serve per analytics)
+  Transfer Acceleration:   OFF (non serve, stessa regione)
+  Requester Pays:          OFF
+
+Lifecycle Rules:           (vedi sezione precedente)
+```
+
+
+## AWS CLI: Operazioni Essenziali
+
+
+```bash
+# Listare oggetti con prefisso
+aws s3 ls s3://marketing-lake/raw/events/ --recursive --human-readable
+
+# Upload di un file
+aws s3 cp report.parquet s3://marketing-lake/exports/monthly/report_2024_01.parquet
+
+# Download di un file
+aws s3 cp s3://marketing-lake/cleaned/events/year=2024/month=01/day=15/part-00000.parquet ./
+
+# Sync di una directory (upload solo file nuovi/modificati)
+aws s3 sync ./local_data/ s3://marketing-lake/raw/events/ --exclude "*.tmp"
+
+# Vedere dimensione totale di un prefisso
+aws s3 ls s3://marketing-lake/cleaned/events/ --recursive --summarize | tail -2
+
+# Copiare tra prefissi (per archivio)
+aws s3 cp s3://marketing-lake/raw/events/old/ s3://marketing-lake/archive/events/ --recursive --storage-class GLACIER
+```
+
+
+## Riepilogo
+
+
+I fondamenti di S3 per il data lake:
+
+- **Bucket** e' il contenitore di primo livello con nome unico globale
+- **Oggetti** sono file con key, dati e metadata — S3 non ha vere directory
+- **Storage classes** permettono di ridurre i costi del 70-90% per dati meno accessi
+- **Lifecycle rules** automatizzano transizione e cancellazione degli oggetti
+- **IAM policies** controllano l'accesso con il principio del minimo privilegio
+- **Versioning** protegge i dati processati da cancellazioni accidentali
+- Configura bucket nella **stessa regione** del compute per evitare costi di transfer
+
+_Prossima lezione: Data Lake Design Patterns — Architettura a zone, schema-on-read e governance._

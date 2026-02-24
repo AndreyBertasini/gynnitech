@@ -1,0 +1,489 @@
+---
+title: Data Modeling per Analytics
+description: >-
+  Star schema, snowflake, fact e dimension tables, slowly changing dimensions e
+  modellazione per ClickHouse.
+order: 2
+date: '2026-02-15T06:20:25.057Z'
+author: GynniTech Team
+notionId: 305ed540-0642-8163-a227-dd4a0aea0bbc
+---
+
+import { Aside, Steps } from '@astrojs/starlight/components';
+
+
+# Data Modeling per Analytics
+
+
+La modellazione dimensionale, formalizzata da Ralph Kimball negli anni '90, resta il paradigma dominante per i data warehouse analitici. In questa lezione esploreremo i concetti fondamentali, le strutture principali e le tecniche specifiche per applicarli in un contesto di marketing analytics su ClickHouse.
+
+
+## 1. I Due Paradigmi: Kimball vs Inmon
+
+
+Prima di entrare nei dettagli, e utile comprendere le due filosofie storiche del data warehousing:
+
+
+| Aspetto              | Ralph Kimball                 | Bill Inmon                          |
+| -------------------- | ----------------------------- | ----------------------------------- |
+| **Approccio**        | Bottom-up (data mart first)   | Top-down (enterprise DW first)      |
+| **Struttura**        | Star schema / Snowflake       | Normalizzato (3NF)                  |
+| **Priorita**         | Performance delle query       | Consistenza dei dati                |
+| **Complessita**      | Piu semplice per gli analisti | Piu complesso, richiede ETL robusto |
+| **Adozione moderna** | dbt, ClickHouse, BigQuery     | Ambienti enterprise legacy          |
+
+
+In un contesto moderno con ClickHouse e dbt, l'approccio Kimball e quasi sempre la scelta giusta: le tabelle denormalizzate sono piu veloci da interrogare e piu semplici da comprendere per i team di marketing e prodotto.
+
+
+## 2. Star Schema: L'Architettura Fondamentale
+
+
+Lo **star schema** organizza i dati in due tipi di tabelle:
+
+- **Fact table** (tabelle dei fatti): contengono le metriche numeriche misurabili (revenue, click, impressions)
+- **Dimension table** (tabelle dimensionali): contengono gli attributi descrittivi (nome campagna, canale, data)
+
+### Diagramma Star Schema
+
+
+```plain text
+┌──────────────┐
+                    │  dim_date    │
+                    │──────────────│
+                    │ date_key     │
+                    │ full_date    │
+                    │ day_of_week  │
+                    │ month_name   │
+                    │ quarter      │
+                    │ is_weekend   │
+                    └──────┬───────┘
+                           │
+   ┌──────────────┐  ┌─────┴────────────────┐  ┌──────────────┐
+   │ dim_campaign │  │ fact_campaign_perf    │  │ dim_channel  │
+   │──────────────│  │─────────────────────  │  │──────────────│
+   │ campaign_key │──│ date_key             │──│ channel_key  │
+   │ campaign_name│  │ campaign_key         │  │ channel_name │
+   │ objective    │  │ channel_key          │  │ channel_type │
+   │ budget       │  │ geo_key              │  │ platform     │
+   │ start_date   │  │ impressions          │  │ cost_model   │
+   │ end_date     │  │ clicks               │  └──────────────┘
+   └──────────────┘  │ conversions          │
+                     │ spend                │  ┌──────────────┐
+                     │ revenue              │  │ dim_geo      │
+                     └─────┬───────────────  │  │──────────────│
+                           │                    │ geo_key      │
+                           └────────────────────│ country      │
+                                                │ region       │
+                                                │ city         │
+                                                └──────────────┘
+```
+
+
+La forma a stella emerge naturalmente: la fact table al centro e collegata a tutte le dimension table circostanti tramite chiavi surrogate.
+
+
+## 3. Star Schema vs Snowflake Schema
+
+
+Lo **snowflake schema** normalizza ulteriormente le dimension table, suddividendole in sotto-tabelle:
+
+
+```plain text
+Star Schema:                          Snowflake Schema:
+┌────────────┐  ┌────────┐           ┌────────────┐  ┌────────┐  ┌──────────┐
+│ dim_channel │──│  fact  │           │ dim_channel │──│  fact  │  │ dim_plat │
+│ channel_name│  │        │           │ channel_name│  │        │  │ platform │
+│ platform    │  │        │           │ platform_key│──│        │──│ vendor   │
+│ vendor      │  │        │           └────────────┘  │        │  └──────────┘
+└────────────┘  └────────┘                            └────────┘
+```
+
+
+| Caratteristica        | Star Schema            | Snowflake Schema     |
+| --------------------- | ---------------------- | -------------------- |
+| **Query performance** | Piu veloce (meno JOIN) | Piu lento (piu JOIN) |
+| **Complessita SQL**   | Piu semplice           | Piu complesso        |
+| **Storage**           | Ridondanza controllata | Meno ridondanza      |
+| **Manutenzione**      | Piu semplice           | Piu complessa        |
+| **ClickHouse**        | Fortemente consigliato | Sconsigliato         |
+
+
+## 4. Tipi di Fact Table
+
+
+Esistono tre tipi fondamentali di fact table, ognuno ottimizzato per un tipo diverso di analisi:
+
+
+### 4.1 Transactional Fact Table
+
+
+Registra un evento nel momento in cui accade. Ogni riga e un singolo evento atomico.
+
+
+```sql
+-- Ogni riga = un singolo evento di performance campagna
+CREATE TABLE fact_ad_events (
+    event_date       Date,
+    event_time       DateTime64(3),
+    campaign_id      UInt32,
+    channel_id       UInt16,
+    geo_id           UInt16,
+    event_type       Enum8('impression' = 1, 'click' = 2, 'conversion' = 3),
+    cost             Decimal(10, 4),
+    revenue          Decimal(10, 2)
+) ENGINE = MergeTree()
+ORDER BY (event_type, campaign_id, event_date)
+PARTITION BY toYYYYMM(event_date)
+TTL event_date + INTERVAL 25 MONTH;
+```
+
+
+### 4.2 Periodic Snapshot Fact Table
+
+
+Cattura lo stato a intervalli regolari. Utile per monitorare grandezze che cambiano nel tempo.
+
+
+```sql
+-- Snapshot giornaliero delle performance di campagna
+CREATE TABLE fact_campaign_daily_snapshot (
+    snapshot_date    Date,
+    campaign_id      UInt32,
+    channel_id       UInt16,
+    impressions_cumulative  UInt64,
+    clicks_cumulative       UInt64,
+    spend_cumulative        Decimal(12, 2),
+    conversions_cumulative  UInt32,
+    active_ads_count        UInt16,
+    quality_score           Float32
+) ENGINE = MergeTree()
+ORDER BY (campaign_id, snapshot_date)
+PARTITION BY toYYYYMM(snapshot_date);
+```
+
+
+### 4.3 Accumulating Snapshot Fact Table
+
+
+Traccia il ciclo di vita di un processo con milestone. Ogni riga viene aggiornata man mano che il processo avanza.
+
+
+```sql
+-- Ciclo di vita di un lead: dal primo contatto alla conversione
+CREATE TABLE fact_lead_lifecycle (
+    lead_id              UInt64,
+    campaign_id          UInt32,
+    first_touch_date     Date,
+    mql_date             Nullable(Date),
+    sql_date             Nullable(Date),
+    opportunity_date     Nullable(Date),
+    closed_won_date      Nullable(Date),
+    days_to_mql          Nullable(UInt16),
+    days_to_close        Nullable(UInt16),
+    deal_value           Nullable(Decimal(12, 2)),
+    current_stage        Enum8('new'=1, 'mql'=2, 'sql'=3, 'opportunity'=4, 'won'=5, 'lost'=6),
+    updated_at           DateTime DEFAULT now()
+) ENGINE = ReplacingMergeTree(updated_at)
+ORDER BY lead_id;
+```
+
+
+## 5. Dimension Table e Slowly Changing Dimensions (SCD)
+
+
+Le dimension table forniscono il contesto alle metriche. Ma le dimensioni cambiano nel tempo: una campagna puo cambiare budget, un utente puo cambiare piano. Come gestire questi cambiamenti?
+
+
+### SCD Type 1: Sovrascrittura
+
+
+Si sovrascrive il valore precedente. La storia viene persa.
+
+
+```sql
+-- SCD Type 1: ReplacingMergeTree sovrascrive il vecchio record
+CREATE TABLE dim_campaign (
+    campaign_id      UInt32,
+    campaign_name    String,
+    objective        LowCardinality(String),
+    budget           Decimal(10, 2),
+    status           LowCardinality(String),
+    updated_at       DateTime DEFAULT now()
+) ENGINE = ReplacingMergeTree(updated_at)
+ORDER BY campaign_id;
+
+-- Aggiornamento: inserisci la nuova versione
+INSERT INTO dim_campaign VALUES
+    (101, 'Summer Sale 2024', 'conversions', 15000.00, 'active', now());
+-- Dopo il merge, il vecchio record con campaign_id=101 viene rimosso
+```
+
+
+### SCD Type 2: Storicizzazione Completa
+
+
+Si mantiene la storia completa con date di validita.
+
+
+```sql
+CREATE TABLE dim_campaign_history (
+    campaign_key     UInt64,        -- Chiave surrogata (unica per versione)
+    campaign_id      UInt32,        -- Chiave naturale (business key)
+    campaign_name    String,
+    objective        LowCardinality(String),
+    budget           Decimal(10, 2),
+    status           LowCardinality(String),
+    valid_from       Date,
+    valid_to         Date DEFAULT '9999-12-31',
+    is_current       UInt8 DEFAULT 1
+) ENGINE = MergeTree()
+ORDER BY (campaign_id, valid_from);
+
+-- Per ottenere il valore corrente:
+SELECT * FROM dim_campaign_history
+WHERE campaign_id = 101 AND is_current = 1;
+
+-- Per ottenere il valore a una data specifica:
+SELECT * FROM dim_campaign_history
+WHERE campaign_id = 101
+  AND valid_from ≤ '2024-06-15'
+  AND valid_to > '2024-06-15';
+```
+
+
+### SCD Type 3: Colonna Precedente
+
+
+Si aggiunge una colonna per il valore precedente. Limitato a un solo livello di storia.
+
+
+```sql
+CREATE TABLE dim_campaign_type3 (
+    campaign_id          UInt32,
+    budget_current       Decimal(10, 2),
+    budget_previous      Nullable(Decimal(10, 2)),
+    budget_changed_date  Nullable(Date),
+    status_current       LowCardinality(String),
+    status_previous      Nullable(String),
+    updated_at           DateTime DEFAULT now()
+) ENGINE = ReplacingMergeTree(updated_at)
+ORDER BY campaign_id;
+```
+
+
+### Confronto dei Tipi SCD
+
+
+| Tipo       | Storia                | Complessita | Storage  | Caso d'uso                                              |
+| ---------- | --------------------- | ----------- | -------- | ------------------------------------------------------- |
+| **Type 1** | Nessuna               | Bassa       | Minimo   | Correzione errori, attributi non analitici              |
+| **Type 2** | Completa              | Alta        | Elevato  | Budget, status, qualsiasi attributo tracciato nel tempo |
+| **Type 3** | Limitata (1 versione) | Media       | Moderato | Confronto prima/dopo per attributi specifici            |
+
+
+## 6. Esempio Completo: Marketing Analytics Warehouse
+
+
+Modelliamo un data warehouse completo per il marketing analytics:
+
+
+### Fact Table Principale
+
+
+```sql
+CREATE TABLE fact_campaign_performance (
+    -- Chiavi dimensionali
+    event_date       Date,
+    campaign_id      UInt32,
+    channel_id       UInt16,
+    geo_id           UInt16,
+
+    -- Metriche di delivery
+    impressions      UInt64,
+    clicks           UInt32,
+    unique_reach     UInt32,
+
+    -- Metriche di costo
+    spend            Decimal(10, 4),
+    cpm              Decimal(8, 4),
+    cpc              Decimal(8, 4),
+
+    -- Metriche di conversione
+    conversions      UInt32,
+    conversion_value Decimal(12, 2),
+    assisted_conversions UInt32,
+
+    -- Metriche di engagement
+    video_views      UInt32,
+    video_completions UInt32,
+    likes            UInt32,
+    shares           UInt32
+) ENGINE = SummingMergeTree()
+ORDER BY (channel_id, campaign_id, event_date)
+PARTITION BY toYYYYMM(event_date)
+TTL event_date + INTERVAL 25 MONTH;
+```
+
+
+### Dimension Table
+
+
+```sql
+-- Dimensione Campagna
+CREATE TABLE dim_campaign (
+    campaign_id      UInt32,
+    campaign_name    String,
+    objective        LowCardinality(String),  -- awareness, consideration, conversion
+    budget_total     Decimal(10, 2),
+    budget_daily     Decimal(8, 2),
+    start_date       Date,
+    end_date         Nullable(Date),
+    team_owner       LowCardinality(String),
+    updated_at       DateTime DEFAULT now()
+) ENGINE = ReplacingMergeTree(updated_at)
+ORDER BY campaign_id;
+
+-- Dimensione Canale
+CREATE TABLE dim_channel (
+    channel_id       UInt16,
+    channel_name     LowCardinality(String),  -- Google Ads, Meta Ads, TikTok...
+    channel_type     LowCardinality(String),  -- paid_search, paid_social, display
+    platform         LowCardinality(String),
+    cost_model       Enum8('cpc' = 1, 'cpm' = 2, 'cpa' = 3, 'flat' = 4),
+    updated_at       DateTime DEFAULT now()
+) ENGINE = ReplacingMergeTree(updated_at)
+ORDER BY channel_id;
+
+-- Dimensione Data (generata)
+CREATE TABLE dim_date (
+    date_key         Date,
+    year             UInt16,
+    quarter          UInt8,
+    month            UInt8,
+    month_name       LowCardinality(String),
+    week_of_year     UInt8,
+    day_of_week      UInt8,
+    day_name         LowCardinality(String),
+    is_weekend       UInt8,
+    is_holiday       UInt8,
+    fiscal_quarter   LowCardinality(String)
+) ENGINE = MergeTree()
+ORDER BY date_key;
+```
+
+
+### Query Analitica di Esempio
+
+
+```sql
+-- Performance per canale e obiettivo, ultimi 30 giorni
+SELECT
+    dc.channel_name,
+    dca.objective,
+    SUM(f.impressions) AS total_impressions,
+    SUM(f.clicks) AS total_clicks,
+    ROUND(SUM(f.clicks) * 100.0 / SUM(f.impressions), 2) AS ctr_pct,
+    SUM(f.spend) AS total_spend,
+    SUM(f.conversions) AS total_conversions,
+    ROUND(SUM(f.spend) / NULLIF(SUM(f.conversions), 0), 2) AS cost_per_conversion
+FROM fact_campaign_performance f
+INNER JOIN dim_channel dc ON f.channel_id = dc.channel_id
+INNER JOIN dim_campaign dca ON f.campaign_id = dca.campaign_id
+WHERE f.event_date ≥ today() - 30
+GROUP BY dc.channel_name, dca.objective
+ORDER BY total_spend DESC;
+```
+
+
+## 7. Modellazione Specifica per ClickHouse
+
+
+ClickHouse ha caratteristiche uniche che influenzano le scelte di modellazione:
+
+
+### Uso di LowCardinality e Enum
+
+
+```sql
+-- Colonne con pochi valori distinti: LowCardinality
+channel_type  LowCardinality(String)   -- ~10 valori → dictionary encoding
+
+-- Colonne con valori fissi e noti: Enum
+status        Enum8('draft'=1, 'active'=2, 'paused'=3, 'completed'=4)
+-- Enum occupa 1 byte e valida automaticamente i valori in inserimento
+```
+
+
+### Strutture Nested
+
+
+Per dati semi-strutturati come le etichette delle campagne:
+
+
+```sql
+CREATE TABLE fact_events_nested (
+    event_date    Date,
+    user_id       UInt64,
+    event_name    LowCardinality(String),
+    -- Proprietà come struttura Nested
+    properties.key   Array(LowCardinality(String)),
+    properties.value Array(String)
+) ENGINE = MergeTree()
+ORDER BY (event_name, event_date, user_id);
+
+-- Query sui nested:
+SELECT event_name, COUNT(*)
+FROM fact_events_nested
+WHERE has(properties.key, 'utm_source')
+  AND properties.value[indexOf(properties.key, 'utm_source')] = 'google'
+GROUP BY event_name;
+```
+
+
+### Flat Table: La Denormalizzazione Estrema
+
+
+Per le dashboard ad alta frequenza, la strategia migliore in ClickHouse e la **flat table** che elimina completamente le JOIN:
+
+
+```sql
+-- Materialized View che denormalizza tutto al momento dell'inserimento
+CREATE MATERIALIZED VIEW mv_campaign_flat
+ENGINE = SummingMergeTree()
+ORDER BY (channel_name, campaign_name, event_date)
+AS SELECT
+    f.event_date,
+    dictGet('campaign_dict', 'campaign_name', f.campaign_id) AS campaign_name,
+    dictGet('campaign_dict', 'objective', f.campaign_id) AS objective,
+    dictGet('channel_dict', 'channel_name', f.channel_id) AS channel_name,
+    dictGet('channel_dict', 'channel_type', f.channel_id) AS channel_type,
+    f.impressions,
+    f.clicks,
+    f.spend,
+    f.conversions,
+    f.conversion_value
+FROM fact_campaign_performance f;
+```
+
+
+## 8. Checklist di Data Modeling
+
+
+## Esercizio Pratico
+
+
+Modella un data warehouse per un e-commerce che deve tracciare:
+
+1. Le performance delle campagne pubblicitarie su Google Ads, Meta e TikTok
+2. Il funnel di conversione dall'impression all'acquisto
+3. L'attribuzione multi-touch (first touch, last touch, linear)
+
+Per ciascun punto:
+
+- Definisci le fact table necessarie con i tipi di dato ClickHouse appropriati
+- Progetta le dimension table con la strategia SCD corretta
+- Scrivi una query analitica di esempio che risponda a una domanda di business
+
+_Un buon modello dati e invisibile: gli analisti trovano i dati dove se li aspettano, le query sono intuitive e le performance sono eccellenti. Un modello sbagliato si fa sentire ogni giorno sotto forma di query lente, risultati incoerenti e frustrazione del team._
+

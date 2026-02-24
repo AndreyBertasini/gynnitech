@@ -1,0 +1,289 @@
+---
+title: 'Kafka + ClickHouse: Pipeline Real-Time per Marketing Analytics'
+description: >-
+  ClickHouse Kafka engine, Materialized Views, error handling e pipeline
+  real-time per dati marketing.
+date: '2026-02-19T06:24:58.114Z'
+author: GynniTech Team
+notionId: 305ed540-0642-8150-9355-e69fcb297e72
+---
+
+import { Aside, Steps } from '@astrojs/starlight/components';
+
+
+# Kafka + ClickHouse: Pipeline Real-Time
+
+
+## Architettura della Pipeline
+
+
+```plain text
+┌──────────┐    ┌──────────┐    ┌──────────────┐    ┌──────────────┐
+│  Website │    │  Mobile  │    │   CRM/Ads    │    │   Backend    │
+│  Events  │    │   App    │    │   Platform   │    │   Services   │
+└────┬─────┘    └────┬─────┘    └──────┬───────┘    └──────┬───────┘
+     │               │                 │                    │
+     └───────────────┼─────────────────┼────────────────────┘
+                     │ Producers
+              ┌──────▼──────┐
+              │    KAFKA    │
+              │   Topics    │
+              │  ┌────────┐ │
+              │  │ clicks │ │
+              │  │ events │ │
+              │  │ convs  │ │
+              │  └────────┘ │
+              └──────┬──────┘
+                     │ Kafka Engine
+              ┌──────▼──────┐
+              │  ClickHouse │
+              │  ┌────────┐ │
+              │  │Kafka TB│─┼──→ Materialized View ──→ Target Table
+              │  └────────┘ │
+              └─────────────┘
+```
+
+
+## Step 1: Kafka Table (Coda di Lettura)
+
+
+La tabella Kafka in ClickHouse funziona come un consumer — legge i messaggi e li rende disponibili.
+
+
+```sql
+CREATE TABLE kafka_marketing_events (
+    event_id String,
+    event_time DateTime64(3),
+    event_type LowCardinality(String),
+    user_id UInt64,
+    session_id String,
+    campaign_id UInt32,
+    channel LowCardinality(String),
+    page_url String,
+    referrer String,
+    revenue Decimal(10, 2),
+    properties String  -- JSON extra
+) ENGINE = Kafka()
+SETTINGS
+    kafka_broker_list = 'kafka-1:9092,kafka-2:9092,kafka-3:9092',
+    kafka_topic_list = 'marketing.events',
+    kafka_group_name = 'clickhouse_marketing_consumer',
+    kafka_format = 'JSONEachRow',
+    kafka_num_consumers = 3,
+    kafka_max_block_size = 65536,
+    kafka_skip_broken_messages = 10;
+```
+
+
+### Parametri Chiave
+
+
+| Parametro                    | Valore Consigliato  | Descrizione                 |
+| ---------------------------- | ------------------- | --------------------------- |
+| `kafka_num_consumers`        | N. partizioni topic | Parallelismo di consumo     |
+| `kafka_max_block_size`       | 65536               | Messaggi per batch          |
+| `kafka_skip_broken_messages` | 10                  | Tollera messaggi malformati |
+| `kafka_poll_timeout_ms`      | 5000                | Timeout polling             |
+| `kafka_flush_interval_ms`    | 7500                | Intervallo flush            |
+
+
+## Step 2: Target Table (Destinazione)
+
+
+```sql
+CREATE TABLE marketing_events (
+    event_id String,
+    event_date Date DEFAULT toDate(event_time),
+    event_time DateTime64(3),
+    event_type LowCardinality(String),
+    user_id UInt64,
+    session_id String,
+    campaign_id UInt32,
+    channel LowCardinality(String),
+    page_url String,
+    referrer String,
+    revenue Decimal(10, 2),
+    properties String,
+    -- Colonne calcolate
+    hour UInt8 DEFAULT toHour(event_time),
+    day_of_week UInt8 DEFAULT toDayOfWeek(event_time)
+) ENGINE = MergeTree()
+PARTITION BY toYYYYMM(event_date)
+ORDER BY (campaign_id, channel, user_id, event_time)
+TTL event_date + INTERVAL 6 MONTH
+SETTINGS index_granularity = 8192;
+```
+
+
+## Step 3: Materialized View (Il Ponte)
+
+
+La Materialized View collega automaticamente Kafka alla tabella target:
+
+
+```sql
+CREATE MATERIALIZED VIEW mv_kafka_to_events
+TO marketing_events
+AS SELECT
+    event_id,
+    toDate(event_time) AS event_date,
+    event_time,
+    event_type,
+    user_id,
+    session_id,
+    campaign_id,
+    channel,
+    page_url,
+    referrer,
+    revenue,
+    properties,
+    toHour(event_time) AS hour,
+    toDayOfWeek(event_time) AS day_of_week
+FROM kafka_marketing_events;
+```
+
+
+## Materialized View per Aggregazioni Pre-calcolate
+
+
+Puoi creare MV aggiuntive che aggregano i dati in tempo reale:
+
+
+```sql
+-- Aggregazione oraria per campaign
+CREATE TABLE campaign_hourly_agg (
+    event_date Date,
+    hour UInt8,
+    campaign_id UInt32,
+    channel LowCardinality(String),
+    clicks AggregateFunction(count, UInt64),
+    unique_users AggregateFunction(uniq, UInt64),
+    total_revenue AggregateFunction(sum, Decimal(10, 2))
+) ENGINE = AggregatingMergeTree()
+PARTITION BY toYYYYMM(event_date)
+ORDER BY (event_date, hour, campaign_id, channel);
+
+CREATE MATERIALIZED VIEW mv_campaign_hourly
+TO campaign_hourly_agg
+AS SELECT
+    toDate(event_time) AS event_date,
+    toHour(event_time) AS hour,
+    campaign_id,
+    channel,
+    countState() AS clicks,
+    uniqState(user_id) AS unique_users,
+    sumState(revenue) AS total_revenue
+FROM kafka_marketing_events
+WHERE event_type = 'click'
+GROUP BY event_date, hour, campaign_id, channel;
+```
+
+
+## Error Handling: Dead Letter Queue
+
+
+Gestisci messaggi problematici con una DLQ:
+
+
+```sql
+-- Tabella per messaggi falliti
+CREATE TABLE dead_letter_queue (
+    received_at DateTime DEFAULT now(),
+    topic String,
+    raw_message String,
+    error_reason String
+) ENGINE = MergeTree()
+ORDER BY received_at
+TTL received_at + INTERVAL 30 DAY;
+```
+
+
+### Strategia di Retry
+
+
+```plain text
+Messaggio Kafka
+     │
+     ▼
+  Parsable?
+  ├── SÌ → Target Table
+  └── NO → kafka_skip_broken_messages
+            └── Se > soglia → Alert
+```
+
+
+## Monitoring della Pipeline
+
+
+### Query di Monitoraggio Essenziali
+
+
+```sql
+-- Consumer lag: confronta timestamp ultimo evento con ora attuale
+SELECT
+    max(event_time) AS last_event,
+    now() AS current_time,
+    dateDiff('second', max(event_time), now()) AS lag_seconds
+FROM marketing_events
+WHERE event_date = today();
+
+-- Volume per minuto (dovrebbe essere costante)
+SELECT
+    toStartOfMinute(event_time) AS minute,
+    count() AS events_per_minute
+FROM marketing_events
+WHERE event_time ≥ now() - INTERVAL 1 HOUR
+GROUP BY minute
+ORDER BY minute;
+
+-- Distribuzione per tipo di evento
+SELECT
+    event_type,
+    count() AS total,
+    round(count() * 100.0 / sum(count()) OVER (), 2) AS percentage
+FROM marketing_events
+WHERE event_date = today()
+GROUP BY event_type
+ORDER BY total DESC;
+```
+
+
+### Metriche da Monitorare
+
+
+| Metrica         | Soglia Alert       | Cosa Indica                     |
+| --------------- | ------------------ | ------------------------------- |
+| Consumer lag    | > 60 secondi       | ClickHouse non tiene il passo   |
+| Events/minuto   | -50% dalla media   | Problema lato producer o Kafka  |
+| Skip messages   | > 100/ora          | Schema mismatch o dati corrotti |
+| Partition count | Mismatch con topic | Consumer non allineato          |
+
+
+## Performance Tuning
+
+
+```sql
+-- Ottimizza il batch size per throughput alto
+ALTER TABLE kafka_marketing_events
+MODIFY SETTING kafka_max_block_size = 131072;
+
+-- Aumenta i consumer se ci sono molte partizioni
+ALTER TABLE kafka_marketing_events
+MODIFY SETTING kafka_num_consumers = 6;
+```
+
+
+### Best Practices
+
+
+| Pratica                                    | Beneficio                      |
+| ------------------------------------------ | ------------------------------ |
+| `kafka_num_consumers` = n. partizioni      | Massimo parallelismo           |
+| Target table con `PARTITION BY toYYYYMM()` | Query range efficienti         |
+| AggregatingMergeTree per metriche          | Query real-time sub-secondo    |
+| TTL sulle tabelle target                   | Pulizia automatica dati vecchi |
+| `kafka_skip_broken_messages` > 0           | Pipeline resiliente            |
+
+
+## Pipeline Completa: Checklist
+

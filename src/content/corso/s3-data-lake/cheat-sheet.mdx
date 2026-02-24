@@ -1,0 +1,286 @@
+---
+title: 'Cheat Sheet — S3 & Data Lake Architecture'
+description: >-
+  Scheda riassuntiva rapida: comandi S3, query ClickHouse, formati dati,
+  partitioning, S3Queue, costi e pattern architetturali.
+order: 13
+tags: ['cheat-sheet', 'riassunto', 'revisione', 'aws', 'datalake']
+date: '2026-02-17'
+author: GynniTech Team
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+
+# Cheat Sheet — S3 & Data Lake Architecture
+
+
+Riferimento rapido per tutti i concetti del modulo. Tieni questa pagina aperta mentre lavori.
+
+
+## Comandi AWS CLI Essenziali
+
+
+```bash
+# Listare file
+aws s3 ls s3://bucket/prefix/ --recursive --human-readable
+
+# Upload
+aws s3 cp file.parquet s3://bucket/prefix/
+
+# Download
+aws s3 cp s3://bucket/prefix/file.parquet ./
+
+# Sync (solo file nuovi/modificati)
+aws s3 sync ./local/ s3://bucket/prefix/ --exclude "*.tmp"
+
+# Dimensione totale
+aws s3 ls s3://bucket/prefix/ --recursive --summarize | tail -2
+
+# Copiare con cambio storage class
+aws s3 cp s3://bucket/raw/ s3://bucket/archive/ --recursive --storage-class GLACIER
+```
+
+
+## ClickHouse: Query S3
+
+
+```sql
+-- Leggere Parquet da S3
+SELECT * FROM s3('https://s3.region.amazonaws.com/bucket/path/*.parquet', 'Parquet');
+
+-- Con credenziali
+SELECT * FROM s3('https://.../*.parquet', 'KEY', 'SECRET', 'Parquet');
+
+-- Descrivere lo schema
+DESCRIBE TABLE s3('https://.../*.parquet', 'Parquet');
+
+-- Colonne virtuali
+SELECT _file, _size, _time, count() FROM s3('...', 'Parquet') GROUP BY ALL;
+
+-- Esportare su S3
+INSERT INTO FUNCTION s3('https://.../output.parquet', 'KEY', 'SECRET', 'Parquet')
+SELECT * FROM my_table;
+
+-- Esportare partizionato
+INSERT INTO FUNCTION s3('https://.../month={_partition_id}/data.parquet', 'Parquet')
+PARTITION BY toYYYYMM(event_timestamp)
+SELECT * FROM my_table;
+```
+
+
+## Glob Pattern
+
+
+```sql
+-- Singolo giorno
+.../year=2024/month=01/day=15/*.parquet
+
+-- Range di giorni
+.../year=2024/month=01/day={10..17}/*.parquet
+
+-- Mesi specifici
+.../year=2024/month={01,02,03}/**/*.parquet
+
+-- Intero anno (ricorsivo)
+.../year=2024/**/*.parquet
+
+-- Singolo carattere wildcard
+.../year=2024/month=0?/**/*.parquet
+```
+
+
+## Formati Dati — Quando Usare Quale
+
+
+| Zona Lake | Formato            | Compressione | Perche'                        |
+| --------- | ------------------ | ------------ | ------------------------------ |
+| Raw       | JSON.gz / CSV.gz   | Gzip         | Formato nativo API             |
+| Cleaned   | Parquet            | ZSTD         | Colonnare, 10-20x compressione |
+| Curated   | Parquet            | ZSTD         | Standard analytics             |
+| Streaming | Avro               | Snappy       | Schema registry, Kafka         |
+| CH ↔ CH  | Native             | LZ4          | 2.4s vs 4.9s Parquet           |
+
+
+## Compressione — Quick Reference
+
+
+| Algoritmo | Ratio | Velocita' | Caso d'uso                    |
+| --------- | ----- | --------- | ----------------------------- |
+| LZ4       | 2-3x  | Molto veloce | Default ClickHouse          |
+| Snappy    | 2-3x  | Veloce    | Default Parquet               |
+| ZSTD      | 4-8x  | Media     | Miglior rapporto (consigliato)|
+| Gzip      | 4-7x  | Lenta     | Compatibilita'                |
+
+
+## Partitioning — Regole
+
+
+```plain text
+1. Cardinalita' bassa (< 1000 valori unici)
+2. Distribuzione uniforme tra partizioni
+3. Gerarchia: anno → mese → giorno (dal generale allo specifico)
+4. Massimo 2-3 livelli
+5. File target: 128-256 MB (Parquet + ZSTD)
+6. Se > 100 file piccoli per partizione → compaction
+```
+
+
+### Chiavi per Marketing Data
+
+
+| Dati               | Chiave primaria | Chiave secondaria |
+| ------------------ | --------------- | ----------------- |
+| Eventi web (GA4)   | year/month/day  | -                 |
+| Campagne ads       | year/month      | source            |
+| Email marketing    | year/month      | event_type        |
+| CRM contacts       | - (snapshot)    | -                 |
+| Attribution        | year/month      | channel           |
+
+
+## S3Queue — Setup Rapido
+
+
+```sql
+-- 1. Sorgente (S3Queue)
+CREATE TABLE my_queue (...)
+ENGINE = S3Queue('https://.../raw/events/*.parquet', 'Parquet')
+SETTINGS
+    mode = 'ordered',                          -- o 'unordered'
+    after_processing = 'move',                 -- keep/delete/move/tag
+    after_processing_move_prefix = 'processed/',
+    keeper_path = '/clickhouse/s3queue/UNICO', -- DEVE essere unico!
+    loading_retries = 3;
+
+-- 2. Destinazione (MergeTree)
+CREATE TABLE my_table (...)
+ENGINE = ReplacingMergeTree()
+PARTITION BY toYYYYMM(event_timestamp)
+ORDER BY (event_date, event_name, event_id);
+
+-- 3. Collegamento (Materialized View)
+CREATE MATERIALIZED VIEW my_consumer TO my_table AS
+SELECT * FROM my_queue;
+```
+
+
+### Ordered vs Unordered
+
+
+| Criterio             | Ordered           | Unordered        |
+| -------------------- | ----------------- | ---------------- |
+| Nomi file            | Date-based        | Casuali (UUID)   |
+| ZK overhead          | Basso (1 nodo)    | Alto (1/file)    |
+| File fuori ordine    | Ignorati!         | OK               |
+| Parallelismo nativo  | Limitato          | Multi-thread     |
+
+
+## Storage Classes e Costi
+
+
+```plain text
+Classe               $/GB/mese    Latenza       Per
+─────────────────────────────────────────────────────
+S3 Standard          $0.023       ms            Dati attivi
+S3 Infrequent Access $0.0125      ms            < 1 accesso/mese
+S3 Glacier Instant   $0.004       ms            Archivio immediato
+S3 Glacier Flexible  $0.0036      1-5 min       Archivio
+S3 Glacier Deep      $0.00099     12-48 ore     Archivio lungo termine
+```
+
+
+## Tiered Storage ClickHouse
+
+
+```sql
+CREATE TABLE events (...)
+ENGINE = MergeTree
+PARTITION BY toYYYYMM(event_timestamp)
+ORDER BY (event_timestamp, user_id)
+TTL event_timestamp + INTERVAL 30 DAY TO VOLUME 'cold'
+SETTINGS storage_policy = 'tiered';
+```
+
+
+## Aggregazioni Incrementali
+
+
+```sql
+-- Tabella aggregata
+CREATE TABLE events_hourly (
+    event_hour DateTime,
+    event_name String,
+    event_count UInt64,
+    unique_users_state AggregateFunction(uniq, String),
+    revenue_state AggregateFunction(sum, Nullable(Decimal(10, 2)))
+) ENGINE = AggregatingMergeTree
+ORDER BY (event_hour, event_name);
+
+-- Materialized View (auto-aggregazione)
+CREATE MATERIALIZED VIEW events_hourly_mv TO events_hourly AS
+SELECT
+    toStartOfHour(event_timestamp) AS event_hour,
+    event_name,
+    count() AS event_count,
+    uniqState(user_id) AS unique_users_state,
+    sumState(revenue) AS revenue_state
+FROM events
+GROUP BY event_hour, event_name;
+
+-- Query (finalizza le aggregazioni)
+SELECT event_hour, event_name,
+    sum(event_count) AS events,
+    uniqMerge(unique_users_state) AS users,
+    sumMerge(revenue_state) AS revenue
+FROM events_hourly
+GROUP BY event_hour, event_name;
+```
+
+
+## Monitoring
+
+
+```sql
+-- File processati da S3Queue
+SELECT file_name, status, rows_processed, exception
+FROM system.s3queue_log
+WHERE table = 'my_queue'
+ORDER BY event_time DESC LIMIT 20;
+
+-- Lag della pipeline
+SELECT dateDiff('minute', max(event_timestamp), now()) AS lag_min
+FROM events;
+
+-- Dimensione partizioni
+SELECT partition, formatReadableSize(sum(bytes_on_disk)) AS size, sum(rows) AS rows
+FROM system.parts WHERE table = 'events' AND active
+GROUP BY partition ORDER BY partition DESC;
+```
+
+
+## Costi — Formule Rapide
+
+
+```plain text
+Storage mensile = GB × $/GB/mese (vedi tabella classes)
+GET requests   = num_file_letti × $0.0004/1000
+LIST requests  = num_prefix_listati × $0.005/1000
+Data transfer  = $0 (stessa regione) / $0.02/GB (altra regione)
+
+Risparmio Parquet vs CSV:  10-20x compressione
+Risparmio glob specifico:  50-100x meno LIST
+Risparmio lifecycle rules: 60-80% storage
+```
+
+
+## Pattern Decisionale
+
+
+```plain text
+Report settimanali        → s3() diretta
+Dashboard ogni ora        → Refreshable MV
+Dashboard real-time       → S3Queue + MV chain
+Real-time + storico       → Lambda Architecture
+CRM con update/delete     → CDC + CollapsingMergeTree
+Multi-sorgente + dedup    → ReplacingMergeTree + S3Queue
+```

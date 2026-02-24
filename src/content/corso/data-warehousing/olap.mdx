@@ -1,0 +1,411 @@
+---
+title: "OLAP: Strategia e Architettura dei Dati Analitici"
+description: "Row-oriented vs Column-oriented, modellazione dimensionale, star schema e le fondamenta teoriche del data warehousing moderno."
+module: "Modulo 3: Infrastructure & Engineering"
+order: 3
+prerequisites: ["infrastructure-ops/monitoring-observability"]
+category: "Fondamenti"
+---
+## OLAP: Strategia e Architettura dei Dati Analitici
+
+> **Consiglio:**
+> Questa lezione è il fondamento teorico di tutto il modulo Data Warehousing. Prima di scrivere query SQL o configurare ClickHouse, devi capire *perché* i database analitici funzionano in modo radicalmente diverso da quelli transazionali. Questa comprensione trasformerà il modo in cui progetti tabelle, scrivi query e ragioni sui costi.
+
+## Due Mondi, Due Database
+
+Esiste una divisione fondamentale nel mondo dei database che determina ogni decisione architetturale successiva:
+
+- **OLTP (Online Transaction Processing)**: Database ottimizzati per *scrivere* dati — inserire un ordine, aggiornare un profilo, registrare un pagamento. PostgreSQL, MySQL, MongoDB sono database OLTP.
+
+- **OLAP (Online Analytical Processing)**: Database ottimizzati per *leggere* dati — calcolare il fatturato dell'ultimo trimestre, analizzare il comportamento degli utenti, confrontare le performance dei canali marketing. ClickHouse, BigQuery, Snowflake, Redshift sono database OLAP.
+
+Questa distinzione non è un dettaglio tecnico — è una scelta architetturale che influenza performance, costi, e ciò che puoi fare con i dati.
+
+### Perché Non Usare Un Solo Database?
+
+La domanda è legittima: perché non usare PostgreSQL per tutto? La risposta sta nella fisica dello storage e nelle leggi fondamentali dell'informatica.
+
+Un database deve scegliere tra due ottimizzazioni contrapposte:
+
+1. **Ottimizzare per la scrittura**: I dati vengono scritti velocemente, riga per riga, in ordine di arrivo. Perfetto per le transazioni (OLTP).
+2. **Ottimizzare per la lettura analitica**: I dati vengono organizzati per colonna, compressi, e pre-aggregati. Perfetto per le analisi (OLAP).
+
+Non puoi avere entrambi al massimo livello. È un trade-off fondamentale, come la velocità vs il consumo in un'automobile.
+
+## Row-Oriented vs Column-Oriented
+
+Questa è la distinzione tecnica più importante del data warehousing.
+
+### Database Row-Oriented (OLTP)
+
+In un database row-oriented, i dati sono archiviati **riga per riga** sul disco:
+
+```
+Disco: [UserID=1, Name="Mario", Country="IT", Revenue=100]
+       [UserID=2, Name="Luigi", Country="DE", Revenue=250]
+       [UserID=3, Name="Anna",  Country="IT", Revenue=175]
+```
+
+**Vantaggi:**
+- Inserire una nuova riga è velocissimo (si appende alla fine)
+- Leggere una riga completa è efficiente (tutti i campi sono contigui)
+- Aggiornare un campo di una riga è rapido
+
+**Svantaggi:**
+- Per calcolare `SUM(Revenue)`, il database deve leggere TUTTE le righe, incluse le colonne `UserID`, `Name`, `Country` che non servono. Su una tabella con 50 colonne, leggi 50x più dati del necessario.
+
+### Database Column-Oriented (OLAP)
+
+In un database column-oriented, i dati sono archiviati **colonna per colonna** sul disco:
+
+```
+Disco: [UserID: 1, 2, 3]
+       [Name: "Mario", "Luigi", "Anna"]
+       [Country: "IT", "DE", "IT"]
+       [Revenue: 100, 250, 175]
+```
+
+**Vantaggi:**
+- Per calcolare `SUM(Revenue)`, il database legge SOLO la colonna Revenue. Su una tabella con 50 colonne, leggi 50x meno dati.
+- La compressione è molto più efficace: valori simili nella stessa colonna (es. "IT", "IT", "IT") comprimono benissimo.
+- Le query analitiche (aggregazioni, filtri, group by) sono ordini di grandezza più veloci.
+
+**Svantaggi:**
+- Inserire una riga richiede di scrivere in N file diversi (uno per colonna)
+- Leggere una singola riga completa è meno efficiente
+- Gli UPDATE sono costosi o impossibili
+
+### Impatto Pratico sui Numeri
+
+Per dare un'idea concreta, consideriamo una tabella con 1 miliardo di righe e 50 colonne:
+
+| Operazione | PostgreSQL (Row) | ClickHouse (Column) |
+|-----------|-----------------|-------------------|
+| `SELECT * FROM t WHERE id = 123` | **1 ms** | 100 ms |
+| `SELECT SUM(revenue) FROM t` | 45 minuti | **0.5 secondi** |
+| `SELECT country, COUNT(*) FROM t GROUP BY country` | 30 minuti | **0.3 secondi** |
+| `INSERT INTO t VALUES (...)` | **0.1 ms** | 5 ms (batch consigliato) |
+| Spazio su disco | 500 GB | **50 GB** (compressione 10x) |
+
+La differenza per le query analitiche è di **ordini di grandezza** — non percentuali, ma 1000x-5000x più veloce. Questo è il motivo per cui il data warehousing esiste come disciplina separata.
+
+> **Attenzione:**
+> Non usare mai un database OLAP come database primario della tua applicazione. ClickHouse è terribile per aggiornare un singolo record o gestire transazioni ACID. Usa PostgreSQL per l'applicazione e ClickHouse per l'analisi.
+
+## La Compressione: Il Superpotere del Colonnare
+
+La compressione è uno dei vantaggi più sottovalutati dei database colonnari. Quando i dati di una stessa colonna sono contigui sul disco, algoritmi di compressione possono ridurre lo spazio di 10-100x.
+
+### Perché Funziona Così Bene
+
+Consideriamo la colonna `Country` con 1 miliardo di righe:
+
+```
+Row-oriented: "IT", "Mario", 100, "DE", "Luigi", 250, "IT", "Anna", 175...
+→ Valori misti, poca ripetizione → compressione ~2x
+
+Column-oriented: "IT", "IT", "IT", "DE", "IT", "FR", "IT", "IT", "IT"...
+→ Valori molto simili, alta ripetizione → compressione ~50-100x
+```
+
+ClickHouse supporta diversi algoritmi di compressione per colonna:
+
+| Algoritmo | Caso d'uso | Ratio tipico |
+|-----------|-----------|-------------|
+| **LZ4** (default) | General purpose, veloce | 3-5x |
+| **ZSTD** | Migliore compressione, un po' più lento | 5-10x |
+| **Delta** | Valori incrementali (timestamp, ID) | 10-50x |
+| **DoubleDelta** | Timestamp con intervalli regolari | 50-100x |
+| **Gorilla** | Valori floating point che cambiano poco | 10-30x |
+| **T64** | Interi con range limitato | 5-20x |
+
+La scelta del codec giusto per ogni colonna può fare la differenza tra un database da 100 GB e uno da 5 GB, con impatto diretto sui costi di storage e sulla velocità delle query (meno dati da leggere = query più veloci).
+
+## Modellazione Dimensionale
+
+Una volta capito *dove* archiviare i dati (database colonnare), la domanda successiva è *come* organizzarli. La risposta è la **modellazione dimensionale**, un approccio inventato da Ralph Kimball negli anni '90 che resta il gold standard per il data warehousing.
+
+### Il Concetto Base: Fatti e Dimensioni
+
+In un modello dimensionale, i dati si dividono in due categorie:
+
+**Fatti (Facts):** Sono gli eventi misurabili del business — le cose che succedono e che vuoi contare, sommare, mediare. Ogni riga di una fact table rappresenta un evento.
+
+Esempi:
+- Un ordine completato (con revenue, quantità, sconto)
+- Una sessione web (con durata, pagine viste, bounce)
+- Un pagamento ricevuto (con importo, valuta, metodo)
+
+**Dimensioni (Dimensions):** Sono gli attributi descrittivi che danno contesto ai fatti — le risposte alle domande "chi?", "cosa?", "dove?", "quando?".
+
+Esempi:
+- L'utente (nome, email, piano, data registrazione)
+- Il prodotto (nome, categoria, prezzo, SKU)
+- Il tempo (giorno, settimana, mese, trimestre, anno)
+- La geografia (paese, regione, città)
+
+### Star Schema
+
+Lo **Star Schema** è il modello dimensionale più comune. Si chiama "stella" perché la fact table è al centro, collegata a molteplici dimension tables come i raggi di una stella.
+
+```
+                    ┌──────────────┐
+                    │  dim_users   │
+                    │──────────────│
+                    │ user_id (PK) │
+                    │ name         │
+                    │ email        │
+                    │ plan         │
+                    │ signup_date  │
+                    └──────┬───────┘
+                           │
+┌──────────────┐   ┌──────┴───────────┐   ┌──────────────┐
+│ dim_products │   │   fct_orders     │   │  dim_time    │
+│──────────────│   │──────────────────│   │──────────────│
+│ product_id   │───│ order_id         │───│ date_key     │
+│ name         │   │ user_id (FK)     │   │ day          │
+│ category     │   │ product_id (FK)  │   │ week         │
+│ price        │   │ date_key (FK)    │   │ month        │
+│ sku          │   │ channel_id (FK)  │   │ quarter      │
+└──────────────┘   │ revenue          │   │ year         │
+                   │ quantity         │   │ is_weekend   │
+                   │ discount         │   └──────────────┘
+                   └──────┬───────────┘
+                          │
+                   ┌──────┴───────┐
+                   │ dim_channels │
+                   │──────────────│
+                   │ channel_id   │
+                   │ channel_name │
+                   │ medium       │
+                   │ source       │
+                   └──────────────┘
+```
+
+### Implementazione in SQL
+
+```sql
+-- Dimension: Utenti
+CREATE TABLE dim_users (
+    user_id      String,
+    name         String,
+    email        String,
+    plan         LowCardinality(String),
+    signup_date  Date,
+    country      LowCardinality(String)
+) ENGINE = ReplacingMergeTree()
+ORDER BY user_id;
+
+-- Dimension: Prodotti
+CREATE TABLE dim_products (
+    product_id   String,
+    name         String,
+    category     LowCardinality(String),
+    price        Decimal(10, 2),
+    sku          String
+) ENGINE = ReplacingMergeTree()
+ORDER BY product_id;
+
+-- Fact: Ordini
+CREATE TABLE fct_orders (
+    order_id     String,
+    user_id      String,
+    product_id   String,
+    order_date   Date,
+    revenue      Decimal(10, 2),
+    quantity     UInt16,
+    discount     Decimal(5, 2),
+    channel      LowCardinality(String)
+) ENGINE = MergeTree()
+ORDER BY (order_date, user_id)
+PARTITION BY toYYYYMM(order_date);
+```
+
+### Query Analitiche con lo Star Schema
+
+Il potere dello star schema è che le query analitiche diventano intuitive:
+
+```sql
+-- Revenue per canale e mese
+SELECT
+    toStartOfMonth(f.order_date) AS month,
+    f.channel,
+    SUM(f.revenue) AS total_revenue,
+    COUNT(DISTINCT f.user_id) AS unique_customers,
+    SUM(f.revenue) / COUNT(DISTINCT f.user_id) AS revenue_per_customer
+FROM fct_orders f
+WHERE f.order_date ≥ '2024-01-01'
+GROUP BY month, f.channel
+ORDER BY month, total_revenue DESC;
+
+-- Top prodotti per categoria con info dimensionale
+SELECT
+    p.category,
+    p.name AS product_name,
+    COUNT(*) AS orders,
+    SUM(f.revenue) AS total_revenue,
+    AVG(f.revenue) AS avg_order_value
+FROM fct_orders f
+JOIN dim_products p ON f.product_id = p.product_id
+WHERE f.order_date ≥ '2024-01-01'
+GROUP BY p.category, p.name
+ORDER BY total_revenue DESC
+LIMIT 20;
+```
+
+### Denormalizzazione: Quando Rompere le Regole
+
+Nel mondo OLTP, la normalizzazione è sacra — si eliminano le ridondanze per mantenere i dati consistenti. Nel mondo OLAP, la **denormalizzazione** è spesso preferibile.
+
+Perché? Le JOIN sono costose nei database colonnari, specialmente su miliardi di righe. Spesso conviene duplicare i dati nelle fact table:
+
+```sql
+-- Denormalizzato: niente JOIN necessarie per le query più comuni
+CREATE TABLE fct_orders_denormalized (
+    order_id       String,
+    order_date     Date,
+    -- Dati dell'ordine
+    revenue        Decimal(10, 2),
+    quantity       UInt16,
+    -- Dati utente (denormalizzati)
+    user_id        String,
+    user_plan      LowCardinality(String),
+    user_country   LowCardinality(String),
+    -- Dati prodotto (denormalizzati)
+    product_id     String,
+    product_name   String,
+    product_category LowCardinality(String),
+    -- Dati canale (denormalizzati)
+    channel        LowCardinality(String),
+    medium         LowCardinality(String)
+) ENGINE = MergeTree()
+ORDER BY (order_date, user_country, product_category)
+PARTITION BY toYYYYMM(order_date);
+```
+
+La query diventa semplicissima e velocissima:
+
+```sql
+-- Stessa analisi, zero JOIN, 10x più veloce
+SELECT
+    toStartOfMonth(order_date) AS month,
+    channel,
+    SUM(revenue) AS total_revenue,
+    COUNT(DISTINCT user_id) AS unique_customers
+FROM fct_orders_denormalized
+WHERE order_date ≥ '2024-01-01'
+GROUP BY month, channel
+ORDER BY month, total_revenue DESC;
+```
+
+> **Note:**
+> La regola nel mondo OLAP: **denormalizza per le query più frequenti**, mantieni le tabelle normalizzate per i casi d'uso meno comuni. Con dbt, puoi avere entrambe le versioni: i modelli staging normalizzati e i modelli mart denormalizzati.
+
+## Il Data Warehouse Layer Cake
+
+Un data warehouse moderno è organizzato in **layer** (strati), ognuno con un ruolo preciso:
+
+```
+┌─────────────────────────────────────────┐
+│           CONSUMPTION LAYER              │  ← Dashboard, Report, ML
+│     (marts: dim_*, fct_*, agg_*)        │
+├─────────────────────────────────────────┤
+│          BUSINESS LOGIC LAYER            │  ← Regole di business, join
+│  (intermediate: int_user_journey, ...)  │
+├─────────────────────────────────────────┤
+│           STAGING LAYER                  │  ← Pulizia, tipizzazione
+│    (staging: stg_events, stg_users)     │
+├─────────────────────────────────────────┤
+│              RAW LAYER                   │  ← Dati grezzi, immutabili
+│  (raw: rudderstack_events, stripe_*)    │
+└─────────────────────────────────────────┘
+```
+
+### Raw Layer
+
+- I dati arrivano dalle sorgenti esattamente come sono
+- Mai modificare o cancellare dati raw
+- Sono la "source of truth" — se qualcosa va storto nei layer superiori, puoi sempre ripartire da qui
+
+### Staging Layer
+
+- Pulizia: rimozione duplicati, gestione nulli, conversione tipi
+- Rinominazione colonne per coerenza (snake_case, naming convention)
+- Una tabella staging per ogni sorgente
+
+### Business Logic Layer (Intermediate)
+
+- Join tra sorgenti diverse
+- Calcoli di business (es. LTV, cohort assignment)
+- Logica che non appartiene a un singolo mart
+
+### Consumption Layer (Marts)
+
+- Tabelle pronte per l'uso finale
+- Ottimizzate per le query più frequenti
+- Denormalizzate dove necessario per la performance
+- Documentate con descrizioni per ogni colonna
+
+## OLAP Cubes e Operazioni
+
+Il termine "OLAP" originariamente si riferiva a **cubi multidimensionali** — strutture dati pre-aggregate che permettevano analisi interattive. Oggi i cubi sono meno comuni (i database colonnari sono abbastanza veloci per le query ad-hoc), ma le operazioni concettuali restano rilevanti:
+
+### Le 4 Operazioni OLAP
+
+1. **Slice**: Tagliare il cubo lungo una dimensione. *"Mostrami solo i dati dell'Italia."*
+
+```sql
+SELECT * FROM fct_orders WHERE user_country = 'IT';
+```
+
+2. **Dice**: Tagliare lungo multiple dimensioni. *"Mostrami i dati dell'Italia, solo prodotti Premium, nel Q1 2024."*
+
+```sql
+SELECT * FROM fct_orders
+WHERE user_country = 'IT'
+  AND product_category = 'Premium'
+  AND order_date BETWEEN '2024-01-01' AND '2024-03-31';
+```
+
+3. **Roll-up**: Aggregare verso un livello di granularità più alto. *"Dai ordini giornalieri, mostrami il totale mensile."*
+
+```sql
+SELECT toStartOfMonth(order_date), SUM(revenue)
+FROM fct_orders GROUP BY 1;
+```
+
+4. **Drill-down**: Scendere a un livello di dettaglio più fine. *"Dai totali mensili, mostrami il dettaglio giornaliero di marzo."*
+
+```sql
+SELECT order_date, SUM(revenue)
+FROM fct_orders
+WHERE order_date BETWEEN '2024-03-01' AND '2024-03-31'
+GROUP BY order_date;
+```
+
+## Scegliere il Database OLAP Giusto
+
+| Database | Tipo | Best For | Pricing |
+|----------|------|----------|---------|
+| **ClickHouse** | Self-hosted / Cloud | Alta performance, costi contenuti, real-time | Gratuito (self-hosted) / $0.10/GB/mese (cloud) |
+| **BigQuery** | Serverless (Google) | Team Google-first, zero ops | Pay-per-query + storage |
+| **Snowflake** | Cloud multi-cloud | Enterprise, governance, data sharing | Credit-based (costoso) |
+| **Redshift** | Cloud (AWS) | Team AWS-first | Instance-based o Serverless |
+| **DuckDB** | In-process (locale) | Analisi locale, prototyping, CI/CD | Gratuito |
+
+### Quando Scegliere Cosa
+
+- **Startup / PMI data-savvy**: ClickHouse (self-hosted o ClickHouse Cloud) — migliore rapporto performance/costo
+- **Team Google-first**: BigQuery — zero manutenzione, integrazione nativa con Google ecosystem
+- **Enterprise con bisogni di governance**: Snowflake — data sharing, role-based access, multi-cloud
+- **Prototyping e sviluppo locale**: DuckDB — funziona in-process, zero setup, compatibile con ClickHouse SQL
+
+## Esercizio Pratico
+
+1. Prendi un dataset del tuo business e identifica **Fatti** e **Dimensioni**
+2. Disegna lo **Star Schema** su carta (o in un tool come dbdiagram.io)
+3. Scrivi le `CREATE TABLE` in SQL per le tabelle principali
+4. Scrivi 3 query analitiche che rispondono a domande di business reali
+5. Considera dove la **denormalizzazione** migliorerebbe le performance
+
+*Nella prossima lezione, ci immergeremo nel SQL ad alte prestazioni: come scrivere query che girano in millisecondi su miliardi di righe.*

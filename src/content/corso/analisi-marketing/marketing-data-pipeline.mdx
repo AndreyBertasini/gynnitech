@@ -1,0 +1,787 @@
+---
+title: "Marketing Data Pipeline"
+description: "Come costruire un flusso dati automatizzato: da Ads e CRM al Data Warehouse."
+module: "Modulo 6: Analisi di Marketing"
+order: 8
+category: "Data Engineering"
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+# Marketing Data Pipeline
+
+La situazione tipica: i dati di Google Ads sono nella console Google Ads, quelli di Meta Ads sono in Business Manager, i lead sono in HubSpot, le transazioni sono in Stripe, i resi sono nel gestionale. Per sapere il ROAS reale di ogni canale devi aprire cinque schede, esportare cinque CSV, e incollare tutto in un foglio Excel. Ogni settimana. A mano.
+
+Questa lezione ti mostra come costruire un flusso dati automatizzato — una Marketing Data Pipeline — che raccoglie tutte queste sorgenti in un Data Warehouse, le normalizza, e le rende disponibili per l'analisi in modo affidabile e ripetibile.
+
+---
+
+## Architettura ELT moderna
+
+### ETL vs ELT: perche' oggi si usa ELT
+
+Il modello tradizionale **ETL** (Extract, Transform, Load) prevede di trasformare i dati prima di caricarli nel Data Warehouse. Il problema: i tool di trasformazione erano in mezzo tra la sorgente e il DW, creando bottleneck e rendendo difficile la manutenzione.
+
+Il modello moderno **ELT** (Extract, Load, Transform) funziona diversamente:
+
+1. **Extract** — Estrai i dati grezzi dalle sorgenti (Google Ads API, Meta API, HubSpot, ecc.)
+2. **Load** — Carica i dati grezzi nel Data Warehouse (BigQuery, Snowflake, Redshift) senza trasformarli
+3. **Transform** — Trasforma i dati direttamente dentro il DW usando SQL, con tool come dbt
+
+**Vantaggi di ELT:**
+- Il DW moderno e' abbastanza potente e economico da poter fare le trasformazioni dentro
+- I dati grezzi sono sempre disponibili: puoi ritrasformarli se cambiano le regole di business
+- La pipeline di ingestion e' semplice: solo extract + load, niente logica complessa nel mezzo
+- dbt gestisce le trasformazioni come codice versionato, testabile, documentato
+
+### Stack tecnologico tipico
+
+| Layer | Tool open source | Tool SaaS |
+|---|---|---|
+| **Ingestion** | Airbyte, Singer | Fivetran, Stitch |
+| **Storage** | PostgreSQL, ClickHouse | BigQuery, Snowflake, Redshift |
+| **Transform** | dbt Core | dbt Cloud |
+| **Orchestration** | Apache Airflow, Dagster | Prefect, Mage |
+| **BI** | Metabase, Grafana | Looker, Tableau |
+
+---
+
+## Le sorgenti dati marketing principali
+
+### Google Ads API
+
+L'API Google Ads usa GAQL (Google Ads Query Language), simile a SQL. Ogni risorsa — campagne, gruppi annunci, keyword, conversioni — e' interrogabile separatamente.
+
+Le metriche chiave disponibili:
+-  — spesa in micros (dividi per 1.000.000 per avere euro)
+- , 
+- , 
+- , 
+
+La struttura gerarchica e': Customer → Campaign → Ad Group → Ad → Keyword. Per l'analisi di marketing attribution solitamente lavori a livello Campaign o Ad Group.
+
+### Meta Marketing API
+
+Meta (Facebook/Instagram Ads) usa un'API REST con rate limits severi:
+
+- **Rate limit**: 200 calls/ora per account ad. Con molti account bisogna implementare il throttling.
+- **Paginazione**: le risposte sono paginate con cursori. Devi iterare su tutte le pagine per avere dati completi.
+- **Attribution window**: Meta di default usa attribution 7-day click + 1-day view. E' diversa da Google Ads (30-day click). Non confrontare i numeri di conversione direttamente.
+- **Retention dei dati**: i dati di breakdown demografico (eta', genere) sono disponibili solo per gli ultimi 37 mesi.
+
+### CRM: HubSpot e Salesforce
+
+I CRM richiedono una scelta architetturale: **webhook** o **polling**?
+
+**Webhook** (push): il CRM notifica il tuo sistema ogni volta che qualcosa cambia. Vantaggi: dati quasi real-time, meno carico sull'API. Svantaggi: devi gestire la ricezione dei webhook, il retry in caso di downtime, la deduplication.
+
+**Polling** (pull): chiedi periodicamente all'API se ci sono aggiornamenti dall'ultimo check. Vantaggi: piu' semplice da implementare, più robusto. Svantaggi: ritardo nei dati, piu' chiamate API, rischio di superare i rate limit.
+
+Per la maggior parte dei casi il polling ogni 15-30 minuti e' la scelta giusta per iniziare.
+
+---
+
+## Codice Python per estrarre dati da Google Ads API
+
+La libreria ufficiale Google Ads per Python e' . Installala con:
+
+```bash
+pip install google-ads
+```
+
+### Script di estrazione campagne
+
+```python
+import datetime
+from google.ads.googleads.client import GoogleAdsClient
+from google.ads.googleads.errors import GoogleAdsException
+
+def extract_google_ads_campaigns(customer_id: str, date_from: str, date_to: str) -> list[dict]:
+    """
+    Estrae performance campagne da Google Ads API per un range di date.
+    
+    Args:
+        customer_id: ID cliente Google Ads (senza trattini, es. '1234567890')
+        date_from: Data inizio formato 'YYYY-MM-DD'
+        date_to: Data fine formato 'YYYY-MM-DD'
+    
+    Returns:
+        Lista di dizionari con metriche per campagna/giorno
+    """
+    # Il client legge le credenziali da google-ads.yaml o da variabili d'ambiente
+    client = GoogleAdsClient.load_from_env()
+    ga_service = client.get_service('GoogleAdsService')
+    
+    query = f"""
+        SELECT
+            campaign.id,
+            campaign.name,
+            campaign.status,
+            campaign.advertising_channel_type,
+            segments.date,
+            metrics.impressions,
+            metrics.clicks,
+            metrics.cost_micros,
+            metrics.conversions,
+            metrics.conversions_value,
+            metrics.average_cpc
+        FROM campaign
+        WHERE
+            segments.date BETWEEN '{date_from}' AND '{date_to}'
+            AND campaign.status != 'REMOVED'
+        ORDER BY segments.date DESC, metrics.cost_micros DESC
+    """
+    
+    results = []
+    
+    try:
+        response = ga_service.search(customer_id=customer_id, query=query)
+        
+        for row in response:
+            results.append({
+                'date': row.segments.date,
+                'campaign_id': str(row.campaign.id),
+                'campaign_name': row.campaign.name,
+                'channel_type': row.campaign.advertising_channel_type.name,
+                'impressions': row.metrics.impressions,
+                'clicks': row.metrics.clicks,
+                # cost_micros e' in milionesimi di unita' valuta: dividi per 1M per avere euro
+                'spend_eur': row.metrics.cost_micros / 1_000_000,
+                'conversions': row.metrics.conversions,
+                'conversions_value': row.metrics.conversions_value,
+                'avg_cpc_eur': row.metrics.average_cpc / 1_000_000
+            })
+    
+    except GoogleAdsException as ex:
+        print(f'Errore Google Ads API: {ex.error.code().name}')
+        for error in ex.failure.errors:
+            print(f'  Dettaglio: {error.message}')
+        raise
+    
+    return results
+
+
+if __name__ == '__main__':
+    # Esempio: ultimi 7 giorni
+    today = datetime.date.today()
+    week_ago = today - datetime.timedelta(days=7)
+    
+    data = extract_google_ads_campaigns(
+        customer_id='1234567890',
+        date_from=week_ago.strftime('%Y-%m-%d'),
+        date_to=today.strftime('%Y-%m-%d')
+    )
+    
+    print(f'Estratte {len(data)} righe da Google Ads API')
+    if data:
+        print(f'Campagne trovate: {set(d["campaign_name"] for d in data)}')
+```
+
+<Aside type="tip">
+Le credenziali Google Ads vanno configurate in un file  oppure come variabili d'ambiente. Il campo obbligatorio e' il  che ottieni dalla console Google Ads. Non committare mai le credenziali nel repository: usate un secrets manager o variabili d'ambiente nel CI/CD.
+</Aside>
+
+---
+
+## Estrazione dati da Meta Marketing API
+
+Meta API richiede attenzione particolare a rate limits e paginazione. Questo client gestisce entrambi automaticamente:
+
+```python
+import time
+import requests
+from datetime import datetime, timedelta
+from typing import Optional
+
+class MetaAdsExtractor:
+    """
+    Estrae dati di performance da Meta Marketing API con gestione rate limits e paginazione.
+    """
+    
+    BASE_URL = 'https://graph.facebook.com/v19.0'
+    
+    def __init__(self, access_token: str, ad_account_id: str):
+        self.access_token = access_token
+        self.ad_account_id = ad_account_id  # formato: 'act_XXXXXXXXXX'
+        self.session = requests.Session()
+    
+    def _make_request(self, endpoint: str, params: dict) -> dict:
+        """Esegue una chiamata API con retry automatico su rate limit."""
+        params['access_token'] = self.access_token
+        url = f'{self.BASE_URL}/{endpoint}'
+        
+        max_retries = 3
+        for attempt in range(max_retries):
+            response = self.session.get(url, params=params)
+            
+            # Rate limit hit: aspetta e riprova
+            if response.status_code == 429:
+                wait_time = 2 ** attempt * 30  # 30s, 60s, 120s
+                print(f'Rate limit Meta API. Attendo {wait_time}s...')
+                time.sleep(wait_time)
+                continue
+            
+            response.raise_for_status()
+            return response.json()
+        
+        raise Exception('Rate limit persistente dopo 3 retry')
+    
+    def get_campaign_insights(
+        self,
+        date_from: str,
+        date_to: str,
+        fields: Optional[list] = None
+    ) -> list[dict]:
+        """
+        Estrae insights campagne con paginazione automatica.
+        
+        Args:
+            date_from: 'YYYY-MM-DD'
+            date_to: 'YYYY-MM-DD'  
+            fields: Lista campi da richiedere. Default: spend, impressions, clicks, conversions
+        
+        Returns:
+            Lista completa di record (tutte le pagine)
+        """
+        if fields is None:
+            fields = [
+                'campaign_id', 'campaign_name',
+                'impressions', 'clicks', 'spend',
+                'actions',  # conversioni (formato nested)
+                'action_values',  # valore conversioni
+                'cpm', 'cpc', 'ctr'
+            ]
+        
+        params = {
+            'fields': ','.join(fields),
+            'time_range': f'{{'since':'{date_from}','until':'{date_to}'}}',
+            'time_increment': 1,  # 1 = dati giornalieri
+            'level': 'campaign',
+            'limit': 500  # max righe per pagina
+        }
+        
+        all_data = []
+        endpoint = f'{self.ad_account_id}/insights'
+        
+        while endpoint:
+            response = self._make_request(endpoint, params)
+            all_data.extend(response.get('data', []))
+            
+            # Controlla se c'e' un'altra pagina
+            paging = response.get('paging', {})
+            next_url = paging.get('next')
+            
+            if next_url:
+                # Estrai solo il path dall'URL completo per la prossima iterazione
+                endpoint = next_url
+                params = {}  # params gia' inclusi nell'URL della prossima pagina
+            else:
+                endpoint = None
+        
+        # Normalizza il campo actions (e' una lista di dict tipo [{action_type: X, value: Y}])
+        normalized = []
+        for row in all_data:
+            record = {k: v for k, v in row.items() if k != 'actions' and k != 'action_values'}
+            
+            # Estrai conversioni per tipo
+            for action in row.get('actions', []):
+                action_key = f'actions_{action["action_type"]}'
+                record[action_key] = float(action.get('value', 0))
+            
+            for action_val in row.get('action_values', []):
+                val_key = f'value_{action_val["action_type"]}'
+                record[val_key] = float(action_val.get('value', 0))
+            
+            normalized.append(record)
+        
+        return normalized
+
+
+if __name__ == '__main__':
+    extractor = MetaAdsExtractor(
+        access_token='EAAxxxx...',
+        ad_account_id='act_123456789'
+    )
+    
+    yesterday = (datetime.today() - timedelta(days=1)).strftime('%Y-%m-%d')
+    data = extractor.get_campaign_insights(
+        date_from='2025-01-01',
+        date_to=yesterday
+    )
+    print(f'Estratte {len(data)} righe da Meta Ads API')
+```
+
+---
+
+## Normalizzare i dati tra piattaforme con SQL
+
+Il problema centrale della marketing analytics: ogni piattaforma usa nomi di campo diversi, unita' diverse (Google Ads usa micros per la valuta), e attribution window diverse. Serve una tabella unificata.
+
+### Modello unified_marketing_spend
+
+```sql
+-- Modello unified_marketing_spend: normalizza Google Ads, Meta Ads e altri canali
+-- in una singola tabella con schema comune
+
+WITH google_ads AS (
+  SELECT
+    date,
+    'google_ads'                        AS platform,
+    campaign_id,
+    campaign_name,
+    channel_type                        AS campaign_type,
+    impressions,
+    clicks,
+    ROUND(spend_eur, 4)                 AS spend_eur,
+    ROUND(conversions, 0)               AS conversions,
+    ROUND(conversions_value, 4)         AS conversions_value_eur
+  FROM
+    `tuo-progetto.raw_google_ads.campaigns`
+  WHERE
+    date ≥ DATE_SUB(CURRENT_DATE(), INTERVAL 90 DAY)
+),
+
+meta_ads AS (
+  SELECT
+    PARSE_DATE('%Y-%m-%d', date_start)  AS date,
+    'meta_ads'                          AS platform,
+    campaign_id,
+    campaign_name,
+    'paid_social'                       AS campaign_type,
+    CAST(impressions AS INT64)          AS impressions,
+    CAST(clicks AS INT64)               AS clicks,
+    ROUND(CAST(spend AS FLOAT64), 4)    AS spend_eur,
+    COALESCE(actions_purchase, 0)       AS conversions,
+    COALESCE(value_purchase, 0)         AS conversions_value_eur
+  FROM
+    `tuo-progetto.raw_meta_ads.campaign_insights`
+  WHERE
+    PARSE_DATE('%Y-%m-%d', date_start) ≥ DATE_SUB(CURRENT_DATE(), INTERVAL 90 DAY)
+)
+
+SELECT * FROM google_ads
+UNION ALL
+SELECT * FROM meta_ads;
+```
+
+### Calcolo ROAS per canale
+
+```sql
+-- Calcolo ROAS per canale e settimana
+-- ROAS = Revenue / Spend (Revenue Ads / Cost Ads)
+
+WITH weekly_performance AS (
+  SELECT
+    DATE_TRUNC(date, WEEK(MONDAY))          AS week_start,
+    platform,
+    campaign_type,
+    SUM(impressions)                        AS total_impressions,
+    SUM(clicks)                             AS total_clicks,
+    SUM(spend_eur)                          AS total_spend_eur,
+    SUM(conversions)                        AS total_conversions,
+    SUM(conversions_value_eur)              AS total_revenue_eur
+  FROM
+    `tuo-progetto.marts.unified_marketing_spend`
+  GROUP BY
+    1, 2, 3
+)
+
+SELECT
+  week_start,
+  platform,
+  campaign_type,
+  total_impressions,
+  total_clicks,
+  ROUND(total_spend_eur, 2)               AS spend_eur,
+  total_conversions,
+  ROUND(total_revenue_eur, 2)             AS revenue_eur,
+  -- ROAS: quanti euro di revenue per ogni euro speso
+  ROUND(
+    total_revenue_eur / NULLIF(total_spend_eur, 0), 2
+  )                                       AS roas,
+  -- CPA: costo medio per conversione
+  ROUND(
+    total_spend_eur / NULLIF(total_conversions, 0), 2
+  )                                       AS cpa_eur,
+  -- CTR
+  ROUND(
+    total_clicks / NULLIF(total_impressions, 0) * 100, 2
+  )                                       AS ctr_pct
+FROM weekly_performance
+ORDER BY
+  week_start DESC,
+  total_spend_eur DESC;
+```
+
+<Aside type="tip">
+ROAS e' il rapporto tra revenue generata e spesa pubblicitaria. Un ROAS di 3 significa che per ogni euro speso in ads hai generato 3 euro di revenue. Attenzione: il ROAS riportato dalle piattaforme (Google Ads, Meta) e' sempre piu' alto di quello reale perche' ogni piattaforma si attribuisce le conversioni che vuole. La tabella unificata con dati last-click da GA4 o da un attribution tool esterno da' numeri piu' accurati.
+</Aside>
+
+---
+
+## dbt per trasformare i dati
+
+dbt (data build tool) e' lo standard per le trasformazioni in un ELT moderno. Ogni modello e' un file SQL che produce una tabella o una view. Supporta test di qualita' dei dati, documentazione, e dependency graph.
+
+### Schema YAML del modello (unified_marketing_spend.yml)
+
+```yaml
+# models/marts/unified_marketing_spend.yml
+version: 2
+
+models:
+  - name: unified_marketing_spend
+    description: >
+      Tabella unificata con performance di marketing da Google Ads e Meta Ads.
+      Normalizza spend, impressioni, click e conversioni in uno schema comune.
+      Granularita: una riga per platform/campaign/day.
+    
+    config:
+      materialized: table
+      partition_by:
+        field: date
+        data_type: date
+        granularity: month
+      cluster_by: [platform, campaign_type]
+    
+    columns:
+      - name: date
+        description: Data della riga (granularita giornaliera)
+        tests:
+          - not_null
+      
+      - name: platform
+        description: "Piattaforma pubblicitaria: google_ads o meta_ads"
+        tests:
+          - not_null
+          - accepted_values:
+              values: [google_ads, meta_ads, linkedin_ads, tiktok_ads]
+      
+      - name: campaign_id
+        description: ID campagna nella piattaforma sorgente
+        tests:
+          - not_null
+      
+      - name: spend_eur
+        description: Spesa pubblicitaria in euro (google_ads converte da micros)
+        tests:
+          - not_null
+          - dbt_utils.expression_is_true:
+              expression: "≥ 0"
+      
+      - name: roas
+        description: Revenue / Spend. Calcolato solo se spend > 0.
+    
+    tests:
+      - dbt_utils.unique_combination_of_columns:
+          combination_of_columns: [date, platform, campaign_id]
+```
+
+### Modello dbt SQL (unified_marketing_spend.sql)
+
+```sql
+-- models/marts/unified_marketing_spend.sql
+-- Modello dbt: unifica dati Google Ads e Meta Ads in schema comune
+-- Viene materializzato come tabella partizionata per data in BigQuery
+
+{{
+  config(
+    materialized = 'table',
+    partition_by = {
+      "field": "date",
+      "data_type": "date",
+      "granularity": "month"
+    },
+    cluster_by = ["platform", "campaign_type"]
+  )
+}}
+
+WITH google_ads_stg AS (
+  SELECT
+    PARSE_DATE('%Y-%m-%d', segments_date)   AS date,
+    'google_ads'                             AS platform,
+    CAST(campaign_id AS STRING)              AS campaign_id,
+    campaign_name,
+    advertising_channel_type                 AS campaign_type,
+    CAST(impressions AS INT64)               AS impressions,
+    CAST(clicks AS INT64)                    AS clicks,
+    ROUND(cost_micros / 1000000.0, 4)        AS spend_eur,
+    ROUND(conversions, 0)                    AS conversions,
+    ROUND(conversions_value, 4)              AS conversions_value_eur
+  FROM {{ ref('stg_google_ads__campaigns') }}
+  WHERE segments_date IS NOT NULL
+),
+
+meta_ads_stg AS (
+  SELECT
+    PARSE_DATE('%Y-%m-%d', date_start)      AS date,
+    'meta_ads'                               AS platform,
+    CAST(campaign_id AS STRING)              AS campaign_id,
+    campaign_name,
+    'paid_social'                            AS campaign_type,
+    CAST(impressions AS INT64)               AS impressions,
+    CAST(clicks AS INT64)                    AS clicks,
+    ROUND(CAST(spend AS FLOAT64), 4)         AS spend_eur,
+    COALESCE(
+      CAST(actions_purchase AS FLOAT64), 0
+    )                                        AS conversions,
+    COALESCE(
+      CAST(value_purchase AS FLOAT64), 0
+    )                                        AS conversions_value_eur
+  FROM {{ ref('stg_meta_ads__campaign_insights') }}
+  WHERE date_start IS NOT NULL
+),
+
+unioned AS (
+  SELECT * FROM google_ads_stg
+  UNION ALL
+  SELECT * FROM meta_ads_stg
+)
+
+SELECT
+  date,
+  platform,
+  campaign_id,
+  campaign_name,
+  campaign_type,
+  impressions,
+  clicks,
+  spend_eur,
+  conversions,
+  conversions_value_eur,
+  -- ROAS calcolato direttamente nel modello
+  ROUND(
+    conversions_value_eur / NULLIF(spend_eur, 0), 4
+  ) AS roas,
+  -- CPA calcolato direttamente nel modello
+  ROUND(
+    spend_eur / NULLIF(conversions, 0), 4
+  ) AS cpa_eur
+FROM unioned
+```
+
+<Aside type="tip">
+La macro  e' il modo in cui dbt gestisce le dipendenze tra modelli. dbt costruisce automaticamente il DAG (Directed Acyclic Graph) delle dipendenze e le esegue nell'ordine corretto. Non usare mai path assoluti alle tabelle nel SQL di dbt: usa sempre ref() o source().
+</Aside>
+
+---
+
+## Scheduling e orchestrazione con Apache Airflow
+
+Airflow e' il tool standard per orchestrare pipeline di dati. Ogni pipeline e' definita come un DAG (Directed Acyclic Graph) in Python. Il DAG specifica i task, le dipendenze tra di loro, e la schedule di esecuzione.
+
+```python
+from datetime import datetime, timedelta
+from airflow import DAG
+from airflow.operators.python import PythonOperator
+from airflow.providers.google.cloud.transfers.local_to_gcs import LocalFilesystemToGCSOperator
+from airflow.providers.google.cloud.operators.bigquery import BigQueryInsertJobOperator
+import subprocess
+
+# Configurazione default per tutti i task
+default_args = {
+    "owner": "data-team",
+    "depends_on_past": False,
+    "start_date": datetime(2025, 1, 1),
+    "email_on_failure": True,
+    "email": ["data-alerts@tuaazienda.it"],
+    "retries": 2,
+    "retry_delay": timedelta(minutes=10),
+}
+
+def extract_google_ads(**context):
+    """Estrae dati Google Ads per il giorno precedente."""
+    from google_ads_extractor import extract_google_ads_campaigns
+    import json
+    
+    execution_date = context["ds"]  # formato YYYY-MM-DD
+    
+    data = extract_google_ads_campaigns(
+        customer_id="1234567890",
+        date_from=execution_date,
+        date_to=execution_date
+    )
+    
+    # Salva in file locale per passarlo allo step successivo
+    output_path = f"/tmp/google_ads_{execution_date}.json"
+    with open(output_path, "w") as f:
+        json.dump(data, f)
+    
+    print(f"Estratte {len(data)} righe Google Ads per {execution_date}")
+    return output_path
+
+
+def extract_meta_ads(**context):
+    """Estrae dati Meta Ads per il giorno precedente."""
+    from meta_ads_extractor import MetaAdsExtractor
+    import json
+    
+    execution_date = context["ds"]
+    
+    extractor = MetaAdsExtractor(
+        access_token="EAAxxxx",
+        ad_account_id="act_123456789"
+    )
+    data = extractor.get_campaign_insights(
+        date_from=execution_date,
+        date_to=execution_date
+    )
+    
+    output_path = f"/tmp/meta_ads_{execution_date}.json"
+    with open(output_path, "w") as f:
+        json.dump(data, f)
+    
+    print(f"Estratte {len(data)} righe Meta Ads per {execution_date}")
+    return output_path
+
+
+def run_dbt_models(**context):
+    """Esegue i modelli dbt per aggiornare le tabelle marts."""
+    result = subprocess.run(
+        ["dbt", "run", "--select", "marts.unified_marketing_spend+",
+         "--vars", f"{{run_date: {context['ds']}}}"],
+        cwd="/opt/dbt/marketing",
+        capture_output=True,
+        text=True
+    )
+    
+    if result.returncode != 0:
+        raise Exception(f"dbt run fallito:
+{result.stderr}")
+    
+    print(result.stdout)
+
+
+# Definizione del DAG
+with DAG(
+    dag_id="marketing_data_pipeline",
+    default_args=default_args,
+    description="Pipeline giornaliera: Google Ads + Meta Ads -> BigQuery -> dbt",
+    schedule_interval="0 6 * * *",  # Ogni giorno alle 06:00 UTC
+    catchup=False,
+    tags=["marketing", "data-pipeline"]
+) as dag:
+    
+    # Step 1: Estrazione parallela da Google Ads e Meta Ads
+    task_google_ads = PythonOperator(
+        task_id="extract_google_ads",
+        python_callable=extract_google_ads,
+    )
+    
+    task_meta_ads = PythonOperator(
+        task_id="extract_meta_ads",
+        python_callable=extract_meta_ads,
+    )
+    
+    # Step 2: Upload su GCS (prerequisito per BigQuery)
+    task_upload_google = LocalFilesystemToGCSOperator(
+        task_id="upload_google_ads_to_gcs",
+        src="/tmp/google_ads_{{ ds }}.json",
+        dst="raw/google_ads/{{ ds }}/campaigns.json",
+        bucket="tuo-bucket-dati"
+    )
+    
+    task_upload_meta = LocalFilesystemToGCSOperator(
+        task_id="upload_meta_ads_to_gcs",
+        src="/tmp/meta_ads_{{ ds }}.json",
+        dst="raw/meta_ads/{{ ds }}/insights.json",
+        bucket="tuo-bucket-dati"
+    )
+    
+    # Step 3: Esecuzione modelli dbt dopo che entrambi i file sono su GCS
+    task_dbt = PythonOperator(
+        task_id="run_dbt_models",
+        python_callable=run_dbt_models,
+    )
+    
+    # Dipendenze: estrazione parallela, poi upload parallelo, poi dbt
+    task_google_ads >> task_upload_google >> task_dbt
+    task_meta_ads >> task_upload_meta >> task_dbt
+```
+
+<Aside type="tip">
+Il parametro  e' importante: senza di esso, Airflow eseguirebbe il DAG per tutti i giorni passati dalla start_date. Con pipeline di dati e' quasi sempre quello che non vuoi. Imposta catchup=False per default e fai i backfill manuali quando servono con il comando .
+</Aside>
+
+---
+
+## Monitoring della pipeline
+
+Una pipeline non monitorata e' una pipeline che fallisce silenziosamente. Hai bisogno di sapere quando:
+
+1. Un task Airflow fallisce
+2. I dati non arrivano (zero righe estratte)
+3. I dati hanno valori anomali (spend improvvisamente 10x il normale)
+
+### Monitoring a livello di pipeline (Airflow)
+
+Airflow invia email automatiche su failure se configuri  nei . Configura anche Slack notification con il provider .
+
+### Monitoring a livello di dati (dbt tests)
+
+dbt ha un sistema di test integrato che puoi eseguire dopo ogni run. I test piu' utili per i dati marketing:
+
+- **not_null** su date, platform, campaign_id: se uno di questi manca la riga e' inutile
+- **accepted_values** su platform: blocca valori imprevisti come "googleads" (typo) invece di "google_ads"
+- **unique_combination_of_columns** su (date, platform, campaign_id): rileva duplicati che gonfiano le metriche
+- **dbt_utils.expression_is_true** con : lo spend non puo' essere negativo
+
+### Monitoring anomalie di business
+
+I test strutturali non catturano anomalie di business come "oggi lo spend e' zero" (forse l'API era down) o "il ROAS e' 50x il normale" (forse conversioni duplicate). Aggiungi questi test con la libreria :
+
+| Check | Cosa rileva |
+|---|---|
+| Spend giornaliero > 0 per platform attive | API down o credenziali scadute |
+| Variazione spend giorno su giorno < 10x | Spike anomali o errori di dato |
+| Somma conversioni coerente con ordini CRM | Disallineamento attribuzione |
+| Fresness tabelle < 25 ore | Pipeline non eseguita |
+
+### Alerting pratico
+
+Una soluzione semplice e' mandare un report di sanita' ogni mattina via Slack o email. Esegui questa query in BigQuery e manda l'output come alert se lo spend e' zero o se mancano piattaforme:
+
+```sql
+-- Check sanita' dati: verifica che ieri ci siano dati per tutte le piattaforme attive
+SELECT
+  platform,
+  COUNT(*)              AS num_campagne,
+  SUM(spend_eur)        AS total_spend_eur,
+  SUM(impressions)      AS total_impressions,
+  SUM(clicks)           AS total_clicks,
+  SUM(conversions)      AS total_conversions,
+  -- Flag anomalia: spend zero o meno del 10% della media degli ultimi 7 giorni
+  CASE
+    WHEN SUM(spend_eur) = 0 THEN 'ALERT: spend_zero'
+    WHEN SUM(spend_eur) < (
+      SELECT AVG(daily_spend) * 0.1
+      FROM (
+        SELECT date, SUM(spend_eur) AS daily_spend
+        FROM `tuo-progetto.marts.unified_marketing_spend`
+        WHERE platform = um.platform
+          AND date BETWEEN DATE_SUB(CURRENT_DATE(), INTERVAL 8 DAY)
+          AND DATE_SUB(CURRENT_DATE(), INTERVAL 2 DAY)
+        GROUP BY date
+      )
+    ) THEN 'ALERT: spend_anomalo_basso'
+    ELSE 'OK'
+  END AS status_check
+FROM
+  `tuo-progetto.marts.unified_marketing_spend` um
+WHERE
+  date = DATE_SUB(CURRENT_DATE(), INTERVAL 1 DAY)
+GROUP BY
+  platform
+ORDER BY
+  platform;
+```
+
+---
+
+## Riepilogo
+
+- L'architettura ELT moderna separa ingestion (Airbyte/Fivetran), storage (BigQuery/Snowflake) e trasformazione (dbt): ogni layer ha una responsabilita' chiara e si scala indipendentemente.
+- Google Ads API usa micros per la valuta (dividi per 1.000.000) e GAQL per le query: la struttura e' gerarchica Customer > Campaign > Ad Group e si estrae livello per livello.
+- Meta API richiede gestione esplicita di rate limits e paginazione: implementa sempre il retry con exponential backoff e itera su tutte le pagine prima di processare i dati.
+- Il modello unified_marketing_spend e' il cuore dell'analisi: normalizza nomi di campo, unita' di misura e attribution window prima di fare qualsiasi calcolo di ROAS o CPA.
+- Il monitoring e' parte della pipeline, non un optional: testa la qualita' dei dati con dbt tests, monitora lo spend giornaliero per piattaforma, e imposta alert su dati mancanti o anomali.

@@ -1,0 +1,337 @@
+---
+title: "Caso Studio: Da Zero a Dashboard — Un E-commerce di Moda"
+description: "Caso studio end-to-end che integra tutti i concetti del modulo Analisi Marketing."
+module: "Modulo 5: Analytics & Data Science"
+order: 14
+prerequisites: ["analisi-marketing/cheat-sheet"]
+category: "Pratica"
+---
+
+# Caso Studio: Da Zero a Dashboard — Un E-commerce di Moda
+
+In questo caso studio applichiamo tutti i concetti del modulo Analisi Marketing a un caso reale. Seguiamo **StyleVerde**, un e-commerce di moda sostenibile che vuole passare da decisioni intuitive a decisioni basate sui dati.
+
+**Situazione iniziale:**
+- Revenue: 450.000€/anno
+- Canali attivi: Google Ads, Meta Ads, Email marketing, Instagram organic
+- Dati: Google Analytics (Universal) non migrato a GA4, nessun CRM strutturato
+- Team: 1 marketing manager, 1 social media manager, 1 founder che "fa un po' tutto"
+- Problema: "Spendiamo 8.000€/mese in ads ma non sappiamo cosa funziona"
+
+## Fase 1: Audit e Setup dei Dati
+
+### Cosa abbiamo trovato
+
+| Area | Stato | Problema |
+|---|---|---|
+| Google Analytics | UA senza obiettivi configurati | Nessun tracciamento conversioni |
+| UTM | Usati sporadicamente, senza naming convention | Impossibile attribuire revenue ai canali |
+| CRM | Foglio Excel con nome e email | Zero segmentazione |
+| Google Ads | 3 campagne attive senza conversion tracking | Ottimizzazione impossibile |
+| Meta Ads | Pixel installato ma nessun evento custom | Solo dati di click, no conversioni |
+| Email | Mailchimp con 1 lista di 8.000 contatti | Nessuna automazione, newsletter mensile generica |
+
+### Azioni di setup
+
+**1. Migrazione a GA4 con configurazione corretta:**
+
+- Installazione GA4 con data stream configurato
+- Eventi di conversione definiti: `purchase`, `add_to_cart`, `begin_checkout`, `sign_up`
+- Enhanced e-commerce abilitato
+- Google Ads e Search Console collegati
+- Consent Mode v2 attivato per conformità GDPR
+
+**2. UTM Naming Convention standardizzata:**
+
+```
+Formato: utm_source_utm_medium_utm_campaign_utm_content
+
+Esempi:
+google_cpc_ss24-collection_search-brand
+meta_paid-social_ss24-collection_carousel-sustainable
+instagram_organic_ss24-collection_reel-bts
+email_newsletter_weekly-digest_cta-new-arrivals
+```
+
+**3. CRM strutturato (migrazione a un CRM con segmentazione):**
+
+Migrazione da foglio Excel a un CRM con:
+- Import storico ordini
+- Segmentazione RFM automatica
+- Tag per fonte di acquisizione
+- Lifecycle stage (Lead → Customer → Repeat → VIP)
+
+## Fase 2: Calcolare le Metriche Chiave
+
+Con i dati strutturati, calcoliamo le metriche fondamentali per avere una baseline.
+
+### CAC per canale
+
+```sql
+-- CAC per canale: quanto costa acquisire un nuovo cliente da ogni fonte
+-- Tabelle: orders, marketing_spend
+
+WITH first_orders AS (
+  SELECT
+    user_id,
+    MIN(order_date)          AS first_order_date,
+    MIN(utm_source)          AS acquisition_source,
+    MIN(utm_medium)          AS acquisition_medium
+  FROM orders
+  GROUP BY user_id
+),
+
+new_customers_by_channel AS (
+  SELECT
+    DATE_TRUNC(first_order_date, MONTH) AS mese,
+    acquisition_source,
+    acquisition_medium,
+    COUNT(DISTINCT user_id) AS new_customers
+  FROM first_orders
+  WHERE first_order_date ≥ '2024-01-01'
+  GROUP BY 1, 2, 3
+),
+
+spend_by_channel AS (
+  SELECT
+    DATE_TRUNC(date, MONTH) AS mese,
+    source,
+    medium,
+    SUM(spend)              AS total_spend
+  FROM marketing_spend
+  WHERE date ≥ '2024-01-01'
+  GROUP BY 1, 2, 3
+)
+
+SELECT
+  nc.mese,
+  nc.acquisition_source AS source,
+  nc.acquisition_medium AS medium,
+  nc.new_customers,
+  sp.total_spend,
+  ROUND(sp.total_spend / NULLIF(nc.new_customers, 0), 2) AS cac
+FROM new_customers_by_channel nc
+LEFT JOIN spend_by_channel sp
+  ON nc.mese = sp.mese
+  AND nc.acquisition_source = sp.source
+  AND nc.acquisition_medium = sp.medium
+ORDER BY nc.mese DESC, cac ASC;
+```
+
+**Risultati del primo trimestre:**
+
+| Canale | Nuovi clienti | Spesa | CAC | Note |
+|---|---|---|---|---|
+| Google Ads (search brand) | 180 | 1.200€ | 6,67€ | Brand search: già ci conoscono |
+| Google Ads (search non-brand) | 95 | 3.400€ | 35,79€ | Acquisizione genuina |
+| Meta Ads | 210 | 4.800€ | 22,86€ | Buon volume, CAC medio |
+| Email (referral) | 45 | ~0€ | ~0€ | Organico dal passaparola |
+| Instagram organic | 30 | ~0€ | ~0€ | Tempo del team non contabilizzato |
+| **TOTALE** | **560** | **9.400€** | **16,79€** | **CAC blended** |
+
+:::caution
+Il CAC del brand search (6,67€) è ingannevole: questi clienti ti avrebbero cercato comunque. Il vero costo di acquisizione è quello del search non-brand e di Meta Ads. Mai mischiare brand e non-brand nel calcolo del CAC se vuoi capire la reale efficacia del marketing.
+:::
+
+### LTV e rapporto LTV:CAC
+
+```sql
+-- Calcolo LTV a 12 mesi per segmento di acquisizione
+
+WITH customer_revenue AS (
+  SELECT
+    o.user_id,
+    fo.acquisition_source,
+    fo.first_order_date,
+    COUNT(DISTINCT o.order_id) AS total_orders,
+    SUM(o.revenue)              AS total_revenue,
+    -- Revenue nei primi 12 mesi
+    SUM(CASE
+      WHEN o.order_date ≤ DATE_ADD(fo.first_order_date, INTERVAL 365 DAY)
+      THEN o.revenue ELSE 0
+    END) AS revenue_12m
+  FROM orders o
+  JOIN (
+    SELECT user_id, MIN(order_date) AS first_order_date,
+           MIN(utm_source) AS acquisition_source
+    FROM orders GROUP BY user_id
+  ) fo ON o.user_id = fo.user_id
+  WHERE fo.first_order_date BETWEEN '2023-01-01' AND '2023-12-31'
+  GROUP BY o.user_id, fo.acquisition_source, fo.first_order_date
+)
+
+SELECT
+  acquisition_source,
+  COUNT(DISTINCT user_id)                   AS num_clienti,
+  ROUND(AVG(total_orders), 1)               AS avg_ordini,
+  ROUND(AVG(total_revenue), 2)              AS avg_revenue_totale,
+  ROUND(AVG(revenue_12m), 2)                AS ltv_12m,
+  -- Con margine lordo del 55%
+  ROUND(AVG(revenue_12m) * 0.55, 2)         AS ltv_12m_margine,
+  COUNTIF(total_orders ≥ 2) * 100 / COUNT(*) AS repeat_rate_pct
+FROM customer_revenue
+GROUP BY acquisition_source
+ORDER BY ltv_12m DESC;
+```
+
+**Risultati:**
+
+| Canale | LTV 12m (revenue) | LTV 12m (margine 55%) | CAC | LTV:CAC | Repeat Rate |
+|---|---|---|---|---|---|
+| Email referral | 185€ | 101,75€ | ~0€ | ∞ | 42% |
+| Instagram organic | 155€ | 85,25€ | ~0€ | ∞ | 35% |
+| Meta Ads | 130€ | 71,50€ | 22,86€ | 3,1:1 | 28% |
+| Google non-brand | 110€ | 60,50€ | 35,79€ | 1,7:1 | 22% |
+
+**Insight chiave**: il rapporto LTV:CAC di Google non-brand (1,7:1) è sotto il target di 3:1. O il CAC deve scendere (ottimizzare le campagne) o l'LTV deve salire (migliorare la retention). Meta Ads è appena al limite con 3,1:1 — funziona ma con poca margine.
+
+## Fase 3: Segmentazione RFM e Email Automation
+
+### Risultati della segmentazione RFM
+
+Applicando la query RFM (vista nella lezione CRM e Email Marketing Analytics) ai dati di StyleVerde:
+
+| Segmento | Clienti | % del totale | Revenue % | AOV | Azione |
+|---|---|---|---|---|---|
+| Champions | 320 | 4% | 28% | 95€ | VIP program, preview collezioni |
+| Loyal | 640 | 8% | 22% | 78€ | Upsell, cross-sell accessori |
+| New Customers | 1.800 | 22% | 15% | 62€ | Welcome series dedicata |
+| At Risk | 480 | 6% | 8% | 72€ | Win-back con sconto 15% |
+| Need Attention | 2.400 | 30% | 18% | 55€ | Re-engagement campaign |
+| Lost | 2.360 | 30% | 9% | 45€ | Sunset flow → rimozione |
+| **TOTALE** | **8.000** | **100%** | **100%** | **62€** | — |
+
+**Insight critico**: il 4% dei clienti (Champions) genera il 28% del revenue. E il 30% della lista (Lost) genera solo il 9% del revenue ma pesa sulla deliverability di ogni invio.
+
+### Email automation implementate
+
+**Welcome Series (3 email, 7 giorni):**
+
+| Email | Timing | Subject | Risultato dopo 3 mesi |
+|---|---|---|---|
+| 1 | Immediata | "Benvenuto nella community 🌿 -10% sul primo ordine" | Open: 62%, CTR: 18% |
+| 2 | Giorno 3 | "Conosci i nostri materiali: la storia dietro ogni capo" | Open: 48%, CTR: 8% |
+| 3 | Giorno 7 | "I 5 best seller scelti dalla community" | Open: 41%, CTR: 12% |
+
+**Abandoned Cart (3 email, 48 ore):**
+
+| Email | Timing | Risultato |
+|---|---|---|
+| 1 | 1 ora | Recovery rate: 8% |
+| 2 | 24 ore | Recovery rate cumulativo: 12% |
+| 3 | 48 ore (con free shipping) | Recovery rate cumulativo: 15% |
+
+**Revenue generato dall'abandoned cart in 3 mesi: 12.600€** — Era revenue che andava perso completamente.
+
+## Fase 4: Ottimizzazione dei Canali Paid
+
+### Google Ads: ristrutturazione delle campagne
+
+**Prima:**
+- 3 campagne generiche con keyword broad match
+- Nessun conversion tracking
+- Budget: 4.600€/mese
+- ROAS: sconosciuto
+
+**Dopo la ristrutturazione:**
+
+| Campagna | Tipo | Budget/mese | ROAS | CPA | Note |
+|---|---|---|---|---|---|
+| Brand Search | Search (exact match) | 1.200€ | 12,5x | 6,67€ | Difesa del brand |
+| Non-Brand Search | Search (phrase + exact) | 2.000€ | 3,8x | 35,79€ | Acquisizione nuova |
+| Shopping | Standard Shopping | 1.000€ | 5,2x | 18,50€ | Performance migliore del search |
+| Performance Max | PMax | 400€ | 4,1x | 24,00€ | Test, volume ancora basso |
+| **TOTALE** | | **4.600€** | **5,4x** | **19,20€** | vs sconosciuto prima |
+
+### Meta Ads: struttura e testing
+
+**Struttura implementata:**
+
+```
+Campaign 1: Prospecting (Cold)
+  ├── Ad Set 1: Lookalike 1% dei Champions (RFM)
+  ├── Ad Set 2: Interesse "moda sostenibile" + 25-45 anni
+  └── Ad Set 3: Broad (18-65, solo Italia)
+
+Campaign 2: Retargeting
+  ├── Ad Set 1: Product viewers (7 giorni) — DPA
+  ├── Ad Set 2: Add-to-cart no purchase (14 giorni) — DPA + urgenza
+  └── Ad Set 3: Past buyers (180+ giorni) — nuova collezione
+
+Campaign 3: Branding (Reach/Video views)
+  └── Ad Set 1: Broad — video storytelling sostenibilità
+```
+
+**Risultati dopo 2 mesi:**
+
+| Campaign | Spend | Revenue | ROAS | Note |
+|---|---|---|---|---|
+| Prospecting | 3.200€ | 9.600€ | 3,0x | Lookalike Champions performa 2x meglio di interest |
+| Retargeting | 1.200€ | 8.400€ | 7,0x | DPA sui cart abandoner è il best performer |
+| Branding | 400€ | Non attribuibile direttamente | — | Brand search +18% nel periodo |
+| **TOTALE** | **4.800€** | **18.000€+** | **3,75x+** | vs sconosciuto prima |
+
+## Fase 5: Dashboard e Reporting
+
+### Le metriche sulla dashboard settimanale
+
+| Sezione | Metriche | Sorgente dati |
+|---|---|---|
+| **Revenue** | Revenue totale, AOV, numero ordini | E-commerce + GA4 |
+| **Acquisizione** | Nuovi clienti, CAC per canale, ROAS per canale | GA4 + Ads platforms |
+| **Retention** | Repeat purchase rate, LTV coorte, churn | CRM + ordini |
+| **Email** | RPE, CTR, lista attiva, revenue da automazioni | Email platform |
+| **Brand** | Brand search volume, direct traffic, NPS | Search Console + GA4 |
+
+### La dashboard executive: 5 numeri che il CEO vuole vedere
+
+| # | Metrica | Valore (prima) | Valore (dopo 6 mesi) | Trend |
+|---|---|---|---|---|
+| 1 | Revenue mensile | 37.500€ | 48.200€ | +28,5% |
+| 2 | CAC blended | Sconosciuto | 16,79€ | Baseline stabilita |
+| 3 | LTV:CAC (Meta) | Sconosciuto | 3,1:1 | Sopra soglia |
+| 4 | Repeat purchase rate | ~20% (stima) | 31% | +11pp |
+| 5 | Email revenue share | ~3% | 18% | +15pp |
+
+## Fase 6: Lezioni Apprese
+
+### Cosa ha funzionato
+
+1. **La segmentazione RFM ha trasformato l'email marketing.** Passare da una newsletter generica a comunicazioni segmentate ha portato il revenue da email dal 3% al 18% del totale. L'abandoned cart da solo ha generato 50.000€/anno in revenue recuperato.
+
+2. **Il Lookalike basato sui Champions batte qualsiasi interest targeting.** Far partire il prospecting da un seed di alta qualità (i migliori clienti esistenti) ha dimezzato il CPA rispetto all'interest targeting generico.
+
+3. **Il conversion tracking ha reso possibile l'ottimizzazione.** Prima non sapevano nemmeno il ROAS. Dopo il setup, ogni decisione di budget è basata su dati reali.
+
+### Cosa non ha funzionato
+
+1. **Performance Max senza dati storici.** PMax richiede volume di conversioni per funzionare bene. Con poche conversioni, l'algoritmo fa scelte subottimali. Meglio partire con Search + Shopping e aggiungere PMax dopo.
+
+2. **Win-back email troppo aggressivo.** L'offerta del 20% di sconto nella win-back ha riattivato clienti che poi hanno comprato solo con lo sconto — distruggendo il margine. Meglio un 10% con focus sul valore, non solo sul prezzo.
+
+3. **Troppo tempo tra setup e prima analisi.** I primi 3 mesi sono stati quasi interamente di setup tecnico. Un approccio più pragmatico: settimana 1 installare il conversion tracking e gli UTM, poi ottimizzare mentre raccogli dati più completi.
+
+### I numeri finali dopo 6 mesi
+
+| Metrica | Prima | Dopo | Variazione |
+|---|---|---|---|
+| Revenue annualizzato | 450.000€ | 578.400€ | +28,5% |
+| Revenue da email | 13.500€ | 104.000€ | +670% |
+| CAC medio | Sconosciuto | 16,79€ | Baseline |
+| Repeat Purchase Rate | ~20% | 31% | +55% relativo |
+| Spesa marketing | 96.000€/anno | 96.000€/anno | = (zero aumento) |
+| ROAS blended | Sconosciuto | 6,0x | Baseline |
+
+**Il punto chiave**: il revenue è cresciuto del 28,5% con lo stesso budget marketing. L'incremento non è venuto da più spesa — è venuto da più intelligenza nei dati.
+
+## Riepilogo
+
+1. **Il setup dei dati viene prima di tutto.** Senza conversion tracking, UTM consistenti e un CRM strutturato, qualsiasi ottimizzazione è un tiro al buio. Investi il primo mese solo nel setup.
+
+2. **Il 4% dei clienti può generare il 28% del revenue.** La segmentazione RFM rivela chi sono i Champions e permette di trattarli come meritano — e di costruire Lookalike audiences da loro.
+
+3. **L'email marketing è il canale con il ROI più alto, ma solo se automatizzato e segmentato.** Welcome series, abandoned cart e win-back trasformano il canale email da "newsletter mensile" a macchina di revenue.
+
+4. **Brand e performance non sono in competizione.** La campagna branding su Meta ha aumentato il brand search del 18%, che a sua volta ha abbassato il CAC del brand search. L'effetto è circolare e si amplifica.
+
+5. **Crescita ≠ più budget. Crescita = più intelligenza.** StyleVerde ha aumentato il revenue del 28,5% senza aumentare la spesa di un euro. La differenza è tutta nella qualità dei dati e delle decisioni.

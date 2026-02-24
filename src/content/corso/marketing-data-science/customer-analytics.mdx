@@ -1,0 +1,545 @@
+---
+title: Advanced Customer Analytics
+description: Predictive modeling for customer behavior.
+module: "Modulo 5: Analytics & Data Science"
+order: 5
+prerequisites: ["analisi-marketing/crm-email-analytics"]
+---
+
+import { Aside, Steps, Tabs, TabItem } from '@astrojs/starlight/components'
+
+Nel 2005, Jeff Bezos fece una scelta che sembrò irrazionale a Wall Street: offrire la spedizione gratuita illimitata per 79 dollari all'anno. I critici calcolavano che Amazon avrebbe perso denaro su ogni ordine. Ma Bezos aveva qualcosa che i critici non avevano: il dato sul Customer Lifetime Value.
+
+I dati interni mostravano che i clienti Prime acquistavano il doppio rispetto ai clienti standard nell'anno successivo all'iscrizione, e quattro volte di più dopo tre anni. Con un LTV 3-4 volte superiore, il costo della spedizione gratuita non era una perdita — era un investimento nella classe di clienti più redditizia mai identificata. Oggi Amazon Prime conta oltre 200 milioni di abbonati e genera decine di miliardi di dollari in ricavi ricorrenti.
+
+Questa lezione è la storia di come trasformare i dati comportamentali dei clienti in decisioni strategiche con impatto diretto sul business.
+
+## Customer Lifetime Value: la metrica che cambia tutto
+
+Il Customer Lifetime Value (LTV o CLV) rappresenta il valore economico totale che un cliente porterà all'azienda nel corso dell'intera relazione commerciale. Non è una metrica vanity: è il fondamento su cui costruire ogni decisione di acquisition, retention e pricing.
+
+### La formula base: chiara, ma spesso mal applicata
+
+La versione più semplice del LTV è:
+
+```
+LTV = ARPU × Gross Margin % × Customer Lifetime
+```
+
+Dove:
+- **ARPU** (Average Revenue Per User) = ricavo medio mensile per cliente
+- **Gross Margin %** = margine lordo sul prodotto/servizio
+- **Customer Lifetime** = durata media della relazione in mesi
+
+**Esempio concreto**: un'app SaaS con abbonamento a 49€/mese, margine lordo del 75%, e un churn mensile del 3% (equivalente a una vita media di 33 mesi):
+
+```
+LTV = 49 × 0.75 × 33 = 1.213,25€
+```
+
+Se il Costo di Acquisizione Cliente (CAC) è 200€, il rapporto LTV/CAC è circa 6:1 — eccellente.
+
+<Aside type="caution">
+Il problema principale di questa formula è che usa la vita media calcolata come 1/churn_rate, assumendo un churn costante nel tempo. Nella realtà, il churn non è costante: è tipicamente più alto nei primi mesi (early churn) e si stabilizza sui clienti fedeli. Usare la formula semplice su dati reali produce stime ottimistiche.
+</Aside>
+
+### La formula con sconto temporale
+
+Per applicazioni più precise, specialmente quando si confrontano clienti con cicli di vita diversi, si utilizza il LTV scontato (Discounted LTV):
+
+```
+LTV = Σ(t=0 → T) [ (Ricavo_t − Costo_t) × (1 − Churn_cumulativo_t) / (1 + r)^t ]
+```
+
+Dove:
+- **t** = periodo (mese o anno)
+- **T** = orizzonte temporale scelto (es. 36 mesi)
+- **r** = tasso di sconto mensile (tipicamente 1-2%)
+- **Churn_cumulativo_t** = probabilità che il cliente abbia già abbandonato entro il periodo t
+
+In pratica, per molte PMI, il LTV a 12 mesi e a 24 mesi calcolato per coorte è più utile della formula predittiva.
+
+### LTV per coorte: il metodo più affidabile
+
+Invece di stimare il LTV da modelli, lo si misura direttamente su coorti storiche. Il metodo è semplice:
+
+1. Raggruppa i clienti per mese di acquisizione (la coorte)
+2. Per ogni coorte, calcola i ricavi cumulativi a 1, 3, 6, 12, 24, 36 mesi
+3. Dividi per il numero di clienti nella coorte (inclusi quelli che hanno churned)
+
+Il risultato è il **LTV reale osservato**, non stimato. Questo metodo richiede solo dati storici sufficienti (almeno 12-18 mesi per un'analisi seria).
+
+```sql
+-- LTV cumulativo per coorte: query SQL completa
+WITH cohort_base AS (
+  SELECT
+    user_id,
+    DATE_TRUNC('month', first_purchase_date) AS cohort_month,
+    first_purchase_date
+  FROM (
+    SELECT
+      user_id,
+      MIN(created_at) AS first_purchase_date
+    FROM orders
+    GROUP BY user_id
+  ) first_orders
+),
+monthly_revenue AS (
+  SELECT
+    o.user_id,
+    DATE_TRUNC('month', o.created_at) AS revenue_month,
+    SUM(o.amount_gross * o.margin_pct) AS gross_margin_contribution
+  FROM orders o
+  GROUP BY o.user_id, DATE_TRUNC('month', o.created_at)
+),
+cohort_revenue AS (
+  SELECT
+    cb.cohort_month,
+    cb.user_id,
+    mr.revenue_month,
+    -- Numero di mesi dall'acquisizione
+    EXTRACT(YEAR FROM AGE(mr.revenue_month, cb.cohort_month)) * 12 +
+    EXTRACT(MONTH FROM AGE(mr.revenue_month, cb.cohort_month)) AS months_since_acquisition,
+    mr.gross_margin_contribution
+  FROM cohort_base cb
+  LEFT JOIN monthly_revenue mr ON cb.user_id = mr.user_id
+    AND mr.revenue_month >= cb.cohort_month
+)
+SELECT
+  cohort_month,
+  months_since_acquisition,
+  COUNT(DISTINCT user_id) AS active_customers,
+  -- Clienti totali nella coorte (includendo chi ha churned)
+  MAX(COUNT(DISTINCT user_id)) OVER (PARTITION BY cohort_month) AS cohort_size,
+  ROUND(SUM(gross_margin_contribution), 2) AS total_gross_margin,
+  -- LTV medio per cliente nella coorte (denominatore = dimensione coorte originale)
+  ROUND(
+    SUM(SUM(gross_margin_contribution)) OVER (
+      PARTITION BY cohort_month
+      ORDER BY months_since_acquisition
+    ) / MAX(COUNT(DISTINCT user_id)) OVER (PARTITION BY cohort_month),
+    2
+  ) AS cumulative_ltv_per_cohort_member
+FROM cohort_revenue
+WHERE months_since_acquisition IS NOT NULL
+GROUP BY cohort_month, months_since_acquisition
+ORDER BY cohort_month, months_since_acquisition;
+```
+
+### Il rapporto LTV/CAC: il termometro della salute aziendale
+
+Il rapporto LTV/CAC è la metrica più importante per valutare la sostenibilità del modello di business:
+
+| LTV/CAC | Interpretazione | Azione consigliata |
+|---------|----------------|-------------------|
+| Inferiore a 1x | Si perde denaro su ogni cliente | Stop acquisition immediato, rivedere pricing o costi |
+| 1x – 3x | Marginalmente sostenibile | Ottimizzare sia CAC che retention |
+| 3x – 5x | Sano e scalabile | Investire nell'acquisition |
+| Superiore a 5x | Sottoinvestimento | Accelerare spesa marketing |
+
+La regola del **3x** come target minimo è consolidata nell'industria SaaS e viene da David Skok di Matrix Partners, che ha analizzato centinaia di scale-up.
+
+Il **Payback Period** completa l'analisi: quanti mesi ci vogliono per recuperare il CAC?
+
+```
+Payback Period (mesi) = CAC / (ARPU × Gross Margin %)
+```
+
+Benchmark per settore:
+- SaaS B2B Enterprise: 18-24 mesi accettabile
+- SaaS B2B SMB: 12-18 mesi
+- E-commerce: 6-12 mesi
+- Consumer app: 3-6 mesi
+
+## Customer Journey Analytics
+
+Il customer journey è la sequenza di interazioni che un cliente ha con un'azienda, dalla prima esposizione al brand fino alla (eventuale) conclusione della relazione. Analizzare questo percorso è fondamentale per ottimizzare ogni punto di contatto.
+
+### I concetti fondamentali
+
+**Touchpoint**: qualsiasi interazione misurabile tra cliente e brand. Un click su un annuncio, una visita al sito, una chiamata al supporto, un acquisto — tutti sono touchpoint.
+
+**Session**: un gruppo di interazioni ravvicinate nel tempo (tipicamente con un timeout di 30 minuti di inattività) che rappresentano una singola visita o sessione di utilizzo.
+
+**Journey**: la sequenza ordinata di touchpoint e sessioni che porta un utente da uno stato iniziale (es. sconosciuto) a uno stato finale (es. cliente pagante, o churned).
+
+### Modellare il customer journey in SQL
+
+Per analizzare i percorsi in SQL, si usa tipicamente la funzione `LAG` o `LEAD` per costruire sequenze di eventi:
+
+```sql
+-- Analisi delle sequenze di eventi pre-conversione
+WITH user_events AS (
+  SELECT
+    user_id,
+    event_name,
+    event_timestamp,
+    -- Evento precedente nello stesso journey
+    LAG(event_name, 1) OVER (
+      PARTITION BY user_id
+      ORDER BY event_timestamp
+    ) AS prev_event,
+    -- Evento precedente (2 step fa)
+    LAG(event_name, 2) OVER (
+      PARTITION BY user_id
+      ORDER BY event_timestamp
+    ) AS prev_event_2,
+    -- Flag se questo evento è una conversione
+    CASE WHEN event_name = 'purchase_completed' THEN 1 ELSE 0 END AS is_conversion
+  FROM events
+  WHERE event_timestamp >= CURRENT_DATE - INTERVAL '90 days'
+),
+conversion_paths AS (
+  SELECT
+    user_id,
+    prev_event_2,
+    prev_event,
+    event_name AS conversion_event,
+    event_timestamp AS conversion_time
+  FROM user_events
+  WHERE is_conversion = 1
+    AND prev_event IS NOT NULL
+)
+SELECT
+  -- I 3 step prima della conversione
+  CONCAT(
+    COALESCE(prev_event_2, 'direct'), ' → ',
+    prev_event, ' → ',
+    conversion_event
+  ) AS conversion_path,
+  COUNT(*) AS conversions,
+  ROUND(COUNT(*) * 100.0 / SUM(COUNT(*)) OVER (), 2) AS pct_of_conversions
+FROM conversion_paths
+GROUP BY prev_event_2, prev_event, conversion_event
+ORDER BY conversions DESC
+LIMIT 20;
+```
+
+### Path Analysis: trovare i percorsi più efficaci
+
+L'analisi dei percorsi (path analysis) risponde a domande come:
+- Quali sequenze di pagine portano più frequentemente alla conversione?
+- Dove si interrompe il flusso di più utenti?
+- Quali percorsi alternativi esistono verso lo stesso obiettivo?
+
+I **Sankey diagram** sono la visualizzazione ideale per questo tipo di analisi: mostrano i flussi di utenti tra stati con la larghezza delle frecce proporzionale al volume.
+
+**Drop-off analysis**: per ogni step del funnel, calcola la percentuale di utenti che abbandonano. Il punto con il drop-off più alto è dove concentrare l'ottimizzazione.
+
+### Time-to-Conversion Analysis
+
+Quanto tempo passa tra il primo touchpoint e la conversione? Questa distribuzione è spesso multimodale:
+- Un picco nei primi minuti (utenti con alta intent che arrivano da ricerca branded)
+- Un picco a 1-3 giorni (consideration phase)
+- Una coda lunga fino a settimane o mesi (cicli di vendita più lunghi)
+
+I percentili sono più informativi della media: il P50 (mediana) e il P90 danno un quadro più realistico della distribuzione.
+
+```sql
+-- Distribuzione del time-to-conversion
+SELECT
+  PERCENTILE_CONT(0.25) WITHIN GROUP (ORDER BY hours_to_convert) AS p25_hours,
+  PERCENTILE_CONT(0.50) WITHIN GROUP (ORDER BY hours_to_convert) AS p50_hours,
+  PERCENTILE_CONT(0.75) WITHIN GROUP (ORDER BY hours_to_convert) AS p75_hours,
+  PERCENTILE_CONT(0.90) WITHIN GROUP (ORDER BY hours_to_convert) AS p90_hours,
+  AVG(hours_to_convert) AS mean_hours,
+  STDDEV(hours_to_convert) AS stddev_hours
+FROM (
+  SELECT
+    user_id,
+    EXTRACT(EPOCH FROM (first_purchase_time - first_visit_time)) / 3600 AS hours_to_convert
+  FROM user_conversion_summary
+  WHERE first_purchase_time IS NOT NULL
+) t;
+```
+
+## Segmentazione Comportamentale
+
+La segmentazione comportamentale divide i clienti in gruppi omogenei in base a come interagiscono con il prodotto o servizio. È più predittiva della segmentazione demografica perché riflette le azioni reali, non le caratteristiche supposte.
+
+### RFM Avanzato: dalla teoria alla produzione
+
+Il modello RFM (Recency, Frequency, Monetary) è uno dei framework di segmentazione più potenti e collaudati nel direct marketing, utilizzato almeno dal 1961 (Arthur Hughes, "The Complete Database Marketer"):
+
+- **Recency (R)**: quanti giorni fa ha fatto l'ultimo acquisto?
+- **Frequency (F)**: quante transazioni ha fatto nel periodo di analisi?
+- **Monetary (M)**: qual è il valore totale degli acquisti?
+
+Il modo classico di calcolare RFM è il quintile scoring: si dividono i clienti in 5 gruppi per ogni dimensione (punteggio da 1 a 5) e si crea un punteggio composito.
+
+```sql
+-- Calcolo RFM con segmenti
+WITH rfm_raw AS (
+  SELECT
+    customer_id,
+    MAX(order_date) AS last_order_date,
+    COUNT(DISTINCT order_id) AS frequency,
+    SUM(order_value) AS monetary,
+    CURRENT_DATE - MAX(order_date) AS recency_days
+  FROM orders
+  WHERE order_date >= CURRENT_DATE - INTERVAL '12 months'
+  GROUP BY customer_id
+),
+rfm_scored AS (
+  SELECT
+    customer_id,
+    recency_days,
+    frequency,
+    monetary,
+    -- Quintile scoring (5 = migliore, 1 = peggiore)
+    NTILE(5) OVER (ORDER BY recency_days ASC) AS r_score,
+    NTILE(5) OVER (ORDER BY frequency DESC) AS f_score,
+    NTILE(5) OVER (ORDER BY monetary DESC) AS m_score
+  FROM rfm_raw
+),
+rfm_segments AS (
+  SELECT
+    *,
+    CONCAT(r_score, f_score, m_score) AS rfm_cell,
+    (r_score + f_score + m_score) / 3.0 AS avg_rfm_score
+  FROM rfm_scored
+)
+SELECT
+  customer_id,
+  rfm_cell,
+  avg_rfm_score,
+  CASE
+    WHEN r_score >= 4 AND f_score >= 4 AND m_score >= 4 THEN 'Champions'
+    WHEN r_score >= 3 AND f_score >= 3 THEN 'Loyal Customers'
+    WHEN r_score >= 4 AND f_score <= 2 THEN 'Recent Customers'
+    WHEN f_score >= 3 AND r_score <= 2 THEN 'At Risk'
+    WHEN r_score <= 2 AND f_score <= 2 AND m_score >= 3 THEN 'Cant Lose Them'
+    WHEN r_score >= 4 AND f_score <= 2 AND m_score <= 2 THEN 'Promising'
+    WHEN r_score <= 2 AND f_score <= 2 AND m_score <= 2 THEN 'Lost'
+    ELSE 'Needs Attention'
+  END AS segment
+FROM rfm_segments;
+```
+
+I segmenti tipici con le loro caratteristiche:
+
+| Segmento | R | F | M | Azione raccomandata |
+|----------|---|---|---|-------------------|
+| Champions | Alto | Alto | Alto | Reward, advocacy program |
+| Loyal Customers | Medio-Alto | Alto | Medio-Alto | Upsell, loyalty program |
+| At Risk | Basso | Medio-Alto | Medio-Alto | Win-back campaign urgente |
+| Cant Lose Them | Basso | Alto | Alto | Riattivazione prioritaria |
+| Recent Customers | Alto | Basso | Basso | Onboarding, second purchase |
+| Lost | Molto basso | Basso | Basso | Campagna tombstone o ignore |
+
+### Segmentazione per valore: LTV Deciles
+
+Un approccio complementare all'RFM è dividere i clienti in decili di LTV. Questo rivela spesso la regola di Pareto nel proprio specifico business:
+
+- Top 10% dei clienti → X% dei ricavi
+- Top 20% dei clienti → Y% dei ricavi
+
+Queste concentrazioni guidano decisioni di investimento: quanto spendere per acquisire e trattenere i clienti nei decili più alti?
+
+### Behavioral Segments: oltre l'RFM
+
+Per i prodotti digitali, la segmentazione comportamentale va oltre le transazioni e include il pattern di utilizzo del prodotto:
+
+**Power Users**: usano il prodotto quotidianamente, esplorano features avanzate, hanno alta profondità di engagement. Sono i migliori candidati per feedback, beta testing e case study.
+
+**Passive Users**: si sono iscritti ma l'utilizzo è sporadico. Alto rischio di churn. Spesso non hanno raggiunto l'"aha moment" — il momento in cui il valore del prodotto diventa evidente.
+
+**Churned Users**: hanno smesso di usare il prodotto. Analizzare cosa li differenziava dagli utenti attivi è fondamentale per prevenire il churn futuro.
+
+## Customer Health Score
+
+Il Customer Health Score è un indicatore composito che misura la "salute" della relazione con un cliente — cioè la probabilità che rimanga attivo e cresca nel tempo. È particolarmente diffuso nei prodotti SaaS B2B, ma applicabile a qualsiasi contesto con relazioni continuative.
+
+### Come costruire uno score composito
+
+Un Health Score efficace combina più segnali con pesi differenziati:
+
+```
+Health Score = w1 × Recency_Score + w2 × Frequency_Score + w3 × Depth_Score
+```
+
+Un esempio di configurazione con pesi bilanciati:
+
+```
+Health Score = 0.40 × Recency_Score + 0.30 × Frequency_Score + 0.30 × Depth_Score
+```
+
+Dove:
+- **Recency_Score**: normalizzato 0-100, basato su giorni dall'ultimo login/utilizzo
+- **Frequency_Score**: normalizzato 0-100, basato su sessioni per settimana nelle ultime 4 settimane
+- **Depth_Score**: normalizzato 0-100, basato su numero di features utilizzate / features disponibili
+
+I pesi vanno calibrati sul proprio specifico business: in un tool di collaborazione, la frequenza è più predittiva; in un tool di reportistica mensile, la recency di utilizzo è meno significativa della completezza del setup.
+
+### Normalizzazione dei componenti
+
+Per normalizzare ogni componente, una formula comune è la min-max normalization per quintili:
+
+```sql
+-- Calcolo Health Score per account SaaS
+WITH usage_metrics AS (
+  SELECT
+    account_id,
+    -- Recency: giorni dall'ultimo evento significativo
+    EXTRACT(EPOCH FROM (CURRENT_TIMESTAMP - MAX(event_timestamp))) / 86400
+      AS days_since_last_activity,
+    -- Frequency: sessioni medie settimanali nelle ultime 4 settimane
+    COUNT(DISTINCT DATE_TRUNC('week', event_timestamp)) / 4.0
+      AS avg_weekly_sessions,
+    -- Depth: features usate su 10 features core
+    COUNT(DISTINCT feature_name) AS features_used
+  FROM product_events
+  WHERE event_timestamp >= CURRENT_TIMESTAMP - INTERVAL '28 days'
+    AND event_type = 'feature_used'
+  GROUP BY account_id
+),
+scored AS (
+  SELECT
+    account_id,
+    days_since_last_activity,
+    avg_weekly_sessions,
+    features_used,
+    -- Recency Score (inverso: più recente = score più alto)
+    GREATEST(0, 100 - (days_since_last_activity / 30.0 * 100)) AS recency_score,
+    -- Frequency Score (capped a 5 sessioni/settimana come massimo)
+    LEAST(100, avg_weekly_sessions / 5.0 * 100) AS frequency_score,
+    -- Depth Score (su 10 features core)
+    LEAST(100, features_used / 10.0 * 100) AS depth_score
+  FROM usage_metrics
+)
+SELECT
+  account_id,
+  ROUND(
+    0.40 * recency_score + 0.30 * frequency_score + 0.30 * depth_score,
+    1
+  ) AS health_score,
+  CASE
+    WHEN (0.40 * recency_score + 0.30 * frequency_score + 0.30 * depth_score) >= 70 THEN 'Healthy'
+    WHEN (0.40 * recency_score + 0.30 * frequency_score + 0.30 * depth_score) >= 40 THEN 'At Risk'
+    ELSE 'Critical'
+  END AS health_status
+FROM scored;
+```
+
+### Early Warning System per il Churn
+
+L'obiettivo principale del Health Score non è misurare lo stato corrente, ma anticipare il churn. Le aziende più sofisticate costruiscono alert automatici:
+
+- **Health Score scende sotto 40**: notifica automatica al Customer Success Manager
+- **Calo di score di 20+ punti in 2 settimane**: trigger per outreach proattivo
+- **Feature Depth scende a zero per 14 giorni**: trigger per campagna di riattivazione
+
+## Caso Reale: Peloton e il Workout Streak
+
+Peloton, la piattaforma di fitness connected, ha costruito uno dei sistemi di customer analytics più sofisticati nel consumer B2C. Il loro caso è particolarmente illuminante perché mostra come metriche comportamentali specifiche del prodotto possano predire il churn con anticipo.
+
+Il **Workout Streak** — il numero di giorni consecutivi in cui l'utente si allena — è emerso come il principale predittore di retention a lungo termine. L'analisi dei dati interni ha rivelato che gli utenti che raggiungono uno streak di 20 giorni nei primi 3 mesi hanno una probabilità di churn a 12 mesi inferiore del 60% rispetto alla media.
+
+Questo insight ha trasformato la product strategy:
+
+1. **Feature design**: il sistema di streak diventò centrale nell'app, con badge, notifiche e leaderboard sociali progettati per mantenere lo streak attivo.
+
+2. **Onboarding optimization**: il flow di onboarding fu ridisegnato per portare l'utente a completare 3 allenamenti nella prima settimana (il primo "micro-streak"), aumentando la probabilità di raggiungere lo streak lungo successivo.
+
+3. **Early intervention**: utenti con streak che si interrompono dopo giorno 7-14 (il periodo critico) ricevono notifiche personalizzate e offerte di contenuto specifico nelle successive 48 ore.
+
+4. **Churn prediction model**: l'algoritmo di churn prediction integra il Workout Streak come feature con peso elevato, permettendo a Peloton di identificare utenti a rischio con 60 giorni di anticipo.
+
+Il risultato: il Net Revenue Retention (NRR) di Peloton nei periodi di crescita pre-pandemia superava il 100%, un benchmark raramente raggiunto nel consumer hardware con subscription.
+
+La lezione per qualsiasi prodotto digitale: trovare l'equivalente del "Workout Streak" — quella specifica sequenza di comportamenti che predice la retention meglio di qualsiasi metrica di vanità.
+
+<Aside type="tip">
+Per identificare le behavioral metrics più predittive nella propria app, si usa tipicamente un'analisi di correlazione o un modello di regressione logistica (churn a 90 giorni come variabile dipendente, behavioral features come variabili indipendenti). Le feature con il coefficiente più alto sono i candidati per il proprio "health score".
+</Aside>
+
+## Template: Customer Analytics Dashboard
+
+Una Customer Analytics Dashboard efficace ha tre livelli di profondità:
+
+### Livello 1: Executive View (KPI di business)
+
+Metriche da monitorare settimanalmente:
+
+| Metrica | Frequenza | Target | Drill-down disponibile |
+|---------|-----------|--------|----------------------|
+| LTV medio per coorte (12m) | Mensile | Crescita YoY | Per canale, per segmento |
+| LTV/CAC ratio | Mensile | Maggiore o uguale a 3x | Per canale di acquisition |
+| Payback Period | Mensile | Sotto benchmark settore | Per canale, per prodotto |
+| Net Revenue Retention | Mensile | Maggiore o uguale a 100% | Per piano, per segmento |
+| Churn Rate mensile | Settimanale | Inferiore a benchmark | Per segmento RFM, per tenure |
+
+### Livello 2: Operational View (segmenti e journey)
+
+Metriche da monitorare settimanalmente per il team marketing/CS:
+
+| Metrica | Frequenza | Azione trigger |
+|---------|-----------|---------------|
+| Distribuzione segmenti RFM | Settimanale | Alert se "At Risk" supera soglia |
+| Health Score distribution | Settimanale | Alert se "Critical" cresce |
+| Conversion path top 10 | Mensile | Ottimizzare path con alto volume/basso CVR |
+| Time-to-conversion P50/P90 | Mensile | Variazioni segnalano cambiamenti nel journey |
+| Feature adoption rate | Settimanale | Monitora adoption di feature critiche |
+
+### Livello 3: Analytical View (drill-down e investigazione)
+
+Strumenti e query per l'analisi ad-hoc:
+
+- LTV cumulativo per coorte mensile (matrice di coorte)
+- Sankey diagram dei percorsi di conversione
+- Distribuzione del health score per segmento
+- Early churners vs retained: analisi delle differenze comportamentali
+- A/B test results su campagne di retention
+
+<Aside type="note">
+La Customer Analytics Dashboard non è uno strumento passivo. Il suo valore è nell'abilitare domande, non nel rispondere a tutte le domande in anticipo. Una buona dashboard porta il team ad alzarsi dal posto e investigare — il drill-down è più importante della vista aggregata.
+</Aside>
+
+## Come Costruire il Sistema in Pratica
+
+Il percorso verso un sistema di customer analytics maturo segue tipicamente questo ordine:
+
+<Steps>
+1. **Fondamenta: event tracking coerente**
+
+   Prima di qualsiasi analisi, serve un piano di misurazione degli eventi coerente. Definisci gli eventi chiave del customer journey (registration, activation, first_value, repeated_value, churn_signal) e assicurati che siano tracciati in modo affidabile con le proprietà necessarie (user_id, timestamp, properties rilevanti).
+
+2. **LTV per coorte su dati storici**
+
+   Costruisci la matrice di coorte LTV con i dati storici disponibili. Anche 12 mesi di dati sono sufficienti per i primi insight. Identifica quale coorte ha performato meglio e cerca correlazioni con il canale di acquisizione.
+
+3. **Segmentazione RFM operativa**
+
+   Implementa il calcolo RFM come tabella aggiornata settimanalmente nel data warehouse. Collega questa tabella al CRM per abilitare campagne personalizzate per segmento. Inizia con almeno 3 segmenti: Champions, At Risk, Lost.
+
+4. **Health Score per i clienti attivi**
+
+   Se hai un prodotto con utilizzo continuativo, implementa il health score partendo da 2-3 segnali forti. Valida che il tuo score sia effettivamente correlato al churn futuro confrontandolo con dati storici.
+
+5. **Early warning system e automazioni**
+
+   Collega il health score e i segnali di churn precoce a workflow automatici nel CRM: notifiche al CS team, email di riattivazione, offerte speciali. Misura l'impatto di ogni intervento.
+
+6. **Reporting e democratizzazione**
+
+   Costruisci la dashboard nei tre livelli descritti sopra. Forma il team marketing e il team CS a leggere i dati in autonomia. L'obiettivo è che l'analyst non sia il collo di bottiglia per ogni risposta.
+</Steps>
+
+## Errori Comuni da Evitare
+
+**Confondere la media con la distribuzione**: un LTV medio di 500€ può nascondere che il 20% dei clienti vale 2.000€ e l'80% vale meno di 100€. Le medie sono utili, le distribuzioni sono necessarie.
+
+**Health Score senza validazione**: costruire uno score composito senza verificare che sia predittivo del churn è un errore costoso. Prima di usarlo in produzione, verifica la correlazione del tuo score storico con il churn reale.
+
+**Segmentare senza agire**: la segmentazione senza follow-through operativo è un esercizio accademico. Ogni segmento deve avere un playbook: cosa si fa con i "Champions"? Cosa si fa con gli "At Risk"?
+
+**Ottimizzare metriche locali**: ridurre il churn nel mese 1-3 a scapito del LTV a lungo termine (es. offrendo sconti che attraggono clienti a basso valore) è un'ottimizzazione miope. Le metriche di customer analytics devono essere sempre valutate sull'orizzonte temporale rilevante per il business.
+
+**Ignorare il LTV per canale**: un CAC di 50€ da Facebook Ads sembra identico a un CAC di 50€ da referral organico. Ma se il LTV a 12 mesi dei clienti da referral è il doppio, stai allocando il budget in modo sbagliato.
+
+## Approfondimenti
+
+- Peter Fader, Bruce Hardie, "The BG/NBD Model for Customer-Base Analysis" (2005) — il paper fondamentale sul modello predittivo di LTV
+- David Skok, "SaaS Metrics 2.0" (For Entrepreneurs blog) — guida pratica alle metriche SaaS incluso LTV/CAC
+- Arthur Hughes, "The Complete Database Marketer" (McGraw-Hill, 1994) — l'origine del framework RFM
+- "Lean Analytics" di Alistair Croll e Benjamin Yoskovitz — approccio pratico alle metriche per stage di crescita
