@@ -18,7 +18,6 @@ export const collections = {
     }),
   }),
   corso: defineCollection({
-    loader: glob({ pattern: "**/*.mdx", base: "./src/content/docs/course" }),
     schema: z.object({
       title: z.string().trim().min(3, 'title is required'),
       description: z.string().trim().min(10, 'description is required'),
