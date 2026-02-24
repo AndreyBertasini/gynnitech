@@ -87,7 +87,7 @@ export default defineConfig({
         starlightHeadingBadges(),
         starlightLinksValidator({
           errorOnRelativeLinks: false,
-          exclude: ['/course/**'],
+          exclude: ['/course/**', '/blog/', '/blog/**'],
         }),
       ],
       disable404Route: true,
