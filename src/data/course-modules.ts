@@ -23,9 +23,9 @@ export const COURSE_MODULES: CourseModule[] = [
     color: 'from-teal-500 to-emerald-400'
   },
   {
-    id: 'metriche-fondamenti',
-    title: 'Metriche e Fondamenti Analitici',
-    description: 'Approccio analitico, metriche fondamentali, statistica e ricerca per il business.',
+    id: 'metriche-dashboard',
+    title: 'Metriche, Dashboard & Analytics',
+    description: 'Metriche fondamentali, Unit Economics, SQL per analisti e Python per data analysis.',
     icon: 'BarChart',
     color: 'from-green-500 to-emerald-400'
   },
@@ -49,13 +49,6 @@ export const COURSE_MODULES: CourseModule[] = [
     description: 'Performance Marketing, Branding, Unit Economics e Modelli di Attribuzione.',
     icon: 'Zap',
     color: 'from-orange-500 to-red-400'
-  },
-  {
-    id: 'dashboard-visualizzazione',
-    title: 'Dashboard & Data Visualization',
-    description: 'Dashboard strategiche, Data Visualization, Storytelling, SQL e Python per analisi.',
-    icon: 'LayoutDashboard',
-    color: 'from-cyan-500 to-blue-400'
   },
   {
     id: 'marketing-data-science',
