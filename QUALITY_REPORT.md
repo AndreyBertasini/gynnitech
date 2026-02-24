@@ -1,0 +1,131 @@
+# Report Qualità Lezioni
+
+## 🟢 Fatte Bene (Strutturate e Dettagliate)
+- **analisi-marketing/analisi-end-to-end-utm.mdx** (1343 parole, 81 blocchi codice, 0 componenti)
+- **analisi-marketing/caso-studio.mdx** (2244 parole, 16 blocchi codice, 0 componenti)
+- **analisi-marketing/cheat-sheet.mdx** (1298 parole, 12 blocchi codice, 0 componenti)
+- **analisi-marketing/costruire-brand-forte.mdx** (2170 parole, 12 blocchi codice, 0 componenti)
+- **analisi-marketing/crm-email-analytics.mdx** (2198 parole, 6 blocchi codice, 0 componenti)
+- **analisi-marketing/customer-journey-mapping.mdx** (1850 parole, 6 blocchi codice, 0 componenti)
+- **analisi-marketing/efficacia-brand.mdx** (1996 parole, 6 blocchi codice, 0 componenti)
+- **analisi-marketing/funnel-unit-economics.mdx** (3222 parole, 15 blocchi codice, 0 componenti)
+- **analisi-marketing/ga4-avanzato.mdx** (1958 parole, 21 blocchi codice, 0 componenti)
+- **analisi-marketing/marketing-data-pipeline.mdx** (3142 parole, 32 blocchi codice, 0 componenti)
+- **analisi-marketing/modelli-attribuzione.mdx** (2461 parole, 12 blocchi codice, 0 componenti)
+- **analisi-marketing/performance-marketing.mdx** (2848 parole, 18 blocchi codice, 0 componenti)
+- **analisi-marketing/seo-content-analytics.mdx** (2115 parole, 12 blocchi codice, 0 componenti)
+- **analisi-marketing/social-media-analytics.mdx** (1980 parole, 9 blocchi codice, 0 componenti)
+- **analisi-prodotto/ab-testing.mdx** (2515 parole, 15 blocchi codice, 0 componenti)
+- **analisi-prodotto/analisi-coorte.mdx** (3382 parole, 36 blocchi codice, 0 componenti)
+- **analisi-prodotto/caso-studio.mdx** (1918 parole, 19 blocchi codice, 0 componenti)
+- **analisi-prodotto/customer-development.mdx** (3701 parole, 12 blocchi codice, 0 componenti)
+- **analisi-prodotto/nps-net-promoter-score.mdx** (1645 parole, 15 blocchi codice, 0 componenti)
+- **analisi-prodotto/onboarding-attivazione.mdx** (2169 parole, 12 blocchi codice, 0 componenti)
+- **analisi-prodotto/prioritizzazione-feature.mdx** (1784 parole, 15 blocchi codice, 0 componenti)
+- **analisi-prodotto/product-market-fit.mdx** (1939 parole, 15 blocchi codice, 0 componenti)
+- **analisi-prodotto/retention-framework.mdx** (1861 parole, 12 blocchi codice, 0 componenti)
+- **analisi-prodotto/strumenti-product-analytics.mdx** (1605 parole, 25 blocchi codice, 0 componenti)
+- **analisi-prodotto/ux-research.mdx** (1536 parole, 12 blocchi codice, 0 componenti)
+- **dashboard-visualizzazione/caso-studio.mdx** (1156 parole, 6 blocchi codice, 0 componenti)
+- **dashboard-visualizzazione/cheat-sheet.mdx** (1181 parole, 6 blocchi codice, 0 componenti)
+- **dashboard-visualizzazione/dashboard-strategiche.mdx** (4739 parole, 6 blocchi codice, 0 componenti)
+- **dashboard-visualizzazione/data-visualization.mdx** (4670 parole, 11 blocchi codice, 0 componenti)
+- **dashboard-visualizzazione/etl-data-pipeline.mdx** (1088 parole, 6 blocchi codice, 0 componenti)
+- **dashboard-visualizzazione/python-data-analysis.mdx** (1006 parole, 6 blocchi codice, 0 componenti)
+- **dashboard-visualizzazione/sql-per-analisti.mdx** (1063 parole, 6 blocchi codice, 0 componenti)
+- **dashboard-visualizzazione/storytelling-dati.mdx** (1092 parole, 6 blocchi codice, 0 componenti)
+- **data-collection/event-tracking.mdx** (4957 parole, 167 blocchi codice, 0 componenti)
+- **data-collection/framework.mdx** (4987 parole, 76 blocchi codice, 0 componenti)
+- **data-collection/integrations.mdx** (1010 parole, 6 blocchi codice, 0 componenti)
+- **data-collection/introduction.mdx** (4351 parole, 15 blocchi codice, 0 componenti)
+- **data-collection/privacy.mdx** (1062 parole, 6 blocchi codice, 0 componenti)
+- **data-collection/quickstart.mdx** (2300 parole, 61 blocchi codice, 0 componenti)
+- **data-warehousing/caso-studio.mdx** (2841 parole, 77 blocchi codice, 0 componenti)
+- **data-warehousing/cheat-sheet.mdx** (1899 parole, 92 blocchi codice, 0 componenti)
+- **data-warehousing/clickhouse.mdx** (2363 parole, 113 blocchi codice, 0 componenti)
+- **data-warehousing/olap.mdx** (2241 parole, 50 blocchi codice, 0 componenti)
+- **data-warehousing/schema-evolution.mdx** (2443 parole, 92 blocchi codice, 0 componenti)
+- **data-warehousing/sql.mdx** (2889 parole, 126 blocchi codice, 0 componenti)
+- **gestione-data-driven/caso-studio.mdx** (2624 parole, 6 blocchi codice, 0 componenti)
+- **gestione-data-driven/cheat-sheet.mdx** (1834 parole, 36 blocchi codice, 0 componenti)
+- **gestione-data-driven/ciclo-deming-hadi.mdx** (3338 parole, 18 blocchi codice, 0 componenti)
+- **gestione-data-driven/cultura-data-driven.mdx** (2631 parole, 3 blocchi codice, 0 componenti)
+- **gestione-data-driven/decision-making-dati.mdx** (2718 parole, 6 blocchi codice, 0 componenti)
+- **gestione-data-driven/framework-jtbd.mdx** (3312 parole, 15 blocchi codice, 0 componenti)
+- **gestione-data-driven/interviste-profondita.mdx** (2814 parole, 20 blocchi codice, 0 componenti)
+- **gestione-data-driven/okr-e-kpi.mdx** (2895 parole, 6 blocchi codice, 0 componenti)
+- **gestione-data-driven/ricerca-quantitativa.mdx** (3393 parole, 12 blocchi codice, 0 componenti)
+- **infrastructure-ops/caso-studio.mdx** (1117 parole, 6 blocchi codice, 0 componenti)
+- **infrastructure-ops/cheat-sheet.mdx** (1155 parole, 6 blocchi codice, 0 componenti)
+- **infrastructure-ops/cicd.mdx** (2919 parole, 82 blocchi codice, 0 componenti)
+- **infrastructure-ops/costs.mdx** (3663 parole, 57 blocchi codice, 0 componenti)
+- **infrastructure-ops/documentation.mdx** (4385 parole, 78 blocchi codice, 0 componenti)
+- **infrastructure-ops/iac-terraform.mdx** (1123 parole, 6 blocchi codice, 0 componenti)
+- **kafka-streaming/caso-studio.mdx** (1046 parole, 6 blocchi codice, 0 componenti)
+- **kafka-streaming/cheat-sheet.mdx** (1093 parole, 6 blocchi codice, 0 componenti)
+- **kafka-streaming/kafka-clickhouse.mdx** (1057 parole, 6 blocchi codice, 0 componenti)
+- **marketing-data-science/analytic-traps.mdx** (3059 parole, 33 blocchi codice, 0 componenti)
+- **marketing-data-science/caso-studio.mdx** (1096 parole, 6 blocchi codice, 0 componenti)
+- **marketing-data-science/cheat-sheet.mdx** (1004 parole, 6 blocchi codice, 0 componenti)
+- **marketing-data-science/cluster-analysis.mdx** (1034 parole, 6 blocchi codice, 0 componenti)
+- **marketing-data-science/customer-analytics.mdx** (3721 parole, 35 blocchi codice, 1 componenti)
+- **marketing-data-science/embeddings.mdx** (1007 parole, 6 blocchi codice, 0 componenti)
+- **marketing-data-science/hadi-cycles.mdx** (1032 parole, 6 blocchi codice, 0 componenti)
+- **marketing-data-science/nps-critique.mdx** (2996 parole, 17 blocchi codice, 0 componenti)
+- **marketing-data-science/pmf.mdx** (2636 parole, 18 blocchi codice, 0 componenti)
+- **marketing-data-science/retention.mdx** (4715 parole, 52 blocchi codice, 0 componenti)
+- **marketing-data-science/trigger-analytics.mdx** (1039 parole, 6 blocchi codice, 0 componenti)
+- **marketing-data-science/unit-economics.mdx** (2900 parole, 53 blocchi codice, 0 componenti)
+- **metriche-fondamenti/approccio-analitico.mdx** (4372 parole, 12 blocchi codice, 0 componenti)
+- **metriche-fondamenti/caso-studio.mdx** (1009 parole, 6 blocchi codice, 0 componenti)
+- **metriche-fondamenti/cheat-sheet.mdx** (1180 parole, 6 blocchi codice, 0 componenti)
+- **metriche-fondamenti/generazione-idee.mdx** (1002 parole, 6 blocchi codice, 0 componenti)
+- **metriche-fondamenti/metriche-fondamentali.mdx** (5196 parole, 19 blocchi codice, 0 componenti)
+- **metriche-fondamenti/statistica-fondamenti.mdx** (3962 parole, 29 blocchi codice, 0 componenti)
+- **panoramica/mappe-concettuali.mdx** (1094 parole, 6 blocchi codice, 0 componenti)
+- **real-time-analytics/cdc-pattern.mdx** (1031 parole, 6 blocchi codice, 0 componenti)
+- **real-time-analytics/cheat-sheet.mdx** (1124 parole, 6 blocchi codice, 0 componenti)
+- **real-time-analytics/clickhouse-fondamenti.mdx** (4314 parole, 160 blocchi codice, 0 componenti)
+- **real-time-analytics/clickhouse-ottimizzazione.mdx** (1115 parole, 6 blocchi codice, 0 componenti)
+- **real-time-analytics/dashboards.mdx** (1091 parole, 6 blocchi codice, 0 componenti)
+
+## 🟡 Da Migliorare o Arricchire (Lunghezza media o pochi esempi)
+- **analisi-prodotto/cheat-sheet.mdx** (829 parole, 6 blocchi codice, 0 componenti)
+- **data-collection/terminology.mdx** (980 parole, 6 blocchi codice, 0 componenti)
+- **data-warehousing/data-modeling.mdx** (1807 parole, 42 blocchi codice, 0 componenti)<br>  ⚠️ Problemi: Manca 'module:' nel frontmatter
+- **infrastructure-ops/monitoring-observability.mdx** (2035 parole, 48 blocchi codice, 0 componenti)<br>  ⚠️ Problemi: Manca 'module:' nel frontmatter
+- **kafka-streaming/introduzione-streaming.mdx** (1817 parole, 29 blocchi codice, 0 componenti)<br>  ⚠️ Problemi: Manca 'module:' nel frontmatter
+- **kafka-streaming/kafka-connect.mdx** (1845 parole, 67 blocchi codice, 0 componenti)<br>  ⚠️ Problemi: Manca 'module:' nel frontmatter
+- **kafka-streaming/kafka-fondamenti.mdx** (2037 parole, 53 blocchi codice, 0 componenti)<br>  ⚠️ Problemi: Manca 'module:' nel frontmatter
+- **kafka-streaming/kafka-ops.mdx** (1082 parole, 52 blocchi codice, 0 componenti)<br>  ⚠️ Problemi: Manca 'module:' nel frontmatter
+- **kafka-streaming/kafka-producers-consumers.mdx** (2063 parole, 67 blocchi codice, 0 componenti)<br>  ⚠️ Problemi: Manca 'module:' nel frontmatter
+- **kafka-streaming/kafka-schema-registry.mdx** (2048 parole, 37 blocchi codice, 0 componenti)<br>  ⚠️ Problemi: Manca 'module:' nel frontmatter
+- **marketing-data-science/attribution.mdx** (966 parole, 6 blocchi codice, 0 componenti)
+- **marketing-data-science/brand.mdx** (878 parole, 6 blocchi codice, 0 componenti)
+- **marketing-data-science/experimentation.mdx** (913 parole, 6 blocchi codice, 0 componenti)
+- **marketing-data-science/python.mdx** (997 parole, 6 blocchi codice, 0 componenti)
+- **marketing-data-science/strategy.mdx** (950 parole, 6 blocchi codice, 0 componenti)
+- **marketing-data-science/text-generation.mdx** (944 parole, 6 blocchi codice, 0 componenti)
+- **marketing-data-science/user-centricity.mdx** (940 parole, 6 blocchi codice, 0 componenti)
+- **metriche-fondamenti/inizio-successo.mdx** (3167 parole, 0 blocchi codice, 0 componenti)
+- **metriche-fondamenti/ricerca-desk.mdx** (941 parole, 6 blocchi codice, 0 componenti)
+- **real-time-analytics/caso-studio.mdx** (983 parole, 6 blocchi codice, 0 componenti)
+- **real-time-analytics/clickhouse-rt.mdx** (999 parole, 6 blocchi codice, 0 componenti)
+- **real-time-analytics/mv-incrementali-dictionaries.mdx** (1809 parole, 55 blocchi codice, 0 componenti)<br>  ⚠️ Problemi: Manca 'module:' nel frontmatter
+- **real-time-analytics/streaming.mdx** (939 parole, 6 blocchi codice, 0 componenti)
+- **s3-data-lake/architetture-avanzate.mdx** (1870 parole, 61 blocchi codice, 0 componenti)<br>  ⚠️ Problemi: Manca 'module:' nel frontmatter
+- **s3-data-lake/caso-studio.mdx** (1722 parole, 34 blocchi codice, 0 componenti)<br>  ⚠️ Problemi: Manca 'module:' nel frontmatter
+- **s3-data-lake/cheat-sheet.mdx** (975 parole, 33 blocchi codice, 0 componenti)<br>  ⚠️ Problemi: Manca 'module:' nel frontmatter
+- **s3-data-lake/data-lake-design.mdx** (2089 parole, 35 blocchi codice, 0 componenti)<br>  ⚠️ Problemi: Manca 'module:' nel frontmatter
+- **s3-data-lake/data-lifecycle.mdx** (1759 parole, 40 blocchi codice, 0 componenti)<br>  ⚠️ Problemi: Manca 'module:' nel frontmatter
+- **s3-data-lake/formati-dati.mdx** (1952 parole, 40 blocchi codice, 0 componenti)<br>  ⚠️ Problemi: Manca 'module:' nel frontmatter
+- **s3-data-lake/introduzione-object-storage.mdx** (1372 parole, 27 blocchi codice, 0 componenti)<br>  ⚠️ Problemi: Manca 'module:' nel frontmatter
+- **s3-data-lake/partitioning-strategy.mdx** (1930 parole, 44 blocchi codice, 0 componenti)<br>  ⚠️ Problemi: Manca 'module:' nel frontmatter
+- **s3-data-lake/pipeline-realtime.mdx** (1702 parole, 66 blocchi codice, 0 componenti)<br>  ⚠️ Problemi: Manca 'module:' nel frontmatter
+- **s3-data-lake/s3-clickhouse.mdx** (1890 parole, 101 blocchi codice, 0 componenti)<br>  ⚠️ Problemi: Manca 'module:' nel frontmatter
+- **s3-data-lake/s3-fondamenti.mdx** (1646 parole, 50 blocchi codice, 0 componenti)<br>  ⚠️ Problemi: Manca 'module:' nel frontmatter
+- **s3-data-lake/s3queue-tabelle-incrementali.mdx** (2028 parole, 96 blocchi codice, 0 componenti)<br>  ⚠️ Problemi: Manca 'module:' nel frontmatter
+
+## 🔴 Critiche (Molto corte o da rifare)
+- **corso/learning-path.mdx** (709 parole, 0 blocchi codice, 0 componenti)<br>  ⚠️ Problemi: Manca 'module:' nel frontmatter
+- **data-collection/jtbd.mdx** (709 parole, 0 blocchi codice, 0 componenti)<br>  ⚠️ Problemi: Manca 'module:' nel frontmatter
