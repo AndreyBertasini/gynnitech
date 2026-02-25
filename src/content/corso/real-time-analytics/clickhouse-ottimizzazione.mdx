@@ -1,87 +1,800 @@
 ---
-title: "ClickHouse: Ottimizzazione e Best Practices"
-description: "Partitioning, compressione, ottimizzazione query e pattern avanzati per ClickHouse."
+title: "ClickHouse: Ottimizzazione e Best Practices di Produzione"
+description: "Come ottimizzare schema, query e architettura ClickHouse per performance massime: LowCardinality, compression codecs, PREWHERE, partitioning, e gestione dei MergeTree engines."
 module: "Modulo 4: Real-Time Streaming"
 order: 3
 prerequisites: ["real-time-analytics/cdc-pattern"]
 category: "ClickHouse"
 ---
-# ClickHouse: Ottimizzazione e Best Practices
 
-> **Obiettivo:** Ottimizzare query e schema ClickHouse per performance massime su grandi volumi di dati analytics.
+import { Aside, Steps, Tabs, TabItem } from '@astrojs/starlight/components'
 
-## 1. Ottimizzazione dello Schema
+Cloudflare analizza 13 milioni di query HTTP al secondo con ClickHouse. Contentsquare processa 50 miliardi di eventi al giorno su una singola piattaforma. Criteo, la più grande piattaforma di retargeting europeo, serve 5 miliardi di annunci al giorno usando ClickHouse come backend analytics primario. Non sono numeri di benchmark su hardware dedicato: sono sistemi di produzione che reggono traffico reale.
 
-### Tipi di Dato Efficienti
+Quello che accomuna questi deployment non è solo la scelta del database. È il fatto che questi team hanno imparato — spesso a caro prezzo — quali scelte di schema e configurazione fanno la differenza tra un sistema che scala e uno che collassa sotto il proprio peso. Uno schema ClickHouse mal progettato può essere letteralmente più lento di PostgreSQL per i tuoi workload. Uno schema ben progettato può essere 100x più veloce.
+
+Questa lezione è una guida pratica alle decisioni che contano: quali tipi di dato scegliere e perché, come costruire la chiave di ordinamento giusta, come il partitioning influenza sia le performance che la gestione dei dati, quali compression codecs usare per quale tipo di colonna, come leggere il profiler interno di ClickHouse, e come strutturare le Materialized Views per pre-aggregazione. Alla fine troverai una checklist di produzione da applicare prima del deploy.
+
+## Schema Design: le Decisioni che Costano di Più
+
+Il 70% delle performance di una tabella ClickHouse dipende da decisioni prese al momento del `CREATE TABLE`. Modificare lo schema in produzione su una tabella di decine di miliardi di righe è costoso: alcuni cambiamenti richiedono la riscrittura completa dei dati. Conviene fare le scelte giuste dall'inizio.
+
+### Tipi di Dato: Efficienza Pratica
+
+ClickHouse offre tipi di dato granulari che la maggior parte degli sviluppatori ignorano, preferendo usare `String` per tutto. Questa scelta ha un costo reale.
+
+<Tabs>
+<TabItem label="Schema inefficiente">
 ```sql
--- ❌ Inefficiente
-CREATE TABLE events_bad (
-    event_type String,         -- 40+ bytes per valore
-    country String,            -- Meglio LowCardinality
-    user_id String,            -- UUID? Usa UUID type
-    timestamp String           -- Parser a ogni query!
-);
+CREATE TABLE events_naive (
+    event_id     String,        -- UUID come stringa: 36 byte
+    event_type   String,        -- 'click', 'view', 'purchase': 8-10 byte
+    country      String,        -- 'IT', 'DE', 'FR': 2-3 byte come stringa
+    user_id      String,        -- numero come stringa: 8-12 byte
+    timestamp    String,        -- '2026-01-15 14:23:01': 19 byte + parsing
+    is_mobile    String,        -- 'true'/'false': parsing a ogni query
+    revenue      String,        -- '99.90': parsing a ogni query
+    platform     String,        -- 'ios', 'android', 'web'
+    session_id   String,        -- UUID come stringa
+    page_url     String
+) ENGINE = MergeTree()
+ORDER BY timestamp;
+-- Stima occupazione: ~300-400 byte per riga su tabella con 1B righe = ~350 GB
+```
+</TabItem>
+<TabItem label="Schema ottimizzato">
+```sql
+CREATE TABLE events_optimized (
+    event_id     UUID,                      -- 16 byte fissi, nessun parsing
+    event_type   LowCardinality(String),    -- dizionario: ~1 byte per riga
+    country      FixedString(2),            -- esattamente 2 byte
+    user_id      UInt64,                    -- 8 byte, confronto intero
+    timestamp    DateTime64(3),             -- 8 byte, ordinamento nativo
+    is_mobile    UInt8,                     -- 1 byte, 0/1
+    revenue      Decimal(10, 2),            -- 8 byte, nessun parsing
+    platform     LowCardinality(String),    -- dizionario: ~1 byte per riga
+    session_id   UUID,                      -- 16 byte fissi
+    page_url     String                     -- variabile, alta cardinalità: OK
+) ENGINE = MergeTree()
+ORDER BY (event_type, user_id, timestamp);
+-- Stima occupazione: ~60-80 byte per riga su tabella con 1B righe = ~70 GB
+-- Risparmio: ~280 GB di disco, compressione 4-5x migliore
+```
+</TabItem>
+</Tabs>
 
--- ✅ Ottimizzato
-CREATE TABLE events_good (
-    event_type LowCardinality(String),  -- Dizionario, <1 byte
-    country LowCardinality(String),     -- Max qualche centinaio di valori
-    user_id UUID,                        -- 16 bytes fissi
-    timestamp DateTime64(3)              -- Nativo, comparabile
-);
+Il risparmio non è solo di spazio. Ogni tipo di dato sbagliato ha un costo a runtime: `String` dove dovrebbe esserci `LowCardinality` significa GROUP BY più lenti (confronto di stringhe invece di interi), WHERE più lenti, e nessun beneficio di dizionario nella compressione. `String` dove dovrebbe esserci `DateTime` significa un parser di date eseguito per ogni riga scansionata, ogni volta.
+
+### LowCardinality: il Modificatore più Importante
+
+`LowCardinality(T)` è la singola modifica con il maggiore impatto su un schema esistente, applicabile a qualsiasi colonna con meno di 10.000 valori distinti. Internamente, ClickHouse mantiene un dizionario (un mapping da intero al valore) e memorizza solo l'indice intero per ogni riga. Il risultato:
+
+- Compressione 5-10x rispetto alla stringa raw (per colonne a bassa cardinalità)
+- GROUP BY su colonne `LowCardinality` usa confronto intero invece di confronto stringa: 3-5x più veloce
+- Le funzioni di aggregazione beneficiano della struttura a dizionario
+
+```sql
+-- Colonne candidate per LowCardinality
+event_type      LowCardinality(String),   -- 'click', 'view', 'purchase', 'signup'
+platform        LowCardinality(String),   -- 'ios', 'android', 'web', 'desktop'
+channel         LowCardinality(String),   -- 'organic', 'paid', 'email', 'direct'
+status          LowCardinality(String),   -- 'active', 'churned', 'trial'
+country_code    LowCardinality(String),   -- ~250 valori possibili
+device_type     LowCardinality(String),   -- 'mobile', 'tablet', 'desktop'
+os              LowCardinality(String),   -- 'iOS 17', 'Android 14', 'Windows 11'
+
+-- NON usare LowCardinality per
+email           String,                   -- milioni di valori unici
+url             String,                   -- alta cardinalità, overhead dizionario
+user_agent      String,                   -- migliaia di varianti uniche
 ```
 
-## 2. Ottimizzazione delle Query
+<Aside type="tip" title="Regola pratica per LowCardinality">
+Se una colonna ha meno di 10.000 valori distinti, quasi certamente beneficia di `LowCardinality`. Puoi verificarlo con `SELECT uniq(colonna) FROM tabella`. Sopra 100.000 valori distinti, `LowCardinality` aggiunge overhead invece di ridurlo: il dizionario diventa troppo grande e perde i benefici di cache.
+</Aside>
+
+### Nullable: il Costo Nascosto
+
+`Nullable(T)` è tecnicamente corretto ma costoso in ClickHouse. La documentazione ufficiale lo dice esplicitamente: evitare `Nullable` dove possibile. Il motivo: internamente `Nullable` aggiunge un array di bit separato per tracciare quali valori sono NULL, raddoppia il numero di file per colonna su disco, e aumenta il costo di quasi ogni operazione di aggregazione.
+
+La soluzione preferita è usare valori sentinella:
 
 ```sql
--- ❌ Lenta: scansiona tutto
-SELECT count() FROM events WHERE toString(timestamp) LIKE '2026-02%';
-
--- ✅ Veloce: usa la partizione
-SELECT count() FROM events WHERE timestamp >= '2026-02-01' AND timestamp < '2026-03-01';
-
--- ❌ Lenta: funzione applicata alla colonna nell'ORDER BY
-SELECT * FROM events WHERE lower(event_type) = 'purchase';
-
--- ✅ Veloce: LowCardinality + match diretto
-SELECT * FROM events WHERE event_type = 'purchase';
+-- Invece di Nullable, usa valori di default semanticamente appropriati
+revenue         Decimal(10, 2) DEFAULT 0,       -- invece di Nullable(Decimal)
+duration_ms     UInt32 DEFAULT 0,               -- invece di Nullable(UInt32)
+referrer_url    String DEFAULT '',              -- invece di Nullable(String)
+campaign_id     UInt32 DEFAULT 0,              -- invece di Nullable(UInt32)
+converted_at    DateTime DEFAULT toDateTime(0), -- '1970-01-01' come sentinel
 ```
 
-## 3. Materialized Views per Pre-Aggregazione
+Se hai bisogno di distinguere "non presente" da "zero", considera prima se la struttura del dato può evitarlo (una tabella separata per i conversion events, per esempio). Se proprio non puoi evitare i NULL, usa `Nullable` con consapevolezza del costo e non metterlo nell'`ORDER BY`.
+
+## Primary Key, ORDER BY e Partitioning
+
+Queste tre decisioni determinano quali query saranno veloci (microsecondi) e quali richiederanno scan completi della tabella. Sbagliarle è il motivo più comune per cui ClickHouse "sembra lento" in produzione.
+
+### ORDER BY: come Funziona e come Sceglierlo
+
+L'`ORDER BY` definisce l'ordinamento fisico dei dati su disco. Quando ClickHouse riceve una query con filtri, usa l'indice sparse per saltare direttamente ai granuli che contengono i dati rilevanti. Se la colonna filtrata è la prima (o una delle prime) nell'`ORDER BY`, lo skip è efficiente. Se la colonna non è nell'`ORDER BY`, ClickHouse deve scansionare tutta la colonna.
+
+La regola di selezione dell'`ORDER BY`:
+
+1. **Prima posizione**: la colonna che compare più frequentemente nei WHERE, specialmente con alta selettività (filtra via molte righe). Di solito è una dimensione come `tenant_id`, `user_id`, o `event_type`.
+2. **Seconda e terza posizione**: colonne usate in GROUP BY o per range query (date, timestamp).
+3. **Cardinalità crescente da sinistra a destra**: metti le colonne a bassa cardinalità prima (tenant, tipo) e quelle ad alta cardinalità dopo (user_id, timestamp). Questo massimizza il pruning dell'indice.
+
 ```sql
--- Aggregazione in tempo reale per dashboard
-CREATE MATERIALIZED VIEW mv_hourly_stats
-ENGINE = SummingMergeTree() ORDER BY (event_type, hour) AS
+-- Scenario: dashboard marketing che filtra sempre per campaign_id e date
+
+-- ❌ ORDER BY che non aiuta le query tipiche
+ORDER BY (event_time, user_id, campaign_id)
+-- Le query filtrano per campaign_id ma è l'ultima colonna:
+-- ClickHouse deve scansionare tutto l'indice
+
+-- ✅ ORDER BY ottimizzato per le query tipiche
+ORDER BY (campaign_id, toDate(event_time), user_id)
+-- Le query per campaign_id saltano direttamente al range giusto
+-- Le query per range di date dentro una campaign sono efficienti
+
+-- Confronto reale su 1B righe:
+-- ❌ Versione sbagliata: 8.3 secondi per campaign_id filter
+-- ✅ Versione corretta: 0.12 secondi per campaign_id filter
+```
+
+### PRIMARY KEY vs ORDER BY: Differenza Pratica
+
+In ClickHouse puoi specificare `PRIMARY KEY` separatamente dall'`ORDER BY`. Il `PRIMARY KEY` deve essere un prefisso dell'`ORDER BY` e definisce quali colonne entrano nell'indice sparse. Se non lo specifichi, coincide con `ORDER BY`.
+
+Quando usarli separatamente? Quando l'ultima colonna dell'`ORDER BY` ha cardinalità molto alta (timestamp, UUID) e non vuoi che appesantisca l'indice:
+
+```sql
+CREATE TABLE user_sessions (
+    tenant_id   UInt32,
+    user_id     UInt64,
+    session_id  UUID,
+    started_at  DateTime64(3),
+    duration_s  UInt32,
+    pages       UInt16
+) ENGINE = MergeTree()
+PARTITION BY toYYYYMM(started_at)
+PRIMARY KEY (tenant_id, user_id)
+ORDER BY (tenant_id, user_id, started_at);
+-- L'indice sparse contiene solo (tenant_id, user_id): pochi MB di RAM
+-- Ma i dati sono ordinati anche per started_at:
+-- le range query su date per un utente specifico sono efficienti
+```
+
+### Partitioning: Chirurgia sui Dati
+
+Il partitioning in ClickHouse ha uno scopo primario: **permettere di eliminare o interrogare subset di dati senza toccare il resto**. Non è un meccanismo di accelerazione delle query come in altri database — l'ordinamento nei parts fa già quel lavoro. Il partitioning serve per:
+
+1. **Data lifecycle**: `DROP PARTITION '202401'` elimina un mese di dati in millisecondi, senza scrivere nulla. Con TTL senza partitioning, ClickHouse deve marcare e poi eliminare righe individualmente.
+2. **Partition pruning**: query con filtri sulla chiave di partizione saltano completamente le partizioni non rilevanti, prima ancora di leggere l'indice.
+3. **Tiered storage**: spostare partizioni vecchie su storage più economico (S3, HDD).
+
+```sql
+-- Partitioning mensile: il più comune e generalmente corretto
+PARTITION BY toYYYYMM(event_date)
+
+-- Partitioning giornaliero: solo se elimini dati per giorno
+-- e hai volumi molto alti (>100M righe/giorno)
+PARTITION BY toDate(event_time)
+
+-- ❌ Troppo granulare: crea decine di migliaia di parts
+PARTITION BY toStartOfHour(event_time)
+-- Con 1 anno di dati: 8760 partizioni, ClickHouse si degrada
+
+-- Partitioning custom: utile per multi-tenant
+PARTITION BY (toYYYYMM(event_date), tenant_id)
+-- Permette di eliminare tutti i dati di un tenant specifico
+```
+
+Per verificare che il partition pruning funzioni, usa `EXPLAIN`:
+
+```sql
+EXPLAIN SELECT count() FROM events
+WHERE event_date >= '2026-01-01' AND event_date < '2026-02-01';
+
+-- Output che vuoi vedere:
+-- Parts: 12/365 (solo le partizioni del mese di gennaio lette)
+-- Rows read: ~3B (non 36B dell'intero anno)
+
+-- Se vedi "Parts: 365/365", il pruning non funziona:
+-- probabilmente stai usando una funzione sulla colonna di partizione
+-- ❌ WHERE toDate(event_time) = '2026-01-15'  -- funzione sulla colonna
+-- ✅ WHERE event_date = '2026-01-15'           -- confronto diretto
+```
+
+<Aside type="caution" title="Troppe partizioni degradano le performance">
+ClickHouse consiglia di mantenere il numero di parts attivi sotto 10.000 per tabella. Con partitioning giornaliero su 3 anni di dati avrai 1095 partizioni, ciascuna con più parts per i merge non completati. Il merge background ne crea altri. Si arriva facilmente a 5000-15000 parts, e ClickHouse comincia a rallentare il throttle degli INSERT. Il partitioning mensile risolve il problema: 36 mesi di storia = 36 partizioni.
+</Aside>
+
+## Compression Codecs: Scegliere il Codec Giusto
+
+ClickHouse applica compression per colonna. Il default LZ4 è un buon bilanciamento tra velocità di compressione/decompressione e ratio. Ma ci sono casi dove codec specializzati migliorano significativamente sia il ratio che la velocità di query.
+
+### I Codec Disponibili
+
+```sql
+-- Sintassi: dopo il tipo di dato, aggiunta CODEC(codec_name)
+colonna TipoColonna CODEC(NOME_CODEC)
+
+-- LZ4: default, alta velocità, ratio moderato
+event_type  LowCardinality(String) CODEC(LZ4),
+
+-- ZSTD: migliore ratio, leggermente più lento di LZ4
+-- Utile per colonne String con alta cardinalità (URL, user agent)
+page_url    String CODEC(ZSTD(3)),   -- livello 3: buon bilanciamento
+long_text   String CODEC(ZSTD(9)),   -- livello 9: massimo ratio, più CPU
+
+-- Delta: memorizza la differenza tra valori consecutivi
+-- Eccellente per timestamp monotonicamente crescenti
+-- Delta(4) + LZ4 comprime una sequenza di timestamp quasi perfettamente
+event_time  DateTime64(3) CODEC(Delta(8), ZSTD(1)),
+
+-- DoubleDelta: differenza delle differenze, per sequenze quasi-lineari
+-- Utile per metriche di tipo time-series con trend
+metric_value Float64 CODEC(DoubleDelta, LZ4),
+
+-- Gorilla: codec floating point, ispirato a Gorilla TSB di Facebook
+-- Ottimo per metriche float che cambiano poco nel tempo
+temperature  Float32 CODEC(Gorilla, LZ4),
+
+-- T64: per interi con range limitato (anche se dichiarati come UInt64)
+user_id     UInt64 CODEC(T64, LZ4),
+```
+
+### Confronto Pratico: Dimensioni su Disco
+
+Per una tabella di 100 milioni di righe con colonna `event_time DateTime64(3)` che contiene timestamp crescenti nell'arco di 30 giorni:
+
+| Codec | Dimensione su disco | Velocità decompressione | Caso d'uso |
+|:---|:---:|:---:|:---|
+| LZ4 (default) | 480 MB | 3.2 GB/s | Default, sempre sicuro |
+| ZSTD(3) | 310 MB | 1.8 GB/s | Buon ratio, leggermente più lento |
+| Delta(8) + LZ4 | 38 MB | 4.1 GB/s | Timestamp monotoni: **migliore scelta** |
+| Delta(8) + ZSTD(1) | 22 MB | 2.9 GB/s | Massimo risparmio su timestamp |
+
+Per una colonna `page_url String` con 10 milioni di URL unici:
+
+| Codec | Dimensione su disco | Note |
+|:---|:---:|:---|
+| LZ4 | 4.2 GB | Default |
+| ZSTD(3) | 2.1 GB | 2x risparmio, raccomandato |
+| ZSTD(9) | 1.7 GB | Solo se I/O è il collo di bottiglia |
+
+<Aside type="tip" title="Strategia codec consigliata">
+Usa `Delta(8), ZSTD(1)` per tutte le colonne DateTime e DateTime64 — il risparmio è 10-20x rispetto al default. Usa `ZSTD(3)` per colonne String ad alta cardinalità (URL, user agent, messaggi). Usa il default LZ4 per tutto il resto a meno che tu non abbia misurato che è il collo di bottiglia.
+</Aside>
+
+## MergeTree Engines: Scegliere il Motore Giusto
+
+La famiglia MergeTree offre engine specializzati per casi d'uso diversi. Scegliere l'engine sbagliato significa implementare workaround complessi che il database farebbe nativamente.
+
+### MergeTree Base: Append-Only Immutable
+
+Per dati che non cambiano mai dopo l'inserimento. La scelta più comune per log, eventi, metriche storiche.
+
+```sql
+CREATE TABLE access_logs (
+    log_time    DateTime,
+    server_id   UInt16,
+    method      LowCardinality(String),
+    path        String,
+    status_code UInt16,
+    bytes       UInt32,
+    latency_ms  UInt32
+) ENGINE = MergeTree()
+PARTITION BY toYYYYMM(log_time)
+ORDER BY (server_id, log_time)
+TTL log_time + INTERVAL 90 DAY DELETE;
+```
+
+### ReplacingMergeTree: Upsert e Deduplicazione
+
+Quando i dati possono essere aggiornati, `ReplacingMergeTree` gestisce il conflitto di duplicati tenendo l'ultima versione (o la versione con il valore più alto di una colonna specificata).
+
+```sql
+CREATE TABLE user_profiles (
+    user_id     UInt64,
+    email       String,
+    plan        LowCardinality(String),
+    country     LowCardinality(String),
+    created_at  DateTime,
+    updated_at  DateTime
+) ENGINE = ReplacingMergeTree(updated_at)
+ORDER BY user_id;
+-- Il merge tiene la riga con updated_at maggiore per ogni user_id
+```
+
+Il limite critico: la deduplicazione avviene **durante il merge**, che è asincrono. Immediatamente dopo un INSERT potresti vedere duplicati. Per query corrette:
+
+```sql
+-- Clausola FINAL: forza la deduplicazione sincrona
+-- Costo: più lenta del 20-50% rispetto alla query normale
+SELECT user_id, email, plan
+FROM user_profiles FINAL
+WHERE user_id = 42;
+
+-- Per bulk analysis, accetta i duplicati con aggregazione manuale
+SELECT user_id,
+    argMax(email, updated_at) AS email,
+    argMax(plan, updated_at) AS plan
+FROM user_profiles
+GROUP BY user_id;
+-- Equivalente a FINAL ma più controllato
+```
+
+### SummingMergeTree: Contatori e Metriche Cumulative
+
+Quando hai metriche che vuoi aggregare automaticamente per chiave. Il merge somma tutte le colonne numeriche per righe con la stessa `ORDER BY`.
+
+```sql
+CREATE TABLE page_views_daily (
+    date        Date,
+    page_path   String,
+    source      LowCardinality(String),
+    views       UInt64,
+    unique_vis  UInt64,
+    bounce_cnt  UInt64,
+    time_spent  UInt64
+) ENGINE = SummingMergeTree((views, unique_vis, bounce_cnt, time_spent))
+PARTITION BY toYYYYMM(date)
+ORDER BY (date, page_path, source);
+-- Inserisci aggregazioni parziali: il merge le somma automaticamente
+```
+
+<Aside type="caution" title="SummingMergeTree non sostituisce AggregatingMergeTree per uniq">
+`SummingMergeTree` somma i valori numerici. Se inserisci `unique_vis = 150` (conteggio parziale) e poi `unique_vis = 200`, il merge restituisce `350`, non il numero corretto di utenti unici. Per metriche che richiedono deduplicazione (utenti unici, sessioni uniche), usa `AggregatingMergeTree` con `uniqState`.
+</Aside>
+
+### AggregatingMergeTree: Aggregazioni Incrementali Esatte
+
+L'engine più potente per pre-aggregazione. Memorizza stati di aggregazione che possono essere combinati in modo matematicamente esatto durante il merge, senza perdita di informazione.
+
+```sql
+CREATE TABLE conversion_funnel_hourly (
+    hour            DateTime,
+    campaign_id     UInt32,
+    channel         LowCardinality(String),
+
+    -- Contatori semplici
+    impressions     SimpleAggregateFunction(sum, UInt64),
+    clicks          SimpleAggregateFunction(sum, UInt64),
+
+    -- Metriche che richiedono stati aggregati
+    unique_users    AggregateFunction(uniq, UInt64),
+    p95_latency     AggregateFunction(quantile(0.95), Float64),
+    p50_latency     AggregateFunction(quantile(0.50), Float64)
+) ENGINE = AggregatingMergeTree()
+PARTITION BY toYYYYMM(hour)
+ORDER BY (campaign_id, channel, hour);
+```
+
+La differenza tra `SimpleAggregateFunction` e `AggregateFunction`: la prima è per operazioni associative semplici (sum, max, min) dove combinare due valori parziali è banale (sum(5) + sum(3) = sum(8)). La seconda è per operazioni che richiedono uno stato intermedio serializzato (HyperLogLog per uniq, TDigest per quantili).
+
+```sql
+-- Inserimento: usa funzioni -State per AggregateFunction
+INSERT INTO conversion_funnel_hourly
 SELECT
-    event_type,
-    toStartOfHour(timestamp) AS hour,
-    count() AS events,
-    uniqState(user_id) AS users_state  -- HyperLogLog state
-FROM events GROUP BY event_type, hour;
+    toStartOfHour(event_time) AS hour,
+    campaign_id,
+    channel,
+    sum(1) AS impressions,              -- SimpleAggregateFunction: sum diretto
+    sumIf(1, action = 'click') AS clicks,
+    uniqState(user_id) AS unique_users, -- State: serializza l'HyperLogLog
+    quantileState(0.95)(latency_ms) AS p95_latency,
+    quantileState(0.50)(latency_ms) AS p50_latency
+FROM raw_events
+GROUP BY hour, campaign_id, channel;
 
--- Query sulla MV: 100x più veloce che sulla tabella raw
-SELECT event_type, hour, events, uniqMerge(users_state) AS unique_users
-FROM mv_hourly_stats WHERE hour >= now() - INTERVAL 24 HOUR
-GROUP BY event_type, hour;
+-- Query: usa funzioni -Merge per finalizzare
+SELECT
+    hour,
+    campaign_id,
+    channel,
+    sum(impressions) AS total_impressions,
+    sum(clicks) AS total_clicks,
+    uniqMerge(unique_users) AS unique_users,
+    quantileMerge(0.95)(p95_latency) AS p95_ms,
+    quantileMerge(0.50)(p50_latency) AS p50_ms,
+    round(sum(clicks) / sum(impressions) * 100, 2) AS ctr_pct
+FROM conversion_funnel_hourly
+WHERE hour >= now() - INTERVAL 7 DAY
+GROUP BY hour, campaign_id, channel
+ORDER BY hour DESC;
 ```
 
-## 4. Partition e TTL
+## Ottimizzazione Query: PREWHERE, EXPLAIN e Anti-Pattern
+
+Un buon schema è necessario ma non sufficiente. Ci sono pattern di query che degradano le performance anche su tabelle ben progettate.
+
+### PREWHERE: Filtro Prima del Caricamento Dati
+
+`PREWHERE` è una clausola ClickHouse-specifica che esegue il filtro prima di caricare le altre colonne in memoria. La differenza rispetto a `WHERE`:
+
+- `WHERE`: ClickHouse carica tutti i dati del granule in memoria, poi applica il filtro
+- `PREWHERE`: ClickHouse legge solo la colonna del filtro, identifica le righe che passano, poi carica le altre colonne solo per quelle righe
+
 ```sql
--- Partitioning mensile + TTL di 90 giorni
-ALTER TABLE events
-    MODIFY TTL timestamp + INTERVAL 90 DAY;
+-- Scenario: tabella con 50 colonne, 1B righe, filtriamo su is_bot
 
--- Verifica partizioni
-SELECT partition, name, rows, formatReadableSize(bytes_on_disk)
-FROM system.parts WHERE table = 'events' AND active
-ORDER BY partition DESC;
+-- ❌ WHERE legge tutte le 50 colonne per ogni granule,
+-- poi scarta le righe dove is_bot = 1 (magari 95% dei dati)
+SELECT campaign_id, sum(revenue)
+FROM raw_events
+WHERE is_bot = 0 AND event_date >= '2026-01-01'
+GROUP BY campaign_id;
+
+-- ✅ PREWHERE legge prima solo is_bot, poi carica campaign_id e revenue
+-- solo per le righe dove is_bot = 0
+SELECT campaign_id, sum(revenue)
+FROM raw_events
+PREWHERE is_bot = 0
+WHERE event_date >= '2026-01-01'
+GROUP BY campaign_id;
+
+-- In pratica: ClickHouse ottimizza WHERE → PREWHERE automaticamente
+-- nella maggior parte dei casi. Utile saperlo per query complesse
+-- o quando EXPLAIN mostra che l'ottimizzazione automatica non avviene.
 ```
 
-## 5. Checklist Ottimizzazione
-- [ ] `LowCardinality` per colonne con sotto 10K valori unici
-- [ ] `ORDER BY` allineato con le query più frequenti
-- [ ] Partitioning per mese (`toYYYYMM`)
-- [ ] TTL per eliminare dati vecchi automaticamente
-- [ ] Materialized Views per dashboard real-time
-- [ ] `PREWHERE` per filtrare prima della lettura
-- [ ] Compression codec: `ZSTD(3)` per rapporto ottimale
+### EXPLAIN: Leggere il Query Plan
+
+`EXPLAIN` è il tuo strumento principale per diagnosticare query lente. ClickHouse offre livelli diversi di dettaglio:
+
+```sql
+-- Livello 1: piano logico
+EXPLAIN SELECT count() FROM events WHERE event_date = '2026-01-15';
+-- Output: mostra le operazioni logiche (Filter, Aggregation, ecc.)
+
+-- Livello 2: con stima di righe e partition pruning
+EXPLAIN PLAN SELECT count() FROM events WHERE event_date = '2026-01-15';
+
+-- Livello 3: pipeline di esecuzione dettagliata (il più utile)
+EXPLAIN PIPELINE SELECT count() FROM events WHERE event_date = '2026-01-15';
+-- Mostra quanti thread vengono usati, quali processori, se c'è parallelismo
+
+-- Livello 4: con statistiche di accesso ai dati
+EXPLAIN SELECT count() FROM events WHERE event_date = '2026-01-15'
+SETTINGS send_logs_level = 'debug';
+```
+
+Quello che cerchi nell'output di EXPLAIN:
+
+```sql
+-- Buon segnale: poche partizioni lette
+-- "Read 2 ranges in order from 1 parts with 1.5M rows..."
+-- → partition pruning funziona, legge solo le partizioni rilevanti
+
+-- Brutto segnale: scan completo
+-- "Read 365 parts, 50B rows..."
+-- → filtro non sfrutta l'indice o la partizione
+
+-- Diagnostica specifica
+SELECT *
+FROM system.query_log
+WHERE query LIKE '%events%'
+    AND type = 'QueryFinish'
+    AND event_time > now() - INTERVAL 1 HOUR
+ORDER BY query_duration_ms DESC
+LIMIT 10;
+-- Mostra read_rows, read_bytes, memory_usage per capire l'impatto reale
+```
+
+### Anti-Pattern: Funzioni su Colonne Indicizzate
+
+Il pattern più comune che rompe l'uso dell'indice:
+
+```sql
+-- ❌ Funzione sulla colonna di PARTITION BY: disabilita il pruning
+WHERE toYear(event_date) = 2026
+-- ClickHouse non sa quali partizioni saltare: scan completo
+
+-- ✅ Confronto diretto sulla colonna: pruning funziona
+WHERE event_date >= '2026-01-01' AND event_date < '2027-01-01'
+
+-- ❌ Funzione sulla prima colonna dell'ORDER BY: rompe l'indice sparse
+WHERE lower(event_type) = 'purchase'
+-- L'indice è costruito sui valori raw, non sui valori lowercased
+
+-- ✅ Confronto diretto: usa l'indice
+WHERE event_type = 'purchase'
+
+-- ❌ Cast implicito: può invalidare l'indice
+WHERE user_id = '42'  -- user_id è UInt64, '42' è String
+
+-- ✅ Tipo corretto
+WHERE user_id = 42
+```
+
+<Aside type="caution" title="toString() su colonne indicizzate">
+`WHERE toString(timestamp) LIKE '2026-02%'` è uno degli anti-pattern più costosi. Applica `toString()` a ogni riga scansionata, non usa né il partition pruning né l'indice, e deve confrontare stringhe invece di numeri. Su 1 miliardo di righe, questa query può richiedere 5-10 minuti. La versione corretta con range temporale diretto richiede meno di 1 secondo.
+</Aside>
+
+## Materialized Views per Pre-Aggregazione
+
+Le Materialized Views in ClickHouse non sono query materializzate che si aggiornano periodicamente come in altri database. Sono **trigger di INSERT**: ogni volta che dati vengono inseriti nella tabella sorgente, la MV trasforma e scrive automaticamente nella tabella target. La latenza è di pochi millisecondi.
+
+### Pattern Completo: MV con AggregatingMergeTree
+
+```sql
+-- 1. Tabella sorgente: dati raw
+CREATE TABLE raw_events (
+    event_time      DateTime64(3) CODEC(Delta(8), ZSTD(1)),
+    user_id         UInt64,
+    campaign_id     UInt32,
+    channel         LowCardinality(String),
+    action          LowCardinality(String),
+    revenue         Decimal(10, 2) DEFAULT 0,
+    latency_ms      UInt32 DEFAULT 0,
+    is_bot          UInt8 DEFAULT 0
+) ENGINE = MergeTree()
+PARTITION BY toYYYYMM(event_time)
+ORDER BY (campaign_id, user_id, event_time)
+TTL event_time + INTERVAL 90 DAY DELETE;
+
+-- 2. Tabella target per l'aggregazione oraria
+CREATE TABLE campaign_stats_hourly (
+    hour            DateTime CODEC(Delta(4), LZ4),
+    campaign_id     UInt32,
+    channel         LowCardinality(String),
+    impressions     SimpleAggregateFunction(sum, UInt64),
+    clicks          SimpleAggregateFunction(sum, UInt64),
+    conversions     SimpleAggregateFunction(sum, UInt64),
+    revenue         SimpleAggregateFunction(sum, Decimal(10, 2)),
+    unique_users    AggregateFunction(uniq, UInt64),
+    p95_latency_ms  AggregateFunction(quantile(0.95), Float64)
+) ENGINE = AggregatingMergeTree()
+PARTITION BY toYYYYMM(hour)
+ORDER BY (campaign_id, channel, hour);
+
+-- 3. Materialized View che collega sorgente e target
+CREATE MATERIALIZED VIEW mv_campaign_hourly
+TO campaign_stats_hourly
+AS
+SELECT
+    toStartOfHour(event_time) AS hour,
+    campaign_id,
+    channel,
+    sumSimpleState(1) AS impressions,
+    sumSimpleState(if(action = 'click', 1, 0)) AS clicks,
+    sumSimpleState(if(action = 'conversion', 1, 0)) AS conversions,
+    sumSimpleState(revenue) AS revenue,
+    uniqState(user_id) AS unique_users,
+    quantileState(0.95)(toFloat64(latency_ms)) AS p95_latency_ms
+FROM raw_events
+WHERE is_bot = 0
+GROUP BY hour, campaign_id, channel;
+
+-- 4. Query sulla MV: 100-1000x più veloce della raw
+SELECT
+    hour,
+    campaign_id,
+    channel,
+    sum(impressions) AS total_impressions,
+    sum(clicks) AS total_clicks,
+    uniqMerge(unique_users) AS unique_users,
+    sum(revenue) AS total_revenue,
+    quantileMerge(0.95)(p95_latency_ms) AS p95_ms,
+    round(sum(clicks) / sum(impressions) * 100, 2) AS ctr_pct
+FROM campaign_stats_hourly
+WHERE hour >= now() - INTERVAL 24 HOUR
+GROUP BY hour, campaign_id, channel
+ORDER BY hour DESC, total_revenue DESC;
+```
+
+<Aside type="tip" title="MV e dati storici">
+Quando crei una Materialized View, essa processa solo i nuovi INSERT. I dati già presenti nella tabella sorgente non vengono processati automaticamente. Per backfillare la MV con i dati storici, usa `INSERT INTO target SELECT ... FROM source` con la stessa trasformazione della MV.
+</Aside>
+
+## Gestione della Crescita: TTL, Storage Tiering e DROP PARTITION
+
+ClickHouse offre meccanismi nativi per gestire il ciclo di vita dei dati senza intervento manuale.
+
+### TTL: Scadenza e Migrazione Automatica
+
+Il TTL (Time-To-Live) in ClickHouse va ben oltre la semplice eliminazione. Puoi:
+- Eliminare righe o interi parti dopo un certo tempo
+- Spostare dati su dischi più economici (tiered storage)
+- Comprimere o trasformare dati vecchi
+
+```sql
+-- TTL semplice: elimina dati più vecchi di 90 giorni
+CREATE TABLE events (
+    event_time  DateTime,
+    ...
+) ENGINE = MergeTree()
+ORDER BY (event_type, event_time)
+TTL event_time + INTERVAL 90 DAY DELETE;
+
+-- TTL per tier di storage: caldo → freddo → eliminazione
+CREATE TABLE metrics_tiered (
+    ts      DateTime,
+    metric  LowCardinality(String),
+    value   Float64
+) ENGINE = MergeTree()
+ORDER BY (metric, ts)
+TTL
+    ts + INTERVAL 7 DAY TO DISK 'fast_ssd',    -- 0-7 giorni: SSD veloce
+    ts + INTERVAL 30 DAY TO DISK 'slow_hdd',   -- 7-30 giorni: HDD
+    ts + INTERVAL 90 DAY TO VOLUME 's3_cold',  -- 30-90 giorni: S3
+    ts + INTERVAL 180 DAY DELETE;               -- >180 giorni: elimina
+
+-- Modificare il TTL su tabella esistente
+ALTER TABLE events MODIFY TTL event_time + INTERVAL 180 DAY DELETE;
+
+-- Forzare il TTL reaper (normalmente è asincrono)
+ALTER TABLE events MATERIALIZE TTL;
+```
+
+### DROP PARTITION: Eliminazione Istantanea
+
+Con il partitioning mensile, eliminare un mese di dati è un'operazione O(1) che rimuove file su disco senza riscrivere nulla:
+
+```sql
+-- Lista le partizioni esistenti
+SELECT
+    partition,
+    name,
+    rows,
+    formatReadableSize(bytes_on_disk) AS size,
+    modification_time
+FROM system.parts
+WHERE table = 'raw_events' AND active
+ORDER BY partition DESC;
+
+-- Elimina la partizione di gennaio 2024
+ALTER TABLE raw_events DROP PARTITION '202401';
+
+-- Elimina partizioni multiple (più veloci in sequenza)
+ALTER TABLE raw_events DROP PARTITION '202310';
+ALTER TABLE raw_events DROP PARTITION '202311';
+ALTER TABLE raw_events DROP PARTITION '202312';
+
+-- Sposta una partizione su un'altra tabella (zero-copy, se stesso disco)
+ALTER TABLE raw_events MOVE PARTITION '202401' TO TABLE raw_events_archive;
+```
+
+## Monitoraggio: Le Tabelle di Sistema Essenziali
+
+ClickHouse espone metriche operative dettagliate attraverso tabelle nel database `system`. Queste sono le più utili per diagnosticare problemi di produzione.
+
+### system.query_log: Analisi Performance Query
+
+```sql
+-- Query più lente nell'ultima ora
+SELECT
+    query_duration_ms,
+    formatReadableSize(read_bytes) AS read_data,
+    read_rows,
+    formatReadableSize(memory_usage) AS memory,
+    left(query, 200) AS query_preview
+FROM system.query_log
+WHERE type = 'QueryFinish'
+    AND event_time >= now() - INTERVAL 1 HOUR
+    AND query_duration_ms > 1000
+ORDER BY query_duration_ms DESC
+LIMIT 20;
+
+-- Query per tabella, aggregate (per trovare tabelle sotto pressione)
+SELECT
+    any(tables) AS tables,
+    count() AS query_count,
+    avg(query_duration_ms) AS avg_ms,
+    max(query_duration_ms) AS max_ms,
+    sum(read_rows) AS total_rows_read
+FROM system.query_log
+WHERE type = 'QueryFinish'
+    AND event_time >= today()
+GROUP BY tables
+ORDER BY total_rows_read DESC
+LIMIT 10;
+```
+
+### system.merges: Stato dei Merge Background
+
+```sql
+-- Merge attivi in questo momento
+SELECT
+    database,
+    table,
+    elapsed,
+    round(progress * 100, 1) AS progress_pct,
+    total_size_bytes_compressed,
+    num_parts,
+    source_part_names
+FROM system.merges
+ORDER BY elapsed DESC;
+
+-- Se ci sono troppi merge in coda, i nuovi INSERT rallentano
+-- Indicatore di problemi: più di 20 merge concorrenti su una tabella
+```
+
+### system.parts: Stato dei Parts e Frammentazione
+
+```sql
+-- Salute dei parts per tabella
+SELECT
+    database,
+    table,
+    partition,
+    count() AS parts_count,
+    sum(rows) AS total_rows,
+    formatReadableSize(sum(bytes_on_disk)) AS total_size,
+    max(max_date) AS latest_data
+FROM system.parts
+WHERE active = 1
+GROUP BY database, table, partition
+ORDER BY parts_count DESC
+LIMIT 20;
+
+-- Alert: tabella con troppi parts (segnale di INSERT troppo frequenti
+-- o merge che non riescono a stare al passo)
+SELECT database, table, count() AS parts_count
+FROM system.parts
+WHERE active = 1
+GROUP BY database, table
+HAVING parts_count > 500
+ORDER BY parts_count DESC;
+```
+
+### system.asynchronous_metrics: Utilizzo Risorse
+
+```sql
+-- Overview salute del cluster
+SELECT metric, value
+FROM system.asynchronous_metrics
+WHERE metric IN (
+    'NumberOfTables',
+    'NumberOfDatabases',
+    'ReplicasMaxQueueSize',
+    'ReplicasSumQueueSize',
+    'UncompressedCacheBytes',
+    'MarkCacheBytes'
+)
+ORDER BY metric;
+```
+
+## Checklist Ottimizzazione per la Produzione
+
+Prima di mettere in produzione una tabella ClickHouse, verifica ogni punto:
+
+**Schema Design**
+
+- Tutte le colonne String con meno di 10.000 valori distinti hanno `LowCardinality`?
+- I timestamp usano `DateTime64(3)` con codec `Delta(8), ZSTD(1)`?
+- Non ci sono colonne `Nullable` evitabili (sostituibili con valori default)?
+- I numeri usano il tipo più piccolo sufficiente (`UInt32` invece di `UInt64` se i valori lo permettono)?
+- Gli UUID usano il tipo nativo `UUID` o `FixedString(16)` invece di `String`?
+
+**ENGINE e Ordinamento**
+
+- L'engine è quello giusto per il pattern di accesso (immutable → MergeTree, upsert → ReplacingMergeTree, pre-agg → AggregatingMergeTree)?
+- L'`ORDER BY` inizia con la colonna più filtrata nelle query tipiche?
+- Il `PARTITION BY` usa `toYYYYMM()` (non giornaliero, non orario)?
+- È stato configurato un TTL per la pulizia automatica dei dati vecchi?
+
+**Query Pattern**
+
+- Le query non applicano funzioni sulle colonne di `PARTITION BY` o sulla prima colonna dell'`ORDER BY`?
+- Le query sui dati aggregati usano le Materialized Views invece della tabella raw?
+- Per le query su dati mutabili con `ReplacingMergeTree`, si usa `FINAL` o `argMax`?
+
+**Inserimento Dati**
+
+- I batch di INSERT sono di almeno 10.000 righe? (preferibile 100.000+)
+- Non ci sono INSERT di singole righe ad alta frequenza (usare `Buffer` engine se necessario)?
+
+**Monitoraggio**
+
+- `system.parts` mostra meno di 500 parts attivi per tabella per partizione?
+- `system.merges` non mostra code di merge persistenti?
+- `system.query_log` viene interrogato regolarmente per trovare query anomale?
+
+<Aside type="tip" title="Misura prima di ottimizzare">
+Ogni ottimizzazione ha un trade-off. `Delta + ZSTD` su timestamp riduce lo spazio ma aumenta il tempo di decompressione (minimo, ma presente). `LowCardinality` migliora GROUP BY ma aggiunge overhead per colonne ad alta cardinalità. Prima di applicare qualsiasi codec o tipo, misura con `SELECT formatReadableSize(sum(bytes_on_disk)) FROM system.parts WHERE table = 'tua_tabella' AND active` e confronta dopo. ClickHouse stesso suggerisce i codec ottimali per ogni colonna tramite `OPTIMIZE TABLE ... DEDUPLICATE`.
+</Aside>
+
+La lezione successiva approfondisce le Materialized Views in dettaglio: il pattern multi-livello per dashboard real-time, il ciclo raw → hourly → daily, il benchmark delle performance, e le limitazioni delle MV con strategie per aggirarle.
