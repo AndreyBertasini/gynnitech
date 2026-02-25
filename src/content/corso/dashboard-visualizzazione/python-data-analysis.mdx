@@ -6,84 +6,350 @@ order: 4
 prerequisites: ["dashboard-visualizzazione/etl-data-pipeline"]
 category: "Analisi Tecnica"
 ---
-# Python per Data Analysis
 
-> **Obiettivo:** Usare Python (pandas, matplotlib) per analisi esplorative e generazione di report che alimentano le dashboard.
+import { Aside, Steps, Tabs, TabItem } from '@astrojs/starlight/components'
 
-## 1. Pandas per l'Analisi Marketing
+Nel 2016, Jupyter Notebook ha superato MATLAB come strumento più citato nelle pubblicazioni di data science. Oggi è lo standard de facto per l'analisi esplorativa. Ma uno studio del 2021 (Règo et al., "A Large-Scale Study About Quality and Reproducibility of Jupyter Notebooks") ha analizzato 1,4 milioni di notebook su GitHub: solo il 24% era riproducibile. Il problema non è lo strumento — è come viene usato.
+
+Python con pandas è lo strumento più potente a disposizione di un data analyst. Questa lezione copre non solo le API di base, ma i pattern che separano un'analisi usa-e-getta da una professionale e riproducibile.
+
+## Setup: l'ambiente di sviluppo corretto
+
+```bash
+# Crea un ambiente virtuale isolato
+python -m venv .venv
+source .venv/bin/activate       # Linux/Mac
+.venv\Scripts\activate          # Windows
+
+# Installa le librerie core
+pip install pandas numpy matplotlib seaborn plotly jupyter
+
+# Per performance su dataset grandi
+pip install polars pyarrow fastparquet
+
+# Salva le dipendenze (essenziale per riproducibilità)
+pip freeze > requirements.txt
+```
+
+**JupyterLab vs VS Code Notebooks**: entrambi vanno bene. VS Code è preferibile se lavori su un codebase Python (refactoring, git integration). JupyterLab per analisi esplorative pure.
+
+## Pandas: le operazioni fondamentali
+
+### Lettura dati
 
 ```python
 import pandas as pd
+import numpy as np
 
-# Leggere e preparare i dati
-orders = pd.read_csv('orders.csv', parse_dates=['order_date'])
-orders['month'] = orders['order_date'].dt.to_period('M')
+# CSV (lento per file grandi, usa solo per ≤ 100MB)
+df = pd.read_csv('orders.csv',
+    parse_dates=['created_at', 'updated_at'],  # parse automatico delle date
+    dtype={'user_id': 'int32', 'status': 'category'},  # ottimizza la memoria
+    usecols=['order_id', 'user_id', 'status', 'amount', 'created_at']  # solo le colonne necessarie
+)
 
-# KPI mensili
-monthly = orders.groupby('month').agg(
-    revenue=('net_revenue', 'sum'),
-    orders=('order_id', 'nunique'),
-    customers=('customer_id', 'nunique'),
-    aov=('net_revenue', 'mean')
-).round(2)
+# Parquet (formato consigliato: 10-100x più veloce e compresso)
+df = pd.read_parquet('orders.parquet')
 
-# Crescita MoM
-monthly['revenue_growth'] = monthly['revenue'].pct_change().round(3)
-print(monthly.tail(6))
+# Da database SQL (via SQLAlchemy)
+from sqlalchemy import create_engine
+engine = create_engine('postgresql://user:pass@host:5432/dbname')
+df = pd.read_sql_query("""
+    SELECT order_id, user_id, status, amount, created_at
+    FROM orders
+    WHERE created_at >= '2024-01-01'
+""", engine)
 ```
 
-## 2. Visualizzazione con Matplotlib
+### Esplorazione iniziale
+
+```python
+# L'EDA (Exploratory Data Analysis) inizia sempre qui
+print(df.shape)          # (1234567, 8) — righe, colonne
+print(df.dtypes)         # tipi di ogni colonna
+print(df.head())         # prime 5 righe
+print(df.describe())     # statistiche descrittive (count, mean, std, percentili)
+print(df.isnull().sum()) # null per colonna — critico!
+print(df.nunique())      # valori unici per colonna
+
+# Distribuzione di una colonna categorica
+print(df['status'].value_counts(normalize=True))  # normalize=True → percentuali
+# pending      0.42
+# completed    0.38
+# cancelled    0.20
+```
+
+### Selezione e filtri
+
+```python
+# Selezione colonne
+subset = df[['user_id', 'status', 'amount']]
+
+# Filtro righe (boolean indexing)
+completed = df[df['status'] == 'completed']
+high_value = df[df['amount'] > 100]
+
+# Filtri multipli (usa parentesi!)
+completed_high = df[(df['status'] == 'completed') & (df['amount'] > 100)]
+
+# Stile SQL con .query() (più leggibile per filtri complessi)
+result = df.query("status == 'completed' and amount > 100 and created_at > '2024-01-01'")
+
+# isin() per filtri su liste
+italian_orders = df[df['country'].isin(['IT', 'ITA'])]
+```
+
+### Aggregazioni con groupby
+
+```python
+# Aggregazione standard
+summary = df.groupby('status').agg(
+    n_orders=('order_id', 'count'),
+    total_revenue=('amount', 'sum'),
+    avg_order_value=('amount', 'mean'),
+    median_order=('amount', 'median'),
+    unique_customers=('user_id', 'nunique')  # distinct count
+).reset_index()
+
+# Aggregazione per periodo temporale
+df['month'] = df['created_at'].dt.to_period('M')
+monthly = df.groupby('month').agg(
+    revenue=('amount', 'sum'),
+    orders=('order_id', 'count')
+)
+
+# Aggregazione multipla per gruppo
+country_status = df.groupby(['country', 'status'])['amount'].agg(['sum', 'count', 'mean'])
+```
+
+### Gestione delle date
+
+```python
+# Estrai componenti temporali
+df['year']       = df['created_at'].dt.year
+df['month']      = df['created_at'].dt.month
+df['day_of_week'] = df['created_at'].dt.dayofweek  # 0=Lunedì, 6=Domenica
+df['hour']       = df['created_at'].dt.hour
+df['week']       = df['created_at'].dt.isocalendar().week
+
+# Differenze temporali
+df['days_since_signup'] = (df['created_at'] - df['signup_date']).dt.days
+
+# Resampling per periodo
+daily_revenue = df.resample('D', on='created_at')['amount'].sum()
+weekly_orders = df.resample('W', on='created_at')['order_id'].count()
+```
+
+## Analisi Coorte con pandas
+
+L'analisi coorte in pandas segue gli stessi concetti SQL ma con una sintassi diversa:
+
+```python
+# 1. Calcola la coorte di ogni utente (mese del primo ordine)
+df['cohort'] = df.groupby('user_id')['created_at'].transform('min').dt.to_period('M')
+df['period'] = df['created_at'].dt.to_period('M')
+
+# 2. Calcola il periodo relativo (mese 0, 1, 2, ...)
+df['periods_since_cohort'] = (df['period'] - df['cohort']).apply(lambda x: x.n)
+
+# 3. Pivot table della retention
+cohort_data = (
+    df.groupby(['cohort', 'periods_since_cohort'])['user_id']
+    .nunique()
+    .reset_index()
+    .rename(columns={'user_id': 'n_users'})
+)
+
+retention = cohort_data.pivot(
+    index='cohort',
+    columns='periods_since_cohort',
+    values='n_users'
+)
+
+# 4. Calcola la retention rate (% rispetto al mese 0)
+retention_pct = retention.divide(retention[0], axis=0) * 100
+
+# 5. Visualizza come heatmap
+import seaborn as sns
+import matplotlib.pyplot as plt
+
+plt.figure(figsize=(12, 8))
+sns.heatmap(
+    retention_pct,
+    annot=True, fmt='.0f',
+    cmap='Blues',
+    vmin=0, vmax=100
+)
+plt.title('Cohort Retention Rate (%)')
+plt.ylabel('Cohort Month')
+plt.xlabel('Months Since First Order')
+plt.tight_layout()
+```
+
+## Visualizzazione: matplotlib, seaborn, plotly
+
+### matplotlib per grafici precisi
 
 ```python
 import matplotlib.pyplot as plt
 
-fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+fig, axes = plt.subplots(1, 3, figsize=(15, 4))
 
-# Revenue trend
-axes[0,0].plot(monthly.index.astype(str), monthly['revenue'], marker='o')
-axes[0,0].set_title('Revenue Mensile')
-axes[0,0].set_ylabel('€')
+# Istogramma della distribuzione
+axes[0].hist(df['amount'], bins=50, edgecolor='white', color='steelblue')
+axes[0].set_title('Distribuzione Revenue per Ordine')
+axes[0].set_xlabel('Amount (€)')
+axes[0].set_ylabel('Frequency')
 
-# AOV trend
-axes[0,1].bar(monthly.index.astype(str), monthly['aov'], color='coral')
-axes[0,1].set_title('Average Order Value')
+# Time series
+daily = df.resample('D', on='created_at')['amount'].sum()
+axes[1].plot(daily.index.astype(str), daily.values, linewidth=1.5, color='steelblue')
+axes[1].set_title('Revenue Giornaliero')
+axes[1].tick_params(axis='x', rotation=45)
 
-# Customers
-axes[1,0].plot(monthly.index.astype(str), monthly['customers'], marker='s', color='green')
-axes[1,0].set_title('Clienti Unici')
-
-# Growth
-colors = ['green' if x > 0 else 'red' for x in monthly['revenue_growth'].fillna(0)]
-axes[1,1].bar(monthly.index.astype(str), monthly['revenue_growth']*100, color=colors)
-axes[1,1].set_title('Crescita MoM (%)')
+# Bar chart per status
+status_counts = df['status'].value_counts()
+axes[2].bar(status_counts.index, status_counts.values, color='steelblue')
+axes[2].set_title('Ordini per Status')
 
 plt.tight_layout()
-plt.savefig('monthly_report.png', dpi=150)
+plt.savefig('analysis.png', dpi=150, bbox_inches='tight')
+plt.show()
 ```
 
-## 3. Analisi Segmentata
+### seaborn per analisi statistiche
 
 ```python
-# Segmentazione per canale di acquisizione
-channel_perf = orders.groupby('utm_source').agg(
-    revenue=('net_revenue', 'sum'),
-    orders=('order_id', 'nunique'),
-    avg_aov=('net_revenue', 'mean'),
-    unique_customers=('customer_id', 'nunique')
-).sort_values('revenue', ascending=False)
+import seaborn as sns
 
-channel_perf['revenue_share'] = (channel_perf['revenue'] / channel_perf['revenue'].sum() * 100).round(1)
-print(channel_perf)
+# Boxplot per confrontare distribuzioni
+fig, ax = plt.subplots(figsize=(10, 5))
+sns.boxplot(
+    data=df[df['amount'] < 500],  # escludi outlier estremi per leggibilità
+    x='country', y='amount',
+    order=df.groupby('country')['amount'].median().sort_values(ascending=False).index[:10]
+)
+ax.set_title('Distribuzione AOV per Paese (top 10)')
+
+# Heatmap di correlazione
+numeric_cols = df.select_dtypes(include=[np.number]).columns
+corr_matrix = df[numeric_cols].corr()
+sns.heatmap(corr_matrix, annot=True, fmt='.2f', cmap='coolwarm', center=0)
+plt.title('Correlation Matrix')
 ```
 
-## 4. Export per Dashboard
+### plotly per visualizzazioni interattive
 
 ```python
-# Salvare i risultati per Metabase/Looker
-monthly.to_sql('mart_monthly_kpi', engine, if_exists='replace', index=True)
-channel_perf.to_sql('mart_channel_performance', engine, if_exists='replace', index=True)
+import plotly.express as px
+import plotly.graph_objects as go
+
+# Line chart interattivo con hover
+fig = px.line(
+    daily.reset_index(),
+    x='created_at', y='amount',
+    title='Revenue Giornaliero',
+    labels={'amount': 'Revenue (€)', 'created_at': 'Data'},
+    template='plotly_white'
+)
+# Aggiungi annotazione per un evento chiave
+fig.add_annotation(
+    x='2024-11-29', y=daily['2024-11-29'],
+    text='Black Friday', showarrow=True, arrowhead=2
+)
+fig.show()
+
+# Scatter con multiple dimensioni
+fig = px.scatter(
+    df_cohort,
+    x='ltv_30d', y='retention_90d',
+    size='cohort_size',
+    color='acquisition_channel',
+    hover_name='cohort_label',
+    title='LTV vs Retention per Canale',
+    labels={'ltv_30d': 'LTV 30 giorni (€)', 'retention_90d': 'Retention 90gg (%)'}
+)
+fig.show()
 ```
 
-## Risorse
-- **Librerie:** pandas, matplotlib, seaborn, plotly
-- **Best Practice:** Virtual environments, requirements.txt, type hints
+## Performance: quando pandas non basta
+
+Per dataset superiori ai 500 MB, pandas diventa lento. Le alternative:
+
+```python
+# 1. Ottimizza i dtype (riduce la memoria del 50-70%)
+def optimize_dtypes(df):
+    for col in df.select_dtypes(include=['int64']).columns:
+        df[col] = pd.to_numeric(df[col], downcast='integer')
+    for col in df.select_dtypes(include=['float64']).columns:
+        df[col] = pd.to_numeric(df[col], downcast='float')
+    for col in df.select_dtypes(include=['object']).columns:
+        if df[col].nunique() / len(df) < 0.05:  # < 5% di valori unici = categorica
+            df[col] = df[col].astype('category')
+    return df
+
+# 2. Chunked processing per file troppo grandi per la RAM
+results = []
+for chunk in pd.read_csv('huge_file.csv', chunksize=100000):
+    chunk = optimize_dtypes(chunk)
+    # processa il chunk
+    results.append(chunk.groupby('status')['amount'].sum())
+final_result = pd.concat(results).groupby(level=0).sum()
+
+# 3. polars: 10-100x più veloce di pandas su dataset grandi
+import polars as pl
+
+df_pl = pl.read_parquet('orders.parquet')
+result = (
+    df_pl
+    .filter(pl.col('status') == 'completed')
+    .group_by('country')
+    .agg([
+        pl.col('amount').sum().alias('total_revenue'),
+        pl.col('user_id').n_unique().alias('unique_customers')
+    ])
+    .sort('total_revenue', descending=True)
+)
+```
+
+## Buone pratiche per notebook analitici
+
+Un notebook professionale è riproducibile, leggibile e condivisibile.
+
+<Steps>
+1. **Struttura consistente**: Import → Costanti/Config → Load dati → EDA → Analisi → Conclusioni
+2. **Parametrizza le variabili** in cima al notebook (date, filtri, soglie) — non hardcodarle nel mezzo
+3. **Esegui le celle in ordine** — mai eseguire celle fuori sequenza. Riavvia il kernel e re-esegui tutto prima di condividere
+4. **Aggiungi markdown** tra le sezioni di codice per spiegare il ragionamento, non solo il codice
+5. **Non committare gli output** in git — usa `.gitignore` per i file `.ipynb` con output, o usa `nbstripout`
+</Steps>
+
+```python
+# In cima al notebook: sezione di configurazione
+# ============================================
+# PARAMETRI ANALISI
+# ============================================
+START_DATE = '2024-01-01'
+END_DATE   = '2024-12-31'
+MIN_ORDER_VALUE = 10.0        # escludi micro-ordini
+COUNTRY_FILTER  = ['IT', 'DE', 'FR', 'ES']
+
+# Cambia questi parametri, riesegui tutto, ottieni l'analisi aggiornata
+```
+
+## Quando usare Python vs SQL
+
+| Compito | Python pandas | SQL |
+|---------|--------------|-----|
+| Esplorazione rapida (EDA) | ✅ Preferibile | Scomodo |
+| Visualizzazione | ✅ Unico | Non nativo |
+| Analisi coorte | Entrambi | Entrambi |
+| Join su tabelle grandi (GB+) | Lento | ✅ Preferibile |
+| Trasformazioni su TB di dati | Non scala | ✅ Preferibile |
+| Feature engineering per ML | ✅ Preferibile | Limitato |
+| Modelli statistici/ML | ✅ Unico | Non supportato |
+| Report automatizzati | Entrambi | Entrambi |
+
+<Aside type="tip">
+Il workflow più produttivo: usa SQL per l'aggregazione e il filtraggio iniziale (nel DW, dove è ottimizzato), poi carica il risultato in pandas per visualizzazione e analisi fine. `pd.read_sql_query()` è il tuo migliore amico — manda tutta la heavy lifting al database, porta in Python solo il necessario.
+</Aside>

@@ -6,92 +6,302 @@ order: 5
 prerequisites: ["real-time-analytics/clickhouse-rt"]
 category: "Visualizzazione"
 ---
-# Dashboard Live e Alerting
 
-> **Obiettivo:** Costruire dashboard real-time con auto-refresh e sistemi di alerting automatico per anomalie.
+import { Aside, Steps, Tabs, TabItem } from '@astrojs/starlight/components'
 
-## 1. Dashboard Real-Time vs Batch
+Cloudflare monitora il 20% del traffico internet mondiale — circa 50 milioni di richieste HTTP al secondo — con una latenza di dashboard inferiore a 10 secondi. Ogni anomalia (attacco DDoS, down di un datacenter, spike di errori) deve essere visibile in quasi real-time al team operations. Il loro stack: ClickHouse come backend + Grafana come frontend.
 
-| Caratteristica | Batch | Real-Time |
-|:---|:---|:---|
-| Refresh | Ogni ora/giorno | 5-30 secondi |
-| Latenza dati | Ore | Secondi |
-| Uso | Report strategici | Monitoring operativo |
-| Complessità | Bassa | Media-Alta |
+La differenza tra una dashboard aggiornata ogni 24 ore e una aggiornata ogni 5 secondi non è solo tecnica — cambia il tipo di decisioni che puoi prendere.
 
-## 2. Setup Grafana per Real-Time
+## Categorie di dashboard per latenza
+
+Non tutte le dashboard hanno bisogno di essere real-time. La scelta della latenza target determina l'architettura, il costo e la complessità.
+
+| Tipo | Latenza | Use case | Stack |
+|------|---------|----------|-------|
+| Batch | T+1 (ieri) | KPI strategici, finance, reporting settimanale | dbt + BI (Looker/Tableau) |
+| Near real-time | 15-60 minuti | Marketing performance, funnel, A/B test | Fivetran + BI |
+| Real-time | 5-60 secondi | Ops monitoring, anomaly detection, SLA | Kafka + ClickHouse + Grafana |
+| Live | ≤ 2 secondi | Trading, incident response, gaming leaderboard | WebSocket + custom UI |
+
+<Aside type="tip">
+Prima di costruire una dashboard real-time, fai questa domanda al team: "Cosa faresti di diverso se questo dato arrivasse con 5 secondi di ritardo vs 1 ora di ritardo?" Se la risposta è "niente", è batch. Se la risposta è "agiresti immediatamente diversamente", è real-time.
+</Aside>
+
+## Stack consigliato: ClickHouse + Grafana
+
+**Grafana** è lo strumento open-source più diffuso per le dashboard real-time su dati tecnici e operazionali. Ha un plugin ufficiale per ClickHouse (Altinity o plugin Grafana Labs).
+
+**Apache Superset** è un'alternativa open-source più orientata al business intelligence con una UI più user-friendly. Ottimo per analisti non tecnici.
+
+**Metabase** è la scelta più accessibile per team non tecnici, ma il plugin ClickHouse è meno maturo.
+
+### Installazione del plugin ClickHouse per Grafana
+
+```bash
+# Via grafana-cli
+grafana-cli plugins install grafana-clickhouse-datasource
+
+# Via docker-compose
+services:
+  grafana:
+    image: grafana/grafana:latest
+    environment:
+      - GF_INSTALL_PLUGINS=grafana-clickhouse-datasource
+    ports:
+      - "3000:3000"
+    volumes:
+      - grafana-storage:/var/lib/grafana
+```
+
+**Configurazione della datasource** (in Grafana UI → Datasources → Add → ClickHouse):
+
+```yaml
+# Parametri chiave
+Server address: clickhouse.internal
+Server port: 9000        # TCP native (più veloce di HTTP 8123)
+Protocol: native
+Username: grafana_reader
+Password: ${secrets:grafana-ch-password}
+Default database: analytics
+
+# Performance settings
+Max open connections: 50
+Max idle connections: 10
+Connection max lifetime: 300s
+```
+
+<Aside type="caution">
+Crea un utente ClickHouse dedicato per Grafana con permessi di sola lettura. Non usare il default user `default` che spesso ha accesso illimitato.
 
 ```sql
--- Query ottimizzata per Grafana con auto-refresh 10s
+CREATE USER grafana_reader
+  IDENTIFIED WITH plaintext_password BY 'secure_password'
+  SETTINGS max_execution_time = 30,    -- query timeout
+            max_memory_usage = 2000000000;  -- 2GB max RAM
+
+GRANT SELECT ON analytics.* TO grafana_reader;
+```
+</Aside>
+
+## Query Grafana per ClickHouse
+
+Grafana usa macro speciali per gestire il time range selezionato dall'utente:
+
+```sql
+-- $__timeFilter(column): aggiunge automaticamente WHERE column BETWEEN start AND end
+-- $__timeInterval(column): raggruppa per l'intervallo ottimale basato sul zoom
+
+-- Query base: revenue per intervallo di tempo
 SELECT
-    $__timeInterval(timestamp, 1m) AS time,
-    event_type,
-    count() AS events,
-    uniq(user_id) AS users
-FROM events_raw
-WHERE $__timeFilter(timestamp)
-GROUP BY time, event_type
+    toStartOfInterval(event_time, INTERVAL $__interval) AS time,
+    sum(revenue)   AS revenue,
+    count()        AS transactions,
+    uniqExact(user_id) AS unique_buyers
+FROM analytics.hourly_revenue
+WHERE $__timeFilter(hour)
+  AND shop_id = $shop_id   -- variabile Grafana
+GROUP BY time
 ORDER BY time;
+
+-- Query per heatmap (valore per ora del giorno × giorno della settimana)
+SELECT
+    toDayOfWeek(event_time)   AS day_of_week,
+    toHour(event_time)        AS hour_of_day,
+    sum(revenue)              AS revenue
+FROM analytics.raw_events
+WHERE $__timeFilter(event_time)
+GROUP BY day_of_week, hour_of_day
+ORDER BY day_of_week, hour_of_day;
+
+-- Query per tabella drill-down: top shop per revenue
+SELECT
+    shop_id,
+    shop_name,
+    sum(revenue)         AS total_revenue,
+    count()              AS transactions,
+    avg(revenue)         AS avg_order_value
+FROM analytics.orders_enriched
+WHERE $__timeFilter(created_at)
+GROUP BY shop_id, shop_name
+ORDER BY total_revenue DESC
+LIMIT 20;
 ```
 
-## 3. Sistema di Alerting
+### Variabili dinamiche in Grafana
+
+```sql
+-- Query per popolare la variabile $shop_id (dropdown nel top della dashboard)
+SELECT DISTINCT shop_id, shop_name
+FROM analytics.shops
+ORDER BY shop_name;
+-- Risultato: dropdown con tutti i shop → l'utente seleziona → $shop_id si aggiorna
+```
+
+## Design di una dashboard real-time efficace
+
+### Layout consigliato (pattern top-down)
+
+```
+┌─────────────────────────────────────────────────┐
+│ [KPI] Revenue today │ [KPI] Orders │ [KPI] Errors│  ← Row 1: Hero metrics
+├─────────────────────────────────────────────────┤
+│                                                 │
+│     Time Series: Revenue ultimi 30 minuti       │  ← Row 2: Trend real-time
+│                                                 │
+├─────────────────────────────────────────────────┤
+│ Funnel                 │ Top Shop per Revenue    │  ← Row 3: Breakdown
+│ conversion rates       │ (tabella drill-down)    │
+└─────────────────────────────────────────────────┘
+```
+
+**Regole di design per RT dashboards**:
+
+1. **Max 8-10 metric visibili senza scroll** — ogni aggiunta riduce l'attenzione su ciò che conta
+2. **KPI card in alto** con valore + trend vs periodo precedente (es. "€45.230 ▲12% vs ieri")
+3. **Timeseries sotto** per mostrare trend ultimi 15-60 minuti
+4. **Tabella drill-down in fondo** per diagnostica (quale shop/prodotto sta trainando o frenando)
+5. **Colori per semantica, non decorazione**: verde = buono, rosso = problema, giallo = attenzione
+6. **Refresh automatico**: 15-30 secondi per dashboards ops, non meno (ogni secondo × 200 utenti = 200 QPS)
+
+### Performance delle query per RT
+
+La velocità percepita della dashboard dipende dalla velocità delle query. Con ClickHouse e pre-aggregazione, le query devono completarsi in ≤ 500ms per una UX fluida.
+
+**Regole di ottimizzazione**:
+
+```sql
+-- LENTO: distinct count su raw table (scansione full)
+SELECT uniqExact(user_id) FROM raw_events WHERE event_date = today();
+
+-- VELOCE: leggi da tabella pre-aggregata con AggregatingMergeTree
+SELECT uniqMerge(uniq_users) FROM daily_unique_users
+WHERE date = today() GROUP BY date;
+
+-- LENTO: COUNT(DISTINCT) su tabella grande
+SELECT count(DISTINCT user_id) FROM raw_events
+WHERE event_time >= now() - INTERVAL 1 HOUR;
+
+-- VELOCE: uniq() è approssimato ma 100x più veloce
+SELECT uniq(user_id) FROM raw_events
+WHERE event_time >= now() - INTERVAL 1 HOUR;
+-- uniq() usa HyperLogLog, errore ≤ 2.3% — accettabile per dashboard RT
+```
+
+**Caching a livello ClickHouse**:
+
+```sql
+-- Query cache (ClickHouse 23.5+): cache i risultati di query identiche
+SELECT ... FROM hourly_revenue
+WHERE hour >= today() - 1
+SETTINGS use_query_cache = 1, query_cache_ttl = 60;  -- cache 60 secondi
+```
+
+## Alerting: dalla dashboard alla notifica
+
+Una dashboard senza alert è inutile di notte. L'alerting trasforma il monitoring passivo in notifica proattiva.
+
+### Grafana Alerting su ClickHouse
+
+```yaml
+# Regola di alert in Grafana (YAML format per backup/versionamento)
+alert:
+  name: "Revenue drop > 30% last 15min"
+  condition: |
+    SELECT
+        sum(revenue) AS current_revenue
+    FROM analytics.hourly_revenue
+    WHERE hour >= now() - INTERVAL 15 MINUTE
+    HAVING current_revenue < (
+        SELECT sum(revenue) * 0.7  -- 70% del baseline = drop > 30%
+        FROM analytics.hourly_revenue
+        WHERE hour >= now() - INTERVAL 1 HOUR - INTERVAL 15 MINUTE
+          AND hour < now() - INTERVAL 1 HOUR
+    )
+  for: 5m              # deve essere vero per 5 minuti consecutivi
+  annotations:
+    summary: "Revenue anomalo: calo > 30% negli ultimi 15 minuti"
+    runbook: "https://wiki.internal/runbooks/revenue-drop"
+  labels:
+    severity: critical
+    team: data-ops
+  contacts:
+    - pagerduty-oncall  # PagerDuty per critical
+    - slack-data-alerts # Slack per tutti
+```
+
+### Regola 3-sigma per anomaly detection
+
+Invece di soglie fisse (fragili: cambiano con la stagionalità), usa soglie statistiche:
+
+```sql
+-- Calcola media e deviazione standard delle ultime 4 settimane (stessa ora)
+WITH baseline AS (
+    SELECT
+        toHour(hour) AS hour_of_day,
+        avg(revenue) AS mean_revenue,
+        stddevPop(revenue) AS std_revenue
+    FROM hourly_revenue
+    WHERE hour >= now() - INTERVAL 28 DAY
+      AND hour < now() - INTERVAL 1 DAY  -- esclude ultime 24h
+    GROUP BY hour_of_day
+)
+SELECT
+    h.hour,
+    h.revenue,
+    b.mean_revenue,
+    b.mean_revenue + 3 * b.std_revenue AS upper_bound,
+    b.mean_revenue - 3 * b.std_revenue AS lower_bound,
+    h.revenue > b.upper_bound OR h.revenue < b.lower_bound AS is_anomaly
+FROM hourly_revenue h
+JOIN baseline b ON toHour(h.hour) = b.hour_of_day
+WHERE h.hour >= now() - INTERVAL 2 HOUR
+ORDER BY h.hour DESC;
+```
+
+La regola 3-sigma: un valore è anomalo se si discosta di più di 3 deviazioni standard dalla media. Statisticamente, questo accade per caso solo lo 0.3% delle volte.
+
+## Apache Superset: alternativa per team BI
+
+Superset è più adatto quando:
+- Il team è composto da analisti business, non engineers
+- Hai bisogno di una UI self-service (creare chart senza SQL)
+- Vuoi SQL Lab integrato per query ad hoc
+
+**Connessione ClickHouse in Superset**:
 
 ```python
-from dataclasses import dataclass
-
-@dataclass
-class AlertRule:
-    name: str
-    query: str
-    threshold: float
-    operator: str  # gt, lt, eq
-    severity: str  # info, warning, critical
-    cooldown_minutes: int = 30
-
-alert_rules = [
-    AlertRule(
-        name="Revenue Drop",
-        query="SELECT sum(revenue) FROM events_raw WHERE timestamp >= now() - INTERVAL 1 HOUR",
-        threshold=1000,
-        operator="lt",
-        severity="critical"
-    ),
-    AlertRule(
-        name="Error Rate Spike",
-        query="""SELECT countIf(status >= 500) / count() * 100 
-                 FROM events_raw WHERE timestamp >= now() - INTERVAL 5 MINUTE""",
-        threshold=5.0,
-        operator="gt",
-        severity="warning"
-    ),
-    AlertRule(
-        name="Zero Events",
-        query="SELECT count() FROM events_raw WHERE timestamp >= now() - INTERVAL 5 MINUTE",
-        threshold=0,
-        operator="eq",
-        severity="critical"
-    )
-]
+# Connection string per Superset
+# Installa: pip install clickhouse-connect
+clickhousedb+connect://user:password@host:8123/database
+# oppure via clickhouse-sqlalchemy
+clickhouse+native://user:password@host:9000/database
 ```
 
-## 4. Dashboard Executive Real-Time
+**Differenze chiave Grafana vs Superset**:
 
-KPI da mostrare:
-| KPI | Refresh | Visualizzazione |
-|:---|:---:|:---|
-| Revenue last hour | 30s | Big number + sparkline |
-| Active users now | 10s | Gauge |
-| Conversion rate | 1min | Line chart rolling 24h |
-| Error rate | 10s | Traffic light (verde/giallo/rosso) |
-| Top events | 30s | Bar chart |
+| Aspetto | Grafana | Superset |
+|---------|---------|----------|
+| Target user | DevOps, engineers | Analysts, business |
+| Refresh auto | Sì (fino a 1s) | Sì (ma meno aggressivo) |
+| Alerting | Nativo e potente | Plugin/limitato |
+| SQL Editor | Integrato | SQL Lab avanzato |
+| Self-service chart | Limitato | Ottimo |
+| Curva di apprendimento | Media | Bassa |
 
-## 5. Best Practices
-- **Auto-refresh:** 10-30s per monitoring, 5min per analytics
-- **Time range:** Mostra sempre almeno 24h per contesto
-- **Annotazioni:** Marca i deploy e gli incident sul grafico
-- **Alerting:** severity-based, con cooldown per evitare spam
-- **On-call:** Ruota le responsabilità di risposta agli alert
+## Anti-pattern dashboard RT
 
-## Risorse
-- **Tool:** Grafana, Metabase, Apache Superset
-- **Alerting:** Grafana Alerts, PagerDuty, OpsGenie
+**1. Query diretta sulla raw table per ogni refresh**
+Con 100 utenti che aggiornano ogni 15 secondi = 400+ QPS sulla raw table. Usa sempre tabelle pre-aggregate.
+
+**2. Refresh ogni secondo**
+1.000 utenti × refresh ogni 1s = 1.000 QPS solo per la dashboard. Il valore di un refresh aggiuntivo ogni secondo è marginale rispetto al costo. Usa 10-30 secondi.
+
+**3. Dashboard con 40+ metric**
+Nessuno guarda davvero 40 metriche contemporaneamente. Identifica le 6-8 metriche "hero" e metti il resto in sub-dashboard accessibili con drill-down.
+
+**4. Soglie di alert fisse**
+Una soglia fissa che va bene a luglio è troppo alta ad agosto (vacanze) e troppo bassa a novembre (Black Friday). Usa medie mobili o regola 3-sigma.
+
+**5. Alert senza runbook**
+Un alert che non dice "cosa fare" sveglia il team di notte per niente. Ogni alert deve linkare un runbook con i passi diagnostici.

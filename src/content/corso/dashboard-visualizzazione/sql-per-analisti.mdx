@@ -6,95 +6,422 @@ order: 5
 prerequisites: ["dashboard-visualizzazione/python-data-analysis"]
 category: "Analisi Tecnica"
 ---
-# SQL per Analisti
 
-> **Obiettivo:** Padroneggiare le query SQL necessarie per alimentare dashboard e report di business.
+import { Aside, Steps, Tabs, TabItem } from '@astrojs/starlight/components'
 
-## 1. Le Query Fondamentali per Dashboard
+Un analyst attende 8 minuti per ogni query che usa subquery annidate. Un collega ottiene lo stesso risultato in 4 secondi usando window functions. La differenza non è hardware — è conoscenza del linguaggio.
 
-### KPI Giornalieri con Confronto
+SQL è il linguaggio universale dell'analisi dati. Non importa se usi BigQuery, Snowflake, ClickHouse, PostgreSQL o Redshift: le stesse tecniche funzionano ovunque. Padroneggiare SQL avanzato — in particolare window functions e CTEs — è il salto di qualità più impattante per un data analyst.
+
+## Window Functions: la skill più potente per l'analytics
+
+Le window functions eseguono un calcolo su un insieme di righe correlate alla riga corrente, senza collassare il risultato in un'unica riga (come farebbe GROUP BY). Ogni riga mantiene il suo valore + il risultato della funzione sulla "finestra" di righe correlate.
+
+**Sintassi generale**:
+```sql
+FUNZIONE() OVER (
+    PARTITION BY colonna1, colonna2   -- raggruppa le righe (opzionale)
+    ORDER BY colonna3                 -- ordina dentro il gruppo (opzionale)
+    ROWS/RANGE BETWEEN ... AND ...   -- definisce la finestra (opzionale)
+)
+```
+
+### ROW_NUMBER, RANK, DENSE_RANK
 
 ```sql
+-- ROW_NUMBER: numera ogni riga in modo univoco nel gruppo
+-- Uso classico: trovare il primo ordine di ogni cliente
 SELECT
-    d.date,
-    d.revenue,
-    d.orders,
-    d.aov,
-    -- Confronto con settimana precedente
-    prev.revenue AS revenue_prev_week,
-    ROUND((d.revenue - prev.revenue) / NULLIF(prev.revenue, 0) * 100, 1) AS wow_pct,
-    -- Confronto con mese precedente
-    prev_m.revenue AS revenue_prev_month,
-    ROUND((d.revenue - prev_m.revenue) / NULLIF(prev_m.revenue, 0) * 100, 1) AS mom_pct
-FROM daily_metrics d
-LEFT JOIN daily_metrics prev ON prev.date = d.date - INTERVAL 7 DAY
-LEFT JOIN daily_metrics prev_m ON prev_m.date = d.date - INTERVAL 30 DAY
-WHERE d.date >= CURRENT_DATE - INTERVAL 30 DAY
-ORDER BY d.date DESC;
+    user_id,
+    order_id,
+    order_date,
+    amount,
+    ROW_NUMBER() OVER (
+        PARTITION BY user_id
+        ORDER BY order_date ASC
+    ) AS order_sequence
+FROM orders;
+-- order_sequence = 1 → primo ordine del cliente
+-- order_sequence = 2 → secondo ordine, ecc.
+
+-- RANK vs DENSE_RANK: gestione dei pareggi
+SELECT
+    product_id,
+    product_name,
+    revenue,
+    RANK()       OVER (ORDER BY revenue DESC) AS rank_gaps,
+    DENSE_RANK() OVER (ORDER BY revenue DESC) AS rank_no_gaps
+FROM products;
+
+-- Se prodotti A e B hanno entrambi revenue=1000 (pareggio):
+-- RANK:       A=1, B=1, C=3  (salta il 2)
+-- DENSE_RANK: A=1, B=1, C=2  (no salti)
+```
+
+### LAG e LEAD: accedere a righe adiacenti
+
+```sql
+-- LAG: valore della riga precedente
+-- LEAD: valore della riga successiva
+SELECT
+    user_id,
+    event_time,
+    event_type,
+    LAG(event_type)  OVER (PARTITION BY user_id ORDER BY event_time) AS prev_event,
+    LEAD(event_time) OVER (PARTITION BY user_id ORDER BY event_time) AS next_event_time,
+    -- Tempo tra questo evento e il prossimo (in secondi)
+    DATEDIFF('second', event_time,
+        LEAD(event_time) OVER (PARTITION BY user_id ORDER BY event_time)
+    ) AS seconds_to_next_event
+FROM user_events
+ORDER BY user_id, event_time;
+```
+
+**Uso pratico**: session analysis (trova il gap tra eventi), time-to-next-purchase, churn prediction (ultimo evento prima dell'abbandono).
+
+### Running Totals e Moving Averages
+
+```sql
+-- Cumulative revenue (somma cumulativa)
+SELECT
+    order_date,
+    daily_revenue,
+    SUM(daily_revenue) OVER (
+        ORDER BY order_date
+        ROWS UNBOUNDED PRECEDING  -- tutte le righe dall'inizio fino a questa
+    ) AS cumulative_revenue,
+
+    -- Media mobile a 7 giorni
+    AVG(daily_revenue) OVER (
+        ORDER BY order_date
+        ROWS 6 PRECEDING  -- le 6 righe precedenti + quella corrente = 7 giorni
+    ) AS ma_7d,
+
+    -- Media mobile a 30 giorni
+    AVG(daily_revenue) OVER (
+        ORDER BY order_date
+        ROWS 29 PRECEDING
+    ) AS ma_30d
+
+FROM daily_sales
+ORDER BY order_date;
+```
+
+### FIRST_VALUE e LAST_VALUE
+
+```sql
+-- Valore del primo e ultimo ordine per cliente
+SELECT
+    user_id,
+    order_id,
+    order_date,
+    amount,
+    FIRST_VALUE(amount) OVER (PARTITION BY user_id ORDER BY order_date) AS first_order_amount,
+    LAST_VALUE(amount)  OVER (
+        PARTITION BY user_id
+        ORDER BY order_date
+        ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING
+    ) AS last_order_amount
+FROM orders;
+-- NOTA: LAST_VALUE richiede ROWS BETWEEN ... UNBOUNDED FOLLOWING per vedere tutte le righe del gruppo
+```
+
+## CTEs: query leggibili e manutenibili
+
+Le Common Table Expressions (CTEs) con la sintassi `WITH` rendono le query complesse leggibili separando la logica in blocchi nominati.
+
+```sql
+-- Anti-pattern: subquery annidate (impossibile da debuggare)
+SELECT u.*, orders.total
+FROM users u
+JOIN (
+    SELECT user_id, COUNT(*) AS total
+    FROM (
+        SELECT user_id, order_id
+        FROM orders
+        WHERE status = 'completed'
+        AND created_at >= '2024-01-01'
+    ) completed_orders
+    WHERE user_id IN (
+        SELECT user_id FROM users WHERE country = 'IT'
+    )
+    GROUP BY user_id
+    HAVING COUNT(*) >= 3
+) orders ON u.id = orders.user_id;
+
+-- Pattern corretto con CTEs
+WITH italian_users AS (
+    SELECT id AS user_id
+    FROM users
+    WHERE country = 'IT'
+),
+completed_orders AS (
+    SELECT user_id, order_id
+    FROM orders
+    WHERE status = 'completed'
+      AND created_at >= '2024-01-01'
+),
+heavy_buyers AS (
+    SELECT user_id, COUNT(*) AS total_orders
+    FROM completed_orders
+    WHERE user_id IN (SELECT user_id FROM italian_users)
+    GROUP BY user_id
+    HAVING COUNT(*) >= 3
+)
+SELECT u.*, h.total_orders
+FROM users u
+JOIN heavy_buyers h ON u.id = h.user_id;
+```
+
+## Pattern Analitici Fondamentali
+
+### Cohort Retention Query
+
+Il pattern più importante per qualsiasi prodotto: quanti utenti acquisiti nel mese X sono ancora attivi dopo N mesi?
+
+```sql
+WITH cohort AS (
+    -- Mese di prima attivazione per ogni utente
+    SELECT
+        user_id,
+        DATE_TRUNC('month', MIN(created_at)) AS cohort_month
+    FROM users
+    GROUP BY user_id
+),
+monthly_activity AS (
+    -- Per ogni mese in cui l'utente è stato attivo
+    SELECT DISTINCT
+        user_id,
+        DATE_TRUNC('month', event_time) AS activity_month
+    FROM user_events
+),
+cohort_retention AS (
+    SELECT
+        c.cohort_month,
+        a.activity_month,
+        -- Numero di mesi dalla prima attivazione
+        DATEDIFF('month', c.cohort_month, a.activity_month) AS month_number,
+        COUNT(DISTINCT c.user_id) AS active_users
+    FROM cohort c
+    JOIN monthly_activity a ON c.user_id = a.user_id
+    GROUP BY c.cohort_month, a.activity_month
+)
+SELECT
+    cohort_month,
+    month_number,
+    active_users,
+    -- Dimensione della coorte (utenti al mese 0)
+    FIRST_VALUE(active_users) OVER (
+        PARTITION BY cohort_month ORDER BY month_number
+    ) AS cohort_size,
+    -- Retention rate
+    ROUND(100.0 * active_users /
+        FIRST_VALUE(active_users) OVER (
+            PARTITION BY cohort_month ORDER BY month_number
+        ), 1) AS retention_pct
+FROM cohort_retention
+ORDER BY cohort_month, month_number;
 ```
 
 ### Funnel Analysis
 
 ```sql
-WITH funnel AS (
+-- Conversion per ogni step del funnel
+WITH funnel_steps AS (
     SELECT
-        COUNT(DISTINCT CASE WHEN event = 'page_view' THEN session_id END) AS step1_view,
-        COUNT(DISTINCT CASE WHEN event = 'add_to_cart' THEN session_id END) AS step2_atc,
-        COUNT(DISTINCT CASE WHEN event = 'checkout_start' THEN session_id END) AS step3_checkout,
-        COUNT(DISTINCT CASE WHEN event = 'purchase' THEN session_id END) AS step4_purchase
-    FROM events WHERE event_date >= CURRENT_DATE - INTERVAL 30 DAY
+        user_id,
+        -- Max perché un utente può aver fatto lo step più volte
+        MAX(CASE WHEN event_type = 'page_view'          THEN 1 ELSE 0 END) AS s1_view,
+        MAX(CASE WHEN event_type = 'product_viewed'     THEN 1 ELSE 0 END) AS s2_product,
+        MAX(CASE WHEN event_type = 'add_to_cart'        THEN 1 ELSE 0 END) AS s3_cart,
+        MAX(CASE WHEN event_type = 'checkout_started'   THEN 1 ELSE 0 END) AS s4_checkout,
+        MAX(CASE WHEN event_type = 'purchase_completed' THEN 1 ELSE 0 END) AS s5_purchase
+    FROM user_events
+    WHERE event_time >= CURRENT_DATE - INTERVAL '30' DAY
+    GROUP BY user_id
 )
 SELECT
-    step1_view AS "Page View",
-    step2_atc AS "Add to Cart",
-    ROUND(step2_atc * 100.0 / step1_view, 1) AS "View → ATC %",
-    step3_checkout AS "Checkout",
-    ROUND(step3_checkout * 100.0 / step2_atc, 1) AS "ATC → Checkout %",
-    step4_purchase AS "Purchase",
-    ROUND(step4_purchase * 100.0 / step1_view, 1) AS "Overall Conv %"
-FROM funnel;
+    SUM(s1_view)     AS step1_views,
+    SUM(s2_product)  AS step2_product,
+    SUM(s3_cart)     AS step3_cart,
+    SUM(s4_checkout) AS step4_checkout,
+    SUM(s5_purchase) AS step5_purchase,
+    -- Conversion da view a purchase
+    ROUND(100.0 * SUM(s5_purchase) / NULLIF(SUM(s1_view), 0), 1) AS overall_cvr,
+    -- Drop-off per ogni step
+    ROUND(100.0 * SUM(s3_cart)     / NULLIF(SUM(s2_product), 0), 1) AS product_to_cart,
+    ROUND(100.0 * SUM(s5_purchase) / NULLIF(SUM(s4_checkout), 0), 1) AS checkout_to_purchase
+FROM funnel_steps;
 ```
 
-### Window Functions per Trend
+### Session Analysis: sessionizzare gli eventi
 
 ```sql
--- Running total + media mobile 7 giorni
-SELECT
-    date,
-    revenue,
-    SUM(revenue) OVER (ORDER BY date ROWS BETWEEN 6 PRECEDING AND CURRENT ROW) / 7 AS ma_7d,
-    SUM(revenue) OVER (PARTITION BY DATE_TRUNC('month', date) ORDER BY date) AS mtd_revenue,
-    RANK() OVER (PARTITION BY DATE_TRUNC('month', date) ORDER BY revenue DESC) AS best_day_rank
-FROM daily_metrics;
-```
-
-## 2. Pattern Comuni
-
-### Top N con "Others"
-
-```sql
-WITH ranked AS (
-    SELECT channel, revenue,
-        ROW_NUMBER() OVER (ORDER BY revenue DESC) AS rn
-    FROM channel_summary
+WITH events_with_gaps AS (
+    SELECT
+        user_id,
+        event_time,
+        event_type,
+        -- Minuti dall'evento precedente dello stesso utente
+        EXTRACT(EPOCH FROM event_time -
+            LAG(event_time) OVER (PARTITION BY user_id ORDER BY event_time)
+        ) / 60 AS minutes_since_prev
+    FROM user_events
+),
+session_markers AS (
+    SELECT *,
+        -- Nuova sessione se: primo evento, oppure gap > 30 minuti
+        CASE
+            WHEN minutes_since_prev IS NULL OR minutes_since_prev > 30
+            THEN 1 ELSE 0
+        END AS is_session_start
+    FROM events_with_gaps
+),
+sessions AS (
+    SELECT *,
+        -- ID sessione progressivo per utente
+        SUM(is_session_start) OVER (
+            PARTITION BY user_id
+            ORDER BY event_time
+            ROWS UNBOUNDED PRECEDING
+        ) AS session_num
+    FROM session_markers
 )
 SELECT
-    CASE WHEN rn <= 5 THEN channel ELSE 'Others' END AS channel,
-    SUM(revenue) AS revenue
-FROM ranked GROUP BY 1 ORDER BY revenue DESC;
+    user_id,
+    session_num,
+    MIN(event_time)  AS session_start,
+    MAX(event_time)  AS session_end,
+    COUNT(*)         AS events_in_session,
+    EXTRACT(EPOCH FROM MAX(event_time) - MIN(event_time)) / 60 AS session_duration_minutes
+FROM sessions
+GROUP BY user_id, session_num
+ORDER BY user_id, session_num;
 ```
 
-### Percentile e Distribuzione
+## Ottimizzazione delle Query
+
+### Regole fondamentali
 
 ```sql
-SELECT
-    PERCENTILE_CONT(0.25) WITHIN GROUP (ORDER BY order_value) AS p25,
-    PERCENTILE_CONT(0.50) WITHIN GROUP (ORDER BY order_value) AS median,
-    PERCENTILE_CONT(0.75) WITHIN GROUP (ORDER BY order_value) AS p75,
-    PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY order_value) AS p95
-FROM orders;
+-- LENTO: SELECT * legge tutte le colonne (in columnar DB è costoso)
+SELECT * FROM orders WHERE user_id = 123;
+
+-- VELOCE: seleziona solo le colonne necessarie
+SELECT order_id, status, amount FROM orders WHERE user_id = 123;
+
+-- LENTO: funzione sulla colonna di filtro impedisce l'uso dell'indice
+SELECT * FROM orders WHERE YEAR(created_at) = 2024;
+
+-- VELOCE: filtra direttamente sulla colonna
+SELECT * FROM orders
+WHERE created_at >= '2024-01-01' AND created_at < '2025-01-01';
+
+-- LENTO: subquery correlata (eseguita N volte, una per ogni riga outer)
+SELECT u.user_id,
+    (SELECT COUNT(*) FROM orders o WHERE o.user_id = u.user_id) AS order_count
+FROM users u;
+
+-- VELOCE: JOIN con subquery non-correlata (eseguita una volta)
+SELECT u.user_id, COALESCE(o.order_count, 0) AS order_count
+FROM users u
+LEFT JOIN (
+    SELECT user_id, COUNT(*) AS order_count FROM orders GROUP BY user_id
+) o ON u.user_id = o.user_id;
 ```
 
-## Risorse
-- **Libro:** *SQL for Data Scientists* — Renee Teate
-- **Practice:** SQLZoo, LeetCode SQL, Mode Analytics tutorials
+### Partition Pruning
+
+Nei data warehouse con partitioning, filtrare sulla colonna di partizione è critico:
+
+```sql
+-- In BigQuery (partitioned by DATE):
+-- LENTO: scansiona tutte le partizioni
+SELECT * FROM `project.dataset.events`
+WHERE FORMAT_DATE('%Y', event_date) = '2024';
+
+-- VELOCE: usa la colonna di partizione direttamente
+SELECT * FROM `project.dataset.events`
+WHERE event_date BETWEEN '2024-01-01' AND '2024-12-31';
+
+-- In ClickHouse (PARTITION BY toYYYYMM(event_date)):
+-- VELOCE: ClickHouse legge solo le partizioni 202401-202412
+SELECT * FROM events
+WHERE event_date >= '2024-01-01' AND event_date <= '2024-12-31';
+```
+
+## SQL Style Guide per Analisti
+
+Query ben scritte sono più facili da mantenere, revisionare e debuggare.
+
+```sql
+-- Regola 1: keywords in maiuscolo, identificatori in snake_case
+SELECT user_id, SUM(amount) AS total_revenue
+FROM orders
+WHERE status = 'completed'
+GROUP BY user_id;
+
+-- Regola 2: CTEs per logica complessa, mai subquery annidate oltre 2 livelli
+
+-- Regola 3: alias espliciti (mai alias ambigui)
+-- SBAGLIATO:
+SELECT u.id, o.id FROM users u JOIN orders o ON u.id = o.user_id;
+-- CORRETTO:
+SELECT u.id AS user_id, o.id AS order_id FROM users u JOIN orders o ON u.id = o.user_id;
+
+-- Regola 4: commenta il PERCHÉ, non il COSA
+-- SBAGLIATO: -- questa query conta gli ordini
+-- CORRETTO: -- conteggio ordini per identificare heavy buyers (≥3 ordini/mese)
+-- per il programma loyalty
+
+-- Regola 5: NULLIF() per evitare divisioni per zero
+SELECT
+    ROUND(100.0 * conversions / NULLIF(views, 0), 1) AS conversion_rate
+FROM funnel_stats;
+-- NULLIF(views, 0) → restituisce NULL se views=0, evitando division by zero
+```
+
+## Anti-pattern SQL
+
+**1. `SELECT DISTINCT` come fix per duplicati**
+
+Se hai duplicati, trova la causa. `DISTINCT` nasconde il problema invece di risolverlo e spesso maschera un JOIN con cardinalità sbagliata.
+
+**2. Confronto di NULL con `=`**
+
+```sql
+-- SBAGLIATO: NULL = NULL → FALSE in SQL (NULL non è uguale a niente)
+SELECT * FROM orders WHERE discount_code = NULL;
+
+-- CORRETTO:
+SELECT * FROM orders WHERE discount_code IS NULL;
+SELECT * FROM orders WHERE discount_code IS NOT NULL;
+```
+
+**3. OR nei JOIN invece di UNION**
+
+```sql
+-- LENTO: OR impedisce l'uso degli indici
+SELECT * FROM events WHERE user_id = 1 OR session_id = 'abc';
+
+-- VELOCE: UNION usa gli indici
+SELECT * FROM events WHERE user_id = 1
+UNION ALL
+SELECT * FROM events WHERE session_id = 'abc' AND user_id != 1;
+```
+
+**4. Aggregazioni senza GROUP BY esplicito**
+
+Nei motori SQL moderni, aggregare senza GROUP BY funziona ma può produrre risultati inattesi quando ci sono colonne non aggregate nella SELECT.
+
+**5. `COUNT(*)` vs `COUNT(colonna)` vs `COUNT(DISTINCT colonna)`**
+
+- `COUNT(*)`: conta tutte le righe inclusi i NULL
+- `COUNT(colonna)`: conta solo i valori non-NULL
+- `COUNT(DISTINCT colonna)`: conta i valori unici non-NULL
+
+Sono semanticamente diversi — scegli quello giusto per il tuo caso.
+
+<Aside type="tip">
+Per imparare SQL avanzato, la risorsa migliore è la documentazione del tuo data warehouse (BigQuery, Snowflake, ClickHouse) con esempi pratici. Ogni engine ha ottimizzazioni specifiche che vale la pena conoscere. Mode Analytics SQL School e SQLZoo sono risorse gratuite eccellenti per la pratica.
+</Aside>

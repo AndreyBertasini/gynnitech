@@ -6,127 +6,479 @@ order: 4
 prerequisites: ["s3-data-lake/formati-dati"]
 category: "Infrastructure"
 ---
-# Infrastructure as Code con Terraform
 
-> **Obiettivo:** Gestire l'infrastruttura dati come codice versionato usando Terraform.
+import { Aside, Steps, Tabs, TabItem } from '@astrojs/starlight/components'
 
-## 1. Perché IaC
+Nel gergo del settore, un "snowflake server" (termine coniato da Martin Fowler, nessuna relazione con il data warehouse) è un server configurato manualmente, nel tempo, da persone diverse — ogni configurazione una piccola modifica che nessuno ha documentato. Come un fiocco di neve, è unico e irriproducibile. Quando crasha, nessuno sa come ricrearlo esattamente. Airbnb aveva questo problema con la loro infrastruttura dati nel 2017: il provisioning di un nuovo ambiente richiedeva 2 settimane di lavoro manuale. Dopo la migrazione a Terraform, quella stessa operazione richiedeva 4 ore.
 
-| Manuale 🚫 | IaC ✅ |
-|:---|:---|
-| Click sulla console AWS | Codice in Git, review, PR |
-| "Chi ha cambiato quella config?" | Git blame + history |
-| "Ricrea l'ambiente di staging" → 2 giorni | `terraform apply` → 10 minuti |
-| Drift non rilevato | `terraform plan` mostra i delta |
+Infrastructure as Code (IaC) tratta l'infrastruttura come software: versionata, testata, peer-reviewed, riproducibile.
 
-## 2. Struttura di un Progetto Terraform
+## Cos'è Infrastructure as Code
 
-```
-infra/
-├── main.tf              # Provider e backend
-├── variables.tf         # Variabili di input
-├── outputs.tf           # Output (URL, IP, ecc.)
-├── modules/
-│   ├── clickhouse/      # Modulo ClickHouse
-│   ├── kafka/           # Modulo Kafka
-│   └── s3/              # Modulo S3
-├── environments/
-│   ├── dev.tfvars       # Config per dev
-│   └── prod.tfvars      # Config per prod
-└── .github/workflows/
-    └── terraform.yml    # CI/CD pipeline
-```
+IaC è la pratica di definire e gestire l'infrastruttura tramite file di configurazione leggibili da macchina, invece di configurazioni manuali via interfacce grafiche o comandi diretti.
 
-## 3. Esempio: Provisioning S3 + ClickHouse
+**I tre principi fondamentali**:
+
+1. **Dichiarativo**: descrivi lo stato desiderato, non i passi per arrivarci. "Voglio un bucket S3 chiamato `prod-data-lake` con versioning abilitato" — non "crea il bucket, poi vai nella console, poi abilita il versioning".
+
+2. **Idempotente**: eseguire la stessa configurazione N volte produce sempre lo stesso risultato. Se il bucket esiste già, Terraform non lo crea di nuovo — verifica solo che sia nello stato corretto.
+
+3. **Immutable infrastructure**: invece di modificare un server esistente, ricrea da zero con la nuova configurazione. Elimina la deriva di configurazione nel tempo.
+
+## Terraform: concetti fondamentali
+
+Terraform è lo strumento IaC più diffuso, creato da HashiCorp nel 2014. Usa HCL (HashiCorp Configuration Language).
+
+### Provider, Resource, Data Source
 
 ```hcl
-# main.tf
+# Provider: connette Terraform al cloud provider
 terraform {
   required_providers {
-    aws = { source = "hashicorp/aws", version = "~> 5.0" }
-  }
-  backend "s3" {
-    bucket = "mycompany-terraform-state"
-    key    = "data-infra/terraform.tfstate"
-    region = "eu-west-1"
+    aws = {
+      source  = "hashicorp/aws"
+      version = "~> 5.0"
+    }
+    snowflake = {
+      source  = "Snowflake-Labs/snowflake"
+      version = "~> 0.87"
+    }
   }
 }
 
-# S3 Bucket per Data Lake
+provider "aws" {
+  region = "eu-west-1"
+  # Credenziali da variabili d'ambiente: AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY
+  # Mai hardcodare le credenziali nel codice
+}
+
+# Resource: una risorsa infrastrutturale da creare/gestire
 resource "aws_s3_bucket" "data_lake" {
-  bucket = "mycompany-data-lake-${var.environment}"
-  
+  bucket = "my-company-data-lake-prod"
+
   tags = {
-    Environment = var.environment
+    Environment = "production"
     Team        = "data-engineering"
     ManagedBy   = "terraform"
   }
 }
 
-resource "aws_s3_bucket_lifecycle_configuration" "data_lifecycle" {
-  bucket = aws_s3_bucket.data_lake.id
-  
-  rule {
-    id     = "archive-old-data"
-    status = "Enabled"
-    
-    transition {
-      days          = 90
-      storage_class = "GLACIER"
-    }
-    
-    expiration {
-      days = 365
-    }
+# Data Source: leggi informazioni da risorse già esistenti (non create da Terraform)
+data "aws_caller_identity" "current" {}
+data "aws_region" "current" {}
+
+# Usa il valore: data.aws_caller_identity.current.account_id
+```
+
+### Variables e Outputs
+
+```hcl
+# variables.tf — parametri configurabili
+variable "environment" {
+  description = "Deployment environment"
+  type        = string
+  validation {
+    condition     = contains(["dev", "staging", "prod"], var.environment)
+    error_message = "Environment must be dev, staging, or prod."
+  }
+}
+
+variable "data_lake_bucket_name" {
+  description = "Name of the S3 data lake bucket"
+  type        = string
+  default     = ""  # se non specificato, calcolato in locals
+}
+
+variable "clickhouse_instance_type" {
+  type    = string
+  default = "c5.4xlarge"  # default per prod, override in dev
+}
+
+# locals.tf — valori derivati da variabili
+locals {
+  bucket_name = var.data_lake_bucket_name != "" ?
+    var.data_lake_bucket_name :
+    "${var.environment}-data-lake-${data.aws_caller_identity.current.account_id}"
+
+  common_tags = {
+    Environment = var.environment
+    ManagedBy   = "terraform"
+    Team        = "data-engineering"
+  }
+}
+
+# outputs.tf — valori esposti ad altri moduli o all'utente
+output "data_lake_bucket_arn" {
+  description = "ARN of the data lake S3 bucket"
+  value       = aws_s3_bucket.data_lake.arn
+}
+
+output "clickhouse_endpoint" {
+  description = "ClickHouse cluster endpoint"
+  value       = aws_instance.clickhouse.private_dns
+  sensitive   = false
+}
+```
+
+### State: la memoria di Terraform
+
+Il Terraform state (`terraform.tfstate`) è il file che mappa le risorse Terraform alle risorse reali nel cloud. È il componente più critico e più pericoloso.
+
+```hcl
+# Backend remoto su S3 (obbligatorio per team)
+terraform {
+  backend "s3" {
+    bucket         = "my-company-terraform-state"
+    key            = "data-engineering/terraform.tfstate"
+    region         = "eu-west-1"
+    encrypt        = true  # sempre!
+    dynamodb_table = "terraform-locks"  # per lock distribuiti
   }
 }
 ```
 
-## 4. CI/CD per Terraform
+<Aside type="caution">
+**MAI committare `terraform.tfstate` in git**. Contiene valori in chiaro come password, connection strings, e chiavi API. Aggiungi sempre `*.tfstate` e `*.tfstate.backup` al `.gitignore`. Usa sempre un backend remoto per ambienti di team.
+</Aside>
+
+## Esempio pratico: Analytics Stack su AWS
+
+```hcl
+# main.tf — infrastruttura principale
+
+# S3 Data Lake con lifecycle rules
+resource "aws_s3_bucket" "data_lake" {
+  bucket = local.bucket_name
+  tags   = local.common_tags
+}
+
+resource "aws_s3_bucket_versioning" "data_lake" {
+  bucket = aws_s3_bucket.data_lake.id
+  versioning_configuration {
+    status = "Enabled"
+  }
+}
+
+resource "aws_s3_bucket_lifecycle_configuration" "data_lake" {
+  bucket = aws_s3_bucket.data_lake.id
+
+  rule {
+    id     = "transition-to-ia"
+    status = "Enabled"
+
+    transition {
+      days          = 90
+      storage_class = "STANDARD_IA"  # 30% più economico per dati acceduti raramente
+    }
+
+    transition {
+      days          = 365
+      storage_class = "GLACIER"  # 80% più economico per archivio
+    }
+  }
+}
+
+# IAM Role per Fivetran o pipeline di ingestion
+resource "aws_iam_role" "data_pipeline_role" {
+  name = "${var.environment}-data-pipeline-role"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect    = "Allow"
+      Principal = { Service = "ec2.amazonaws.com" }
+      Action    = "sts:AssumeRole"
+    }]
+  })
+
+  tags = local.common_tags
+}
+
+resource "aws_iam_role_policy" "data_pipeline_s3" {
+  name = "s3-data-lake-access"
+  role = aws_iam_role.data_pipeline_role.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect   = "Allow"
+        Action   = ["s3:GetObject", "s3:PutObject", "s3:DeleteObject"]
+        Resource = "${aws_s3_bucket.data_lake.arn}/*"
+      },
+      {
+        Effect   = "Allow"
+        Action   = ["s3:ListBucket"]
+        Resource = aws_s3_bucket.data_lake.arn
+      }
+    ]
+  })
+}
+```
+
+## Terraform per tool analytics specifici
+
+### Snowflake
+
+```hcl
+provider "snowflake" {
+  account   = var.snowflake_account
+  username  = var.snowflake_user
+  # Password via env: SNOWFLAKE_PASSWORD (mai in codice)
+  role      = "SYSADMIN"
+}
+
+resource "snowflake_database" "analytics" {
+  name                        = upper("${var.environment}_ANALYTICS")
+  data_retention_time_in_days = var.environment == "prod" ? 30 : 1
+  comment                     = "Analytics database managed by Terraform"
+}
+
+resource "snowflake_schema" "marts" {
+  database = snowflake_database.analytics.name
+  name     = "MARTS"
+}
+
+resource "snowflake_warehouse" "transform" {
+  name           = upper("${var.environment}_TRANSFORM_WH")
+  warehouse_size = var.environment == "prod" ? "MEDIUM" : "X-SMALL"
+  auto_suspend   = 60    # sospendi dopo 60 secondi di inattività
+  auto_resume    = true  # risveglia automaticamente
+  initially_suspended = true
+}
+
+# Utente per dbt
+resource "snowflake_user" "dbt_user" {
+  name         = upper("${var.environment}_DBT_USER")
+  password     = data.aws_secretsmanager_secret_version.dbt_password.secret_string
+  default_warehouse = snowflake_warehouse.transform.name
+  default_role = "TRANSFORMER"
+}
+
+resource "snowflake_role" "transformer" {
+  name = "TRANSFORMER"
+}
+
+resource "snowflake_grant_privileges_to_role" "transformer_schema" {
+  privileges = ["USAGE", "CREATE TABLE", "CREATE VIEW"]
+  role_name  = snowflake_role.transformer.name
+  on_schema {
+    schema_name = "\"${snowflake_database.analytics.name}\".\"${snowflake_schema.marts.name}\""
+  }
+}
+```
+
+### ClickHouse Cloud
+
+```hcl
+provider "clickhouse" {
+  api_url        = "https://api.clickhouse.cloud"
+  token_key      = var.clickhouse_api_key_id
+  token_secret   = var.clickhouse_api_key_secret
+  organization_id = var.clickhouse_org_id
+}
+
+resource "clickhouse_service" "analytics" {
+  name           = "${var.environment}-analytics"
+  cloud_provider = "aws"
+  region         = "eu-west-1"
+  tier           = var.environment == "prod" ? "production" : "development"
+
+  min_total_memory_gb = var.environment == "prod" ? 64 : 8
+  max_total_memory_gb = var.environment == "prod" ? 256 : 16
+
+  ip_access = [
+    {
+      source      = "10.0.0.0/8"
+      description = "Internal network"
+    }
+  ]
+}
+```
+
+## Struttura modulare per team data
+
+```
+terraform/
+├── modules/
+│   ├── data-lake/               # S3 + lifecycle + IAM
+│   │   ├── main.tf
+│   │   ├── variables.tf
+│   │   └── outputs.tf
+│   ├── data-warehouse/          # Snowflake o ClickHouse
+│   │   ├── main.tf
+│   │   ├── variables.tf
+│   │   └── outputs.tf
+│   ├── streaming/               # MSK (Kafka managed) + security groups
+│   └── monitoring/              # CloudWatch dashboards + alarms
+│
+├── environments/
+│   ├── dev/
+│   │   ├── main.tf              # chiama i moduli con variabili dev
+│   │   ├── terraform.tfvars     # override di variabili per dev
+│   │   └── backend.tf           # backend S3 per dev state
+│   ├── staging/
+│   └── prod/
+│
+└── shared/                      # risorse condivise da tutti gli ambienti
+    ├── iam-base-roles/
+    └── networking/
+```
+
+**Esempio di utilizzo dei moduli**:
+
+```hcl
+# environments/prod/main.tf
+module "data_lake" {
+  source = "../../modules/data-lake"
+
+  environment             = "prod"
+  bucket_name             = "mycompany-data-lake-prod"
+  enable_versioning       = true
+  lifecycle_ia_days       = 90
+  lifecycle_glacier_days  = 365
+}
+
+module "data_warehouse" {
+  source = "../../modules/data-warehouse"
+
+  environment        = "prod"
+  warehouse_size     = "MEDIUM"
+  auto_suspend_sec   = 60
+}
+
+# Passa l'output del data lake al data warehouse (cross-module reference)
+output "s3_to_snowflake_integration_arn" {
+  value = module.data_warehouse.s3_integration_arn
+}
+```
+
+## CI/CD per Terraform
 
 ```yaml
 # .github/workflows/terraform.yml
-name: Terraform
+name: Terraform CI/CD
+
 on:
   pull_request:
-    paths: ['infra/**']
+    paths: ['terraform/**']
   push:
     branches: [main]
-    paths: ['infra/**']
+    paths: ['terraform/**']
 
 jobs:
   plan:
+    name: Terraform Plan
     runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
     steps:
       - uses: actions/checkout@v4
       - uses: hashicorp/setup-terraform@v3
-      - run: terraform init
-        working-directory: infra
-      - run: terraform plan -var-file=environments/prod.tfvars
-        working-directory: infra
-  
+        with:
+          terraform_version: "1.7.0"
+
+      - name: Terraform Format Check
+        run: terraform fmt -check -recursive
+        working-directory: terraform/environments/prod
+
+      - name: Terraform Init
+        run: terraform init
+        working-directory: terraform/environments/prod
+        env:
+          AWS_ACCESS_KEY_ID:     ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+
+      - name: Terraform Validate
+        run: terraform validate
+        working-directory: terraform/environments/prod
+
+      - name: Terraform Plan
+        run: terraform plan -out=tfplan -no-color
+        working-directory: terraform/environments/prod
+
+      - name: Comment PR with Plan
+        uses: actions/github-script@v7
+        # Pubblica il piano come commento nella PR
+
   apply:
-    if: github.ref == 'refs/heads/main'
-    needs: plan
+    name: Terraform Apply
     runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    environment: production  # richiede approvazione manuale in GitHub
     steps:
       - uses: actions/checkout@v4
       - uses: hashicorp/setup-terraform@v3
-      - run: terraform apply -auto-approve -var-file=environments/prod.tfvars
-        working-directory: infra
+      - run: terraform init && terraform apply -auto-approve
+        working-directory: terraform/environments/prod
+        env:
+          AWS_ACCESS_KEY_ID:     ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
 ```
 
-## 5. Best Practices
+## Security best practices
 
-| Practice | Perché |
-|:---|:---|
-| Remote state (S3) | Condivisione team + locking |
-| Moduli | Riusabilità e organizzazione |
-| Plan prima di apply | Review delle modifiche |
-| Tag su tutto | Tracking costi e ownership |
-| Secrets in Vault/SSM | Mai credenziali nei .tf |
+**IAM Least Privilege**: il principio più violato in IaC
 
-## Risorse
-- **Doc:** [terraform.io/docs](https://terraform.io/docs)
-- **Corso:** HashiCorp Learn Terraform
-- **Tool:** tflint, checkov per security scanning
+```hcl
+# SBAGLIATO: troppo permissivo
+resource "aws_iam_role_policy_attachment" "bad" {
+  role       = aws_iam_role.pipeline.name
+  policy_arn = "arn:aws:iam::aws:policy/AdministratorAccess"  # MAI in prod
+}
+
+# CORRETTO: permessi minimi necessari
+resource "aws_iam_role_policy" "s3_read_only" {
+  name = "s3-raw-read-only"
+  role = aws_iam_role.pipeline.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect   = "Allow"
+      Action   = ["s3:GetObject", "s3:ListBucket"]
+      Resource = [
+        "arn:aws:s3:::${var.raw_bucket_name}",
+        "arn:aws:s3:::${var.raw_bucket_name}/*"
+      ]
+    }]
+  })
+}
+```
+
+**Secrets**: mai in terraform files
+
+```hcl
+# SBAGLIATO: password hardcodata
+resource "snowflake_user" "dbt" {
+  password = "SuperSecretPassword123"  # visibile in git, nel state, ovunque
+}
+
+# CORRETTO: leggi da Secrets Manager
+data "aws_secretsmanager_secret_version" "dbt_password" {
+  secret_id = "/${var.environment}/snowflake/dbt_user_password"
+}
+
+resource "snowflake_user" "dbt" {
+  password = data.aws_secretsmanager_secret_version.dbt_password.secret_string
+}
+```
+
+## Drift Detection: lo stato reale vs lo stato desiderato
+
+Il "drift" avviene quando qualcuno modifica l'infrastruttura direttamente (via console, CLI) senza aggiornare il codice Terraform. Terraform non lo sa finché non esegui `terraform plan`.
+
+```bash
+# Esegui periodicamente (es. ogni notte in CI) per rilevare il drift
+terraform plan -detailed-exitcode
+# Exit code 0: no changes
+# Exit code 1: error
+# Exit code 2: changes detected (drift!)
+
+# Se rilevi drift, hai due opzioni:
+# 1. terraform apply → riporta l'infrastruttura allo stato desiderato
+# 2. terraform import → importa la risorsa modificata nel state e aggiorna il codice
+```
+
+<Aside type="tip">
+La regola d'oro: **se non è in Terraform, non esiste**. Qualsiasi modifica all'infrastruttura deve passare per un PR → plan → review → apply. Nessuna modifica manuale via console, mai. Questo è il cambiamento culturale più difficile, ma anche il più importante.
+</Aside>

@@ -6,93 +6,348 @@ order: 3
 prerequisites: ["dashboard-visualizzazione/data-visualization"]
 category: "Data Engineering"
 ---
-# ETL e Data Pipeline per la Visualizzazione
 
-> **Obiettivo:** Costruire pipeline dati affidabili che alimentino le dashboard con dati puliti e aggiornati.
+import { Aside, Steps, Tabs, TabItem } from '@astrojs/starlight/components'
 
-## 1. ETL vs ELT
+Nel 2019, il team di analytics di Airbnb aveva un problema noto internamente come il "metrics inconsistency problem": team diversi calcolavano la stessa metrica (es. "host attivi") in modi leggermente diversi, usando pipeline dati diverse, producendo numeri che non tornava mai nei meeting. La soluzione — costruire "Minerva", un sistema centralizzato di pipeline e metric layer — ha richiesto 2 anni e ha coinvolto decine di ingegneri. Risultato: da "3 team con 3 risposte diverse" a "1 risposta condivisa da tutti".
 
-| Approccio | Processo | Quando Usarlo |
-|:---|:---|:---|
-| **ETL** | Extract → Transform → Load | Dati sensibili, trasformazioni complesse |
-| **ELT** | Extract → Load → Transform | Cloud DW moderni, dbt |
+Le pipeline dati sono l'infrastruttura invisibile che trasforma i dati grezzi in insights affidabili. Quando funzionano, nessuno le nota. Quando si rompono alle 2 di notte, tutti le notano.
 
-```mermaid
-graph LR
-    subgraph ETL
-        A1["Extract"] --> B1["Transform"] --> C1["Load"]
-    end
-    subgraph ELT
-        A2["Extract"] --> C2["Load"] --> B2["Transform<br>(dbt)"]
-    end
+## ETL vs ELT: il cambio di paradigma
+
+La distinzione tra ETL ed ELT riflette un cambiamento fondamentale reso possibile dai cloud data warehouse.
+
+| | ETL (Extract-Transform-Load) | ELT (Extract-Load-Transform) |
+|--|-----|-----|
+| **Epoca** | Pre-cloud (anni 2000) | Cloud era (2010+) |
+| **Flusso** | Estrai → Trasforma → Carica | Estrai → Carica → Trasforma |
+| **Dove si trasforma** | Server ETL intermedio | Dentro il data warehouse (SQL) |
+| **Tool tipici** | Informatica, SSIS, Talend | Fivetran + dbt, Airbyte + dbt |
+| **Limitazione** | Server ETL = collo di bottiglia | DW deve essere potente (BigQuery, Snowflake) |
+| **Flessibilità** | Bassa (schemi fissi) | Alta (raw data sempre disponibile) |
+
+**Perché ELT ha vinto**: i moderni cloud data warehouse (BigQuery, Snowflake, ClickHouse) possono eseguire trasformazioni SQL su terabyte di dati in secondi. Non ha più senso fare la trasformazione su un server ETL separato quando il DW fa lo stesso lavoro 10x più veloce. Inoltre, con ELT i dati raw sono sempre disponibili — se hai bisogno di una nuova trasformazione, puoi applicarla retroattivamente.
+
+## Le 4 fasi di una pipeline dati
+
+### Fase 1: Extract
+
+Estrarre dati dalla sorgente verso un'area di staging (spesso S3 o una tabella staging nel DW).
+
+**Modalità di estrazione**:
+
+- **Full refresh**: `SELECT * FROM source_table` ogni volta. Semplice, ma per tabelle grandi è inefficiente
+- **Incremental (timestamp-based)**: `SELECT * WHERE updated_at > last_run_time`. Efficiente, ma non cattura i DELETE
+- **CDC (log-based)**: cattura tutti i cambiamenti inclusi i DELETE. Più complesso (vedi lezione CDC)
+
+**Sfide comuni dell'extration**:
+- API rate limiting: gestire il throttling delle API sorgente
+- Pagination: le API REST raramente restituiscono milioni di record in una risposta
+- Schema drift: la sorgente cambia lo schema senza avvertirti
+- Authentication: OAuth token expiry, key rotation
+
+### Fase 2: Load
+
+Caricare i dati raw nella destination (data warehouse o data lake) prima di trasformarli.
+
+**Formati di file consigliati**:
+
+| Formato | Compressione | Tipo | Quando usarlo |
+|---------|-------------|------|---------------|
+| Parquet | Ottima (columnar) | Binario | Standard per analytics su S3/data lake |
+| CSV | Nessuna | Testo | Solo per interoperabilità legacy |
+| JSON | Variabile | Testo | Dati semi-strutturati, API |
+| Avro | Buona | Binario | Kafka + streaming |
+| ORC | Ottima (columnar) | Binario | Ecosistema Hive/Hadoop |
+
+**Strategia di caricamento**:
+- **Append only**: ogni run aggiunge righe nuove (per eventi immutabili)
+- **Truncate and reload**: svuota la tabella e ricarica tutto (per tabelle piccole)
+- **MERGE / UPSERT**: inserisci se nuovo, aggiorna se esiste già (per dati mutabili)
+
+```sql
+-- Esempio MERGE in BigQuery per gestire upsert
+MERGE INTO analytics.orders AS target
+USING staging.orders_new AS source
+ON target.order_id = source.order_id
+WHEN MATCHED AND source.updated_at > target.updated_at THEN
+    UPDATE SET
+        status = source.status,
+        updated_at = source.updated_at
+WHEN NOT MATCHED THEN
+    INSERT (order_id, user_id, status, amount, created_at, updated_at)
+    VALUES (source.order_id, source.user_id, source.status,
+            source.amount, source.created_at, source.updated_at);
 ```
 
-## 2. Pipeline con dbt
+### Fase 3: Transform
+
+Trasformare i dati raw in tabelle analitiche pulite e pronte per il consumo.
+
+**dbt** (data build tool) è il gold standard per questa fase:
 
 ```sql
 -- models/staging/stg_orders.sql
-WITH source AS (
-    SELECT * FROM {{ source('shopify', 'orders') }}
-),
-cleaned AS (
-    SELECT
-        id AS order_id,
-        customer_id,
-        CAST(created_at AS DATE) AS order_date,
-        total_price - total_discounts - total_tax AS net_revenue,
-        financial_status,
-        fulfillment_status
-    FROM source
-    WHERE financial_status = 'paid'
-      AND cancelled_at IS NULL
-)
-SELECT * FROM cleaned
-```
-
-```sql
--- models/marts/mart_daily_revenue.sql
+-- Livello staging: solo pulizia e rinomina
 SELECT
-    order_date,
-    COUNT(DISTINCT order_id) AS orders,
-    COUNT(DISTINCT customer_id) AS unique_customers,
-    SUM(net_revenue) AS revenue,
-    ROUND(SUM(net_revenue) / COUNT(DISTINCT order_id), 2) AS aov
-FROM {{ ref('stg_orders') }}
-GROUP BY order_date
+    id              AS order_id,
+    user_id,
+    status,
+    amount / 100.0  AS amount_eur,   -- conversione centesimi → euro
+    created_at,
+    updated_at
+FROM {{ source('raw', 'orders') }}
+WHERE id IS NOT NULL               -- rimuovi righe corrotte
+  AND amount > 0;                  -- rimuovi ordini con importo negativo
+
+-- models/marts/orders.sql
+-- Livello mart: logica di business, join, aggregazioni
+SELECT
+    o.order_id,
+    o.user_id,
+    u.email,
+    u.country,
+    o.status,
+    o.amount_eur,
+    -- Feature engineering
+    CASE
+        WHEN o.amount_eur >= 100 THEN 'high_value'
+        WHEN o.amount_eur >= 30  THEN 'medium_value'
+        ELSE 'low_value'
+    END AS value_segment,
+    o.created_at
+FROM {{ ref('stg_orders') }} o
+LEFT JOIN {{ ref('stg_users') }} u ON o.user_id = u.user_id
 ```
 
-## 3. Data Quality Checks
-
-```sql
--- tests/assert_revenue_positive.sql
-SELECT order_id, net_revenue
-FROM {{ ref('stg_orders') }}
-WHERE net_revenue <= 0
-
--- Se restituisce righe, il test fallisce
+**Struttura a layer in dbt**:
 ```
+raw/           ← dati grezzi dalla sorgente (non toccare)
+staging/       ← pulizia e standardizzazione (1:1 con la sorgente)
+intermediate/  ← join e logica intermedia (opzionale)
+marts/         ← tabelle finali per il consumo (dimensioni, fatti)
+```
+
+### Fase 4: Serve
+
+Rendere i dati disponibili per BI, ML, API e altri consumatori.
+
+- **BI Tools**: Looker, Tableau, Superset accedono alle tabelle mart via SQL
+- **Reverse ETL**: Hightouch, Census sincronizzano le tabelle mart verso CRM, email tools, Salesforce
+- **Feature Store**: tabelle aggregate servono come feature per i modelli ML
+- **API**: un layer di servizio (FastAPI, GraphQL) espone i dati via REST
+
+## Orchestrazione: chi gestisce il flusso
+
+L'orchestrazione decide l'ordine di esecuzione, gestisce le retry, monitora i fallimenti e manda alert.
+
+<Tabs>
+<TabItem label="Apache Airflow">
+
+Airflow è lo strumento più maturo e diffuso. Usa DAG (Directed Acyclic Graph) Python per definire le dipendenze.
 
 ```python
-# Test automatici per la pipeline
-def test_data_freshness(engine, table: str, max_hours: int = 24):
-    """Verifica che i dati siano aggiornati."""
-    result = engine.execute(f"""
-        SELECT MAX(updated_at) as last_update,
-               EXTRACT(hours FROM NOW() - MAX(updated_at)) as hours_ago
-        FROM {table}
-    """).fetchone()
-    assert result.hours_ago < max_hours, f"Dati vecchi di {result.hours_ago}h!"
+from airflow import DAG
+from airflow.operators.python import PythonOperator
+from airflow.operators.bash import BashOperator
+from datetime import datetime, timedelta
+
+with DAG(
+    dag_id='daily_analytics_pipeline',
+    schedule='0 6 * * *',   # ogni giorno alle 6:00 UTC
+    start_date=datetime(2024, 1, 1),
+    catchup=False,
+    default_args={
+        'retries': 2,
+        'retry_delay': timedelta(minutes=5),
+        'on_failure_callback': alert_slack  # alert su fallimento
+    }
+) as dag:
+
+    extract_orders = PythonOperator(
+        task_id='extract_orders_from_postgres',
+        python_callable=extract_orders_fn
+    )
+
+    load_to_s3 = PythonOperator(
+        task_id='load_orders_to_s3',
+        python_callable=load_to_s3_fn
+    )
+
+    transform_dbt = BashOperator(
+        task_id='run_dbt_models',
+        bash_command='dbt run --select staging.stg_orders+ --profiles-dir /dbt'
+    )
+
+    test_dbt = BashOperator(
+        task_id='run_dbt_tests',
+        bash_command='dbt test --select staging.stg_orders+'
+    )
+
+    # Dipendenze: extract → load → transform → test
+    extract_orders >> load_to_s3 >> transform_dbt >> test_dbt
 ```
 
-## 4. Orchestrazione
+</TabItem>
+<TabItem label="Prefect / Dagster">
 
-| Tool | Tipo | Prezzo |
-|:---|:---|:---|
-| **cron + dbt** | Semplice, affidabile | Gratis |
-| **Airflow** | Enterprise, DAG complessi | Gratis (self-hosted) |
-| **Dagster** | Modern, developer-friendly | Gratis (self-hosted) |
-| **Prefect** | Cloud-native | Freemium |
+**Prefect** è più moderno di Airflow, con deploy cloud-native e meno boilerplate:
 
-## Risorse
-- **Tool:** dbt Core, Airbyte, Airflow
-- **Best Practice:** Idempotenza, incremental models, testing
+```python
+from prefect import flow, task
+from prefect.tasks import task_input_hash
+from datetime import timedelta
+
+@task(cache_key_fn=task_input_hash, cache_expiration=timedelta(hours=1))
+def extract_orders(date: str) -> list:
+    # ... logica di estrazione
+    return orders
+
+@task(retries=3, retry_delay_seconds=60)
+def load_to_warehouse(orders: list) -> None:
+    # ... logica di caricamento
+    pass
+
+@flow(name="Daily Orders Pipeline")
+def daily_pipeline(date: str = "today"):
+    orders = extract_orders(date)
+    load_to_warehouse(orders)
+
+if __name__ == "__main__":
+    daily_pipeline()
+```
+
+**Dagster** introduce il concetto di "asset" — invece di pensare a "task da eseguire", pensi a "dati da produrre":
+
+```python
+from dagster import asset, AssetIn
+
+@asset
+def raw_orders():
+    """Ordini grezzi da PostgreSQL"""
+    return extract_from_postgres()
+
+@asset(ins={"raw": AssetIn("raw_orders")})
+def cleaned_orders(raw):
+    """Ordini puliti e validati"""
+    return clean_and_validate(raw)
+```
+
+</TabItem>
+</Tabs>
+
+## Idempotency: la proprietà più importante
+
+Una pipeline idempotente produce lo stesso risultato indipendentemente da quante volte viene eseguita. Se una pipeline non è idempotente, un retry crea duplicati o dati sbagliati.
+
+```sql
+-- NON idempotente: ogni run aggiunge righe
+INSERT INTO orders_summary
+SELECT DATE(created_at), SUM(amount)
+FROM orders
+WHERE DATE(created_at) = '2024-01-15';
+-- Se eseguita 3 volte → 3 righe con lo stesso giorno!
+
+-- IDEMPOTENTE: cancella e ricarica
+DELETE FROM orders_summary WHERE summary_date = '2024-01-15';
+INSERT INTO orders_summary
+SELECT DATE(created_at) AS summary_date, SUM(amount) AS total
+FROM orders WHERE DATE(created_at) = '2024-01-15';
+
+-- IDEMPOTENTE: con MERGE/UPSERT
+MERGE INTO orders_summary AS target
+USING (
+    SELECT DATE(created_at) AS summary_date, SUM(amount) AS total
+    FROM orders WHERE DATE(created_at) = '2024-01-15'
+) AS source ON target.summary_date = source.summary_date
+WHEN MATCHED THEN UPDATE SET total = source.total
+WHEN NOT MATCHED THEN INSERT (summary_date, total) VALUES (source.summary_date, source.total);
+```
+
+## Data Quality Checks nella Pipeline
+
+I test automatici nella pipeline evitano che dati sbagliati raggiungano le dashboard e le decisioni.
+
+**Con dbt tests** (il modo più comune):
+
+```yaml
+# models/staging/schema.yml
+models:
+  - name: stg_orders
+    columns:
+      - name: order_id
+        tests:
+          - unique               # nessun duplicato
+          - not_null             # nessun valore NULL
+      - name: status
+        tests:
+          - accepted_values:
+              values: ['pending', 'confirmed', 'shipped', 'delivered', 'cancelled']
+      - name: amount_eur
+        tests:
+          - not_null
+          - dbt_utils.accepted_range:
+              min_value: 0
+              max_value: 100000  # alert se ordine > 100K€ (probabilmente errore)
+      - name: user_id
+        tests:
+          - relationships:
+              to: ref('stg_users')
+              field: user_id
+```
+
+**Freshness check** (i dati sono arrivati nei tempi previsti):
+
+```yaml
+sources:
+  - name: raw
+    freshness:
+      warn_after: {count: 12, period: hour}
+      error_after: {count: 24, period: hour}
+    tables:
+      - name: orders
+        loaded_at_field: _loaded_at
+```
+
+## Monitoring e Alerting
+
+```python
+# Check di freshness personalizzato
+def check_data_freshness(table: str, expected_max_age_hours: int):
+    query = f"""
+    SELECT
+        MAX(created_at) AS latest_record,
+        CURRENT_TIMESTAMP - MAX(created_at) AS age
+    FROM {table}
+    """
+    result = execute_query(query)
+    age_hours = result['age'].total_seconds() / 3600
+
+    if age_hours > expected_max_age_hours:
+        send_alert(
+            channel='#data-alerts',
+            message=f"⚠️ {table}: dati vecchi di {age_hours:.1f} ore (max: {expected_max_age_hours}h)"
+        )
+```
+
+**Metriche da monitorare per ogni pipeline**:
+- **Freshness SLA**: i dati sono arrivati entro l'orario previsto? (es. entro le 7:00 ogni mattina)
+- **Row count**: la tabella ha un numero di righe ragionevole? (calo del 50% = probabile problema)
+- **Null rate**: le colonne critiche non hanno troppi NULL?
+- **Duration**: quanto ci ha messo la pipeline? (regressione di performance)
+
+## Anti-pattern comuni
+
+**1. Trasformazioni in Excel** — non versionabile, non riproducibile, non scalabile. Ogni trasformazione che viene fatta manualmente in Excel deve essere automatizzata.
+
+**2. Pipeline senza retry logic** — se un'API è temporaneamente down, il job fallisce. Con retry exponential backoff, il job riprova automaticamente.
+
+**3. Nessun monitoring della freshness** — i dati possono essere "vecchi di 3 giorni" senza che nessuno lo sappia, finché un manager non nota che i numeri sono fermi.
+
+**4. Full refresh su tabelle grandi** — riscrivere 10 miliardi di righe ogni notte per aggiornare 100.000 righe nuove è uno spreco enorme. Usa incremental.
+
+**5. Pipeline accoppiata allo schema sorgente** — se il database di produzione rinomina una colonna, la pipeline crasha. Isola lo schema sorgente in un layer staging che puoi aggiornare senza toccare il resto.
+
+<Aside type="tip">
+Il principio più importante per costruire pipeline affidabili: **fail loudly, fail early**. Un errore silenzioso che produce dati sbagliati è molto peggio di un errore che crasha immediatamente. Configura sempre alert su ogni fallimento, e assicurati che i fallimenti siano visibili.
+</Aside>
