@@ -1,67 +1,318 @@
 ---
 title: "Caso Studio — Architetture Streaming"
-description: "Caso studio pratico sulla costruzione di una piattaforma di scommesse live basata su Apache Kafka e architettura Kappa."
+description: "Come una piattaforma di scommesse live ha migrato da batch a streaming Kafka in 8 settimane, passando da 24h a 3 secondi di latenza."
 module: "Modulo 4: Real-Time Streaming"
 order: 9
 prerequisites: ["real-time-analytics/caso-studio"]
 tags: ["caso-studio", "pratica", "kafka", "streaming", "real-time", "clickhouse", "schema-registry"]
 ---
-# Caso Studio — Architetture Streaming
 
-> **Scenario:** Un marketplace online deve passare da batch processing (aggiornamento notturno) a streaming real-time per le dashboard marketing.
+import { Aside, Steps } from '@astrojs/starlight/components'
 
-## 1. Il Problema
-| Aspetto | Batch (prima) | Real-Time (dopo) |
-|:---|:---|:---|
-| Latenza dati | 24 ore | meno di 5 secondi |
-| Costo opportunità | Anomalie scoperte il giorno dopo | Alert immediato |
-| User experience | Report del giorno prima | Dashboard live |
+## Il Problema: Un Marketplace che Non Vedeva il Futuro
 
-## 2. Architettura Implementata
-```mermaid
-graph LR
-    A["Web App"] -->|eventi| B["Kafka"]
-    C["Mobile App"] -->|eventi| B
-    B -->|Kafka Connect| D["ClickHouse"]
-    B -->|Kafka Connect| E["S3 Archive"]
-    D --> F["Grafana<br>Dashboard Live"]
-    D --> G["Metabase<br>Analytics"]
+SportBet Italia (nome fittizio) è una piattaforma di scommesse live con 180.000 utenti attivi mensili e €15M di volume mensile gestito. Nel 2023, il loro stack era semplice: MySQL come database transazionale, un job Airflow ogni notte che esportava i dati su BigQuery, Looker per le dashboard.
+
+Il problema: le quote delle scommesse live cambiano ogni 30 secondi. Il comportamento degli utenti segue le quote in tempo reale. Ma le dashboard marketing, le analisi di rischio e i report operativi lavoravano con dati di 24 ore prima.
+
+**Le conseguenze concrete:**
+
+| Problema | Impatto |
+|---------|--------|
+| Anomalie nel comportamento degli utenti rilevate il giorno dopo | €40.000 di perdite in 3 incidenti di frode nel Q3 2022 |
+| Quote errate visibili agli utenti per minuti prima della correzione | 120 reclami/mese, 3 rimborsi obbligatori |
+| Report di performance delle campagne paid con 24h di ritardo | Budget sprecato su campagne non performanti per 24h |
+| Nessuna visibilità sul comportamento degli utenti durante eventi live | Impossibile personalizzare l'esperienza in real-time |
+
+Il team tecnico era composto da 4 persone: 2 backend engineers, 1 data engineer, 1 analyst. Budget per il progetto: €25.000 in 8 settimane.
+
+## Analisi Tecnica: Cosa Serviva Davvero
+
+Prima di scegliere la tecnologia, il team ha analizzato i requisiti reali:
+
+**Volume:**
+- 50.000 eventi/giorno in media
+- Picchi di 15.000 eventi/ora durante le partite in diretta (Champions League: 50.000/ora)
+- Dimensione media messaggio: 800 byte
+
+**Latenza:**
+- Operazioni: alert su anomalie entro 60 secondi
+- Marketing: dashboard aggiornata ogni 5 minuti è sufficiente
+- Rischio: scommesse sospette rilevate entro 30 secondi
+
+**Retention:**
+- 7 giorni di retention Kafka (sufficiente per replay in caso di incidenti)
+- 90 giorni su ClickHouse (analytics)
+- 2 anni su S3 (audit, compliance)
+
+**Budget:**
+- Confluent Cloud Basic: €180/mese
+- ClickHouse Cloud Dev: €250/mese
+- S3: €20/mese
+- Totale: €450/mese (vs €2.800/mese di BigQuery enterprise)
+
+## Architettura Implementata
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                        PRODUCERS                                │
+│  Backend API (Node.js)  │  Quote Engine (Python)  │  Mobile App │
+└────────────────────────────┬────────────────────────────────────┘
+                             │ HTTPS → Kafka REST Proxy
+                             ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                      KAFKA (Confluent Cloud)                    │
+│  topic: bet.events.v1      │  6 partizioni  │  RF=3             │
+│  topic: odds.updates.v1    │  3 partizioni  │  RF=3             │
+│  topic: user.sessions.v1   │  6 partizioni  │  RF=3             │
+│  Schema Registry (Avro)    │  DLQ per errori│                   │
+└──────┬──────────────────────────┬───────────────────────────────┘
+       │                          │
+       ▼                          ▼
+┌─────────────┐          ┌──────────────────┐
+│  ClickHouse │          │    S3 Archive     │
+│  (analytics)│          │  (Parquet, Avro) │
+│  Kafka Engine│          │  Kafka Connect   │
+│  + MV       │          │  S3 Sink         │
+└──────┬──────┘          └──────────────────┘
+       │
+       ▼
+┌──────────────────────────────┐
+│  Grafana (dashboard ops)     │
+│  Metabase (analytics mktg)   │
+└──────────────────────────────┘
 ```
 
-## 3. Configurazione Kafka
-```properties
-# Topic per eventi di tracking
-num.partitions=6
-replication.factor=3
-retention.ms=604800000   # 7 giorni
-cleanup.policy=delete
-compression.type=lz4
+### Topic Design
+
+La decisione più critica è stata il design dei topic. Il team ha discusso due approcci:
+
+**Approccio A (scartato): un topic per entità**
 ```
+scommesse, quote, sessioni, utenti, pagamenti
+```
+Problema: troppo accoppiamento tra producer e consumer. Ogni consumer doveva sapere tutto.
+
+**Approccio B (scelto): topic per domain event**
+```
+bet.events.v1     → tutte le azioni sulle scommesse (placed, settled, voided)
+odds.updates.v1   → cambio quote in tempo reale
+user.sessions.v1  → eventi di sessione (login, logout, page_view, bet_view)
+payments.v1       → eventi di pagamento (deposit, withdrawal, settlement)
+```
+
+La versione nel nome del topic (`v1`) permette di introdurre `v2` con schema incompatibile senza interrompere i consumer esistenti.
+
+## Implementazione Dettagliata
+
+### Schema Avro (bet.events.v1)
+
+```json
+{
+  "type": "record",
+  "name": "BetEvent",
+  "namespace": "it.sportbet.events",
+  "fields": [
+    {"name": "event_id",    "type": "string",  "doc": "UUID v4"},
+    {"name": "event_type",  "type": {"type": "enum", "name": "BetEventType",
+                                    "symbols": ["placed", "settled", "voided", "cashed_out"]}},
+    {"name": "user_id",     "type": "long"},
+    {"name": "bet_amount",  "type": "double"},
+    {"name": "odds",        "type": "double"},
+    {"name": "sport",       "type": "string"},
+    {"name": "match_id",    "type": "string"},
+    {"name": "timestamp_ms","type": "long", "logicalType": "timestamp-millis"},
+    {"name": "metadata",    "type": {"type": "map", "values": "string"}, "default": {}}
+  ]
+}
+```
+
+Il campo `metadata` (map opzionale) permette di aggiungere campi contestuali senza evolvere lo schema principale. Questo ha risolto il problema delle "feature emergenti" — durante l'implementazione il team ha capito che alcune scommesse avevano attributi specifici per sport che non erano stati previsti.
+
+### Producer Python (Backend API)
 
 ```python
-from confluent_kafka import Producer
-producer = Producer({
-    'bootstrap.servers': 'kafka:9092',
+from confluent_kafka import avro
+from confluent_kafka.avro import AvroProducer
+
+producer_config = {
+    'bootstrap.servers': '${CONFLUENT_BOOTSTRAP_SERVERS}',
+    'security.protocol': 'SASL_SSL',
+    'sasl.mechanism': 'PLAIN',
+    'sasl.username': '${CONFLUENT_API_KEY}',
+    'sasl.password': '${CONFLUENT_API_SECRET}',
+    'schema.registry.url': '${SCHEMA_REGISTRY_URL}',
+    'schema.registry.basic.auth.credentials.source': 'USER_INFO',
+    'schema.registry.basic.auth.user.info': '${SR_KEY}:${SR_SECRET}',
+    # Affidabilità
     'acks': 'all',
     'enable.idempotence': True,
+    'delivery.timeout.ms': 30000,
+    # Performance
     'compression.type': 'lz4',
+    'linger.ms': 5,
     'batch.size': 16384,
-    'linger.ms': 10
-})
-def send_event(topic, key, value):
-    producer.produce(topic, key=key.encode(), value=json.dumps(value).encode())
-    producer.flush()
+}
+
+value_schema = avro.load('schemas/bet_event.avsc')
+producer = AvroProducer(producer_config, default_value_schema=value_schema)
+
+def publish_bet_event(bet: dict):
+    try:
+        producer.produce(
+            topic='bet.events.v1',
+            key=str(bet['user_id']),  # Ordine garantito per utente
+            value=bet,
+            on_delivery=lambda err, msg: log_delivery(err, msg)
+        )
+        producer.poll(0)
+    except Exception as e:
+        # Fail fast: non perdere scommesse silenziosamente
+        logger.error(f"Failed to publish bet event: {e}")
+        raise
+
+def log_delivery(err, msg):
+    if err:
+        logger.error(f'Delivery failed: {err}')
+        metrics.increment('kafka.produce.error')
+    else:
+        metrics.increment('kafka.produce.success')
 ```
 
-## 4. Risultati
-| Metrica | Prima | Dopo |
-|:---|:---:|:---:|
-| Latenza dati | 24h | 3s |
-| Anomalie rilevate/giorno | 0.3 | 4.2 |
-| Tempo di reazione | Giorno dopo | 10 minuti |
-| Revenue salvato (trim.) | - | €85K |
+### Kafka Engine in ClickHouse
 
-## Lezioni
-1. Kafka come buffer assorbe gli spike senza perdere eventi
-2. Inizia con pochi topic ben partizionati, non decine
-3. Il vero valore non è la velocità ma la capacità di reagire
+```sql
+-- Consumer automatico da Kafka
+CREATE TABLE kafka_bet_events_queue (
+    event_id    String,
+    event_type  LowCardinality(String),
+    user_id     UInt64,
+    bet_amount  Float64,
+    odds        Float64,
+    sport       LowCardinality(String),
+    match_id    String,
+    timestamp_ms UInt64
+)
+ENGINE = Kafka
+SETTINGS
+    kafka_broker_list   = '${CONFLUENT_BOOTSTRAP}',
+    kafka_topic_list    = 'bet.events.v1',
+    kafka_group_name    = 'clickhouse-bet-consumer',
+    kafka_format        = 'Avro',
+    kafka_schema_registry_url = '${SCHEMA_REGISTRY_URL}',
+    kafka_num_consumers = 6,
+    kafka_skip_broken_messages = 10;
+
+-- Tabella di destinazione
+CREATE TABLE bet_events (
+    event_time  DateTime,
+    event_id    String,
+    event_type  LowCardinality(String),
+    user_id     UInt64,
+    bet_amount  Float64,
+    odds        Float64,
+    sport       LowCardinality(String),
+    match_id    String
+)
+ENGINE = MergeTree()
+PARTITION BY toYYYYMM(event_time)
+ORDER BY (sport, event_type, user_id, event_time)
+TTL event_time + INTERVAL 90 DAY;
+
+-- MV che copia e converte
+CREATE MATERIALIZED VIEW mv_kafka_bet_events
+TO bet_events AS
+SELECT
+    fromUnixTimestamp64Milli(timestamp_ms) AS event_time,
+    event_id, event_type, user_id, bet_amount, odds, sport, match_id
+FROM kafka_bet_events_queue;
+
+-- MV per alert in real-time: volume anomalo per utente
+CREATE TABLE user_bet_stats_realtime (
+    window_start  DateTime,
+    user_id       UInt64,
+    bet_count     UInt32,
+    total_amount  Float64
+)
+ENGINE = SummingMergeTree()
+ORDER BY (window_start, user_id);
+
+CREATE MATERIALIZED VIEW mv_user_bet_stats
+TO user_bet_stats_realtime AS
+SELECT
+    toStartOfFiveMinute(fromUnixTimestamp64Milli(timestamp_ms)) AS window_start,
+    user_id,
+    count()    AS bet_count,
+    sum(bet_amount) AS total_amount
+FROM kafka_bet_events_queue
+GROUP BY window_start, user_id;
+```
+
+### Alert su Anomalie (Grafana)
+
+```yaml
+# alert-rules.yml — alert Grafana per comportamento anomalo
+groups:
+  - name: sportbet_risk
+    rules:
+      - alert: HighBetVolumeUser
+        expr: |
+          SELECT user_id, sum(bet_count) AS total_bets,
+                 sum(total_amount) AS total_amount
+          FROM user_bet_stats_realtime
+          WHERE window_start >= now() - INTERVAL 5 MINUTE
+          GROUP BY user_id
+          HAVING total_bets > 50 OR total_amount > 5000
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Utente {{ $labels.user_id }} con volume anomalo"
+```
+
+## Il Momento Critico: Lo Schema Breaking Change
+
+A settimana 5, il team di prodotto ha richiesto l'aggiunta del campo `liability_amount` (potenziale perdita per la piattaforma) come campo obbligatorio nello schema. Il problema: non era stato catturato per i messaggi storici.
+
+**Soluzione applicata:**
+1. Schema `v1` rimane immutabile
+2. Nuovo schema `bet_events_enriched` su topic `bet.events.v2` con `liability_amount` calcolato in real-time
+3. ClickHouse consumer separato per `v2`, i modelli BI puntano a `bet_events_v2`
+4. `v1` rimane per archivio e replay
+
+Questa decisione ha aggiunto una settimana al progetto ma ha evitato un breaking change che avrebbe interrotto tutti i consumer esistenti.
+
+## Risultati dopo 3 Mesi
+
+| Metrica | Prima (Batch) | Dopo (Streaming) |
+|---------|--------------|-----------------|
+| Latenza dati per dashboard | 24 ore | 3-5 secondi |
+| Latenza alert anomalie | 24-48 ore | 45-60 secondi |
+| Incidenti di frode rilevati in tempo | 0% | 87% (4 su 5 ultimi incidenti) |
+| Tempo reazione a campagne paid | 24 ore | 15 minuti |
+| Costo infrastruttura dati | €850/mese | €490/mese |
+| Uptime Kafka | — | 99.98% (2 ore down in 3 mesi) |
+| Throughput max gestito | N/A | 180.000 eventi/ora (test di carico) |
+
+Il risparmio sui costi è stato inaspettato: eliminando BigQuery Enterprise (€2.100/mese) e sostituendolo con ClickHouse Cloud (€250/mese) + Confluent Basic (€180/mese), il costo totale è dimezzato nonostante la maggiore potenza.
+
+## Lezioni Apprese
+
+**1. Inizia con pochi topic, ben progettati.**
+Il team era partito con 12 topic. Ne sono rimasti 4. Ogni topic aggiunto è un contratto da mantenere per anni. Meno è più.
+
+**2. Lo Schema Registry non è opzionale in produzione.**
+Nella settimana 1, senza Schema Registry, un bug del producer aveva inviato JSON malformato che aveva corrotto il consumer ClickHouse. Con Avro e Schema Registry, questo diventa impossibile — il producer rifiuta il messaggio prima di inviarlo.
+
+**3. Versiona i topic dal giorno 1.**
+`bet.events.v1` sembra ridondante quando c'è solo una versione. Diventa ovvio perché serve quando arriva il breaking change a settimana 5.
+
+**4. Il consumer lag è la metrica più importante.**
+Non la latenza del producer, non il throughput. Il consumer lag dice se il sistema stia tenendo il passo. Alert a >5.000 messaggi di lag, critical a >50.000.
+
+**5. La Dead Letter Queue salva i dati.**
+Settimana 6: un bug nel consumer ClickHouse faceva crashare il parsing di certi eventi con odds=0. Senza DLQ, quegli eventi sarebbero stati persi. Con DLQ, sono stati recuperati e riprocessati dopo il fix.
+
+<Aside type="tip">
+Il vero valore dello streaming non è la velocità — è la capacità di reagire. Un team che può vedere e reagire a un problema in 60 secondi ha un vantaggio competitivo strutturale rispetto a un team che lo scopre il giorno dopo.
+</Aside>

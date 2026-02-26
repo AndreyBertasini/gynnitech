@@ -1,60 +1,329 @@
 ---
 title: "Cheat Sheet — Real-Time Analytics"
-description: "Scheda riassuntiva rapida con formule, framework e concetti chiave di Real-Time Analytics & ClickHouse"
+description: "Riferimento rapido: ClickHouse engines, MV patterns, Kafka, ottimizzazione query e monitoring per real-time analytics."
 module: "Modulo 4: Real-Time Streaming"
 order: 8
 prerequisites: ["real-time-analytics/streaming"]
 tags: ["cheat-sheet", "riassunto", "revisione", "clickhouse", "streaming"]
 ---
-# Cheat Sheet — Real-Time Analytics
 
-## ClickHouse Query Patterns
+import { Aside } from '@astrojs/starlight/components'
+
+## ClickHouse — Engine Selection Guide
+
+| Engine | Quando Usarlo | Caratteristica Chiave |
+|--------|--------------|----------------------|
+| `MergeTree` | Analytics general purpose | ORDER BY per ottimizzare le query |
+| `ReplacingMergeTree(version)` | CDC, upsert (UPDATE) | Deduplica per chiave, tieni `max(version)` |
+| `CollapsingMergeTree(sign)` | CDC con DELETE | Riga +1 inserisce, riga -1 cancella |
+| `SummingMergeTree` | Contatori, totali pre-aggregati | Somma automatica nei merge |
+| `AggregatingMergeTree` | Aggregazioni complesse in MV | Usa `-State`/`-Merge` suffix |
+| `Kafka` engine | Ingestion diretta da Kafka | Consumer automatico, usare con MV |
+| `Null` | Trigger per MV senza storage | Dati non salvati, solo MV |
+
 ```sql
--- Ultimi N minuti
-SELECT ... FROM events WHERE timestamp >= now() - INTERVAL 5 MINUTE;
+-- MergeTree: il default per analytics
+CREATE TABLE events (
+    event_time   DateTime,
+    user_id      UInt64,
+    event_type   LowCardinality(String),
+    properties   String
+)
+ENGINE = MergeTree()
+PARTITION BY toYYYYMM(event_time)   -- Partizione mensile
+ORDER BY (event_type, user_id, event_time)  -- Ordina per le colonne più filtrate
+TTL event_time + INTERVAL 90 DAY;   -- Elimina automaticamente dopo 90 giorni
 
--- Aggregazione per finestra temporale
-SELECT toStartOfMinute(timestamp) AS minute, count() FROM events GROUP BY minute;
+-- ReplacingMergeTree: upsert via CDC
+CREATE TABLE users (
+    user_id      UInt64,
+    email        String,
+    plan         LowCardinality(String),
+    updated_at   DateTime,
+    _version     UInt64   -- timestamp unix o numero incrementale
+)
+ENGINE = ReplacingMergeTree(_version)
+ORDER BY user_id;
 
--- Uniq approssimato (veloce)
-SELECT uniq(user_id) FROM events;  -- HyperLogLog, ~2% errore
-
--- Uniq esatto
-SELECT uniqExact(user_id) FROM events;  -- Preciso ma più lento
-
--- Top N
-SELECT event_type, count() AS c FROM events GROUP BY event_type ORDER BY c DESC LIMIT 10;
+-- Query SEMPRE con FINAL o GROUP BY per deduplicazione
+SELECT user_id, email, plan
+FROM users FINAL   -- Più lento ma preciso
+WHERE plan = 'pro';
 ```
 
-## Engine Selection
-| Engine | Uso | Caratteristica |
-|:---|:---|:---|
-| MergeTree | Default, analytics | Ordinato, compresso |
-| ReplacingMergeTree | CDC, upsert | Deduplica per version |
-| SummingMergeTree | Aggregazioni pre-calcolate | Somma automatica |
-| AggregatingMergeTree | Aggregazioni complesse | uniqState, quantileState |
-| Kafka | Ingestion da Kafka | Consumer automatico |
+## Materialized Views — Pattern Fondamentali
 
-## Monitoring Essenziale
 ```sql
--- Spazio occupato per tabella
-SELECT table, formatReadableSize(sum(bytes_on_disk)) AS size, sum(rows) AS rows
-FROM system.parts WHERE active GROUP BY table ORDER BY sum(bytes_on_disk) DESC;
+-- Pattern 1: SummingMergeTree (contatori real-time)
+CREATE TABLE events_hourly (
+    hour         DateTime,
+    event_type   LowCardinality(String),
+    user_count   AggregateFunction(uniq, UInt64),
+    event_count  UInt64
+)
+ENGINE = SummingMergeTree()
+PARTITION BY toYYYYMM(hour)
+ORDER BY (hour, event_type);
 
--- Query più lente
-SELECT query, query_duration_ms, read_rows, memory_usage
-FROM system.query_log WHERE type = 'QueryFinish'
-ORDER BY query_duration_ms DESC LIMIT 10;
+CREATE MATERIALIZED VIEW mv_events_hourly
+TO events_hourly
+AS SELECT
+    toStartOfHour(event_time)   AS hour,
+    event_type,
+    uniqState(user_id)          AS user_count,  -- Stato per HLL
+    count()                     AS event_count
+FROM events
+GROUP BY hour, event_type;
 
--- Consumer lag Kafka
+-- Query: SEMPRE aggregare ancora (merge del MergeTree)
+SELECT
+    hour,
+    event_type,
+    uniqMerge(user_count) AS unique_users,  -- Merge degli stati HLL
+    sum(event_count)      AS total_events    -- Somma i SummingMergeTree
+FROM events_hourly
+WHERE hour >= now() - INTERVAL 24 HOUR
+GROUP BY hour, event_type
+ORDER BY hour DESC;
+
+-- Pattern 2: AggregatingMergeTree (metriche avanzate)
+CREATE TABLE revenue_stats (
+    day        Date,
+    product_id UInt32,
+    total_rev  AggregateFunction(sum, Decimal(12,2)),
+    order_cnt  AggregateFunction(count, UInt8),
+    p50_value  AggregateFunction(quantile(0.5), Decimal(12,2)),
+    p95_value  AggregateFunction(quantile(0.95), Decimal(12,2))
+)
+ENGINE = AggregatingMergeTree()
+PARTITION BY toYYYYMM(day)
+ORDER BY (day, product_id);
+
+CREATE MATERIALIZED VIEW mv_revenue
+TO revenue_stats
+AS SELECT
+    toDate(event_time)               AS day,
+    product_id,
+    sumState(revenue)                AS total_rev,
+    countState()                     AS order_cnt,
+    quantileState(0.5)(revenue)      AS p50_value,
+    quantileState(0.95)(revenue)     AS p95_value
+FROM orders
+GROUP BY day, product_id;
+```
+
+## ClickHouse — Query Patterns Veloci
+
+```sql
+-- Ultimi N minuti (sempre usa indice)
+SELECT * FROM events
+WHERE event_time >= now() - INTERVAL 5 MINUTE;
+
+-- Aggregazione per finestra temporale
+SELECT
+    toStartOfMinute(event_time) AS minute,
+    count()                      AS events,
+    uniq(user_id)                AS users    -- HyperLogLog, ~2% errore, 10x più veloce
+FROM events
+WHERE event_time >= now() - INTERVAL 1 HOUR
+GROUP BY minute
+ORDER BY minute;
+
+-- Top N (LIMIT BY per top-N per gruppo)
+SELECT user_id, event_type, count() AS c
+FROM events
+WHERE event_time >= today()
+GROUP BY user_id, event_type
+ORDER BY c DESC
+LIMIT 5 BY user_id;   -- Top 5 event types per ogni utente
+
+-- Funnel (max CASE WHEN pattern)
+SELECT
+    count() AS started,
+    countIf(step2_time IS NOT NULL) AS step2,
+    countIf(step3_time IS NOT NULL) AS converted,
+    round(countIf(step3_time IS NOT NULL) / count() * 100, 1) AS conversion_pct
+FROM (
+    SELECT
+        user_id,
+        minIf(event_time, event_type = 'page_view')    AS step1_time,
+        minIf(event_time, event_type = 'add_to_cart')  AS step2_time,
+        minIf(event_time, event_type = 'purchase')     AS step3_time
+    FROM events
+    WHERE event_time >= today() - 7
+    GROUP BY user_id
+);
+
+-- Session analysis (gap di 30 min = nuova sessione)
+SELECT
+    user_id,
+    session_id,
+    min(event_time) AS session_start,
+    max(event_time) AS session_end,
+    count() AS events_in_session
+FROM (
+    SELECT
+        user_id,
+        event_time,
+        sum(is_new_session) OVER (PARTITION BY user_id ORDER BY event_time) AS session_id
+    FROM (
+        SELECT
+            user_id,
+            event_time,
+            if(
+                dateDiff('minute', lagInFrame(event_time) OVER (PARTITION BY user_id ORDER BY event_time), event_time) > 30
+                OR lagInFrame(event_time) OVER (PARTITION BY user_id ORDER BY event_time) IS NULL,
+                1, 0
+            ) AS is_new_session
+        FROM events
+    )
+)
+GROUP BY user_id, session_id;
+```
+
+## ClickHouse — Ottimizzazione Rapida
+
+```sql
+-- EXPLAIN per capire come viene eseguita la query
+EXPLAIN indexes = 1 SELECT ...;
+
+-- Profilazione query
+SET send_logs_level = 'trace';
+SET log_queries = 1;
+
+-- Prewhere (filtro prima del decompression, usa automaticamente CH)
+SELECT * FROM events
+PREWHERE user_id = 12345   -- Filtro efficiente sull'indice
+WHERE event_type = 'purchase';
+
+-- Sampling per query su grandi dataset (approximate, very fast)
+SELECT count() * 10 AS estimated_count
+FROM events SAMPLE 0.1   -- 10% dei dati, 10x più veloce
+
+-- Query cache (ClickHouse 23.5+)
+SELECT count(), uniq(user_id)
+FROM events
+SETTINGS use_query_cache = 1, query_cache_ttl = 60;
+```
+
+**Regole di ottimizzazione:**
+- `ORDER BY` deve matchare i filtri più comuni: `WHERE (colonna1, colonna2)` deve essere prefix di `ORDER BY (colonna1, colonna2, ...)`
+- Partizioni piccole = overhead. Partition by MESE, non per giorno su tabelle grandi
+- `uniq()` (HyperLogLog, ~2% errore) è 10x più veloce di `uniqExact()`. Usa HLL per dashboard
+- `LowCardinality(String)` riduce storage del 50% e velocizza query su colonne con pochi valori distinti (status, country, event_type)
+- Mai `SELECT *` in produzione su tabelle colonnari
+
+## Kafka Engine in ClickHouse
+
+```sql
+-- Step 1: Tabella Kafka Engine (consumer automatico)
+CREATE TABLE kafka_events_queue (
+    user_id    UInt64,
+    event_type String,
+    timestamp  UInt64,
+    payload    String
+)
+ENGINE = Kafka
+SETTINGS
+    kafka_broker_list = 'kafka:9092',
+    kafka_topic_list = 'events',
+    kafka_group_name = 'clickhouse-consumer',
+    kafka_format = 'JSONEachRow',
+    kafka_num_consumers = 4,     -- Parallelismo
+    kafka_skip_broken_messages = 100;  -- Tolleranza agli errori di parsing
+
+-- Step 2: Tabella di destinazione
+CREATE TABLE events (
+    event_time DateTime DEFAULT now(),
+    user_id    UInt64,
+    event_type LowCardinality(String),
+    payload    String
+) ENGINE = MergeTree() ORDER BY (event_type, event_time);
+
+-- Step 3: MV che copia dalla queue alla tabella
+CREATE MATERIALIZED VIEW mv_kafka_to_events
+TO events AS
+SELECT
+    fromUnixTimestamp(timestamp) AS event_time,
+    user_id,
+    event_type,
+    payload
+FROM kafka_events_queue;
+
+-- Monitoring consumer lag
 SELECT * FROM system.kafka_consumers;
 ```
 
-## Kafka Quick Reference
-| Concetto | Descrizione |
-|:---|:---|
-| Topic | Canale logico per i messaggi |
-| Partition | Unità di parallelismo |
-| Consumer Group | Gruppo di consumer che si dividono le partizioni |
-| Offset | Posizione del consumer nella partizione |
-| Replication Factor | Copie del dato (3 = standard) |
+## Monitoring — Query Essenziali
+
+```sql
+-- Query più lente (ultimi 60 min)
+SELECT
+    normalizeQuery(query)     AS query_pattern,
+    count()                   AS calls,
+    round(avg(query_duration_ms)) AS avg_ms,
+    round(quantile(0.95)(query_duration_ms)) AS p95_ms,
+    formatReadableSize(avg(memory_usage)) AS avg_memory
+FROM system.query_log
+WHERE event_time >= now() - INTERVAL 60 MINUTE
+  AND type = 'QueryFinish'
+  AND query NOT LIKE '%system.%'
+GROUP BY query_pattern
+ORDER BY p95_ms DESC
+LIMIT 20;
+
+-- Parts e merge health
+SELECT
+    table,
+    count() AS parts,
+    formatReadableSize(sum(bytes_on_disk)) AS total_size,
+    max(max_date) AS max_date
+FROM system.parts
+WHERE active AND database = 'default'
+GROUP BY table
+ORDER BY sum(bytes_on_disk) DESC;
+
+-- Errori recenti
+SELECT name, value, last_error_time, last_error_message
+FROM system.errors WHERE value > 0 ORDER BY value DESC;
+
+-- Consumer Kafka lag (tramite system.kafka_consumers)
+SELECT
+    consumer_id,
+    assignment,
+    num_messages_pending
+FROM system.kafka_consumers;
+```
+
+## Decision Tree: Quale Pattern Real-Time Usare?
+
+```
+Ho bisogno di aggiornare dati in real-time?
+│
+├── Nuovi eventi (INSERT only, no update)?
+│   └── MergeTree + eventuale SummingMergeTree per pre-aggregazioni
+│
+├── UPDATE da CDC (es. stato ordine cambia)?
+│   └── ReplacingMergeTree + query con FINAL
+│
+├── DELETE da CDC?
+│   └── CollapsingMergeTree con sign column
+│
+└── Aggregazioni complesse (percentili, HLL)?
+    └── AggregatingMergeTree + -State/-Merge functions
+```
+
+## Anti-Pattern ClickHouse
+
+| Anti-Pattern | Problema | Soluzione |
+|-------------|---------|----------|
+| `uniqExact()` nelle MV | Impossibile aggregare stati HLL | Usa `uniqState()` + `uniqMerge()` |
+| `SELECT *` su tabella raw | Legge tutte le colonne, lento | Specifica solo le colonne necessarie |
+| Query senza filtro su partition key | Full table scan | Aggiungi filtro su colonna di partizione |
+| `ReplacingMergeTree` senza `FINAL` | Duplicati nei risultati | Usa `FINAL` o `GROUP BY` con `argMax` |
+| MV con JOIN pesanti | Non ottimizzato, lento | Pre-join in tabelle denormalizzate |
+| Troppe partizioni piccole | Overhead di merge | Partition by mese, non per giorno |
+
+<Aside type="tip">
+Usa `system.query_log` come prima risposta a qualsiasi problema di performance. La colonna `ProfileEvents` contiene la sequenza di operazioni eseguite — numero di rows lette, cache hits, merge eseguiti — ed è fondamentale per capire dove va il tempo.
+</Aside>

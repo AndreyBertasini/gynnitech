@@ -1,62 +1,352 @@
 ---
 title: "Cheat Sheet — Infrastructure & Ops"
-description: "Scheda riassuntiva rapida con formule, framework e concetti chiave di Infrastructure & Ops"
+description: "Riferimento rapido: Terraform, Docker, CI/CD, monitoring, sicurezza e cost management per data platform."
 module: "Modulo 3: Infrastructure & Engineering"
 order: 6
 prerequisites: ["data-warehousing/sql"]
 tags: ["cheat-sheet", "riassunto", "revisione", "devops", "sre"]
 ---
-# Cheat Sheet — Infrastructure & Ops
 
-## Comandi Essenziali
+import { Aside } from '@astrojs/starlight/components'
 
-### Terraform
-
-```bash
-terraform init          # Inizializza il progetto
-terraform plan          # Mostra le modifiche previste
-terraform apply         # Applica le modifiche
-terraform destroy       # Distrugge l'infrastruttura
-terraform state list    # Lista risorse gestite
-```
-
-### Docker
+## Terraform — Comandi Essenziali
 
 ```bash
-docker compose up -d     # Avvia i servizi
-docker compose logs -f   # Segui i log
-docker compose ps        # Stato dei container
-docker system prune -a   # Pulizia completa
+# Setup iniziale
+terraform init                    # Scarica provider e moduli
+terraform init -upgrade           # Aggiorna provider alle ultime versioni
+terraform workspace new staging   # Crea ambiente separato
+
+# Planning e apply
+terraform plan                    # Anteprima delle modifiche
+terraform plan -out=tfplan        # Salva il plan (consigliato per CI/CD)
+terraform apply tfplan            # Applica il plan salvato
+terraform apply -target=aws_s3_bucket.data  # Apply su risorsa specifica
+terraform apply -auto-approve     # ⚠️ Solo in CI/CD con plan salvato
+
+# State management
+terraform state list              # Lista tutte le risorse gestite
+terraform state show aws_s3_bucket.data  # Dettagli risorsa specifica
+terraform state rm aws_s3_bucket.old     # Rimuovi risorsa dallo state (NON distrugge)
+terraform import aws_s3_bucket.new bucket-name  # Importa risorsa esistente
+
+# Debugging
+terraform plan -detailed-exitcode  # Exit 0=no changes, 1=error, 2=changes
+terraform validate                 # Valida la sintassi HCL
+terraform fmt -recursive           # Formatta tutti i file HCL
+TF_LOG=DEBUG terraform apply      # Log verboso
+
+# Distruzione (attenzione!)
+terraform destroy                  # ⚠️ Distrugge TUTTO - chiedere sempre conferma
+terraform destroy -target=aws_ec2_instance.test  # Target specifico
 ```
 
-### ClickHouse
+## Terraform — Pattern Essenziali
+
+```hcl
+# Remote state su S3 (SEMPRE in produzione)
+terraform {
+  backend "s3" {
+    bucket         = "company-terraform-state"
+    key            = "prod/data-platform.tfstate"
+    region         = "eu-west-1"
+    dynamodb_table = "terraform-locks"  # Evita applicazioni concorrenti
+    encrypt        = true
+  }
+}
+
+# Variabili con validazione
+variable "environment" {
+  type        = string
+  description = "Ambiente di deployment"
+  validation {
+    condition     = contains(["dev", "staging", "prod"], var.environment)
+    error_message = "Environment deve essere dev, staging o prod."
+  }
+}
+
+# Data source (leggi risorse esistenti)
+data "aws_iam_role" "existing" {
+  name = "data-platform-role"
+}
+
+# Locals (evita ripetizioni)
+locals {
+  common_tags = {
+    Environment = var.environment
+    Project     = "data-platform"
+    ManagedBy   = "Terraform"
+    Owner       = "data-engineering"
+  }
+}
+
+# Output (esponi valori ad altri moduli)
+output "clickhouse_endpoint" {
+  value     = module.clickhouse.endpoint
+  sensitive = false
+}
+```
+
+## Docker Compose — Pattern per Data Stack
+
+```yaml
+# docker-compose.yml per sviluppo locale
+services:
+  clickhouse:
+    image: clickhouse/clickhouse-server:latest
+    ports:
+      - "8123:8123"   # HTTP
+      - "9000:9000"   # Native
+    volumes:
+      - clickhouse_data:/var/lib/clickhouse
+      - ./config/clickhouse:/etc/clickhouse-server/config.d
+    environment:
+      CLICKHOUSE_USER: admin
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD}
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8123/ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  kafka:
+    image: confluentinc/cp-kafka:latest
+    environment:
+      KAFKA_KRAFT_ENABLED: "true"
+      KAFKA_PROCESS_ROLES: "broker,controller"
+      KAFKA_NODE_ID: 1
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+    ports:
+      - "9092:9092"
+
+volumes:
+  clickhouse_data:
+```
+
+```bash
+# Comandi Docker Compose
+docker compose up -d              # Avvia in background
+docker compose down               # Ferma e rimuovi container
+docker compose down -v            # Ferma + rimuovi volumi (reset totale)
+docker compose logs -f clickhouse # Segui log di un servizio
+docker compose exec clickhouse clickhouse-client  # Accedi al CLI
+docker compose ps                 # Stato di tutti i servizi
+docker compose restart kafka      # Riavvia servizio specifico
+docker stats                      # CPU/RAM per container (live)
+```
+
+## GitHub Actions — Pipeline CI/CD per IaC
+
+```yaml
+# .github/workflows/terraform.yml
+name: Terraform
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.7"
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::123456789:role/GitHubActionsRole
+          aws-region: eu-west-1
+
+      - name: Terraform Plan
+        run: |
+          terraform init
+          terraform plan -out=tfplan
+
+      - name: Upload plan artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: terraform-plan
+          path: tfplan
+
+  apply:
+    needs: plan
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+    environment: production  # Richiede approvazione manuale
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download plan
+        uses: actions/download-artifact@v4
+        with:
+          name: terraform-plan
+      - name: Terraform Apply
+        run: terraform apply tfplan
+```
+
+## Monitoring — Query di Sistema ClickHouse
 
 ```sql
--- Stato del cluster
-SELECT * FROM system.metrics WHERE metric LIKE '%Query%';
-SELECT database, table, formatReadableSize(total_bytes) FROM system.tables ORDER BY total_bytes DESC;
+-- Query più lente (p95 ultimi 24h)
+SELECT
+    query_kind,
+    normalizeQuery(query) AS normalized_query,
+    count() AS query_count,
+    round(avg(query_duration_ms)) AS avg_ms,
+    round(quantile(0.95)(query_duration_ms)) AS p95_ms,
+    formatReadableSize(avg(memory_usage)) AS avg_memory
+FROM system.query_log
+WHERE event_time >= now() - INTERVAL 24 HOUR
+  AND type = 'QueryFinish'
+GROUP BY 1, 2
+ORDER BY p95_ms DESC
+LIMIT 20;
 
--- Performance query
-SELECT query, query_duration_ms, read_rows, memory_usage FROM system.query_log ORDER BY query_duration_ms DESC LIMIT 10;
+-- Spazio per tabella
+SELECT
+    database,
+    table,
+    formatReadableSize(sum(bytes_on_disk)) AS size_on_disk,
+    formatReadableSize(sum(data_uncompressed_bytes)) AS uncompressed,
+    round(sum(bytes_on_disk) / sum(data_uncompressed_bytes) * 100) AS compression_pct,
+    sum(rows) AS total_rows,
+    max(modification_time) AS last_modified
+FROM system.parts
+WHERE active AND database NOT IN ('system', 'INFORMATION_SCHEMA')
+GROUP BY database, table
+ORDER BY sum(bytes_on_disk) DESC;
+
+-- Merge in corso (overhead)
+SELECT database, table, elapsed, progress, memory_usage
+FROM system.merges ORDER BY elapsed DESC;
+
+-- Repliche lag (cluster distribuito)
+SELECT database, table, absolute_delay
+FROM system.replicas
+WHERE absolute_delay > 0
+ORDER BY absolute_delay DESC;
+
+-- Errori frequenti
+SELECT last_error_time, name, value
+FROM system.errors
+WHERE value > 0
+ORDER BY value DESC;
 ```
 
-## Monitoring Checklist
+## Monitoring Checklist — Alert Soglie
 
-| Cosa Monitorare | Soglia Alert | Tool |
-|:---|:---|:---|
-| CPU | >80% per 5 min | Grafana |
-| Memoria | >85% | Grafana |
-| Disco | >80% | Alert email |
-| Query latency p95 | >5s | ClickHouse system tables |
-| Pipeline lag | >5 min | Kafka consumer lag |
-| Error rate | >1% | Application logs |
+| Metrica | Warning | Critical | Dove Monitorare |
+|---------|---------|----------|-----------------|
+| CPU server | >70% per 5 min | >90% per 2 min | Grafana |
+| RAM | >80% | >95% | Grafana |
+| Disco | >75% | >90% | Alert + Grafana |
+| ClickHouse query latency p95 | >2s | >10s | system.query_log |
+| Kafka consumer lag | >5.000 msg | >50.000 msg | Kafka JMX/Confluent |
+| Pipeline failures | 1/ora | >3/ora | Airflow/Prefect |
+| Error rate API | >0.5% | >2% | Application logs |
+| dbt test failures | qualsiasi | qualsiasi | CI/CD + Slack alert |
+| Terraform drift | detected | — | `terraform plan` in cron |
 
-## Costi di Riferimento
+## Sicurezza — Checklist Essenziale
 
-| Servizio | Free Tier | Produzione |
-|:---|:---|:---|
-| ClickHouse Cloud | 300GB, $300 crediti | Da $200/mese |
-| Confluent Kafka | Basic cluster free | Da $100/mese |
-| AWS S3 | 5GB, 12 mesi | ~$0.023/GB/mese |
-| Terraform Cloud | 500 risorse | Da $20/user/mese |
-| Grafana Cloud | 10K metriche | Da $29/mese |
+```bash
+# IAM — Principio del minimo privilegio
+# ❌ MAI
+aws iam attach-user-policy --policy-arn arn:aws:iam::aws:policy/AdministratorAccess
+
+# ✅ Politica specifica per Data Engineer
+{
+  "Effect": "Allow",
+  "Action": [
+    "s3:GetObject", "s3:PutObject",
+    "s3:ListBucket"
+  ],
+  "Resource": [
+    "arn:aws:s3:::company-data-lake/*",
+    "arn:aws:s3:::company-data-lake"
+  ]
+}
+```
+
+```bash
+# Secrets — MAI in codice o variabili d'ambiente in chiaro
+# ❌ MAI
+export DB_PASSWORD="mypassword123"
+
+# ✅ AWS Secrets Manager
+aws secretsmanager create-secret \
+  --name "prod/clickhouse/admin" \
+  --secret-string '{"user":"admin","password":"..."}'
+
+# Recupero in Python
+import boto3, json
+client = boto3.client('secretsmanager', region_name='eu-west-1')
+secret = json.loads(client.get_secret_value(SecretId='prod/clickhouse/admin')['SecretString'])
+```
+
+**Regole di sicurezza non negoziabili:**
+- Terraform state files → SEMPRE in S3 con cifratura, MAI in git
+- Secrets → SEMPRE in AWS Secrets Manager, HashiCorp Vault o simili
+- IAM → SEMPRE ruoli per servizi, MAI access key di utenti personali
+- SSH → SEMPRE chiavi, MAI password. Root login → disabilitato
+- Network → Data platform in VPC privata, accesso via bastion o VPN
+
+## Costi — Reference Aggiornato
+
+| Servizio | Tier Gratuito | Sviluppo | Produzione |
+|---------|--------------|---------|-----------|
+| ClickHouse Cloud | $300 crediti | ~$100/mese | $500-5.000/mese |
+| Confluent Cloud (Kafka) | Nessuno | Basic ~$100/mese | Standard ~$500/mese |
+| AWS S3 (storage) | 5GB, 12 mesi | ~$5-20/mese | ~$0.023/GB/mese |
+| AWS MSK (Kafka managed) | No | ~$150/mese | ~$500-2.000/mese |
+| Grafana Cloud | 10K metriche free | Free | Teams $29/mese |
+| GitHub Actions | 2.000 min/mese | Free | Team $4/user/mese |
+| Terraform Cloud | 500 risorse free | Free | Plus $20/user/mese |
+
+**Formula costo S3:**
+```
+Storage: GB × $0.023/mese
+Requests: 10K GET = $0.0004, 10K PUT = $0.005
+Transfer out: 0-10 TB = $0.09/GB (dopo primo GB free)
+```
+
+**Ottimizzazione costi:**
+- S3 Intelligent-Tiering: -40% per dati con accesso irregolare
+- ClickHouse: compressione LZ4 riduce storage del 70-80%
+- Kafka: retention 7 giorni (non di più senza motivo)
+- Spegni istanze di sviluppo nei weekend (risparmio 60%)
+
+## Decision Tree: Quale Storage Usare?
+
+```
+Devo archiviare dati?
+├── Query OLAP veloci (analytics, dashboard)? → ClickHouse
+├── File raw, archivio, ML training data? → S3
+│   ├── Accesso frequente (<30 gg)? → S3 Standard
+│   ├── Accesso mensile? → S3 Standard-IA
+│   └── Archivio >90 gg? → S3 Glacier Instant Retrieval
+├── Dati transazionali (OLTP)? → PostgreSQL / MySQL
+└── Cache, sessioni? → Redis / ElastiCache
+```
+
+## dbt — Comandi Chiave
+
+```bash
+dbt run                           # Esegui tutti i modelli
+dbt run --select staging.*        # Esegui solo schema staging
+dbt run --select +my_model        # Esegui my_model e le sue dipendenze
+dbt test                          # Esegui tutti i test
+dbt test --select my_model        # Test su un modello specifico
+dbt docs generate && dbt docs serve  # Genera e apri documentazione
+dbt source freshness              # Controlla freschezza delle sorgenti
+dbt compile                       # Compila SQL senza eseguire
+dbt debug                         # Verifica la connessione al DW
+```
+
+<Aside type="tip">
+Configura `on-run-start` e `on-run-end` hooks in dbt per loggare ogni run nel data warehouse. Questo crea un audit trail automatico dei modelli eseguiti.
+</Aside>
