@@ -5,7 +5,7 @@ export const blogSchema = z.object({
     description: z.string(),
     date: z.coerce.date(),
     category: z.string(),
-    author: z.string().default('GynniTech Team'),
+    author: z.string().default('GinnyTech'),
     image: z.string().optional(),
 });
 
