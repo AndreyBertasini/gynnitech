@@ -296,6 +296,284 @@ LIMIT 1;
 -- Se 0 righe → CDC interrotto
 ```
 
+## Snapshot iniziale: la fase più critica
+
+Quando configuri Debezium su un database esistente con milioni di righe, prima di iniziare a streammare i cambiamenti incrementali deve fare uno **snapshot iniziale** dell'intero stato corrente. Questa fase è spesso sottovalutata — e causa i problemi più seri in produzione.
+
+### Modalità di snapshot
+
+Debezium supporta quattro `snapshot.mode`:
+
+| Modalità | Comportamento | Quando usarla |
+|----------|---------------|---------------|
+| `initial` | Snapshot completo, poi stream | Prima installazione (default) |
+| `initial_only` | Solo snapshot, poi stop | Backfill una-tantum |
+| `schema_only` | Solo schema, nessun dato | Il DW è già sincronizzato |
+| `never` | Assume dati allineati | Restart dopo interruzione breve |
+
+### Il problema dello snapshot su tabelle grandi
+
+Su una tabella `orders` da 500 milioni di righe, lo snapshot `initial` può richiedere ore — durante le quali:
+1. Il replication slot continua ad accumulare WAL (che cresce fino al termine dello snapshot)
+2. Il lock di snapshot acquisito da Debezium blocca i `VACUUM FULL` di PostgreSQL
+3. Il carico I/O sul database può impattare le performance applicative
+
+La soluzione sono i **chunked snapshots** (Debezium 2.0+):
+
+```json
+{
+  "snapshot.mode": "initial",
+  "snapshot.fetch.size": "10240",          // righe per batch
+  "snapshot.max.threads": "4",             // parallelismo (una tabella per thread)
+  "snapshot.select.statement.overrides": {
+    "public.orders": "SELECT * FROM public.orders WHERE created_at > '2023-01-01'"
+  }
+}
+```
+
+La configurazione `snapshot.select.statement.overrides` permette di limitare lo snapshot a un sottoinsieme di dati — ad esempio, solo gli ordini degli ultimi 2 anni — riducendo drasticamente il tempo di inizializzazione.
+
+### Il rischio del "gap" tra snapshot e stream
+
+C'è un momento critico nello snapshot iniziale: Debezium legge i dati dal database *mentre* le transazioni continuano. Il WAL position del replication slot viene salvato all'inizio dello snapshot. Tutti i cambiamenti avvenuti durante lo snapshot vengono poi applicati in ordine — garantendo consistenza finale.
+
+```
+T=0: Debezium acquisisce LSN=1000, inizia snapshot
+T=10min: ordine #9999 viene creato (LSN=1050)
+T=30min: snapshot completato (ha letto il DB all'LSN=1000)
+T=31min: Debezium riprende dal LSN=1001 → emette evento INSERT per ordine #9999
+→ Il DW riceve correttamente l'ordine (ReplacingMergeTree deduplication)
+```
+
+Questo è il motivo per cui in destinazione si usa `ReplacingMergeTree` e non una tabella semplice: i duplicate INSERT dal gap snapshot→stream sono normali e attesi.
+
+## Setup locale con Docker Compose
+
+Per sviluppare e testare la pipeline CDC prima del deploy in produzione, questo `docker-compose.yml` avvia l'intero stack in locale:
+
+```yaml
+version: '3.8'
+
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_DB: production
+      POSTGRES_USER: admin
+      POSTGRES_PASSWORD: secret
+    command: >
+      postgres
+        -c wal_level=logical
+        -c max_replication_slots=4
+        -c max_wal_senders=4
+    ports:
+      - "5432:5432"
+    volumes:
+      - ./init.sql:/docker-entrypoint-initdb.d/init.sql
+
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.5.0
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+
+  kafka:
+    image: confluentinc/cp-kafka:7.5.0
+    depends_on: [zookeeper]
+    environment:
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+    ports:
+      - "9092:9092"
+
+  kafka-connect:
+    image: debezium/connect:2.5
+    depends_on: [kafka]
+    environment:
+      BOOTSTRAP_SERVERS: kafka:9092
+      GROUP_ID: connect-cluster
+      CONFIG_STORAGE_TOPIC: _connect-configs
+      OFFSET_STORAGE_TOPIC: _connect-offsets
+      STATUS_STORAGE_TOPIC: _connect-statuses
+    ports:
+      - "8083:8083"
+```
+
+**File `init.sql`** per inizializzare il database di test:
+
+```sql
+CREATE TABLE orders (
+    id         SERIAL PRIMARY KEY,
+    user_id    INTEGER NOT NULL,
+    status     VARCHAR(20) NOT NULL DEFAULT 'pending',
+    amount     NUMERIC(10,2),
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE PUBLICATION debezium_pub FOR TABLE orders;
+```
+
+**Registra il connettore** dopo che il container è in esecuzione:
+
+```bash
+curl -X POST http://localhost:8083/connectors \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "name": "orders-connector",
+    "config": {
+      "connector.class": "io.debezium.connector.postgresql.PostgresConnector",
+      "database.hostname": "postgres",
+      "database.port": "5432",
+      "database.user": "admin",
+      "database.password": "secret",
+      "database.dbname": "production",
+      "table.include.list": "public.orders",
+      "plugin.name": "pgoutput",
+      "topic.prefix": "local"
+    }
+  }'
+
+# Verifica lo stato
+curl http://localhost:8083/connectors/orders-connector/status
+```
+
+**Test rapido**: inserisci dati nel database e controlla che arrivino su Kafka:
+
+```bash
+# Inserisci un ordine
+docker exec -it <postgres-container> psql -U admin -d production \
+  -c "INSERT INTO orders(user_id, amount) VALUES(1, 99.99);"
+
+# Leggi il messaggio Kafka
+docker exec -it <kafka-container> \
+  kafka-console-consumer --bootstrap-server kafka:9092 \
+  --topic local.public.orders --from-beginning
+```
+
+## Problemi comuni in produzione (e come risolverli)
+
+### 1. Replication slot overflow (WAL accumulation)
+
+**Sintomo**: il disco del server PostgreSQL si riempie improvvisamente.
+
+**Causa**: se Debezium si disconnette e non è attivo, il replication slot continua ad accumulare WAL che non può essere eliminato da PostgreSQL. Su un database ad alto traffico, questo può riempire il disco in ore.
+
+**Soluzione**:
+```sql
+-- Monitora il WAL accumulato per ogni slot (alert > 1 GB)
+SELECT
+    slot_name,
+    pg_size_pretty(pg_wal_lsn_diff(pg_current_wal_lsn(), restart_lsn)) AS wal_lag,
+    active
+FROM pg_replication_slots;
+
+-- Se Debezium è offline per > 30 min e il WAL cresce: considera drop del slot
+-- (perdi la posizione, ma mantieni il disco)
+SELECT pg_drop_replication_slot('debezium_orders_slot');
+-- Poi: restart Debezium con snapshot.mode=initial
+```
+
+**Prevenzione**: configura un alert su WAL lag > 500 MB e un circuit breaker che stoppa Debezium se il DB non è raggiungibile.
+
+### 2. Consumer group rebalancing su Kafka
+
+**Sintomo**: durante un restart di Kafka Connect, il consumer lag esplode temporaneamente.
+
+**Causa**: il rebalancing del consumer group riassegna le partizioni Kafka tra i worker. Durante il rebalancing, il consumo si ferma.
+
+**Soluzione**: aumenta il timeout di sessione e usa un numero fisso di partizioni per il topic CDC:
+```json
+{
+  "consumer.session.timeout.ms": "60000",
+  "consumer.max.poll.interval.ms": "300000"
+}
+```
+
+### 3. Null handling tra JSON e ClickHouse
+
+**Sintomo**: errori di inserimento in ClickHouse per valori NULL che non corrispondono al tipo della colonna.
+
+**Causa**: Debezium emette `null` per campi non valorizzati nel record `before`/`after`. Se la colonna ClickHouse non è `Nullable`, l'insert fallisce silenziosamente (con `kafka_skip_broken_messages`).
+
+**Soluzione**: usa `Nullable(Type)` per le colonne che possono essere null nel DB sorgente, oppure gestiscili nella Materialized View con `coalesce(after_status, '')`.
+
+### 4. Timezone e timestamp
+
+PostgreSQL archivia i timestamp in UTC quando il tipo è `TIMESTAMPTZ`. Con Debezium, i timestamp vengono serializzati come **millisecondi da epoch** (non come stringa ISO). In ClickHouse:
+
+```sql
+-- Converti millisecondi da epoch in DateTime
+toDateTime(intDiv(source_ts_ms, 1000)) AS event_time
+
+-- Per microsecondi (TIMESTAMP(6) in PostgreSQL)
+toDateTime64(intDiv(source_ts_us, 1000000), 6) AS event_time_precise
+```
+
+## Garanzie di consegna e idempotenza
+
+CDC log-based garantisce **at-least-once delivery**: ogni evento viene consegnato almeno una volta, ma in caso di failover può arrivare due volte. Questo significa che la destinazione deve essere **idempotente** — ricevere lo stesso evento due volte deve produrre lo stesso risultato di riceverlo una volta.
+
+Come ClickHouse gestisce questa garanzia:
+
+```sql
+-- ReplacingMergeTree: la deduplica avviene al merge
+-- Se lo stesso (id, updated_at) arriva due volte, viene deduplicato automaticamente
+-- NB: la deduplica definitiva avviene solo nel background merge
+-- Per query accurate nel frattempo: usa FINAL
+
+-- Idempotenza garantita a livello di query
+SELECT id, status, amount
+FROM orders FINAL  -- forza la deduplica sincrona
+WHERE _deleted = 0;
+```
+
+Per pipeline critiche dove even-exactly-once è necessario, usa **Kafka transactions** con `transactional.id` sul producer. Ma nella maggior parte dei casi analitici, at-least-once + ReplacingMergeTree è sufficiente.
+
+## CDC come abilitatore di use case di business
+
+Il CDC non è solo una soluzione tecnica — abilita categorie intere di analisi che prima erano impossibili o richiedevano compromessi importanti.
+
+**Analisi in near-real-time**: senza CDC, le analisi di comportamento utente erano sempre "ieri". Con CDC a latenza ≤ 10 secondi, puoi rispondere a domande come "quanti ordini sono stati completati negli ultimi 5 minuti?" in modo operativo, non solo storico.
+
+**Audit trail completo**: il log CDC cattura ogni stato intermedio di un record. Se un ordine passa da `pending` → `in_processing` → `shipped` → `returned`, hai la storia completa con i timestamp esatti di ogni transizione — utile per SLA analysis e dispute resolution.
+
+**Sincronizzazione microservizi**: in architetture a microservizi, il CDC diventa il bus di eventi tra servizi. Il servizio `orders` non deve sapere che esiste il servizio `notifications` — il servizio `notifications` si iscrive al topic CDC degli ordini e agisce di conseguenza. Questo pattern è chiamato **Event-Driven Architecture** ed è reso possibile praticamente solo dal CDC.
+
+**Invalidazione cache**: quando un record cambia nel DB sorgente, il CDC emette un evento che può essere usato per invalidare immediatamente la cache Redis corrispondente — eliminando la classica discrepanza tra DB e cache.
+
+## Alternative a Debezium
+
+Debezium è eccellente per architetture Kafka-native, ma non è sempre la scelta giusta. Ecco un confronto:
+
+| Tool | Tipo | Migliore per | Limitazione principale |
+|------|------|-------------|----------------------|
+| **Debezium** | Open source, self-hosted | Architetture Kafka esistenti, controllo totale | Complessità operativa alta |
+| **Airbyte** | Open source, UI-driven | Team con meno expertise infra | Latenza minuti, non secondi |
+| **AWS DMS** | Managed (AWS) | Ecosistema AWS, migrazioni one-shot | Vendor lock-in, costi variabili |
+| **Estuary Flow** | Managed, real-time | CDC real-time senza gestire Kafka | Costo per volume dati |
+| **Fivetran** | Managed, no-code | Integrazioni veloci, poca customizzazione | Costo alto, meno flessibile |
+| **PeerDB** | Open source, CDC-native | CDC da PostgreSQL a ClickHouse direttamente | Solo sorgente PostgreSQL |
+
+**PeerDB** merita attenzione speciale: è costruito specificamente per replicare PostgreSQL → ClickHouse, supporta `ReplacingMergeTree` nativamente, e ha performance native superiori a Debezium+Kafka per questo caso d'uso specifico.
+
+```sql
+-- PeerDB: sincronizzazione PostgreSQL → ClickHouse senza Kafka intermedio
+CREATE PEER pg_source WITH (
+    TYPE = POSTGRES,
+    HOST = 'postgres.internal',
+    ...
+);
+
+CREATE MIRROR orders_sync
+FROM pg_source.public.orders
+INTO clickhouse_dest.analytics.orders
+WITH (
+    do_initial_copy = true,
+    publication_name = 'peerdb_pub'
+);
+```
+
 ## Checklist pre-produzione CDC
 
 - [ ] Utente DB con permessi minimi (REPLICATION + SELECT)
@@ -309,7 +587,9 @@ LIMIT 1;
 - [ ] Piano per schema evolution comunicato ai team
 - [ ] Test con failover simulato (Debezium offline per 30 minuti → recovery)
 - [ ] Runbook di troubleshooting scritto e testato
+- [ ] Alert WAL accumulation attivo in monitoring
+- [ ] Docker Compose per ambiente di sviluppo locale documentato
 
 <Aside type="tip">
-Un CDC ben monitorato può avere SLA di latenza ≤ 10 secondi con uptime del 99.9%. La maggior parte degli incidenti CDC deriva da slot lag non monitorato o da schema evolution non coordinata — entrambi prevenibili.
+Un CDC ben monitorato può avere SLA di latenza ≤ 10 secondi con uptime del 99.9%. La maggior parte degli incidenti CDC deriva da slot lag non monitorato o da schema evolution non coordinata — entrambi prevenibili. Inizia sempre con un ambiente Docker locale per testare la pipeline prima di toccare il database di produzione.
 </Aside>

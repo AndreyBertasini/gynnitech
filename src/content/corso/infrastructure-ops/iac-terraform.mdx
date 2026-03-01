@@ -482,3 +482,273 @@ terraform plan -detailed-exitcode
 <Aside type="tip">
 La regola d'oro: **se non è in Terraform, non esiste**. Qualsiasi modifica all'infrastruttura deve passare per un PR → plan → review → apply. Nessuna modifica manuale via console, mai. Questo è il cambiamento culturale più difficile, ma anche il più importante.
 </Aside>
+
+## Testing dell'infrastruttura Terraform
+
+Il codice Terraform può avere bug esattamente come il codice applicativo. La differenza è che un bug Terraform in produzione può eliminare un database o esporre un bucket S3 pubblicamente.
+
+### Policy as Code con Conftest/OPA
+
+[Open Policy Agent (OPA)](https://www.openpolicyagent.org/) e Conftest permettono di scrivere regole automatiche che verificano il piano Terraform prima dell'apply:
+
+```rego
+# policy/s3-security.rego
+package main
+
+# Regola: i bucket S3 non devono essere pubblici
+deny[msg] {
+    resource := input.resource_changes[_]
+    resource.type == "aws_s3_bucket_acl"
+    resource.change.after.acl == "public-read"
+    msg := sprintf(
+        "Bucket S3 '%s' non può avere ACL public-read",
+        [resource.address]
+    )
+}
+
+# Regola: il versioning deve essere abilitato sui bucket di prod
+deny[msg] {
+    resource := input.resource_changes[_]
+    resource.type == "aws_s3_bucket"
+    contains(resource.address, "prod")
+    not bucket_has_versioning(resource.address)
+    msg := sprintf(
+        "Bucket prod '%s' deve avere il versioning abilitato",
+        [resource.address]
+    )
+}
+```
+
+```bash
+# Nel CI: genera il piano JSON e validalo con conftest
+terraform plan -out=tfplan
+terraform show -json tfplan > tfplan.json
+conftest test tfplan.json --policy policy/
+```
+
+Conftest fallisce la CI se una regola viene violata, impedendo all'infrastruttura non-compliant di raggiungere la produzione.
+
+### Terratest: test end-to-end in Go
+
+[Terratest](https://github.com/gruntwork-io/terratest) permette di scrivere test che:
+1. Eseguono `terraform apply` su un ambiente effimero
+2. Verificano che l'infrastruttura funzioni correttamente
+3. Eseguono `terraform destroy` al termine
+
+```go
+// test/data_lake_test.go
+package test
+
+import (
+    "testing"
+    "github.com/gruntwork-io/terratest/modules/terraform"
+    "github.com/gruntwork-io/terratest/modules/aws"
+    "github.com/stretchr/testify/assert"
+)
+
+func TestDataLakeModule(t *testing.T) {
+    t.Parallel()
+
+    terraformOptions := &terraform.Options{
+        TerraformDir: "../modules/data-lake",
+        Vars: map[string]interface{}{
+            "environment": "test",
+            "bucket_name": "test-data-lake-terratest-1234",
+        },
+    }
+
+    defer terraform.Destroy(t, terraformOptions)  // cleanup garantito
+    terraform.InitAndApply(t, terraformOptions)
+
+    bucketName := terraform.Output(t, terraformOptions, "bucket_name")
+
+    // Verifica che il bucket esista
+    aws.AssertS3BucketExists(t, "eu-west-1", bucketName)
+
+    // Verifica che il versioning sia abilitato
+    aws.AssertS3BucketVersioningExists(t, "eu-west-1", bucketName)
+
+    // Verifica che il bucket non sia pubblico
+    assert.False(t, aws.IsS3BucketPublic(t, "eu-west-1", bucketName))
+}
+```
+
+I test Terratest girano realmente nel cloud, quindi costano. Usarli in CI per i moduli critici (storage, networking, IAM) e localmente su demand per quelli meno critici.
+
+## Cost Estimation con Infracost
+
+Prima di applicare un piano Terraform, è utile sapere quanto costerà. [Infracost](https://www.infracost.io/) aggiunge automaticamente una stima dei costi mensili al PR.
+
+```bash
+# Installa infracost
+brew install infracost
+
+# Genera stima dal piano Terraform
+cd terraform/environments/prod
+terraform plan -out=tfplan
+infracost breakdown --path tfplan
+```
+
+Output esempio:
+```
+Project: prod/main.tf
+
+ Name                                          Monthly Qty  Unit   Monthly Cost
+
+ aws_instance.clickhouse
+ ├─ Instance usage (Linux/UNIX, on-demand, c5.4xlarge)   730  hours        $556.42
+ └─ root_block_device
+    └─ Storage (general purpose SSD, gp3)                100  GB-months     $8.00
+
+ aws_s3_bucket.data_lake
+ ├─ Standard storage                                    3,000  GB-months     $69.00
+ └─ PUT, COPY, POST, LIST requests              500,000  1K requests       $2.50
+
+ OVERALL TOTAL                                                             $635.92
+```
+
+Integrato nel CI, Infracost commenta ogni PR con la differenza di costo rispetto al branch main:
+
+```yaml
+# .github/workflows/infracost.yml
+- name: Infracost diff
+  run: |
+    infracost diff \
+      --path=terraform/environments/prod/tfplan.json \
+      --format=github-comment \
+      --out-file=/tmp/infracost-comment.md
+- name: Post comment
+  uses: infracost/actions/comment@v1
+  with:
+    path: /tmp/infracost-comment.md
+```
+
+## Gestire più ambienti con Terragrunt
+
+Quando hai più di 2-3 ambienti, il codice Terraform può diventare ripetitivo: stessa struttura di moduli, ma con variabili diverse per dev/staging/prod. [Terragrunt](https://terragrunt.gruntwork.io/) aggiunge un layer di DRY (Don't Repeat Yourself) sopra Terraform.
+
+```hcl
+# terragrunt.hcl — root config condivisa da tutti gli ambienti
+remote_state {
+  backend = "s3"
+  config = {
+    bucket         = "my-company-terraform-state"
+    key            = "${path_relative_to_include()}/terraform.tfstate"
+    region         = "eu-west-1"
+    encrypt        = true
+    dynamodb_table = "terraform-locks"
+  }
+}
+
+# Inputs comuni a tutti gli ambienti
+inputs = {
+  aws_region = "eu-west-1"
+  team       = "data-engineering"
+}
+```
+
+```hcl
+# environments/prod/data-lake/terragrunt.hcl
+include "root" {
+  path = find_in_parent_folders()
+}
+
+terraform {
+  source = "../../../modules/data-lake"
+}
+
+inputs = {
+  environment           = "prod"
+  enable_versioning     = true
+  lifecycle_ia_days     = 90
+  lifecycle_glacier_days = 365
+}
+```
+
+Con Terragrunt, puoi applicare tutti gli ambienti in parallelo:
+```bash
+terragrunt run-all plan    # piano per tutti gli ambienti
+terragrunt run-all apply   # apply con dipendenze rispettate
+```
+
+## Checklist IaC per team data
+
+**Setup iniziale**
+- [ ] Backend remoto configurato su S3 (o GCS/Azure Blob) con DynamoDB lock
+- [ ] `terraform.tfstate` e `*.tfstate.backup` in `.gitignore`
+- [ ] Secrets letti da Secrets Manager, mai hardcodati
+- [ ] Tag obbligatori su tutte le risorse (`Environment`, `Team`, `ManagedBy`)
+
+**Sicurezza**
+- [ ] IAM con least privilege per ogni role (nessun `AdministratorAccess` in prod)
+- [ ] Bucket S3 con block public access abilitato
+- [ ] Encryption at rest su tutti i servizi di storage
+- [ ] Security groups con regole minimali (no 0.0.0.0/0 su porte critiche)
+- [ ] Policy as Code (OPA/Conftest) nel CI per bloccare configurazioni non-compliant
+
+**CI/CD**
+- [ ] `terraform fmt -check` nel CI
+- [ ] `terraform validate` nel CI
+- [ ] `terraform plan` commentato automaticamente nelle PR
+- [ ] `terraform apply` solo su merge a main, con approvazione manuale
+- [ ] Drift detection schedulato (nightly)
+- [ ] Infracost per cost estimation nei PR
+
+**Operatività**
+- [ ] Struttura a moduli separati per layer (storage, compute, networking, IAM)
+- [ ] Ambienti separati (dev/staging/prod) con state separati
+- [ ] Runbook per operazioni comuni (import di risorse esistenti, destroy selettivo)
+- [ ] Alert su Terraform apply failure (Slack, PagerDuty)
+
+## Terraform vs alternative: quando usare cosa
+
+Terraform non è l'unica opzione. La scelta dipende dal contesto:
+
+| Tool | Meglio per | Limitazioni |
+|------|-----------|-------------|
+| **Terraform / OpenTofu** | Multi-cloud, team grandi, moduli riusabili | Curva di apprendimento, state management |
+| **Pulumi** | Team che preferiscono Python/TypeScript invece di HCL | Ecosistema più piccolo di provider |
+| **AWS CDK** | Team full AWS, infrastracture definita in Python/TS | Lock-in AWS, meno maturo di CloudFormation |
+| **CloudFormation** | AWS puro, compliance aziendale (nativo AWS) | Solo AWS, sintassi YAML verbosa |
+| **Ansible** | Configuration management server già esistenti | Non ideale per provisioning risorse cloud |
+
+Per il data engineering stack su AWS (S3 + Glue + ClickHouse + MSK), **Terraform è la scelta standard del settore** per tre motivi:
+1. Provider ufficiali per tutti i servizi AWS + provider community per ClickHouse, Snowflake, dbt Cloud
+2. Registry pubblico con moduli pre-costruiti per scenari comuni (bucket S3 con best practices, MSK cluster)
+3. Il mercato lavora: la maggior parte delle offerte di lavoro per Data Engineer richiede esperienza Terraform
+
+**OpenTofu** (fork open-source di Terraform, nato dopo il cambio di licenza di HashiCorp nel 2023) è ormai compatibile al 100% con i file Terraform e preferito da molti team che vogliono evitare la dipendenza da HashiCorp. La scelta tra i due dipende principalmente dalle policy aziendali — tecnicamente sono equivalenti.
+
+<Aside type="note">
+Se stai iniziando un nuovo progetto nel 2025, valuta **OpenTofu**: stesso linguaggio HCL, stessa community di provider, ma completamente open-source (MPL-2.0). La migrazione da Terraform a OpenTofu richiede in genere meno di un'ora.
+</Aside>
+
+## Importare risorse esistenti nel state
+
+Nella realtà, raramente si parte da zero. Ci sono già bucket S3 creati manualmente, cluster ClickHouse configurati via console, utenti IAM generati da wizard. Il comando `terraform import` permette di portare queste risorse sotto il controllo di Terraform senza distruggerle e ricrearle.
+
+```bash
+# Importa un bucket S3 già esistente
+terraform import aws_s3_bucket.data_lake my-existing-bucket-name
+
+# Importa un'istanza EC2 per ID
+terraform import aws_instance.clickhouse i-0123456789abcdef0
+
+# Importa un utente Snowflake (provider-specific syntax)
+terraform import snowflake_user.dbt_user DBT_USER
+```
+
+Dopo l'import, Terraform conosce la risorsa ma il codice HCL potrebbe non corrispondere esattamente allo stato reale. Esegui `terraform plan` e aggiusta il codice finché il piano non mostra "No changes" — solo a quel punto la risorsa è correttamente gestita.
+
+Per import massicci (decine di risorse), lo strumento `terraformer` genera automaticamente il codice HCL a partire dall'infrastruttura cloud esistente:
+
+```bash
+# Genera il codice per tutti i bucket S3 nella region
+terraformer import aws --resources=s3 --regions=eu-west-1
+```
+
+Il risultato non è mai perfetto, ma riduce drasticamente il lavoro manuale di scrittura HCL per infrastrutture legacy già esistenti.
+
+<Aside type="tip">
+Dopo ogni import, aggiungi una nota in commento al codice HCL (`# imported from console: 2024-03-15`) con la data di import e il motivo. Aiuta il team a capire la storia della risorsa e a identificare eventuali configurazioni non standard da allineare agli standard attuali.
+</Aside>

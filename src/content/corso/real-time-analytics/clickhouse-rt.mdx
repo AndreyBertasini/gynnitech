@@ -304,6 +304,149 @@ Ogni INSERT crea una "part". Con 10.000 INSERT/sec si accumulano 10.000 parts in
 **4. MV senza tabella destinazione esplicita**
 La sintassi `CREATE MATERIALIZED VIEW mv AS SELECT ... TO table` è obbligatoria. La sintassi senza `TO` crea una tabella `.inner` nascosta non interrogabile direttamente.
 
+## Projections: alternativa alle MV per dati già presenti
+
+Le Materialized Views richiedono che i dati siano stati inseriti *dopo* la creazione della MV. Per dati già esistenti nella tabella, le **Projections** sono la soluzione alternativa.
+
+Una Projection è una seconda rappresentazione dei dati nella stessa tabella, con un ordinamento o aggregazione diversa. Non è una tabella separata — è un layer nascosto che ClickHouse usa automaticamente quando una query beneficia dell'ordinamento alternativo.
+
+```sql
+-- Tabella principale ordinata per (customer_id, event_time)
+CREATE TABLE events (
+    event_id     UUID,
+    event_time   DateTime,
+    customer_id  UInt64,
+    shop_id      UInt32,
+    event_type   LowCardinality(String),
+    revenue      Decimal(18, 2)
+) ENGINE = MergeTree()
+ORDER BY (customer_id, event_time);
+
+-- Projection 1: ottimizza query per shop_id
+ALTER TABLE events ADD PROJECTION proj_by_shop (
+    SELECT shop_id, event_time, event_type, sum(revenue), count()
+    GROUP BY shop_id, toDate(event_time), event_type
+);
+
+-- Projection 2: ordinamento alternativo per analisi time-series
+ALTER TABLE events ADD PROJECTION proj_time_series (
+    SELECT *
+    ORDER BY (event_time, shop_id)
+);
+
+-- Materializza le projections sui dati esistenti
+ALTER TABLE events MATERIALIZE PROJECTION proj_by_shop;
+ALTER TABLE events MATERIALIZE PROJECTION proj_time_series;
+```
+
+Dopo la materializzazione, ClickHouse sceglie automaticamente la projection più efficiente per ogni query. Se una query filtra per `shop_id`, usa `proj_by_shop` invece di scansionare tutta la tabella.
+
+**Projections vs Materialized Views**:
+
+| Aspetto | Projection | Materialized View |
+|---------|------------|------------------|
+| Scope | Stessa tabella | Tabella separata |
+| Dati esistenti | ✅ Supporta (`MATERIALIZE`) | ❌ Solo nuovi dati |
+| Scelta automatica | ✅ ClickHouse decide | ❌ Devi scegliere tu |
+| Complessità query | Semplice | Può usare JOIN, transformazioni |
+| Overhead storage | Medio | Alto |
+
+## Refreshable Materialized Views (ClickHouse 24.1+)
+
+ClickHouse 24.1 ha introdotto le **Refreshable Materialized Views** — MV che si rigenerano periodicamente dall'inizio invece di aggiornarsi incrementalmente. Utili per calcoli che non si possono fare incrementalmente (es. median, percentili esatti, aggregazioni che richiedono visione completa del dataset).
+
+```sql
+-- MV che si rigenera ogni ora
+-- Utile per metriche che richiedono visione completa (retention, LTV)
+CREATE MATERIALIZED VIEW monthly_cohort_retention
+REFRESH EVERY 1 HOUR
+DEPENDS ON raw_events     -- si attende che raw_events abbia dati recenti
+AS
+SELECT
+    toStartOfMonth(first_event_time) AS cohort_month,
+    toStartOfMonth(event_time)       AS activity_month,
+    uniq(customer_id)                AS active_users
+FROM (
+    SELECT
+        customer_id,
+        event_time,
+        min(event_time) OVER (PARTITION BY customer_id) AS first_event_time
+    FROM raw_events
+)
+GROUP BY cohort_month, activity_month
+ORDER BY cohort_month, activity_month;
+```
+
+La differenza fondamentale rispetto alle MV tradizionali:
+- MV tradizionale: aggrega solo i nuovi insert (incrementale, veloce, ma limitata per certi calcoli)
+- Refreshable MV: riesegue la query completa ogni N ore (lenta ma supporta qualsiasi calcolo)
+
+## Ottimizzare le query per dashboard live
+
+Una dashboard live esegue le stesse query decine o centinaia di volte al giorno. Ottimizzare queste query ha un ROI altissimo.
+
+### Sampling per metriche approssimative
+
+Quando la precisione assoluta non è critica (es. un conto approssimativo degli utenti attivi), ClickHouse può campionare per accelerare drasticamente:
+
+```sql
+-- Query esatta: scan di 10B righe
+SELECT uniq(customer_id) FROM raw_events WHERE event_date = today();
+-- Tempo: 8 secondi
+
+-- Query con sampling 1%: scan di 100M righe, risultato ±1% accurato
+SELECT uniq(customer_id) * 100 AS estimated_users
+FROM raw_events SAMPLE 1/100
+WHERE event_date = today();
+-- Tempo: 80ms — 100x più veloce
+```
+
+### Query cache
+
+ClickHouse 23.5+ include una query cache integrata:
+
+```sql
+-- Attiva la query cache per questa sessione
+SET use_query_cache = 1;
+SET query_cache_ttl = 60;  -- risultati cachati per 60 secondi
+
+-- Questa query usa la cache se eseguita entro 60 secondi
+SELECT sum(revenue), count() FROM hourly_revenue
+WHERE hour >= today();
+```
+
+Per dashboard dove i dati cambiano ogni minuto, una cache di 30-60 secondi è trasparente all'utente ma riduce il carico del 80-90%.
+
+### Materialize le KPI più richieste
+
+Per le 5-10 KPI che appaiono su ogni dashboard, pre-calcola esplicitamente con un cron job o uno scheduled MV:
+
+```sql
+-- Tabella di KPI pre-calcolate, aggiornata ogni 5 minuti
+CREATE TABLE dashboard_kpis (
+    refreshed_at  DateTime,
+    revenue_today Decimal(18, 2),
+    orders_today  UInt64,
+    aov_today     Float64,
+    users_today   UInt64
+) ENGINE = MergeTree() ORDER BY refreshed_at;
+
+-- Script Python schedulato ogni 5 minuti con cron/Airflow
+INSERT INTO dashboard_kpis
+SELECT
+    now()                          AS refreshed_at,
+    sum(revenue)                   AS revenue_today,
+    count()                        AS orders_today,
+    avg(revenue)                   AS aov_today,
+    uniq(customer_id)              AS users_today
+FROM raw_events
+WHERE event_date = today();
+
+-- La dashboard legge questa singola riga invece di aggregare miliardi di eventi
+SELECT * FROM dashboard_kpis ORDER BY refreshed_at DESC LIMIT 1;
+-- Tempo: < 1ms
+```
+
 ## Caso reale: Contentsquare a 100 miliardi di eventi/mese
 
 Contentsquare, piattaforma di analytics comportamentale, processa 100 miliardi di eventi al mese (circa 38.000/secondo in media, con picchi a 200.000/secondo). Per servire le loro dashboard con latenza ≤ 2 secondi, usano una catena di Materialized Views:
@@ -312,4 +455,93 @@ Contentsquare, piattaforma di analytics comportamentale, processa 100 miliardi d
 2. Session-level → `AggregatingMergeTree` per page-level metrics (aggiornato ogni 30 secondi circa)
 3. Page-level → Pre-computed reports per i clienti enterprise (aggiornato ogni ora)
 
-Il risultato: query di dashboard che scannerizzano 10^5 righe pre-aggregate invece di 10^11 righe raw, con latenza scesa da 8 secondi a 80 millisecondi.
+Il risultato: query di dashboard che scannerizzano 10^5 righe pre-aggregate invece di 10^11 righe raw, con latenza scesa da 8 secondi a 80 milliseconds.
+
+Il pattern riflette la regola generale del real-time analytics con ClickHouse: **più pre-aggreghi, meno scansioni fai al momento della query**. Il costo si sposta dall'insert-time (MV esecuzione) al query-time (aggregazione minima). Per dashboard con molti utenti concorrenti, questo trade-off è quasi sempre vantaggioso.
+
+## Diagnosticare le query lente con EXPLAIN
+
+Quando una query è più lenta del previsto, `EXPLAIN` mostra esattamente cosa ClickHouse sta facendo:
+
+```sql
+-- EXPLAIN PLAN: mostra come ClickHouse leggerà i dati
+EXPLAIN PLAN
+SELECT shop_id, sum(revenue)
+FROM raw_events
+WHERE event_date = today()
+GROUP BY shop_id;
+
+-- EXPLAIN PIPELINE: mostra i thread di esecuzione
+EXPLAIN PIPELINE graph=1
+SELECT shop_id, sum(revenue) FROM raw_events WHERE event_date = today() GROUP BY shop_id;
+```
+
+**Cosa cercare nel plan**:
+- `ReadFromMergeTree (rows=1234567)` → quante righe vengono lette. Se questo numero è alto, considera una MV o projection.
+- `Expression (Projection)` → ClickHouse sta usando una projection automaticamente.
+- `Filter: event_date = today()` → il filtro viene applicato correttamente (buon uso del partition pruning).
+- `Aggregating` → fase di aggregazione. Se compare prima del `ReadFromMergeTree`, la query non può usare le aggregazioni pre-calcolate della MV.
+
+### Query log per analisi storica
+
+```sql
+-- Le 10 query più lente dell'ultima ora
+SELECT
+    left(query, 100) AS query_preview,
+    query_duration_ms,
+    read_rows,
+    formatReadableSize(memory_usage) AS memory,
+    user
+FROM system.query_log
+WHERE type = 'QueryFinish'
+  AND event_time >= now() - INTERVAL 1 HOUR
+  AND query NOT LIKE '%system.%'
+ORDER BY query_duration_ms DESC
+LIMIT 10;
+
+-- Consumo medio per tabella
+SELECT
+    tables[1] AS tabella,
+    avg(query_duration_ms) AS avg_ms,
+    count() AS n_queries
+FROM system.query_log
+WHERE type = 'QueryFinish'
+  AND event_time >= today()
+GROUP BY tabella
+ORDER BY avg_ms DESC;
+```
+
+## Checklist: real-time analytics con ClickHouse
+
+**Architettura MVs**
+- [ ] Una MV per ogni granularità temporale richiesta (minuto, ora, giorno)
+- [ ] `SummingMergeTree` per somme e contatori, `AggregatingMergeTree` per distinct count e percentili
+- [ ] Query da MV usano sempre `GROUP BY + sum()` (mai lettura diretta senza aggregazione)
+- [ ] Tabella destinazione ha TTL configurato per gestire la crescita
+
+**Ingestion**
+- [ ] Insert in batch (100–10.000 righe per insert), mai insert singoli ad alta frequenza
+- [ ] Buffer Engine se il client non supporta il batching nativo
+- [ ] Monitoring dei parts per tabella (alert se > 300)
+
+**Query optimization**
+- [ ] KPI critiche pre-calcolate in tabella separata aggiornata ogni 5 minuti
+- [ ] Query cache abilitata per dashboard ad alto traffico (`SET use_query_cache = 1`)
+- [ ] Sampling usato per metriche approssimative su dati storici grandi
+- [ ] EXPLAIN usato per verificare le query lente prima del deploy
+
+**Monitoring**
+- [ ] Alert su errori MV da `system.text_log`
+- [ ] Alert su query_duration_ms > soglia critica (es. > 5 secondi)
+- [ ] Dashboard `system.parts` per rilevare accumulo parti non merged
+
+<Aside type="tip">
+Il pattern più efficace per iniziare: aggiungi prima le MVs per le KPI della dashboard principale, verifica che le query scendano sotto i 100ms, poi ottimizza ulteriormente solo se necessario. La pre-aggregazione tramite `SummingMergeTree` è la singola ottimizzazione con il rapporto sforzo/beneficio più alto nell'intero stack di real-time analytics.
+
+**Ordine di ottimizzazione raccomandato**:
+1. Scegli il partizionamento e l'ordinamento (ORDER BY) corretti prima di inserire dati — impossibile cambiare senza ricreare la tabella
+2. Aggiungi Materialized Views per le query più frequenti
+3. Abilita query cache per ridurre il carico su query identiche
+4. Usa Projections per accessi ad alta frequenza su colonne non nell'ORDER BY
+5. Considera il sampling solo per report storici su grandi volumi
+</Aside>

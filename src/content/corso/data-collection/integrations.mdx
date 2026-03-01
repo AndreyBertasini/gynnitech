@@ -372,3 +372,242 @@ ORDER BY data_age DESC;
 <Aside type="tip">
 Il principio "use managed tools for standard sources, build custom for unique sources" evita di sprecare ingegneria dove non è necessario. Fivetran o Airbyte per Salesforce e Stripe. Codice custom per le API interne proprietarie.
 </Aside>
+
+## CDP: Customer Data Platform
+
+Quando il numero di integrazioni cresce oltre una soglia critica, il pattern Hub-and-Spoke implementato manualmente diventa ingestibile. Un CDP (Customer Data Platform) è un layer software che risolve il problema a livello di prodotto.
+
+Un CDP fa tre cose:
+1. **Raccoglie** eventi da web, mobile, server, CRM, piattaforme di advertising
+2. **Unifica** i profili utente attraverso identity resolution (email, device ID, cookie)
+3. **Distribuisce** i dati alle destinazioni: data warehouse, email platform, advertising tools
+
+```mermaid
+graph TB
+    A["Web SDK"] --> CDP["CDP\n(Segment / RudderStack)"]
+    B["Mobile SDK"] --> CDP
+    C["Server Events"] --> CDP
+    D["CRM"] --> CDP
+    CDP --> DW["Data Warehouse"]
+    CDP --> EMAIL["Email Platform\n(Klaviyo, Brevo)"]
+    CDP --> ADS["Advertising\n(Google Ads, Meta)"]
+    CDP --> SUPPORT["Support\n(Zendesk)"]
+    style CDP fill:#1a3a5c,color:#ffffff
+    style DW fill:#2d5016,color:#ffffff
+```
+
+### Segment vs RudderStack
+
+| Caratteristica | Segment | RudderStack |
+|----------------|---------|-------------|
+| Tipo | SaaS managed | Open-source + cloud |
+| Prezzo | ~$120/mese per 10K MTU | Gratis self-hosted |
+| MTU (Monthly Tracked Users) | Tariffato per MTU | No limite su self-hosted |
+| Connettori | 400+ | 200+ |
+| Data residency | USA/EU | Completo controllo |
+| Migliore per | Startup con budget, team piccolo | GDPR-strict, budget ridotto, customizzazione |
+
+**Segment in pratica** — la chiamata standard di tracking:
+
+```javascript
+// Identifica l'utente (al login)
+analytics.identify('user_123', {
+  email: 'mario@example.com',
+  name: 'Mario Rossi',
+  plan: 'pro',
+  created_at: '2024-01-15'
+})
+
+// Traccia un evento
+analytics.track('Purchase Completed', {
+  order_id: 'ord_789',
+  revenue: 49.90,
+  currency: 'EUR',
+  products: [{ product_id: 'sku_42', name: 'Report Pro', quantity: 1 }]
+})
+
+// Associa l'utente a un'azienda (B2B)
+analytics.group('company_456', {
+  name: 'Acme Corp',
+  plan: 'enterprise',
+  employees: 250
+})
+```
+
+Segment invia automaticamente questo evento a tutte le destinazioni configurate: il DW, la piattaforma email, Google Ads per le conversioni, ecc.
+
+### Identity Resolution: il problema dei silos di identità
+
+Un utente tipico ha 3-5 punti di contatto diversi prima di convertire: visita anonima dal blog, click su un ad, email marketing, visita diretta, acquisto. Senza identity resolution, questi sono 5 profili separati.
+
+La risoluzione funziona con un grafo di identità:
+
+```
+anonymous_id_1 ──→ email:mario@example.com ←── user_id:123
+      ↓                                              ↑
+device_id:iPhone_XYZ ─────────────────────────────→ merged profile
+```
+
+Ogni sistema usa il suo identifier principale. Il CDP mantiene una tabella di mapping tra tutti gli identifier dello stesso utente, permettendo di tracciare il journey completo cross-device e cross-channel.
+
+## Reverse ETL: dal Data Warehouse ai Sistemi Operativi
+
+Il flusso tradizionale è **sorgenti → DW**. Il Reverse ETL inverte questo flusso: **DW → strumenti operativi**. Il DW diventa la fonte di verità e le analisi vengono sincronizzate verso i sistemi dove i team lavorano.
+
+**Caso d'uso classico**: il data team calcola un "health score" per ogni cliente nel DW. Il Reverse ETL sincronizza questo score in Salesforce (campo custom sull'Account), così il team sales può vedere lo score direttamente nel CRM senza accedere al DW.
+
+```mermaid
+graph LR
+    DW["Data Warehouse\n(BigQuery / Snowflake)"] -->|"Reverse ETL"| CRM["CRM\n(Salesforce)"]
+    DW -->|"Reverse ETL"| EMAIL["Email\n(Klaviyo)"]
+    DW -->|"Reverse ETL"| ADS["Advertising\n(Google Ads)"]
+    DW -->|"Reverse ETL"| SUPPORT["Support\n(Zendesk)"]
+    style DW fill:#2d5016,color:#ffffff
+```
+
+**Tool principali**:
+- **Hightouch**: leader di mercato, 200+ destinazioni, UI visual per mappare colonne
+- **Census**: più orientato all'ingegneria, supporta dbt models come sorgente
+- **Polytomic**: buon price/performance per team medi
+
+```sql
+-- Modello dbt che calcola lo score da sincronizzare via Reverse ETL
+-- models/marts/customer_health_score.sql
+SELECT
+    customer_id,
+    account_name,
+    owner_email,                              -- per matching con Salesforce
+    CASE
+        WHEN days_since_last_login <= 7  AND nps_score >= 8 THEN 'healthy'
+        WHEN days_since_last_login <= 30 OR nps_score >= 6  THEN 'at_risk'
+        ELSE 'churning'
+    END AS health_score,
+    days_since_last_login,
+    monthly_active_users,
+    nps_score,
+    CURRENT_TIMESTAMP AS score_calculated_at
+FROM {{ ref('fct_customer_activity') }}
+JOIN {{ ref('dim_customers') }} USING (customer_id)
+```
+
+Hightouch legge questo modello da BigQuery ogni 4 ore e aggiorna il campo `Health_Score__c` in Salesforce per ogni account.
+
+## Real-Time vs Batch: il trade-off
+
+Non tutte le integrazioni richiedono real-time. Scegliere la latenza giusta riduce i costi e la complessità.
+
+| Caso d'uso | Latenza necessaria | Approccio consigliato |
+|------------|-------------------|----------------------|
+| Fraud detection | < 1 secondo | Webhook → Kafka → regole real-time |
+| Stock alert "prodotto esaurito" | < 1 minuto | CDC Debezium → Kafka → notifica |
+| Dashboard operative | 5-15 minuti | Airbyte incremental ogni 15 min |
+| Reporting direzionale | Qualsiasi | Airbyte full refresh notturno |
+| Data science training | Batch mensile | Export S3 + dbt |
+| Email churn prevention | < 24 ore | Batch notturno → Klaviyo |
+
+La regola pratica: **scegli la latenza più alta che soddisfa il use case**. Real-time costa 5-10x di più in infrastruttura, ingegneria e manutenzione.
+
+## Observability delle integrazioni
+
+Un'integrazione non monitorata è un'integrazione che prima o poi si rompe silenziosamente — e te ne accorgi quando un manager ti chiede perché i dati nel CRM non si aggiornano da 3 giorni.
+
+### Data Lineage
+
+Il lineage documenta l'origine e le trasformazioni di ogni dato: da quale sistema è arrivato, attraverso quali step è passato, dove è finito. Strumenti come **dbt Docs** e **DataHub** costruiscono automaticamente questi grafi di dipendenza.
+
+```
+Stripe API → Fivetran → BigQuery stripe_raw.charges
+                                   ↓
+                      dbt: stg_stripe_charges
+                                   ↓
+                      dbt: fct_revenue (join con dim_customers)
+                                   ↓
+                      Hightouch → Salesforce Opportunity.ARR__c
+```
+
+Quando una colonna cambia in Stripe, puoi capire immediatamente quali dashboard e Salesforce fields ne sono impattati.
+
+### Alert su freshness e volume
+
+Il monitoring della freshness (già visto nella sezione precedente) è necessario ma non sufficiente. Aggiungi anche alert su **anomalie di volume**:
+
+```sql
+-- Alert se il volume giornaliero è anomalo (± 3σ dalla media mobile)
+WITH daily_volumes AS (
+    SELECT
+        source_name,
+        DATE(loaded_at)                         AS load_date,
+        COUNT(*)                                AS daily_count
+    FROM integration_metadata
+    WHERE loaded_at >= CURRENT_DATE - INTERVAL '60 days'
+    GROUP BY source_name, DATE(loaded_at)
+),
+stats AS (
+    SELECT
+        source_name,
+        AVG(daily_count)                        AS mean_count,
+        STDDEV(daily_count)                     AS stddev_count
+    FROM daily_volumes
+    GROUP BY source_name
+)
+SELECT
+    d.source_name,
+    d.daily_count,
+    s.mean_count,
+    s.stddev_count,
+    ABS(d.daily_count - s.mean_count) / NULLIF(s.stddev_count, 0) AS z_score
+FROM daily_volumes d
+JOIN stats s USING (source_name)
+WHERE d.load_date = CURRENT_DATE
+  AND ABS(d.daily_count - s.mean_count) / NULLIF(s.stddev_count, 0) > 3
+ORDER BY z_score DESC;
+```
+
+Un giorno con 0 record caricati da Stripe potrebbe significare che l'integrazione si è rotta — o che era un giorno di nessuna transazione. Il z-score ti distingue le anomalie statistiche dai casi normali.
+
+## Checklist di produzione per le integrazioni
+
+Prima di andare in produzione con una nuova integrazione:
+
+**Autenticazione e sicurezza**
+- [ ] Le credenziali sono in un secrets manager (non in variabili d'ambiente del CI)?
+- [ ] I token OAuth hanno scope minimi necessari (principle of least privilege)?
+- [ ] C'è rotation automatica dei token a scadenza?
+- [ ] Il webhook endpoint valida la firma del mittente?
+
+**Affidabilità**
+- [ ] Il connector gestisce il rate limiting con retry ed exponential backoff?
+- [ ] Esiste un meccanismo di replay per riprocessare record persi?
+- [ ] La pipeline è idempotente (se gira due volte, il risultato è lo stesso)?
+- [ ] Il fallimento di una sorgente non blocca le altre?
+
+**Monitoring**
+- [ ] C'è un alert su freshness (dati non arrivati da X ore)?
+- [ ] C'è un alert su anomalie di volume (±3σ)?
+- [ ] I log di ogni run sono accessibili e contengono error details?
+- [ ] C'è un runbook per i problemi più comuni?
+
+**Documentazione**
+- [ ] L'integrazione è nel catalogo con owner, SLA freshness e note sui quirk del dato?
+- [ ] Il canonical model è documentato in dbt (schema.yml con descriptions)?
+- [ ] I campi PII sono marcati nel catalogo?
+
+## Il costo nascosto delle integrazioni
+
+Un errore comune dei team early-stage è sottovalutare il costo operativo delle integrazioni custom. Ogni connettore custom che costruisci diventa un debito tecnico che devi mantenere quando il vendor cambia l'API (e lo fanno sempre, spesso senza preavviso).
+
+**Stima realistica del costo di un connettore custom**:
+- Sviluppo iniziale: 2-5 giorni
+- Testing e deploy: 1-2 giorni
+- Manutenzione annua: 3-5 giorni (rotta API, token scaduti, schema drift)
+- Debugging e incident response: 2-3 giorni/anno
+
+**Totale**: 10-15 giorni/anno per un singolo connettore. Con 20 connettori custom: 200-300 giorni di ingegneria all'anno spesi in manutenzione.
+
+Confrontato con Fivetran a ~$500/mese per 20 sorgenti standard, il calcolo diventa ovvio: i managed connector sono quasi sempre più economici del costo opportunità dell'ingegneria interna.
+
+La regola operativa dei team data maturi: **non costruire mai un connettore per una sorgente che ha già un connettore managed di qualità**. Investi l'ingegneria custom solo dove crea vantaggio competitivo — le pipeline per dati proprietari e le integrazioni con sistemi interni non disponibili su nessun marketplace.
+
+<Aside type="tip">
+Il momento giusto per costruire un connettore custom è quando: (1) la sorgente è interna o unica, (2) il volume è troppo alto per il pricing del managed tool, o (3) hai requisiti di trasformazione pre-ingestion non supportati. In tutti gli altri casi, usa Fivetran o Airbyte e rimanda la complessità.
+</Aside>

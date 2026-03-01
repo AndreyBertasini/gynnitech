@@ -336,6 +336,64 @@ def check_data_freshness(table: str, expected_max_age_hours: int):
 - **Null rate**: le colonne critiche non hanno troppi NULL?
 - **Duration**: quanto ci ha messo la pipeline? (regressione di performance)
 
+## Schema Evolution: sopravvivere ai cambiamenti dello schema sorgente
+
+Ogni pipeline che vive abbastanza a lungo incontra il **schema drift**: la sorgente cambia il suo schema senza avvertirti. Una colonna rinominata, un campo aggiunto, un tipo cambiato — e la pipeline crasha silenziosamente o produce dati sbagliati.
+
+**Strategie di difesa**:
+
+**1. Schema-on-read nel landing layer**: archivia i dati raw come JSON/Parquet con schema flessibile. La struttura è validata solo nel layer staging, non al momento dell'extraction.
+
+```python
+# Layer extraction: salva tutto, schema-on-read
+def extract_and_save(api_response: dict, date: str):
+    """
+    Salva i dati raw senza validazione dello schema.
+    Parquet inferisce automaticamente i tipi; JSON è totalmente flessibile.
+    """
+    import pandas as pd
+    import json
+
+    # Approccio 1: JSON lines (massima flessibilità, supporta schema diversi per riga)
+    with open(f"raw/orders_{date}.jsonl", "w") as f:
+        for record in api_response["data"]:
+            f.write(json.dumps(record) + "\n")
+
+    # Approccio 2: Parquet con schema inferito (compresso, veloce)
+    df = pd.DataFrame(api_response["data"])
+    df.to_parquet(f"raw/orders_{date}.parquet")
+    # Se una colonna viene aggiunta nella sorgente, viene automaticamente aggiunta al Parquet
+```
+
+**2. Dbt source freshness + schema test**: dbt rileva automaticamente i cambiamenti di schema nel staging layer e fallisce il build, evitando che i dati corrotti arrivino alle tabelle mart.
+
+**3. Alert automatico sul volume di colonne**:
+
+```sql
+-- Monitora il numero di colonne per tabella (cambiamento = schema drift)
+SELECT
+    table_name,
+    count(column_name) AS n_columns,
+    max(update_time) AS last_updated
+FROM information_schema.columns
+WHERE table_schema = 'staging'
+GROUP BY table_name
+ORDER BY last_updated DESC;
+-- Se n_columns cambia rispetto al run precedente → alert
+```
+
+**4. Compatibilità BACKWARD nelle trasformazioni**: scrivi le query dbt in modo da gestire colonne mancanti con `COALESCE`:
+
+```sql
+-- Se la sorgente non ha ancora la colonna 'discount_amount', COALESCE la gestisce
+SELECT
+    order_id,
+    amount,
+    COALESCE(discount_amount, 0) AS discount_amount,  -- 0 se colonna non esiste ancora
+    amount - COALESCE(discount_amount, 0) AS net_amount
+FROM {{ source('raw', 'orders') }}
+```
+
 ## Anti-pattern comuni
 
 **1. Trasformazioni in Excel** — non versionabile, non riproducibile, non scalabile. Ogni trasformazione che viene fatta manualmente in Excel deve essere automatizzata.
@@ -344,10 +402,203 @@ def check_data_freshness(table: str, expected_max_age_hours: int):
 
 **3. Nessun monitoring della freshness** — i dati possono essere "vecchi di 3 giorni" senza che nessuno lo sappia, finché un manager non nota che i numeri sono fermi.
 
-**4. Full refresh su tabelle grandi** — riscrivere 10 miliardi di righe ogni notte per aggiornare 100.000 righe nuove è uno spreco enorme. Usa incremental.
+**4. Full refresh su tabelle grandi** — riscrivere 10 miliardi di righe ogni notte per aggiornare 100.000 righe nuove è uno spreco enorme di compute e tempo. Usa sempre la modalità incremental con filtro temporale.
 
 **5. Pipeline accoppiata allo schema sorgente** — se il database di produzione rinomina una colonna, la pipeline crasha. Isola lo schema sorgente in un layer staging che puoi aggiornare senza toccare il resto.
 
+## Managed ELT: Fivetran, Airbyte e quando usarli
+
+Non tutte le pipeline vanno costruite da zero. Per le sorgenti più comuni (Salesforce, Google Ads, Facebook Ads, Stripe, Postgres, Shopify), esistono connettori pre-costruiti che gestiscono automaticamente schemi, API pagination, rate limiting, e schema drift.
+
+**Fivetran** è il leader dei managed connectors: zero configurazione, schema sync automatico, 300+ connettori. Il costo è basato sul volume dei dati.
+
+**Airbyte** è l'alternativa open-source: self-hostable, 400+ connettori dalla community, costo infrastruttura (server) invece di costo per volume.
+
+**Quando usare managed vs custom**:
+
+| Sorgente | Raccomandazione | Motivo |
+|----------|-----------------|--------|
+| Google Ads, Meta Ads, Salesforce | Managed (Fivetran/Airbyte) | API complesse con rate limiting, schema cambiano spesso |
+| Database sorgente (Postgres, MySQL) | CDC (Debezium) o managed | Dipende dalla latenza richiesta |
+| API REST interne | Custom (Python) | Logica business-specific, nessun connettore disponibile |
+| File S3/GCS | Personalizzato o Airbyte | Semplice ma specifico per il tuo schema |
+
+```python
+# Quando usi Airbyte via API per automatizzare le sync
+import requests
+
+AIRBYTE_URL = "http://airbyte:8000/api/v1"
+
+# Triggera una sync manuale di una connessione specifica
+response = requests.post(
+    f"{AIRBYTE_URL}/connections/sync",
+    json={"connectionId": "conn-uuid-123"},
+    headers={"Authorization": f"Bearer {AIRBYTE_API_KEY}"}
+)
+job_id = response.json()["job"]["id"]
+
+# Poll per verificare il completamento
+import time
+while True:
+    status = requests.get(f"{AIRBYTE_URL}/jobs/get",
+                          json={"id": job_id}).json()["job"]["status"]
+    if status in ("succeeded", "failed"):
+        break
+    time.sleep(30)
+```
+
+## Extraction da API: gestire pagination e rate limiting
+
+La maggior parte delle API REST non restituisce milioni di record in una risposta. Gestire correttamente pagination e throttling è fondamentale per pipeline affidabili.
+
+```python
+import requests
+import time
+from datetime import datetime, timedelta
+
+def extract_from_api(
+    base_url: str,
+    endpoint: str,
+    api_key: str,
+    start_date: str,
+    end_date: str,
+    page_size: int = 100
+) -> list:
+    """
+    Extraction generica con pagination cursor-based e retry su rate limit.
+    Funziona con la maggior parte delle API REST che usano `cursor` o `page`.
+    """
+    all_records = []
+    cursor = None
+    page = 0
+
+    while True:
+        params = {
+            "start_date": start_date,
+            "end_date": end_date,
+            "limit": page_size
+        }
+        if cursor:
+            params["cursor"] = cursor
+
+        try:
+            response = requests.get(
+                f"{base_url}/{endpoint}",
+                headers={"Authorization": f"Bearer {api_key}"},
+                params=params,
+                timeout=30
+            )
+
+            # Rate limit: aspetta e riprova
+            if response.status_code == 429:
+                retry_after = int(response.headers.get("Retry-After", 60))
+                print(f"Rate limited. Aspetto {retry_after}s...")
+                time.sleep(retry_after)
+                continue
+
+            response.raise_for_status()
+            data = response.json()
+
+            records = data.get("data", data.get("records", []))
+            all_records.extend(records)
+            page += 1
+
+            print(f"Estratte {len(all_records)} righe totali (pagina {page})")
+
+            # Fine della paginazione
+            cursor = data.get("next_cursor")
+            if not cursor or not records:
+                break
+
+        except requests.exceptions.Timeout:
+            print(f"Timeout alla pagina {page}, riprovo...")
+            time.sleep(10)
+            continue
+
+    return all_records
+```
+
+**Best practice per l'extraction da API**:
+- Salva sempre il `cursor` o il `last_processed_id` in un datastore (DB o S3) per il resume dopo un crash
+- Usa `start_date + end_date` con finestre temporali piccole (es. 1 giorno) per ridurre il rischio di timeout
+- Implementa exponential backoff: attesa di 1s, 2s, 4s, 8s per i retry sui 5xx errors
+
+## Backfill: caricare lo storico
+
+Quando aggiungi una nuova sorgente o un nuovo campo alla pipeline, hai bisogno di caricare i dati storici. Questo è il **backfill**.
+
+Il problema: eseguire la pipeline con date passate può sovrascrivere dati corretti, duplicare, o richiedere giorni per completarsi.
+
+```python
+# Pattern per backfill sicuro e riprendibile
+def run_backfill(
+    pipeline_fn,
+    start_date: str,
+    end_date: str,
+    dry_run: bool = True  # Prima esegui con dry_run=True per verificare
+):
+    """
+    Esegue la pipeline su date passate, un giorno alla volta.
+    Può essere interrotta e ripresa senza duplicati (idempotente).
+    """
+    current = datetime.strptime(start_date, "%Y-%m-%d")
+    end = datetime.strptime(end_date, "%Y-%m-%d")
+
+    while current <= end:
+        date_str = current.strftime("%Y-%m-%d")
+
+        if dry_run:
+            print(f"[DRY RUN] Processerei: {date_str}")
+        else:
+            try:
+                pipeline_fn(date=date_str)
+                print(f"✅ Completato: {date_str}")
+            except Exception as e:
+                print(f"❌ Fallito: {date_str} — {e}")
+                # Continua con i giorni successivi invece di fermarsi
+
+        current += timedelta(days=1)
+
+# Uso: prima dry run, poi esecuzione reale
+run_backfill(daily_orders_pipeline, "2023-01-01", "2024-01-01", dry_run=True)
+run_backfill(daily_orders_pipeline, "2023-01-01", "2024-01-01", dry_run=False)
+```
+
+La chiave del backfill sicuro è l'**idempotenza**: eseguire la pipeline due volte per lo stesso giorno deve produrre lo stesso risultato, non duplicare i dati.
+
+## Checklist: pipeline dati in produzione
+
+**Design**
+- [ ] La pipeline è idempotente (eseguirla N volte = stesso risultato di eseguirla 1 volta)
+- [ ] Usa incremental load dove possibile (non full refresh su tabelle grandi)
+- [ ] I dati raw sono conservati in staging (mai sovrascrivere i dati grezzi)
+- [ ] Il codice di estrazione è separato dal codice di trasformazione
+
+**Data Quality**
+- [ ] dbt tests configurati per le tabelle critiche (unique, not_null, accepted_values)
+- [ ] Freshness check configurato: alert se i dati sono più vecchi di X ore
+- [ ] Row count check: alert se il volume cala > 30% rispetto alla media
+- [ ] Null rate check: alert se colonne critiche hanno null > soglia attesa
+
+**Operatività**
+- [ ] Alert su ogni job failure (Slack/PagerDuty)
+- [ ] Retry automatico con backoff per errori transitori
+- [ ] Backfill testato: puoi rieseguire la pipeline su date passate senza duplicati
+- [ ] Runbook scritto per i failure più comuni
+- [ ] SLA documentato: entro che ora i dati devono essere disponibili?
+
+**Sicurezza**
+- [ ] Le credenziali sono in variabili d'ambiente o secret manager (non nel codice)
+- [ ] L'utente DB di estrazione ha solo permessi di SELECT
+- [ ] I log non contengono dati sensibili (PII, password)
+- [ ] I dati con PII sono mascherati o pseudonimizzati nel layer staging (non nelle raw tables)
+
+**Schema Evolution**
+- [ ] Il landing layer usa schema-on-read (JSON o Parquet con schema inferito)
+- [ ] Le trasformazioni usano `COALESCE` per gestire colonne non ancora presenti
+- [ ] Un alert rileva automaticamente cambiamenti nel numero di colonne delle tabelle sorgente
+- [ ] Esiste un processo di comunicazione con i team sorgente prima dei cambiamenti di schema
+
 <Aside type="tip">
-Il principio più importante per costruire pipeline affidabili: **fail loudly, fail early**. Un errore silenzioso che produce dati sbagliati è molto peggio di un errore che crasha immediatamente. Configura sempre alert su ogni fallimento, e assicurati che i fallimenti siano visibili.
+Il principio più importante per costruire pipeline affidabili: **fail loudly, fail early**. Un errore silenzioso che produce dati sbagliati è molto peggio di un errore che crasha immediatamente. Configura sempre alert su ogni fallimento, e assicurati che i fallimenti siano visibili. Una pipeline che fallisce alle 3 AM con un alert su Slack è infinitamente meglio di una che produce silenziosamente dati sbagliati per una settimana.
 </Aside>

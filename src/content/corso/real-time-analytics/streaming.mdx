@@ -300,3 +300,215 @@ Schema drift causa crash del consumer. È il debito tecnico più comune nelle pi
 
 **5. Auto-commit degli offset**
 `enable.auto.commit=true` fa il commit dell'offset periodicamente, non dopo l'elaborazione. Se il consumer crasha dopo il commit ma prima di elaborare, i messaggi vengono persi. Usa sempre commit manuale dopo elaborazione.
+
+## Windowing: aggregare eventi in stream
+
+Uno dei problemi fondamentali dello stream processing è come aggregare eventi che arrivano continuamente nel tempo. Non puoi fare `GROUP BY day` su uno stream infinito — hai bisogno di **finestre temporali**.
+
+### Tipi di window
+
+**Tumbling window**: finestre di dimensione fissa, non sovrapposte. Ogni evento appartiene esattamente a una finestra. Esempio: revenue ogni 5 minuti.
+
+```
+Tempo: ──────|──────|──────|──────|──────
+Window:   [W1]   [W2]   [W3]   [W4]
+```
+
+**Sliding window**: finestre di dimensione fissa, ma si sovrappongono. Esempio: media mobile a 1 ora, calcolata ogni 5 minuti.
+
+```
+Tempo: ──────────────────────────────────
+W1:    [────────────]
+W2:         [────────────]
+W3:              [────────────]
+```
+
+**Session window**: finestre basate sull'inattività. Si chiudono quando non arrivano eventi per un certo periodo. Esempio: sessione utente (gap > 30 minuti = nuova sessione).
+
+### Aggregazioni con windowing in ClickHouse
+
+ClickHouse non ha windowing nativo come Flink, ma può simularlo con query su finestre temporali:
+
+```sql
+-- Tumbling window: revenue ogni 5 minuti degli ultimi 60 minuti
+SELECT
+    toStartOfFiveMinutes(event_time) AS window_start,
+    count()                          AS events,
+    sum(revenue)                     AS revenue,
+    uniq(user_id)                    AS unique_users
+FROM orders_stream
+WHERE event_time >= now() - INTERVAL 60 MINUTE
+GROUP BY window_start
+ORDER BY window_start;
+
+-- Sliding window: media mobile a 1 ora (ogni refresh della query)
+SELECT
+    event_time,
+    avg(revenue) OVER (
+        ORDER BY event_time
+        RANGE BETWEEN INTERVAL 1 HOUR PRECEDING AND CURRENT ROW
+    ) AS revenue_ma_1h
+FROM orders_stream
+WHERE event_time >= now() - INTERVAL 24 HOUR
+ORDER BY event_time;
+```
+
+## Dead Letter Queue: gestire i messaggi invalidi
+
+In ogni pipeline di produzione, alcuni messaggi non potranno essere processati: formato invalido, schema non riconosciuto, dati corrotti. Senza una strategia per questi casi, il consumer si blocca o li salta silenziosamente.
+
+Il pattern **Dead Letter Queue (DLQ)** risolve questo: i messaggi che non riescono ad essere processati vengono inviati a un topic separato (il DLQ) per analisi successiva.
+
+```python
+from kafka import KafkaConsumer, KafkaProducer
+import json
+
+consumer = KafkaConsumer(
+    'orders',
+    bootstrap_servers=['kafka:9092'],
+    group_id='orders-processor',
+    enable_auto_commit=False,
+    value_deserializer=lambda m: json.loads(m.decode('utf-8'))
+)
+
+producer = KafkaProducer(
+    bootstrap_servers=['kafka:9092'],
+    value_serializer=lambda v: json.dumps(v).encode('utf-8')
+)
+
+for message in consumer:
+    try:
+        # Elabora il messaggio
+        process_order(message.value)
+        consumer.commit()
+
+    except ValidationError as e:
+        # Messaggio invalido → DLQ con metadati di errore
+        producer.send('orders.dlq', {
+            'original_message': message.value,
+            'error': str(e),
+            'error_type': 'ValidationError',
+            'original_topic': message.topic,
+            'original_partition': message.partition,
+            'original_offset': message.offset,
+            'failed_at': datetime.utcnow().isoformat()
+        })
+        consumer.commit()  # commit per non riprocessare il messaggio rotto
+
+    except Exception as e:
+        # Errore transitorio → non fare commit, riprova al prossimo poll
+        consumer.seek(
+            TopicPartition(message.topic, message.partition),
+            message.offset
+        )
+        break
+```
+
+Il DLQ è prezioso per il monitoring: se il volume di messaggi nel DLQ cresce, significa che qualcosa nello schema o nei dati sorgente è cambiato.
+
+## Backpressure: quando il consumer non tiene il passo
+
+La **backpressure** è il fenomeno per cui il consumer non riesce a processare i messaggi alla stessa velocità con cui il producer li produce. Il risultato è un consumer lag che cresce nel tempo.
+
+**Come diagnosticarla**:
+
+```bash
+# Script bash per monitorare il lag nel tempo
+while true; do
+  LAG=$(kafka-consumer-groups.sh \
+    --bootstrap-server kafka:9092 \
+    --group clickhouse-orders-consumer \
+    --describe 2>/dev/null | awk 'NR>1 {sum += $6} END {print sum}')
+
+  echo "$(date): Consumer lag = $LAG"
+  sleep 30
+done
+```
+
+**Come risolverla**:
+
+1. **Aumenta il parallelismo del consumer**: più istanze = più partizioni processate in parallelo. Ricorda: `#consumer ≤ #partizioni`. Se hai 3 partizioni, aggiungere un 4° consumer non aiuta.
+
+2. **Aumenta `max.poll.records`**: processa più record per poll → meno overhead di rete.
+
+3. **Ottimizza il processing**: identifica il bottleneck (DB write, HTTP call, CPU) e ottimizzalo.
+
+4. **Scala le partizioni**: se il lag persiste, aggiungi partizioni al topic e scala i consumer. Attenzione: le partizioni non possono essere ridotte in Kafka.
+
+5. **Throttling del producer**: in casi estremi, il producer può essere rallentato per dare respiro al consumer. Usa `quota.producer.byte-rate` in Kafka.
+
+## Riepilogo: quando usare cosa
+
+```mermaid
+graph TD
+    A["Nuova pipeline dati"] --> B{"Latenza\nrichiesta?"}
+    B -->|"≤ 30 secondi"| C["Streaming\nKafka + ClickHouse Kafka Engine"]
+    B -->|"Minuti - ore"| D{"Volume\ndati?"}
+    D -->|"< 10 GB/giorno"| E["Batch con dbt\n+ Airflow"]
+    D -->|"> 10 GB/giorno"| F["Batch con Spark\n+ Airflow"]
+    C --> G{"Logica\ncomplessa?"}
+    G -->|"Windowing/Join"| H["Apache Flink\ncome stream processor"]
+    G -->|"Solo ingest"| I["Kafka Engine diretto\nin ClickHouse"]
+    style C fill:#1a5c3a,color:#ffffff
+    style H fill:#1a3a5c,color:#ffffff
+    style I fill:#1a5c3a,color:#ffffff
+```
+
+La scelta dell'architettura dipende dai requisiti di latenza, dalla complessità della logica di trasformazione, e dalle capacità del team. Un sistema di streaming mal gestito è più costoso e fragile di un sistema batch ben progettato. Prima di scegliere il real-time, verifica che la latenza bassa sia un requisito di business reale — non solo un'aspirazione tecnica.
+
+## Late-arriving events: il problema dell'orologio distribuito
+
+In un sistema distribuito, gli eventi non arrivano sempre in ordine. Un evento di click generato alle 14:59:58 può arrivare al broker Kafka alle 15:00:02 — dopo che la finestra delle 14:00–15:00 si è già chiusa. Questi sono **late-arriving events** e sono la fonte di errori silenziosi più comune nelle pipeline di analytics real-time.
+
+**Event time vs Processing time**: la distinzione fondamentale.
+
+- **Event time**: quando l'evento è avvenuto nel mondo reale (timestamp generato dal client)
+- **Processing time**: quando l'evento è stato processato dalla pipeline
+
+Per aggregazioni corrette, usa *sempre* l'event time. Ma l'event time può essere inaffidabile (orologio client sbagliato, ritardi di rete) e può arrivare fuori ordine.
+
+**Watermark**: il meccanismo per gestire il ritardo. Un watermark è una soglia che dice "tutti gli eventi con event_time < watermark_time sono arrivati". Events più vecchi del watermark vengono scartati o inviati in una finestra speciale.
+
+```sql
+-- In ClickHouse: aggrega per event time ma con una finestra di "grace period"
+-- Usa event_time del messaggio, non now()
+SELECT
+    toStartOfFiveMinutes(event_time) AS window_start,  -- event time, non ingestion time
+    sum(revenue) AS revenue
+FROM orders_stream
+WHERE event_time >= now() - INTERVAL 65 MINUTE  -- 60min finestra + 5min grace period
+  AND event_time < now() - INTERVAL 5 MINUTE    -- aspetta 5 minuti per late events
+GROUP BY window_start
+ORDER BY window_start;
+```
+
+Per sistemi con requisiti di ordering stricti, Apache Flink gestisce watermark e late events nativamente tramite le sue API di event time processing.
+
+## Checklist: pipeline Kafka in produzione
+
+**Design**
+- [ ] Topic partitionato in base al parallelismo desiderato (min. 3 partizioni per flessibilità)
+- [ ] Chiave di partizione scelta deliberatamente (es. `user_id` per events dello stesso utente nella stessa partizione)
+- [ ] Schema Avro registrato in Schema Registry con compatibilità BACKWARD
+- [ ] Retention configurata in base ai requisiti (7 giorni default, più lungo se serve reprocessamento)
+
+**Produttore**
+- [ ] `acks=all` + `enable.idempotence=true` per pipeline critiche
+- [ ] `retries=3` con `retry.backoff.ms` configurato
+- [ ] Gestione esplicita degli errori di serializzazione (non ignorarli silenziosamente)
+
+**Consumatore**
+- [ ] `enable.auto.commit=false` — commit manuale dopo elaborazione
+- [ ] DLQ configurato per messaggi non processabili
+- [ ] Alert su consumer lag > soglia critica per business (es. > 5.000 messaggi)
+- [ ] Gestione del rebalancing (listener su `on_revoke` per commit degli offset pendenti)
+
+**Monitoring**
+- [ ] Dashboard consumer lag per topic e consumer group
+- [ ] Alert under-replicated partitions > 0
+- [ ] Alert broker disk > 80%
+- [ ] Log aggregati per errori consumer (Elasticsearch o Loki)
+
+<Aside type="tip">
+La regola del 90% nelle architetture di streaming: il 90% dei problemi in produzione vengono da tre sorgenti — consumer lag non monitorato, schema drift non gestito, e log disk overflow sul broker. La checklist sopra copre tutti e tre. Investire un'ora a configurare monitoring all'inizio risparmia giornate di debugging in produzione.
+</Aside>

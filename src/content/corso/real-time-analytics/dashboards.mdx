@@ -305,3 +305,272 @@ Una soglia fissa che va bene a luglio è troppo alta ad agosto (vacanze) e tropp
 
 **5. Alert senza runbook**
 Un alert che non dice "cosa fare" sveglia il team di notte per niente. Ogni alert deve linkare un runbook con i passi diagnostici.
+
+## Notification channels: routing degli alert
+
+Grafana gestisce l'alerting tramite **contact points** (dove mandare la notifica) e **notification policies** (quando e a chi). Configurare correttamente il routing è cruciale per evitare alert fatigue (troppi alert = nessuno li legge) e missed alerts (alert ignorati perché il canale sbagliato).
+
+```yaml
+# grafana/provisioning/alerting/notification-policies.yaml
+apiVersion: 1
+policies:
+  - orgId: 1
+    receiver: default-slack         # default per tutto
+    group_by: [alertname, team]
+    routes:
+      # Critical: va su PagerDuty (sveglia il team di notte)
+      - receiver: pagerduty-oncall
+        matchers:
+          - severity = critical
+        continue: true  # continua anche verso Slack
+      # Warning: solo Slack
+      - receiver: slack-data-alerts
+        matchers:
+          - severity = warning
+
+contactPoints:
+  - name: pagerduty-oncall
+    grafana_managed_receiver_configs:
+      - type: pagerduty
+        settings:
+          integrationKey: $PAGERDUTY_KEY
+          severity: '{{ .Values.severity }}'
+          description: '{{ .Annotations.summary }}'
+          details:
+            runbook: '{{ .Annotations.runbook }}'
+
+  - name: slack-data-alerts
+    grafana_managed_receiver_configs:
+      - type: slack
+        settings:
+          url: $SLACK_WEBHOOK_URL
+          channel: '#data-alerts'
+          title: '{{ .Annotations.summary }}'
+          text: >
+            *Alert*: {{ .Labels.alertname }}
+            *Severity*: {{ .Labels.severity }}
+            *Runbook*: {{ .Annotations.runbook }}
+```
+
+**Best practice per notification routing**:
+- **Critical** (revenue drop, sistema down): PagerDuty on-call + Slack
+- **Warning** (performance degradata, lag crescente): solo Slack
+- **Info** (deployment completato, manutenzione): canale Slack separato a bassa priorità
+- **Regola delle 3 AM**: se un alert ti sveglia alle 3 AM e non richiede azione immediata, non è critical
+
+## Condividere dashboard con stakeholder esterni
+
+Per condividere una dashboard con stakeholder non tecnici che non hanno accesso a Grafana:
+
+**Snapshot statici** (temporanei, senza accesso al DB):
+```bash
+# Crea uno snapshot tramite API Grafana
+curl -X POST http://grafana:3000/api/snapshots \
+  -H 'Content-Type: application/json' \
+  -H 'Authorization: Bearer your-api-key' \
+  -d '{
+    "dashboard": <dashboard-json>,
+    "expires": 3600,  # scade in 1 ora
+    "name": "Revenue snapshot 2024-11-15"
+  }'
+# Ritorna una URL pubblica condivisibile (nessun login richiesto)
+```
+
+**Dashboard embedded tramite iframe** (per portali interni):
+```html
+<!-- Embed in una pagina interna con autenticazione JWT -->
+<iframe
+  src="https://grafana.internal/d/revenue-rt?orgId=1&kiosk=full&theme=light&var-shop_id=42"
+  width="100%" height="600"
+  frameborder="0">
+</iframe>
+<!-- ?kiosk=full: nasconde header e nav bar (solo il contenuto della dashboard) -->
+<!-- &var-shop_id=42: pre-imposta la variabile shop_id -->
+```
+
+**Grafana Public Dashboards** (Grafana 10+): permette di rendere una dashboard pubblica senza login, con una URL dedicata e senza esporre le credenziali ClickHouse.
+
+## Grafana as Code: dashboard versionabili
+
+Gestire le dashboard Grafana tramite l'interfaccia grafica è comodo per i prototipi, ma problematico in produzione: le modifiche non sono tracciate, è impossibile fare code review, e ripristinare una versione precedente richiede backup manuali.
+
+**Grafana provisioning** permette di definire datasource e dashboard come file YAML/JSON che vengono caricati automaticamente all'avvio di Grafana:
+
+```yaml
+# grafana/provisioning/datasources/clickhouse.yaml
+apiVersion: 1
+datasources:
+  - name: ClickHouse
+    type: grafana-clickhouse-datasource
+    orgId: 1
+    url: http://clickhouse:9000
+    isDefault: true
+    jsonData:
+      server: clickhouse
+      port: 9000
+      username: grafana_reader
+      defaultDatabase: analytics
+      protocol: native
+      tlsSkipVerify: true
+    secureJsonData:
+      password: $CLICKHOUSE_GRAFANA_PASSWORD  # variabile d'ambiente
+```
+
+```yaml
+# grafana/provisioning/dashboards/config.yaml
+apiVersion: 1
+providers:
+  - name: default
+    orgId: 1
+    folder: ''
+    type: file
+    disableDeletion: false   # permette di cancellare via UI (sconsigliato)
+    updateIntervalSeconds: 30
+    options:
+      path: /etc/grafana/dashboards  # cartella con i JSON delle dashboard
+```
+
+**Esportare una dashboard come JSON** (per versionarla in git):
+1. Grafana → Dashboard → Settings (ingranaggio) → JSON Model
+2. Copia il JSON in `grafana/dashboards/revenue-rt.json`
+3. Committa in git → peer review → merge → deploy
+
+Questo approccio permette di:
+- Fare code review delle modifiche alle dashboard
+- Rollback a versioni precedenti con `git revert`
+- Replicare le stesse dashboard in staging e produzione
+- Avere un audit trail di chi ha modificato cosa e quando
+
+## Multi-tenant dashboards e Row Level Security
+
+Se la dashboard deve mostrare dati diversi a utenti diversi (es. ogni merchant vede solo i propri dati), ClickHouse supporta il **Row Level Security** (RLS) a livello di policy:
+
+```sql
+-- Tabella degli utenti con il loro shop_id
+CREATE TABLE auth.user_permissions (
+    username    String,
+    shop_id     UInt32
+) ENGINE = MergeTree() ORDER BY username;
+
+INSERT INTO auth.user_permissions VALUES
+('merchant_001', 42),
+('merchant_002', 57),
+('analyst_team', 0);  -- 0 = accesso globale
+
+-- Policy RLS: ogni utente vede solo i propri shop
+CREATE ROW POLICY shop_policy ON analytics.orders
+AS PERMISSIVE
+FOR SELECT
+USING shop_id IN (
+    SELECT shop_id FROM auth.user_permissions
+    WHERE username = currentUser()
+      AND (shop_id = 0 OR shop_id = analytics.orders.shop_id)
+)
+TO grafana_reader;
+```
+
+Con questa policy:
+- `merchant_001` esegue `SELECT * FROM orders` → vede solo righe con `shop_id = 42`
+- `analyst_team` esegue la stessa query → vede tutti i dati (shop_id = 0 = bypass)
+- Le query non cambiano — il filtro è trasparente e applicato automaticamente
+
+**Integrazione con Grafana**: configura una datasource ClickHouse per ogni tier di accesso, con un utente ClickHouse diverso per merchant e per analyst.
+
+## SLA tracking: misurare la dashboard stessa
+
+Monitora la tua dashboard come monitora il prodotto. Un team di ops che non sa che le proprie dashboard sono lente scopre il problema nel momento peggiore — durante un incidente.
+
+```sql
+-- Crea una tabella per le metriche di performance delle query dashboard
+-- (da popolare con uno script che interroga system.query_log ogni ora)
+CREATE TABLE analytics.dashboard_query_sla (
+    measured_at   DateTime,
+    dashboard_name LowCardinality(String),
+    panel_name    LowCardinality(String),
+    p50_ms        UInt32,
+    p95_ms        UInt32,
+    p99_ms        UInt32,
+    error_rate    Float32
+) ENGINE = MergeTree()
+PARTITION BY toYYYYMM(measured_at)
+ORDER BY (dashboard_name, measured_at);
+
+-- Query di caricamento (da schedulare con cron ogni ora)
+INSERT INTO analytics.dashboard_query_sla
+SELECT
+    now() AS measured_at,
+    'revenue-dashboard' AS dashboard_name,
+    query_kind AS panel_name,
+    quantile(0.50)(query_duration_ms) AS p50_ms,
+    quantile(0.95)(query_duration_ms) AS p95_ms,
+    quantile(0.99)(query_duration_ms) AS p99_ms,
+    countIf(exception != '') / count() AS error_rate
+FROM system.query_log
+WHERE type = 'QueryFinish'
+  AND event_time >= now() - INTERVAL 1 HOUR
+  AND user = 'grafana_reader'
+GROUP BY query_kind;
+```
+
+**SLA target raccomandati per dashboards real-time**:
+- p50 ≤ 200ms (metà delle query veloci)
+- p95 ≤ 1000ms (solo il 5% supera 1 secondo)
+- p99 ≤ 3000ms (rarissimi outlier accettabili fino a 3 secondi)
+- error_rate ≤ 0.1% (meno di 1 errore ogni 1000 query)
+
+Se una query dashboard supera questi SLA, è candidata a un'ottimizzazione con Materialized View o projection.
+
+## Capacity planning per dashboard ad alto traffico
+
+Prima del lancio di una dashboard a tutta l'azienda, stima il carico che genererà:
+
+```
+QPS dashboard = (utenti concorrenti) × (panels per dashboard) × (1 / refresh_interval_seconds)
+
+Esempio:
+200 utenti × 8 panels × (1/30s refresh) = 53 QPS su ClickHouse
+```
+
+53 QPS è gestibile per ClickHouse con query pre-aggregate (< 100ms ciascuna). Ma se ogni query richiede 2 secondi:
+
+```
+200 utenti × 8 panels × 0.5 QPS × 2 secondi = 1.600 query concorrenti → saturazione
+```
+
+**Scalabilità verticale vs orizzontale**:
+- **Verticale** (più CPU/RAM): efficace per ClickHouse single-node fino a ~500 QPS per query semplici
+- **Orizzontale** (ClickHouse cluster): necessario per > 1.000 QPS, richiede coordinazione delle shard
+
+**Materialize tutto ciò che è ad alto QPS**: se una query viene eseguita > 100 volte al minuto, pre-calcola il risultato in una tabella dedicata. Il costo di calcolo si sposta da 100× query-time a 1× background-time.
+
+## Checklist: dashboard live in produzione
+
+**Setup e accesso**
+- [ ] Utente ClickHouse dedicato per Grafana/Superset con permessi solo SELECT
+- [ ] Limiti di risorse sull'utente (`max_execution_time`, `max_memory_usage`)
+- [ ] Dashboard source-controlled in git (provisioning YAML/JSON)
+- [ ] Staging dashboard identica alla produzione per test
+
+**Query performance**
+- [ ] Tutte le query da tabelle pre-aggregate, mai da raw table per dashboard ad alto traffico
+- [ ] Nessuna query supera 1 secondo a p95 (verificato con `system.query_log`)
+- [ ] Query cache abilitata dove i dati cambiano meno del refresh interval
+- [ ] Refresh rate ≥ 10 secondi (mai più aggressivo senza giustificazione)
+
+**Alerting**
+- [ ] Alert su anomalie, non solo su soglie fisse
+- [ ] Ogni alert ha un runbook linkato
+- [ ] Test degli alert: verifica manualmente che scattino e notifichino correttamente
+- [ ] Silencing policy per manutenzioni pianificate (evita false alarm)
+- [ ] Escalation policy: chi riceve cosa a quale ora
+
+**Monitoring della dashboard stessa**
+- [ ] SLA tracking delle query dashboard (`system.query_log`)
+- [ ] Alert se p95 supera il target (es. > 2 secondi)
+- [ ] Dashboard di "health" per la dashboard principale (meta-monitoring)
+
+<Aside type="tip">
+La Cloudflare citata all'inizio non usa hardware magico — usa ClickHouse con pre-aggregazione + Grafana con query ottimizzate. Il risultato, 50 milioni di eventi/secondo con latenza dashboard di 10 secondi, è replicabile con gli strumenti open-source descritti in questa lezione. La differenza è nell'architettura (Materialized Views pre-aggregate, pre-computed KPI tables) e nella disciplina operativa (SLA misurati, alert con runbook, dashboard versionata in git).
+
+Il percorso consigliato: inizia con Grafana + datasource ClickHouse → crea le prime 3 KPI card + time series → aggiungi alert su anomalie → versiona in git → ottimizza le query lente man mano che la base utenti cresce.
+</Aside>

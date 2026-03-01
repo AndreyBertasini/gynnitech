@@ -422,6 +422,195 @@ Nei motori SQL moderni, aggregare senza GROUP BY funziona ma può produrre risul
 
 Sono semanticamente diversi — scegli quello giusto per il tuo caso.
 
+## Recursive CTEs: dati gerarchici e referral chains
+
+Le CTE ricorsive permettono di navigare strutture gerarchiche: organigrammi, categorie di prodotti annidate, catene di referral utente, strutture di cartelle. Senza CTE ricorsive, queste query richiederebbero codice applicativo.
+
+```sql
+-- Referral chain: chi ha portato chi (multi-livello)
+WITH RECURSIVE referral_chain AS (
+    -- Anchor: gli utenti senza referrer (top della catena)
+    SELECT
+        user_id,
+        referred_by,
+        user_id AS root_user,   -- l'utente capostipite della catena
+        0       AS depth,       -- profondità nella catena
+        CAST(user_id AS VARCHAR) AS chain_path
+    FROM users
+    WHERE referred_by IS NULL
+
+    UNION ALL
+
+    -- Recursive step: aggiungi un livello alla volta
+    SELECT
+        u.user_id,
+        u.referred_by,
+        rc.root_user,
+        rc.depth + 1,
+        rc.chain_path || ' → ' || CAST(u.user_id AS VARCHAR)
+    FROM users u
+    JOIN referral_chain rc ON u.referred_by = rc.user_id
+    WHERE rc.depth < 10  -- CRITICO: limita la profondità per evitare loop infiniti
+)
+SELECT
+    root_user,
+    COUNT(*) - 1 AS total_referred,  -- -1 per escludere il root stesso
+    MAX(depth)   AS max_depth,
+    SUM(u.lifetime_value) AS total_network_value
+FROM referral_chain rc
+JOIN users u ON u.user_id = rc.user_id
+GROUP BY root_user
+ORDER BY total_network_value DESC
+LIMIT 20;
+```
+
+<Aside type="caution">
+Le CTE ricorsive richiedono un **limite di profondità esplicito** (`WHERE depth < N`). Senza di esso, se ci sono cicli nei dati (utente A → B → A), la query gira all'infinito. Testa sempre su un sample controllato prima di eseguire in produzione.
+</Aside>
+
+## Date Spine: riempire i gap nei dati temporali
+
+Un problema frequente nell'analytics è avere **giorni o mesi senza dati** — ad esempio un negozio che non aveva vendite il lunedì. Una query `GROUP BY date` mostrerà solo le date con attività, saltando le date vuote. Per un grafico, questo crea discontinuità; per una media mobile, distorce i valori.
+
+La soluzione è la **date spine**: una tabella o CTE con tutte le date del periodo, su cui fare un LEFT JOIN con i dati reali.
+
+```sql
+-- PostgreSQL / BigQuery: genera una sequenza di date
+WITH date_spine AS (
+    SELECT
+        generate_series(
+            '2024-01-01'::date,
+            '2024-12-31'::date,
+            INTERVAL '1 day'
+        )::date AS day
+),
+-- ClickHouse: usa generateUUIDv4 o una tabella di numeri
+date_spine_ch AS (
+    SELECT toDate('2024-01-01') + number AS day
+    FROM numbers(366)  -- 366 = giorni nel periodo
+    WHERE day <= '2024-12-31'
+)
+-- LEFT JOIN: tutte le date appaiono, anche quelle senza ordini
+SELECT
+    d.day,
+    COALESCE(SUM(o.amount), 0) AS revenue,  -- 0 invece di NULL
+    COALESCE(COUNT(o.order_id), 0) AS orders
+FROM date_spine d
+LEFT JOIN orders o ON o.created_date = d.day
+GROUP BY d.day
+ORDER BY d.day;
+```
+
+Con la date spine, un grafico mostra correttamente i giorni a zero revenue invece di saltarli — rendendo le anomalie (giorni vuoti inattesi) immediatamente visibili.
+
+## Pivot: trasformare righe in colonne
+
+Il pivot trasforma i valori di una colonna categorica in colonne separate. È il modo standard per creare report "tabella di confronto".
+
+```sql
+-- Dati originali (long format):
+-- month | channel  | revenue
+-- 2024-01 | google  | 10000
+-- 2024-01 | meta    | 8000
+-- 2024-02 | google  | 12000
+
+-- Risultato pivot (wide format):
+-- month | google | meta | organic
+-- 2024-01 | 10000 | 8000 | 3000
+-- 2024-02 | 12000 | 9000 | 4000
+
+-- Pivot manuale con CASE WHEN (funziona ovunque)
+SELECT
+    DATE_TRUNC('month', order_date)        AS month,
+    SUM(CASE WHEN channel = 'google'  THEN revenue ELSE 0 END) AS google,
+    SUM(CASE WHEN channel = 'meta'    THEN revenue ELSE 0 END) AS meta,
+    SUM(CASE WHEN channel = 'organic' THEN revenue ELSE 0 END) AS organic,
+    SUM(revenue)                           AS total
+FROM orders
+WHERE order_date >= '2024-01-01'
+GROUP BY month
+ORDER BY month;
+```
+
+```sql
+-- Unpivot: da colonne a righe (opposto del pivot)
+-- Utile quando un report Excel arriva con dati in wide format
+-- BigQuery / ClickHouse: usa CROSS JOIN UNNEST o VALUES
+SELECT month, channel, revenue
+FROM monthly_pivot
+CROSS JOIN UNNEST(
+    ARRAY['google', 'meta', 'organic'],
+    ARRAY[google_rev, meta_rev, organic_rev]
+) AS t(channel, revenue)
+WHERE revenue > 0;
+```
+
+## ROLLUP e GROUPING SETS: subtotali automatici
+
+Quando un report deve mostrare sia i dettagli che i subtotali per categoria, riscrivere la query tre volte (dettaglio + subtotale + totale) è ridondante e error-prone. `ROLLUP` e `GROUPING SETS` lo fanno in una sola query.
+
+```sql
+-- ROLLUP: genera subtotali gerarchici automaticamente
+-- Equivale a: GROUP BY (country, channel), (country), ()
+SELECT
+    country,
+    channel,
+    SUM(revenue) AS revenue,
+    COUNT(DISTINCT user_id) AS customers,
+    GROUPING(country) AS is_country_subtotal,   -- 1 se questa riga è un subtotale
+    GROUPING(channel) AS is_channel_subtotal
+FROM orders
+WHERE order_date >= '2024-01-01'
+GROUP BY ROLLUP(country, channel)
+ORDER BY country NULLS LAST, channel NULLS LAST;
+
+-- Risultato:
+-- country | channel | revenue | is_country_subtotal | is_channel_subtotal
+-- IT      | google  | 10000   | 0                   | 0      (dettaglio)
+-- IT      | meta    | 8000    | 0                   | 0
+-- IT      | NULL    | 18000   | 0                   | 1      (subtotale IT)
+-- DE      | google  | 12000   | 0                   | 0
+-- DE      | NULL    | 12000   | 0                   | 1      (subtotale DE)
+-- NULL    | NULL    | 30000   | 1                   | 1      (totale generale)
+```
+
+```sql
+-- GROUPING SETS: specificare esattamente quali combinazioni di aggregazione
+GROUP BY GROUPING SETS (
+    (country, channel),   -- dettaglio
+    (country),            -- subtotale per country
+    (channel),            -- subtotale per channel
+    ()                    -- totale generale
+)
+-- Equivalente a 4 query UNION ALL separate, ma molto più efficiente
+```
+
+**Quando usarli**: reportistica gerarchica (paese → canale → prodotto), P&L con subtotali, qualsiasi situazione dove ti ritrovi a fare UNION di query identiche con diversi livelli di GROUP BY.
+
+## Checklist qualità per query analitiche
+
+Prima di condividere una query o aggiungerla a un report, verifica questi punti:
+
+**Correttezza**
+- [ ] La query gestisce i NULL correttamente (usa `IS NULL`, `COALESCE`, `NULLIF` dove necessario)
+- [ ] I JOIN non duplicano righe (verifica con `SELECT COUNT(*) prima e dopo il JOIN`)
+- [ ] La `HAVING` è usata per filtrare aggregati, la `WHERE` per filtrare righe individuali
+- [ ] I window functions usano il `PARTITION BY` corretto (test su sample con utenti noti)
+
+**Performance**
+- [ ] Nessun `SELECT *` in query di produzione
+- [ ] I filtri temporali usano la colonna di partizione (non funzioni su date)
+- [ ] Le subquery correlate sono state sostituite con JOIN o window functions
+- [ ] La query è stata eseguita con `EXPLAIN`/`EXPLAIN ANALYZE` per verificare il query plan
+
+**Leggibilità**
+- [ ] I CTE hanno nomi che descrivono il loro contenuto (`italian_active_users`, non `cte1`)
+- [ ] I commenti spiegano il "perché" della logica non ovvia
+- [ ] Gli alias sono espliciti e non ambigui
+- [ ] `NULLIF(divisore, 0)` usato per tutte le divisioni
+- [ ] La query è stata testata su un campione di dati noti prima di eseguire in produzione
+- [ ] Le query ad uso frequente (>10 volte/giorno) sono state segnalate al team data per creazione di MV o view materializzata
+
 <Aside type="tip">
-Per imparare SQL avanzato, la risorsa migliore è la documentazione del tuo data warehouse (BigQuery, Snowflake, ClickHouse) con esempi pratici. Ogni engine ha ottimizzazioni specifiche che vale la pena conoscere. Mode Analytics SQL School e SQLZoo sono risorse gratuite eccellenti per la pratica.
+Per imparare SQL avanzato, la risorsa migliore è la documentazione del tuo data warehouse (BigQuery, Snowflake, ClickHouse) con esempi pratici. Ogni engine ha ottimizzazioni specifiche che vale la pena conoscere. Mode Analytics SQL School e SQLZoo sono risorse gratuite eccellenti per la pratica. Il modo più veloce per migliorare: prendere una query che hai scritto nell'ultimo mese e riscriverla usando CTEs e window functions — il confronto è immediato.
 </Aside>
