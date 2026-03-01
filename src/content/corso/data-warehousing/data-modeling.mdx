@@ -468,7 +468,227 @@ FROM fact_campaign_performance f;
 ```
 
 
-## 8. Checklist di Data Modeling
+## 8. Star Schema vs Snowflake Schema vs One Big Table (OBT)
+
+La scelta del modello fisico ha impatti enormi su performance, manutenibilità e comprensibilità. Tre approcci dominano il panorama moderno.
+
+### Kimball Star Schema
+
+Il **Kimball Star Schema** (Ralph Kimball, 1996) è il gold standard del data warehousing classico: una fact table al centro, collegata a dimension table de-normalizzate. La de-normalizzazione delle dimensioni (includere `category_name` direttamente nella dim_product invece di avere una tabella separata per le categorie) riduce il numero di JOIN e semplifica le query.
+
+**Quando usarlo**: warehouse enterprise con molti utenti BI, tooling come Looker o Power BI che sfruttano le relazioni tra tabelle, necessità di attributi dimensionali storici (SCD Type 2).
+
+### Data Vault 2.0: Hub, Link, Satellite
+
+Il **Data Vault 2.0** (Dan Linstedt) è un approccio alternativo pensato per warehouse enterprise con molte sorgenti dati eterogenee. Invece di star schema, usa tre tipi di tabelle:
+
+- **Hub**: Contiene solo le business key (chiavi naturali del business). Un Hub per ogni entità del business.
+- **Link**: Rappresenta le relazioni tra Hub. Ogni relazione many-to-many diventa un Link.
+- **Satellite**: Contiene gli attributi contestuali e la storia. Un Hub può avere più Satellite per sorgenti diverse.
+
+```sql
+-- Hub: Business key degli ordini (solo ID, nessun attributo)
+CREATE TABLE hub_order (
+    order_hk        String,           -- Hash key (MD5 della business key)
+    order_id        String,           -- Business key dal sistema sorgente
+    load_date       DateTime,
+    record_source   LowCardinality(String)
+) ENGINE = ReplacingMergeTree(load_date)
+ORDER BY order_hk;
+
+-- Link: Relazione ordine-prodotto
+CREATE TABLE link_order_product (
+    link_hk         String,           -- Hash key combinata
+    order_hk        String,           -- FK verso hub_order
+    product_hk      String,           -- FK verso hub_product
+    load_date       DateTime,
+    record_source   LowCardinality(String)
+) ENGINE = MergeTree()
+ORDER BY (order_hk, product_hk, load_date);
+
+-- Satellite: Attributi dell'ordine con storia completa
+CREATE TABLE sat_order_details (
+    order_hk        String,
+    load_date       DateTime,
+    hash_diff       String,           -- Hash degli attributi (per rilevare cambiamenti)
+    status          LowCardinality(String),
+    total_amount    Decimal(10, 2),
+    currency        LowCardinality(String),
+    record_source   LowCardinality(String)
+) ENGINE = MergeTree()
+ORDER BY (order_hk, load_date);
+```
+
+**Pro di Data Vault 2.0**:
+- Aggiunta di nuove sorgenti senza modificare tabelle esistenti (solo nuovi Satellite)
+- Auditabilità completa: ogni riga ha `load_date` e `record_source`
+- Parallelizzazione del caricamento: Hub, Link e Satellite sono indipendenti
+
+**Contro**:
+- Complessità elevata: le query devono sempre joinare Hub + Satellite
+- Non adatto a team piccoli o dataset piccoli
+- Richiede tooling specializzato (dbt-vault, dbtvault)
+
+Data Vault è la scelta giusta per warehouse enterprise che aggregano 20+ sorgenti dati con audit trail rigorosi (settore finanziario, assicurativo, farmaceutico).
+
+### One Big Table (OBT): La Denormalizzazione Estrema
+
+L'**OBT** è l'approccio opposto a Data Vault: invece di normalizzare, si denormalizza tutto in un'unica tabella piatta con tutte le dimensioni pre-joinata. Ogni riga contiene tutti gli attributi necessari per l'analisi.
+
+```sql
+-- OBT per analytics di marketing: nessun JOIN necessario
+CREATE TABLE obt_marketing_events (
+    event_date          Date,
+    event_time          DateTime,
+    -- Dati evento
+    event_name          LowCardinality(String),
+    revenue             Decimal(10, 2),
+    -- Dati campagna (denormalizzati dalla dim_campaign)
+    campaign_id         UInt32,
+    campaign_name       String,
+    campaign_objective  LowCardinality(String),
+    campaign_budget     Decimal(10, 2),
+    -- Dati canale (denormalizzati dalla dim_channel)
+    channel_id          UInt16,
+    channel_name        LowCardinality(String),
+    channel_type        LowCardinality(String),
+    -- Dati utente (denormalizzati dalla dim_users)
+    user_id             UInt64,
+    user_country        LowCardinality(String),
+    user_plan           LowCardinality(String),
+    user_signup_date    Date
+) ENGINE = MergeTree()
+ORDER BY (event_date, channel_name, campaign_id)
+PARTITION BY toYYYYMM(event_date);
+```
+
+**Pro di OBT**:
+- Query istantanee: nessun JOIN, solo scan colonnare
+- Comprensibilità: ogni analista capisce la struttura immediatamente
+- Ottimale per ClickHouse e BigQuery (partitioning + clustering su una sola tabella)
+
+**Contro**:
+- Ridondanza dei dati: `campaign_name` ripetuto per ogni riga
+- Aggiornamento degli attributi dimensionali richiede backfill
+- Non adatto per analisi multi-dimensionali complesse
+
+**La regola pratica**: usa OBT per le tabelle di analytics ad alta frequenza (dashboard operative), star schema per le analisi cross-dimensionali, Data Vault solo se hai requisiti enterprise specifici.
+
+## 9. dbt Layers: Staging, Intermediate, Marts
+
+**dbt** (data build tool) ha standardizzato il modo in cui si organizzano i modelli in un data warehouse moderno. La struttura a layer è diventata il pattern più diffuso nel settore.
+
+```
+dbt_project/
+└── models/
+    ├── staging/           ← 1:1 con le sorgenti dati
+    │   ├── _sources.yml   ← definizione delle sorgenti
+    │   ├── stg_shopify_orders.sql
+    │   ├── stg_ga4_events.sql
+    │   └── stg_stripe_charges.sql
+    ├── intermediate/      ← Logica business multi-sorgente
+    │   ├── int_orders_enriched.sql
+    │   └── int_user_journey.sql
+    └── marts/             ← Tabelle finali per i consumer
+        ├── marketing/
+        │   ├── fct_campaign_performance.sql
+        │   └── dim_channels.sql
+        └── finance/
+            ├── fct_daily_revenue.sql
+            └── dim_customers.sql
+```
+
+**Staging Layer**: pulizia e standardizzazione, una tabella per ogni sorgente. Nessuna logica di business. Il modello `stg_shopify_orders` fa solo: rinominare colonne in snake_case, castare i tipi, rimuovere duplicati ovvi. Non aggrega, non joina.
+
+**Intermediate Layer**: dove vive la logica di business che dipende da più sorgenti. `int_orders_enriched` joina ordini Shopify con attributi di tracking GA4 (il canale di acquisizione) e dati Stripe (lo stato del pagamento). I modelli intermediate non sono mai esposti direttamente ai consumer BI.
+
+**Marts Layer**: tabelle finali ottimizzate per i consumer specifici. Il team marketing vede `mart_marketing.*`, il team finance vede `mart_finance.*`. La separazione riduce l'accoppiamento e permette di ottimizzare ogni mart per il suo use case.
+
+### Esempio Completo: Modello Dimensionale per E-commerce
+
+```sql
+-- staging/stg_shopify_orders.sql
+-- Pulizia 1:1 dalla sorgente Shopify
+
+SELECT
+    id::string                                           AS order_id,
+    customer_id::string                                  AS customer_id,
+    created_at                                           AS order_created_at,
+    financial_status                                     AS financial_status,
+    total_price::decimal(10,2)                           AS gross_revenue,
+    total_discounts::decimal(10,2)                       AS discounts,
+    total_price - total_discounts                        AS net_revenue,
+    lower(trim(landing_site_ref))                        AS utm_source_raw,
+    fulfillment_status
+FROM {{ source('shopify', 'orders') }}
+WHERE financial_status IN ('paid', 'partially_paid')
+  AND test = false
+```
+
+```sql
+-- marts/marketing/fct_daily_orders.sql
+-- Fact table finale: ordini giornalieri con attributi denormalizzati
+
+WITH orders AS (
+    SELECT * FROM {{ ref('stg_shopify_orders') }}
+    WHERE financial_status = 'paid'
+      AND fulfillment_status = 'fulfilled'
+),
+customers AS (
+    SELECT * FROM {{ ref('dim_customers') }}
+    WHERE is_current = 1
+),
+channels AS (
+    SELECT * FROM {{ ref('dim_channels') }}
+)
+
+SELECT
+    o.order_id,
+    DATE(o.order_created_at)                            AS order_date,
+    o.customer_id,
+    c.country                                           AS customer_country,
+    c.acquisition_channel                               AS first_touch_channel,
+    c.customer_segment,
+    ch.channel_name,
+    ch.channel_type,
+    o.gross_revenue,
+    o.net_revenue,
+    o.discounts,
+    CASE WHEN c.first_order_id = o.order_id
+         THEN TRUE ELSE FALSE END                       AS is_first_order,
+    -- Metriche pre-calcolate per le dashboard
+    o.net_revenue * 0.35                               AS estimated_gross_margin
+FROM orders o
+LEFT JOIN customers c ON o.customer_id = c.customer_id
+LEFT JOIN channels ch ON o.utm_source_raw = ch.utm_source_pattern
+```
+
+Con questa struttura, le dashboard BI possono interrogare `fct_daily_orders` con query semplici senza JOIN, mentre il modello dbt mantiene tutta la logica di business documentata, testata e versionata in Git.
+
+## 10. Checklist di Data Modeling
+
+Prima di considerare un modello dati pronto per la produzione, verifica ogni punto della seguente lista:
+
+**Schema Design**:
+- Le fact table hanno solo misure numeriche e chiavi dimensionali? (Nessun attributo descrittivo nelle fact)
+- Le dimension table hanno chiavi surrogate (generate) oltre alle business key naturali?
+- Le colonne categoriche a bassa cardinalità usano `LowCardinality(String)` o `Enum`?
+- Le colonne monetarie usano `Decimal(10,2)` e non `Float`?
+- La `ORDER BY` della fact table riflette i filtri più comuni nelle query?
+
+**Storicizzazione**:
+- Le dimension che cambiano nel tempo usano SCD Type 2 con `valid_from`, `valid_to`, `is_current`?
+- C'è un meccanismo di backfill per i dati storici prima del go-live?
+
+**dbt Layer**:
+- I modelli staging fanno solo pulizia (nessuna logica business)?
+- Ogni modello mart ha test dbt per `unique` e `not_null` sulle primary key?
+- Le definizioni delle metriche chiave (revenue, conversion rate) sono documentate nel `schema.yml`?
+
+**Performance**:
+- Le tabelle grandi (>1 miliardo di righe) hanno un `PARTITION BY` mensile o settimanale?
+- Le Materialized Views pre-aggregano i risultati per le dashboard ad alta frequenza?
+- I dizionari ClickHouse sono configurati per le tabelle di lookup più frequenti?
 
 
 ## Esercizio Pratico

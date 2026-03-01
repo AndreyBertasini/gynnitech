@@ -542,3 +542,216 @@ I pattern avanzati ti permettono di costruire architetture data lake sofisticate
 - **Pattern decisionale** per scegliere l'architettura giusta in base ai requisiti
 
 Il principio guida: **inizia semplice** (S3Queue + MergeTree) e **aggiungi complessita'** solo quando i requisiti lo richiedono.
+
+## Data Mesh: Decentralizzare la Proprieta' dei Dati
+
+Il Data Mesh, concetto introdotto da Zhamak Dehghani nel 2019 (ora VP di ThoughtWorks) e approfondito nel suo libro del 2022, e' la risposta architetturale ai problemi di scala organizzativa dei data lake centralizzati. Il problema che risolve non e' tecnico: e' organizzativo.
+
+### Il Problema del Data Lake Centralizzato
+
+```plain text
+Data Lake Centralizzato (il problema):
+
+Marketing Team       →  |              |
+Analytics Team       →  | Central Data |  → Analisti
+Engineering Team     →  | Engineering  |
+Finance Team         →  | Team         |
+                         |   (COLLO     |
+                         |   DI BOTTIGLIA)|
+                         |______________|
+
+Sintomi:
+- Backlog del Data Engineering team sempre pieno
+- I domain team non capiscono i propri dati (li ha trasformati qualcun altro)
+- Pipeline rotte scoperte settimane dopo
+- SLA non rispettati perche' il team centrale ha troppe priorita'
+```
+
+### I 4 Principi del Data Mesh
+
+Zhamak Dehghani definisce il Data Mesh su quattro principi:
+
+**1. Domain Ownership**
+Ogni dominio di business e' responsabile dei propri dati come prodotto. Il team Marketing possiede e pubblica i dati di campagna. Il team Product possiede e pubblica gli eventi di prodotto.
+
+**2. Data as a Product**
+I dati esposti da ogni dominio devono rispettare contratti di qualita': schema stabile, SLA di aggiornamento, documentazione, discoverable tramite catalog.
+
+**3. Self-serve Data Platform**
+Una piattaforma condivisa (infrastruttura) che abbassa il costo per i domain team di produrre e consumare dati: provisioning automatico di bucket S3, tabelle Athena, monitoring.
+
+**4. Federated Computational Governance**
+Governance globale (standard di sicurezza, compliance GDPR, naming convention) applicata localmente con autonomia decisionale ai domain team.
+
+### Architettura Data Mesh su AWS
+
+```plain text
+┌─────────────────────────────────────────────────────────────────────┐
+│                         Data Mesh su AWS                             │
+├──────────────────┬──────────────────┬────────────────────────────────┤
+│ Marketing Domain │ Product Domain   │  Finance Domain                │
+│                  │                  │                                │
+│  S3 Bucket:      │  S3 Bucket:      │  S3 Bucket:                   │
+│  mkt-data-prod/  │  prd-data-prod/  │  fin-data-prod/               │
+│                  │                  │                                │
+│  Glue Tables:    │  Glue Tables:    │  Glue Tables:                 │
+│  - campaigns     │  - app_events    │  - orders                     │
+│  - ad_insights   │  - feature_flags │  - revenue                    │
+│  - email_events  │  - ab_tests      │  - refunds                    │
+│                  │                  │                                │
+│  Owner: mkt-eng  │  Owner: prd-eng  │  Owner: fin-eng               │
+│  SLA: daily 8am  │  SLA: real-time  │  SLA: daily 9am               │
+└──────────────────┴──────────────────┴────────────────────────────────┘
+                              │
+                    ┌─────────▼──────────┐
+                    │  Shared Platform    │
+                    │  (Platform Team)    │
+                    │                    │
+                    │  - Lake Formation  │ ← Permessi unificati
+                    │  - Glue Catalog    │ ← Discovery
+                    │  - Athena          │ ← Query engine
+                    │  - CloudWatch      │ ← Monitoring
+                    └────────────────────┘
+```
+
+### Implementazione con S3 + Glue + Lake Formation
+
+AWS Lake Formation e' il servizio che implementa il controllo accessi per dominio nel Data Mesh AWS:
+
+```json
+// Permessi Lake Formation per il Marketing Domain:
+// Il team Marketing puo' LEGGERE i dati di Prodotto,
+// ma non i dati Finanziari (senza approvazione)
+
+{
+  "Principal": {
+    "DataLakePrincipalIdentifier": "arn:aws:iam::123456789:role/marketing-analytics"
+  },
+  "Resource": {
+    "Table": {
+      "DatabaseName": "product_domain",
+      "Name": "app_events"
+    }
+  },
+  "Permissions": ["SELECT"],
+  "PermissionsWithGrantOption": []
+}
+```
+
+```python
+# Script Python per provisioning automatico di un nuovo dominio
+import boto3
+
+def provision_domain(domain_name: str, team_role_arn: str):
+    """
+    Crea l'infrastruttura completa per un nuovo domain nel Data Mesh.
+    Eseguito dal Platform Team su richiesta.
+    """
+    s3 = boto3.client('s3')
+    glue = boto3.client('glue')
+    lakeformation = boto3.client('lakeformation')
+
+    bucket_name = f"{domain_name}-data-prod"
+
+    # 1. Crea il bucket S3 del dominio
+    s3.create_bucket(
+        Bucket=bucket_name,
+        CreateBucketConfiguration={'LocationConstraint': 'eu-west-1'}
+    )
+
+    # 2. Configura lifecycle rules standard (policy aziendale)
+    s3.put_bucket_lifecycle_configuration(
+        Bucket=bucket_name,
+        LifecycleConfiguration={
+            'Rules': [{
+                'ID': 'standard-lifecycle',
+                'Filter': {'Prefix': 'raw/'},
+                'Status': 'Enabled',
+                'Transitions': [
+                    {'Days': 30, 'StorageClass': 'STANDARD_IA'},
+                    {'Days': 90, 'StorageClass': 'GLACIER_IR'},
+                ],
+                'Expiration': {'Days': 730}
+            }]
+        }
+    )
+
+    # 3. Registra il bucket con Lake Formation
+    lakeformation.register_resource(
+        ResourceArn=f"arn:aws:s3:::{bucket_name}",
+        UseServiceLinkedRole=False,
+        RoleArn='arn:aws:iam::123456789:role/lakeformation-service-role'
+    )
+
+    # 4. Crea database Glue per il dominio
+    glue.create_database(
+        DatabaseInput={
+            'Name': f"{domain_name}_domain",
+            'Description': f"Database del dominio {domain_name}",
+            'LocationUri': f"s3://{bucket_name}/",
+        }
+    )
+
+    # 5. Concedi permessi al team del dominio
+    lakeformation.grant_permissions(
+        Principal={'DataLakePrincipalIdentifier': team_role_arn},
+        Resource={'Database': {'Name': f"{domain_name}_domain"}},
+        Permissions=['CREATE_TABLE', 'DESCRIBE', 'ALTER', 'DROP']
+    )
+
+    print(f"Dominio {domain_name} provisionato correttamente.")
+    return bucket_name
+
+# Uso:
+# provision_domain('marketing', 'arn:aws:iam::123456789:role/marketing-analytics')
+```
+
+## Data Fabric vs Data Mesh
+
+Il Data Fabric e' un approccio alternativo che usa l'AI e i metadata per connettere automaticamente fonti di dati eterogenee, senza richiedere la ristrutturazione organizzativa del Data Mesh.
+
+### Confronto
+
+| Aspetto                    | Data Mesh                           | Data Fabric                            |
+| -------------------------- | ----------------------------------- | -------------------------------------- |
+| **Approccio**              | Organizzativo + tecnologico         | Principalmente tecnologico             |
+| **Ownership**              | Distribuita ai domain team          | Centralizzata (ma automatizzata)       |
+| **Governance**             | Federated                           | Centralizzata via metadata AI          |
+| **Complessita'**           | Alta (richiede cambio cultura)      | Media (richiede infrastruttura AI)     |
+| **Aziende**                | Netflix, Zalando, JP Morgan         | SAP, IBM, Informatica                  |
+| **Costo implementazione**  | Alto (riorganizzazione team)        | Medio (tooling)                        |
+| **Adatto per**             | Aziende >200 persone, multi-domain  | Aziende con dati legacy da integrare   |
+
+## Architetture Centralizzate vs Federate: Il Confronto
+
+Dopo aver visto Lambda, CDC, Data Mesh e Data Fabric, qual e' l'architettura giusta per te?
+
+```plain text
+Fattori                  Centralized              Federated (Data Mesh)
+─────────────────────────────────────────────────────────────────────────
+Team size                < 10 persone data        > 50 persone in domain team
+Numero di domini         1-3                      4+
+Velocita' di iterazione  Non critica              Critica per ogni dominio
+Governance               Facile (1 team)          Complessa (standard + autonomia)
+Consistenza dei dati     Alta                     Media (ogni dominio fa da se')
+Costo iniziale           Basso                    Alto
+Costo a lungo termine    Alto (bottleneck)        Basso (scale)
+Esempi aziende           Startup, PMI             Netflix, Spotify, ING Bank
+```
+
+<Aside type="tip">
+Per il 90% delle aziende marketing analytics, un data lake centralizzato con buona governance e' la scelta corretta. Il Data Mesh ha senso solo quando il team centrale di data engineering e' il collo di bottiglia organizzativo — tipicamente quando si supera la soglia di 5-6 domain team che competono per le risorse di engineering.
+</Aside>
+
+### Caso Studio: Zalando e il Data Mesh
+
+Zalando (la piu' grande piattaforma fashion e-commerce europea, 50 milioni di clienti attivi) ha adottato il Data Mesh nel 2020 come parte del progetto interno "Nakadi" e poi "Tessellate". Prima della migrazione, il loro central data team era il collo di bottiglia per 200+ team di prodotto.
+
+**Risultati dopo 2 anni di Data Mesh:**
+- 300+ data product pubblicati da domain team autonomi
+- Time-to-insight ridotto da settimane a giorni per nuovi use case
+- Il team platform gestisce l'infrastruttura condivisa, non i singoli dataset
+
+**La lezione chiave di Zalando:** il Data Mesh non elimina il bisogno di una piattaforma condivisa. Richiede anzi un investimento maggiore nell'infrastruttura di base (catalog, governance, monitoring self-service) per abilitare l'autonomia dei domain team senza creare chaos.
+
+Per un marketing analytics team di 5-15 persone, investire in un Data Mesh avrebbe il costo dell'infrastruttura senza i benefici dell'autonomia distribuita. La scelta pragmatica rimane: un data lake centralizzato ben governato, con proprietari chiari per ogni dataset (anche se tutto vive in un unico bucket S3), e documentazione come codice in Git.

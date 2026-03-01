@@ -557,3 +557,357 @@ def send_to_dlq(msg, reason):
 - Gestisci gli **offset manualmente** per dati business-critical (commit dopo il processing)
 - Il **rebalancing** e' inevitabile; usa il Cooperative Sticky Assignor per minimizzare le pause
 - Implementa una **Dead Letter Queue** per gestire i messaggi problematici senza bloccare la pipeline
+
+## Consumer Group Rebalancing: Anatomia e Ottimizzazione
+
+Il rebalancing e' uno dei fenomeni piu' impattanti nelle pipeline Kafka. Durante un rebalance, tutti i consumer del gruppo si fermano, le partizioni vengono ridistribuite, e il processing riprende. In pipeline ad alto volume, anche pochi secondi di stop causano lag significativo.
+
+### Trigger del Rebalancing
+
+```plain text
+CAUSE DI UN REBALANCE:
+  1. Consumer si unisce al gruppo (nuovo deployment, scaling up)
+  2. Consumer lascia il gruppo (crash, shutdown, scaling down)
+  3. Consumer non invia heartbeat in tempo (timeout)
+  4. Consumer supera max.poll.interval.ms (processing troppo lento)
+  5. Nuove partizioni aggiunte al topic
+  6. Subscription cambia (pattern-based subscribe)
+
+SEQUENZA DI UN REBALANCE CLASSICO (Eager Rebalance):
+  T=0: Consumer C2 cade
+  T=3s: Group Coordinator rileva la mancanza di heartbeat
+  T=10s: session.timeout.ms scade, C2 dichiarato morto
+  T=10s: STOP-THE-WORLD - tutti i consumer smettono di processare
+  T=10s: Group Coordinator avvia la fase di Join Group
+  T=11s: C1 e C3 inviano JoinGroup request
+  T=11s: Group Coordinator nomina un leader (es. C1)
+  T=12s: C1 calcola la nuova assegnazione delle partizioni
+  T=12s: Group Coordinator invia SyncGroup con la nuova mappa
+  T=13s: C1 e C3 riprendono il consuming con le nuove partizioni
+  Downtime totale: ~3-4 secondi
+```
+
+### Cooperative Sticky Rebalancing
+
+Il **Cooperative Sticky Assignor** (disponibile da Kafka 2.4) risolve il problema dello stop-the-world. Invece di revocare tutte le partizioni e riassegnarle, rivoca solo le partizioni che devono essere spostate.
+
+```plain text
+SCENARIO: 6 partizioni, 3 consumer, C2 cade
+
+EAGER REBALANCE (vecchio):
+  C1 perde P0, P1 (anche se le riprende subito)
+  C3 perde P4, P5 (anche se le riprende subito)
+  --> TUTTI i consumer si fermano per 3-4 secondi
+
+COOPERATIVE STICKY REBALANCE (nuovo):
+  Solo le partizioni P2, P3 di C2 devono essere spostate
+  C1 e C3 NON si fermano per P0, P1, P4, P5
+  --> Solo il processing di P2 e P3 si ferma brevemente
+
+  Risultato: downtime ridotto del 60-80% in cluster tipici
+```
+
+Configurazione:
+
+```python
+config = {
+    'partition.assignment.strategy': 'cooperative-sticky',
+    # Alternativa per compatibilita' con versioni piu' vecchie:
+    # 'partition.assignment.strategy': 'roundrobin,cooperative-sticky'
+}
+```
+
+### Minimizzare il Numero di Rebalance
+
+Il parametro piu' importante per evitare rebalance indesiderati e' `session.timeout.ms`:
+
+```plain text
+PROBLEMA TIPICO: consumer che fa processing lento causa rebalance
+
+Scenario:
+  session.timeout.ms = 45000 (45 secondi)
+  heartbeat.interval.ms = 3000 (3 secondi)
+  max.poll.interval.ms = 300000 (5 minuti)
+
+  Consumer chiama poll(), riceve 1000 messaggi
+  Processing di un singolo messaggio richiede 10 secondi
+  1000 x 10s = 10.000 secondi >> max.poll.interval.ms
+
+  Kafka ritiene il consumer morto --> rebalance
+
+SOLUZIONI:
+  1. Riduci il batch size: max.poll.records = 100
+  2. Aumenta max.poll.interval.ms (se il processing e' giustificatamente lento)
+  3. Processa in modo asincrono, torna al poll() piu' frequentemente
+  4. Parallelizza il processing nel consumer
+```
+
+| Parametro | Default | Consigliato per pipeline lente | Spiegazione |
+| --- | --- | --- | --- |
+| `session.timeout.ms` | 45000 | 60000 | Timeout prima che il consumer sia dichiarato morto |
+| `heartbeat.interval.ms` | 3000 | 5000 | Frequenza degli heartbeat (1/3 di session.timeout) |
+| `max.poll.interval.ms` | 300000 | 600000 | Tempo massimo tra due poll() |
+| `max.poll.records` | 500 | 100-200 | Record per poll (meno = processing piu' veloce) |
+
+## Static Group Membership: Eliminare i Rebalance al Deploy
+
+Il **static group membership** (parametro `group.instance.id`) risolve un caso specifico: ogni volta che un consumer viene riavviato (es. deploy, aggiornamento), causa un rebalance. Con la static membership, Kafka "ricorda" il consumer e riassegna le stesse partizioni quando torna online.
+
+### Come Funziona
+
+```plain text
+SENZA static membership (dynamic):
+  Deploy del consumer in Kubernetes:
+  T=0: Pod vecchio viene terminato --> consumer lascia il gruppo --> REBALANCE
+  T=5: Nuovo pod parte --> consumer si unisce --> REBALANCE (di nuovo)
+  Totale: 2 rebalance per ogni deploy, ~8-10 secondi di downtime
+
+CON static membership (static):
+  Deploy con group.instance.id = "marketing-consumer-pod-1"
+  T=0: Pod vecchio viene terminato
+       --> Kafka aspetta session.timeout.ms prima di dichiararlo morto
+       --> NESSUN rebalance immediato
+  T=3: Nuovo pod parte con lo stesso group.instance.id
+       --> Kafka riconosce il "consumer"
+       --> Riassegna le stesse partizioni (sticky)
+       --> Consumer riprende dal proprio offset
+  Totale: 0 rebalance, continuita' del processing
+```
+
+### Configurazione
+
+```python
+# Consumer con static membership
+config = {
+    'bootstrap.servers': 'kafka-1:9092,kafka-2:9092,kafka-3:9092',
+    'group.id': 'clickhouse_ingestion',
+    'group.instance.id': 'clickhouse-consumer-0',  # Univoco per ogni pod
+    'session.timeout.ms': 60000,
+    'partition.assignment.strategy': 'cooperative-sticky',
+    'auto.offset.reset': 'earliest',
+    'enable.auto.commit': False,
+}
+```
+
+In Kubernetes, usa il nome del pod come `group.instance.id`:
+
+```yaml
+# kubernetes deployment
+env:
+  - name: KAFKA_GROUP_INSTANCE_ID
+    valueFrom:
+      fieldRef:
+        fieldPath: metadata.name  # Es: "clickhouse-consumer-0", "clickhouse-consumer-1"
+```
+
+<Aside type="caution">
+Con static membership, se un consumer cade e non torna online entro `session.timeout.ms`, le sue partizioni rimangono non consumate per tutto quel tempo. Scegli un valore di session.timeout.ms che bilanci il rischio di rebalance spurio con l'accettabilita' del lag in caso di crash reale. 30-60 secondi e' un buon punto di partenza.
+</Aside>
+
+## Consumer Lag Monitoring con JMX e Prometheus
+
+Il **consumer lag** e' la metrica piu' critica per le pipeline Kafka: misura quanti messaggi sono stati prodotti ma non ancora consumati. Un lag in crescita indica che il consumer non riesce a stare al passo con il producer.
+
+### Calcolo del Lag
+
+```plain text
+Consumer Lag per partizione = Log End Offset - Consumer Committed Offset
+
+Esempio:
+  Topic: marketing.clicks, Partizione 0
+  Log End Offset: 15.847 (ultimo messaggio prodotto)
+  Consumer Committed Offset: 15.200 (ultimo messaggio processato)
+  Lag: 647 messaggi
+
+  Total Lag per gruppo = somma del lag di tutte le partizioni
+```
+
+### Metriche JMX Chiave
+
+Kafka espone le metriche del consumer lag via JMX. Le metriche piu' importanti:
+
+```yaml
+# Metriche JMX consumer
+kafka.consumer:type=consumer-fetch-manager-metrics,client-id=*
+  records-lag          # Lag corrente per partizione (gauge)
+  records-lag-max      # Lag massimo tra tutte le partizioni (gauge)
+  records-lag-avg      # Lag medio tra tutte le partizioni (gauge)
+
+kafka.consumer:type=consumer-coordinator-metrics,client-id=*
+  rebalance-rate-per-hour  # Numero di rebalance all'ora
+  last-rebalance-seconds-ago  # Secondi dall'ultimo rebalance
+```
+
+### Configurazione Prometheus con JMX Exporter
+
+```yaml
+# jmx_prometheus_javaagent config per consumer
+lowercaseOutputName: true
+rules:
+  # Consumer lag per gruppo, topic e partizione
+  - pattern: kafka.consumer<type=consumer-fetch-manager-metrics, client-id=(.+)><>records-lag
+    name: kafka_consumer_records_lag
+    type: GAUGE
+    labels:
+      client_id: "$1"
+
+  - pattern: kafka.consumer<type=consumer-fetch-manager-metrics, client-id=(.+)><>records-lag-max
+    name: kafka_consumer_records_lag_max
+    type: GAUGE
+    labels:
+      client_id: "$1"
+
+  # Rebalance metrics
+  - pattern: kafka.consumer<type=consumer-coordinator-metrics, client-id=(.+)><>rebalance-rate-per-hour
+    name: kafka_consumer_rebalance_rate
+    type: GAUGE
+    labels:
+      client_id: "$1"
+```
+
+### Monitoring Esterno con kafka-consumer-groups.sh
+
+Oltre al JMX, puoi monitorare il lag con lo strumento CLI incluso in Kafka:
+
+```bash
+# Visualizza il lag di tutti i consumer group
+kafka-consumer-groups.sh \
+  --bootstrap-server kafka:9092 \
+  --describe --all-groups
+
+# Output:
+# GROUP                    TOPIC              PARTITION  CURRENT-OFFSET  LOG-END-OFFSET  LAG
+# clickhouse_ingestion     marketing.clicks   0          15200           15847           647
+# clickhouse_ingestion     marketing.clicks   1          22100           22100           0
+# clickhouse_ingestion     marketing.clicks   2          9800            10500           700
+# email_trigger            marketing.clicks   0          15847           15847           0
+
+# Monitora un gruppo specifico in real-time
+watch -n 5 'kafka-consumer-groups.sh \
+  --bootstrap-server kafka:9092 \
+  --describe --group clickhouse_ingestion'
+```
+
+### Alert Rules per il Consumer Lag
+
+```yaml
+# prometheus-alerts.yml
+groups:
+  - name: kafka_consumer_alerts
+    rules:
+      - alert: KafkaConsumerLagCritical
+        expr: kafka_consumer_records_lag_max > 50000
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Consumer lag critico: {{ $value }} messaggi in attesa"
+          description: "Il consumer {{ $labels.client_id }} ha un lag di {{ $value }} messaggi da piu' di 5 minuti."
+
+      - alert: KafkaConsumerLagWarning
+        expr: kafka_consumer_records_lag_max > 10000
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Consumer lag alto: {{ $value }} messaggi in attesa"
+
+      - alert: KafkaConsumerRebalancingFrequently
+        expr: kafka_consumer_rebalance_rate > 2
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Consumer group si sta ribilanciando troppo frequentemente"
+```
+
+## Kafka Streams vs Consumer API: Quando Usare l'Uno o l'Altro
+
+**Kafka Streams** e' una libreria Java/Scala per il processing di stream integrata nell'ecosistema Kafka. La **Consumer API** e' l'API di basso livello per leggere messaggi. Scegliere quella giusta dipende dalla complessita' del processing.
+
+### Kafka Streams: Cosa Offre
+
+Kafka Streams aggiunge sopra la Consumer API:
+
+- **Stateful processing**: aggregazioni, join, finestre temporali con state store locale
+- **Exactly-once semantics**: garantisce che ogni evento sia processato esattamente una volta, anche in caso di crash
+- **Topology dichiarativa**: definisci il processing come un grafo di operazioni
+- **Fault tolerance automatica**: lo stato viene replicato su un topic Kafka interno
+
+```plain text
+Kafka Streams Topology per CTR in tempo reale:
+
+Sorgente: marketing.clicks
+    |
+    v
+Filter: solo eventi con campaign_id non nullo
+    |
+    v
+GroupBy: campaign_id
+    |
+    v
+Window: tumbling window di 5 minuti
+    |
+    v
+Aggregate: count() per finestra
+    |
+    v
+Join con: marketing.impressions (aggregato allo stesso modo)
+    |
+    v
+Map: ctr = clicks / impressions * 100
+    |
+    v
+Destinazione: marketing.ctr_realtime
+```
+
+### Consumer API: Quando Basta
+
+La Consumer API raw e' sufficiente quando:
+
+- Il processing e' **stateless**: ogni messaggio e' indipendente dagli altri
+- Non hai bisogno di **join** tra topic
+- Non hai bisogno di **finestre temporali** o aggregazioni
+- Vuoi **massimo controllo** sul comportamento del consumer
+- Usi un linguaggio non JVM (Python, Go, Rust) — Kafka Streams e' solo Java/Scala
+
+Esempi di uso della Consumer API:
+
+```plain text
+Stateless (Consumer API sufficiente):
+  - Leggere eventi e inserirli in ClickHouse senza trasformazioni
+  - Triggerare email in base a eventi di conversione
+  - Archiviare eventi raw su S3
+  - Inviare notifiche push per ogni evento
+
+Stateful (considera Kafka Streams o Flink):
+  - Calcolare CTR per campagna ogni 5 minuti
+  - Sessionizzare gli eventi utente (raggruppare per sessione)
+  - Rilevare pattern fraudolenti (es: 10 click in 1 secondo dallo stesso IP)
+  - Join tra click e impression per calcolare ROAS in tempo reale
+```
+
+### Confronto Diretto
+
+| Aspetto | Consumer API | Kafka Streams |
+| --- | --- | --- |
+| **Linguaggi** | Java, Python, Go, Rust, .NET | Solo Java e Scala |
+| **Stateful processing** | Da implementare manualmente | Built-in (state store) |
+| **Join tra topic** | Molto complesso manualmente | Nativamente supportato |
+| **Windowing** | Da implementare | Built-in (tumbling, hopping, session) |
+| **Exactly-once** | Possibile ma complesso | Built-in con EOS |
+| **Scalabilita'** | Aggiungi consumer al gruppo | Aggiungi istanze dell'app |
+| **Overhead** | Minimo | Aggiunge latenza (~10-50ms) |
+| **Fault tolerance** | Da implementare | Automatica via changelog topic |
+| **Debugging** | Piu' semplice | Piu' complesso (topology) |
+| **Curva di apprendimento** | Bassa | Media-Alta |
+
+### Alternativa: Apache Flink
+
+Per use case molto complessi (machine learning in streaming, CEP - Complex Event Processing, join multi-stream con finestre temporali lunghe), considera **Apache Flink**:
+
+- Supporta Python (PyFlink), Java, Scala
+- Latenza piu' bassa di Kafka Streams per topologie complesse
+- Connector nativo con Kafka come sorgente e destinazione
+- Piu' complesso da operare (richiede un cluster Flink separato)
+- Usato da Uber (rilevamento frodi), Netflix (quality of experience), Alibaba (Double 11)

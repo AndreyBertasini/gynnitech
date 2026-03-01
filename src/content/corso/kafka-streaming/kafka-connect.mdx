@@ -437,3 +437,440 @@ Configurazione:
 - La **REST API** permette di gestire i connector programmaticamente
 - Configura **Dead Letter Queue** e **errors.tolerance** per gestire i messaggi problematici
 - Monitora con metriche JMX e health check automatici per prevenire downtime
+
+## Single Message Transforms in Dettaglio
+
+Le SMT sono trasformazioni atomiche applicate uno a uno ad ogni messaggio. Possono essere concatenate in sequenza. Sono potenti ma hanno limiti: non possono aggregare piu' messaggi, non hanno stato, e non possono fare join.
+
+### ReplaceField: Rinominare e Rimuovere Campi
+
+`ReplaceField` e' una delle SMT piu' usate per normalizzare i dati prima che arrivino nella destinazione.
+
+```json
+{
+  "transforms": "renameAndClean",
+
+  "transforms.renameAndClean.type": "org.apache.kafka.connect.transforms.ReplaceField$Value",
+
+  "transforms.renameAndClean.renames": "usr_id:user_id,cmp_id:campaign_id,ts:timestamp",
+
+  "transforms.renameAndClean.blacklist": "internal_debug_field,temp_session_token,raw_cookie"
+}
+```
+
+**Comportamento:**
+
+```plain text
+Messaggio di input:
+{
+  "usr_id": "u123",
+  "cmp_id": "cmp_001",
+  "ts": "2025-01-15T10:00:00Z",
+  "page_url": "/prodotti/scarpe",
+  "internal_debug_field": "value_da_non_propagare",
+  "raw_cookie": "__utm=abc123..."
+}
+
+Messaggio dopo ReplaceField:
+{
+  "user_id": "u123",       <-- rinominato
+  "campaign_id": "cmp_001",  <-- rinominato
+  "timestamp": "2025-01-15T10:00:00Z",  <-- rinominato
+  "page_url": "/prodotti/scarpe"
+  <-- internal_debug_field eliminato (in blacklist)
+  <-- raw_cookie eliminato (in blacklist)
+}
+```
+
+Puoi anche usare `whitelist` per mantenere solo i campi che ti servono:
+
+```json
+{
+  "transforms.selectFields.type": "org.apache.kafka.connect.transforms.ReplaceField$Value",
+  "transforms.selectFields.whitelist": "user_id,campaign_id,timestamp,revenue,country"
+}
+```
+
+### MaskField: Protezione Dati Sensibili per GDPR
+
+`MaskField` sostituisce il valore di un campo con un valore fisso (stringa vuota, zero, null) senza rimuovere il campo dalla struttura. Essenziale per compliance GDPR quando si archiviano dati su S3 o si replicano verso sistemi terzi.
+
+```json
+{
+  "transforms": "maskPII",
+
+  "transforms.maskPII.type": "org.apache.kafka.connect.transforms.MaskField$Value",
+  "transforms.maskPII.fields": "email,phone,ip_address,full_name",
+  "transforms.maskPII.replacement": ""
+}
+```
+
+**Comportamento:**
+
+```plain text
+Messaggio di input (topic: crm.contacts):
+{
+  "user_id": "u123",
+  "email": "mario.rossi@example.com",
+  "phone": "+39 02 1234567",
+  "ip_address": "192.168.1.100",
+  "full_name": "Mario Rossi",
+  "country": "IT",
+  "campaign_source": "google"
+}
+
+Messaggio dopo MaskField (verso S3 sink):
+{
+  "user_id": "u123",
+  "email": "",             <-- mascherato
+  "phone": "",             <-- mascherato
+  "ip_address": "",        <-- mascherato
+  "full_name": "",         <-- mascherato
+  "country": "IT",
+  "campaign_source": "google"
+}
+```
+
+<Aside type="tip">
+Usa connector diversi per destinazioni diverse con SMT diverse. Il connector verso ClickHouse (analytics interna) puo' avere tutti i campi. Il connector verso S3 (archivio condiviso con partner) usa MaskField per i dati PII. Stessa sorgente Kafka, due livelli di privacy.
+</Aside>
+
+### TimestampConverter: Normalizzare i Formati Timestamp
+
+I sistemi sorgente usano formati timestamp diversi: epoch in millisecondi, epoch in secondi, stringhe ISO 8601, stringhe custom. `TimestampConverter` li normalizza.
+
+```json
+{
+  "transforms": "normalizeTimestamp",
+
+  "transforms.normalizeTimestamp.type": "org.apache.kafka.connect.transforms.TimestampConverter$Value",
+  "transforms.normalizeTimestamp.field": "created_at",
+  "transforms.normalizeTimestamp.type.name": "Timestamp",
+  "transforms.normalizeTimestamp.format": "yyyy-MM-dd HH:mm:ss"
+}
+```
+
+**Conversioni possibili:**
+
+| Da | A | Config `type.name` |
+| --- | --- | --- |
+| Epoch ms (long) | Stringa ISO | `string` con `format` |
+| Stringa ISO | Epoch ms (long) | `unix` |
+| Stringa custom | Stringa ISO | `string` con `format` source e target |
+| Epoch ms | Epoch s | `unix` (divide per 1000) |
+
+**Esempio pratico: MySQL DATETIME a epoch per ClickHouse**
+
+```json
+{
+  "transforms": "convertMysqlDatetime",
+  "transforms.convertMysqlDatetime.type": "org.apache.kafka.connect.transforms.TimestampConverter$Value",
+  "transforms.convertMysqlDatetime.field": "order_date",
+  "transforms.convertMysqlDatetime.type.name": "unix",
+  "transforms.convertMysqlDatetime.unix.precision": "milliseconds",
+  "transforms.convertMysqlDatetime.format": "yyyy-MM-dd HH:mm:ss"
+}
+```
+
+## Connector Monitoring con JMX
+
+Ogni task di un Kafka Connect connector espone metriche JMX per monitorare la salute e le performance.
+
+### Metriche JMX per Source Connector
+
+```plain text
+MBean: kafka.connect:type=source-task-metrics,connector={connector-name},task={task-id}
+
+Metriche chiave:
+  source-record-poll-rate       - Record letti dalla sorgente/secondo
+  source-record-poll-total      - Record totali letti dall'avvio
+  source-record-write-rate      - Record scritti su Kafka/secondo
+  source-record-write-total     - Record totali scritti su Kafka
+  poll-batch-max-time-ms        - Tempo massimo per poll dal sistema sorgente
+  poll-batch-avg-time-ms        - Tempo medio per poll
+  offset-commit-success-percentage - Percentuale di commit offset riusciti
+```
+
+### Metriche JMX per Sink Connector
+
+```plain text
+MBean: kafka.connect:type=sink-task-metrics,connector={connector-name},task={task-id}
+
+Metriche chiave:
+  sink-record-read-rate         - Record letti da Kafka/secondo
+  sink-record-send-rate         - Record inviati alla destinazione/secondo
+  sink-record-send-total        - Record totali inviati alla destinazione
+  partition-count               - Numero di partizioni assegnate al task
+  offset-commit-seq-no          - Sequenza del commit offset (monotonica)
+  put-batch-max-time-ms         - Tempo massimo per insert nella destinazione
+  put-batch-avg-time-ms         - Tempo medio per insert
+```
+
+### Configurazione Prometheus con JMX Exporter per Connect
+
+```yaml
+# jmx_exporter_connect_config.yml
+lowercaseOutputName: true
+rules:
+  # Source connector throughput
+  - pattern: 'kafka.connect<type=source-task-metrics, connector=(.+), task=(.+)><>source-record-write-rate'
+    name: kafka_connect_source_record_write_rate
+    type: GAUGE
+    labels:
+      connector: "$1"
+      task: "$2"
+
+  # Sink connector throughput
+  - pattern: 'kafka.connect<type=sink-task-metrics, connector=(.+), task=(.+)><>sink-record-send-rate'
+    name: kafka_connect_sink_record_send_rate
+    type: GAUGE
+    labels:
+      connector: "$1"
+      task: "$2"
+
+  # Sink batch latency
+  - pattern: 'kafka.connect<type=sink-task-metrics, connector=(.+), task=(.+)><>put-batch-avg-time-ms'
+    name: kafka_connect_sink_put_batch_avg_ms
+    type: GAUGE
+    labels:
+      connector: "$1"
+      task: "$2"
+
+  # Dead letter queue
+  - pattern: 'kafka.connect<type=task-error-metrics, connector=(.+), task=(.+)><>deadletterqueue-produce-requests'
+    name: kafka_connect_dlq_requests_total
+    type: COUNTER
+    labels:
+      connector: "$1"
+      task: "$2"
+```
+
+## Troubleshooting dei Connector
+
+I connector Kafka Connect falliscono per motivi prevedibili. Ecco i problemi piu' comuni e come risolverli.
+
+### Problema 1: Connector Non Parte (FAILED all'avvio)
+
+```bash
+# Diagnostica: leggi i log del connector
+curl -s http://connect:8083/connectors/postgres-orders-source/status | jq .
+
+# Output tipico di errore:
+# {
+#   "name": "postgres-orders-source",
+#   "connector": {
+#     "state": "FAILED",
+#     "trace": "org.apache.kafka.connect.errors.ConnectException:
+#               Failed to connect to database..."
+#   }
+# }
+
+# Cause comuni e soluzioni:
+# 1. Credenziali database errate
+#    --> Verifica connection.url, user, password
+#    --> Testa la connessione manualmente: psql -h host -U user -d db
+
+# 2. Plugin non installato sul worker
+#    --> Verifica: ls $KAFKA_HOME/plugins/
+#    --> Riavvia il worker dopo aver copiato il plugin
+
+# 3. Configurazione JSON malformata
+#    --> Valida il JSON prima del deploy: cat config.json | python -m json.tool
+
+# 4. Topic di destinazione non esiste (con auto.create.topics.enable=false)
+#    --> Crea il topic manualmente prima di avviare il connector
+```
+
+### Problema 2: Task in FAILED durante il Processing
+
+```bash
+# Leggi il trace dello stack
+curl -s http://connect:8083/connectors/s3-marketing-sink/status | jq '.tasks[] | select(.state == "FAILED")'
+
+# Output:
+# {
+#   "id": 2,
+#   "state": "FAILED",
+#   "worker_id": "connect-3:8083",
+#   "trace": "org.apache.kafka.connect.errors.ConnectException:
+#             Caused by: com.amazonaws.services.s3.model.AmazonS3Exception:
+#             Access Denied (Service: Amazon S3)..."
+# }
+
+# Causa: permessi S3 insufficienti
+# Soluzione: verifica IAM role/policy per il bucket
+
+# Restart del task fallito (dopo aver risolto il problema)
+curl -X POST http://connect:8083/connectors/s3-marketing-sink/tasks/2/restart
+
+# Se il task continua a fallire, abilita errors.tolerance per skippare
+# Aggiorna la configurazione con:
+# "errors.tolerance": "all",
+# "errors.deadletterqueue.topic.name": "s3-sink-errors"
+```
+
+### Problema 3: Consumer Lag del Sink in Crescita
+
+```plain text
+SINTOMO: il sink connector non riesce a stare al passo con il producer
+
+DIAGNOSI:
+  1. Verifica la velocita' del sink:
+     kafka-consumer-groups.sh --describe --group connect-s3-marketing-sink
+     Se il lag cresce, il sink e' piu' lento del producer
+
+  2. Verifica le metriche JMX:
+     put-batch-avg-time-ms > 1000ms indica che la destinazione e' lenta
+
+SOLUZIONI:
+  a) Aumenta il numero di task (parallelo):
+     "tasks.max": 6 (invece di 3)
+     Funziona solo se ci sono abbastanza partizioni
+
+  b) Aumenta il batch size (per S3 Sink):
+     "flush.size": 50000 (invece di 10000)
+     Scrive meno file piu' grandi, piu' efficiente per S3
+
+  c) Per ClickHouse Sink: verifica il tuning del batch insert
+     "batch.size": 100000
+     "batch.timeout.ms": 30000
+```
+
+### Problema 4: Offset non Committati (Messaggi Duplicati)
+
+```plain text
+SINTOMO: dopo un restart, il connector riprocessa messaggi gia' processati
+
+CAUSA: il commit degli offset e' fallito prima del crash
+
+DIAGNOSI:
+  - Verifica offset-commit-success-percentage nelle metriche JMX
+  - Controlla i log per "Failed to commit offsets"
+
+SOLUZIONE:
+  1. Assicurati che la destinazione sia idempotente:
+     ClickHouse: usa ReplacingMergeTree con event_id come chiave
+     S3: i file Parquet sono idempotenti per natura (stesso nome = sovrascritto)
+     PostgreSQL: usa INSERT ... ON CONFLICT DO UPDATE
+
+  2. Aumenta offset.flush.timeout.ms (default: 5000ms)
+     "offset.flush.timeout.ms": 10000
+```
+
+## Kafka Connect REST API per Deployment Automatico
+
+La REST API di Kafka Connect permette di automatizzare il deployment e la gestione dei connector in pipeline CI/CD.
+
+### Script di Deploy Automatico
+
+```bash
+#!/bin/bash
+# deploy_connector.sh - Deploy o aggiorna un connector
+
+CONNECT_URL="${CONNECT_URL:-http://connect:8083}"
+CONNECTOR_CONFIG_FILE="$1"
+CONNECTOR_NAME=$(cat "$CONNECTOR_CONFIG_FILE" | python -c "import sys,json; print(json.load(sys.stdin)['name'])")
+
+echo "Deploying connector: $CONNECTOR_NAME"
+
+# Controlla se il connector esiste gia'
+HTTP_STATUS=$(curl -o /dev/null -s -w "%{http_code}" "$CONNECT_URL/connectors/$CONNECTOR_NAME")
+
+if [ "$HTTP_STATUS" = "200" ]; then
+    echo "Connector esiste, aggiornamento configurazione..."
+    # Aggiorna solo la configurazione (senza resettare gli offset)
+    CONNECTOR_CONFIG=$(cat "$CONNECTOR_CONFIG_FILE" | python -c "import sys,json; data=json.load(sys.stdin); print(json.dumps(data['config']))")
+    curl -s -X PUT \
+      -H "Content-Type: application/json" \
+      --data "$CONNECTOR_CONFIG" \
+      "$CONNECT_URL/connectors/$CONNECTOR_NAME/config" | python -m json.tool
+else
+    echo "Nuovo connector, creazione..."
+    curl -s -X POST \
+      -H "Content-Type: application/json" \
+      --data @"$CONNECTOR_CONFIG_FILE" \
+      "$CONNECT_URL/connectors" | python -m json.tool
+fi
+
+# Attendi che il connector sia in RUNNING
+MAX_WAIT=60
+ELAPSED=0
+while [ $ELAPSED -lt $MAX_WAIT ]; do
+    STATE=$(curl -s "$CONNECT_URL/connectors/$CONNECTOR_NAME/status" | python -c "import sys,json; print(json.load(sys.stdin)['connector']['state'])")
+    if [ "$STATE" = "RUNNING" ]; then
+        echo "Connector in stato RUNNING"
+        exit 0
+    fi
+    echo "Stato corrente: $STATE, attesa..."
+    sleep 5
+    ELAPSED=$((ELAPSED + 5))
+done
+
+echo "ERRORE: Connector non in RUNNING dopo $MAX_WAIT secondi"
+curl -s "$CONNECT_URL/connectors/$CONNECTOR_NAME/status" | python -m json.tool
+exit 1
+```
+
+### Integrazione con GitHub Actions
+
+```yaml
+# .github/workflows/deploy-connectors.yml
+name: Deploy Kafka Connect Connectors
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'kafka-connect/**'
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Deploy all connectors
+        env:
+          CONNECT_URL: ${{ secrets.KAFKA_CONNECT_URL }}
+        run: |
+          for config_file in kafka-connect/*.json; do
+            echo "Deploying $config_file"
+            ./scripts/deploy_connector.sh "$config_file"
+          done
+
+      - name: Verify all connectors are RUNNING
+        env:
+          CONNECT_URL: ${{ secrets.KAFKA_CONNECT_URL }}
+        run: |
+          FAILED=0
+          for connector in $(curl -s $CONNECT_URL/connectors | python -c "import sys,json; [print(c) for c in json.load(sys.stdin)]"); do
+            STATE=$(curl -s $CONNECT_URL/connectors/$connector/status | python -c "import sys,json; print(json.load(sys.stdin)['connector']['state'])")
+            if [ "$STATE" != "RUNNING" ]; then
+              echo "ERRORE: $connector in stato $STATE"
+              FAILED=1
+            fi
+          done
+          exit $FAILED
+```
+
+### Versionamento dei Connector
+
+Usa il controllo di versione per le configurazioni dei connector come fai per il codice:
+
+```plain text
+kafka-connect/
+  README.md
+  sources/
+    postgres-orders-source.json   <-- config del connector
+    http-google-ads-source.json
+  sinks/
+    s3-marketing-events-sink.json
+    clickhouse-events-sink.json
+    elasticsearch-log-sink.json
+  scripts/
+    deploy_connector.sh
+    check_health.sh
+
+Ogni modifica alla configurazione passa per PR e review.
+I deploy sono automatizzati via CI/CD su merge in main.
+```

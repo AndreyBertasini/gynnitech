@@ -427,7 +427,111 @@ LIMIT 20;
 > **Consiglio:**
 > Per la domanda 3, la risposta e uno skip index `bloom_filter` su `user_id`. Non cambiare la sorting key per un solo caso d'uso: la sorting key ottimale e quella che beneficia il 90% delle query, non il 100%.
 
-## 10. Riepilogo della Lezione
+## 10. ClickHouse Keeper: Addio a ZooKeeper
+
+Prima del 2022, ClickHouse usava Apache ZooKeeper per coordinare i nodi in un cluster distribuito: sincronizzazione dello schema, consensus per le repliche, gestione dei leader. ZooKeeper funzionava, ma era un componente esterno con la sua complessità operativa, la sua configurazione separata e i suoi problemi di scaling.
+
+Con **ClickHouse 22.4**, il team ha introdotto **ClickHouse Keeper** — un'implementazione del protocollo Raft integrata direttamente in ClickHouse. Dal 2024 (versione 24.x), ClickHouse Keeper è l'opzione raccomandata e predefinita, mentre ZooKeeper è considerato legacy.
+
+**I vantaggi principali di ClickHouse Keeper:**
+
+```yaml
+# clickhouse-keeper standalone (config minima)
+# keeper_config.xml
+
+keeper_server:
+  tcp_port: 9181
+  server_id: 1
+  log_storage_path: /var/lib/clickhouse-keeper/log
+  snapshot_storage_path: /var/lib/clickhouse-keeper/snapshots
+
+  raft_configuration:
+    server:
+      id: 1
+      hostname: clickhouse-keeper-1
+      port: 9234
+    server:
+      id: 2
+      hostname: clickhouse-keeper-2
+      port: 9234
+    server:
+      id: 3
+      hostname: clickhouse-keeper-3
+      port: 9234
+```
+
+I benefici rispetto a ZooKeeper:
+- **Nessuna dipendenza esterna**: Keeper è incluso nel binario ClickHouse, nessun JVM da gestire
+- **Latenza inferiore**: Implementazione Raft in C++ ottimizzata, 30-50% meno latenza rispetto a ZooKeeper
+- **Compressione dei log**: Keeper comprime i log di consenso, riducendo l'uso del disco
+- **Miglior monitoraggio**: Metriche esposte tramite il sistema di metriche di ClickHouse nativo
+
+Per verificare lo stato del cluster Keeper:
+
+```sql
+-- Mostra lo stato del Keeper cluster
+SELECT * FROM system.zookeeper WHERE path = '/';
+
+-- Metriche del Keeper
+SELECT * FROM system.keeper_map;
+```
+
+## 11. ClickHouse Cloud vs Self-Managed: Confronto TCO
+
+La scelta tra ClickHouse Cloud e una deployment self-managed è una delle decisioni più importanti per un data team. Non è solo una questione di prezzo — è una questione di costo totale di possesso (TCO) e del tempo dell'ingegnere.
+
+| Aspetto | ClickHouse Cloud | Self-Managed (AWS/GCP) |
+|---|---|---|
+| **Setup iniziale** | 5 minuti | 2-4 settimane (infra, config, tuning) |
+| **Scaling** | Automatico (serverless compute) | Manuale o con autoscaling custom |
+| **Backup** | Incluso, automatico | Da configurare (S3 + cron) |
+| **Upgrade versione** | Automatico | Manuale, con potenziale downtime |
+| **Keeper/ZooKeeper** | Incluso e gestito | Da configurare e monitorare |
+| **Supporto** | SLA garantito | Community + Enterprise support a pagamento |
+| **Costo compute** | ~$0.20/CPU-ora | ~$0.05/CPU-ora (EC2) ma con ops overhead |
+| **Costo storage** | $0.023/GB/mese | ~$0.023/GB/mese (S3) — simile |
+| **Ops engineer** | Non necessario | 0.2-0.5 FTE per cluster di produzione |
+
+**Analisi TCO per un team di 5 persone con 10TB di dati:**
+
+| Voce | ClickHouse Cloud | Self-Managed |
+|---|---|---|
+| Compute (query load media) | ~€800/mese | ~€300/mese (EC2) |
+| Storage (10TB) | ~€230/mese | ~€230/mese (S3) |
+| Ops engineering (0.3 FTE a €80K/anno) | €0 | ~€2.000/mese |
+| **Totale** | **~€1.030/mese** | **~€2.530/mese** |
+
+Il paradosso del self-managed: sembra più economico sull'invoice cloud, ma quando contabilizzi il tempo dell'ingegnere per backup, upgrade, monitoring e debugging di problemi di cluster, spesso è 2-3x più costoso del cloud.
+
+**Quando scegliere Self-Managed:**
+- Dati che per requisiti legali non possono lasciare un datacenter specifico
+- Volume molto alto (>100TB) dove il risparmio sul compute supera il costo ops
+- Team DevOps già esistente con esperienza ClickHouse
+- Necessità di configurazioni hardware specializzate (NVMe locali per performance massima)
+
+**Quando scegliere ClickHouse Cloud:**
+- Team dati piccolo (<10 persone) senza DevOps dedicato
+- Necessità di andare in produzione rapidamente
+- Scaling imprevedibile (picchi stagionali, crescita rapida)
+- Priorità alla qualità dei dati invece che all'infrastruttura
+
+### ClickHouse vs Snowflake per OLAP: il confronto chiave
+
+ClickHouse e Snowflake occupano spazi diversi nel mercato OLAP. Snowflake eccelle per governance enterprise, data sharing e un modello di pricing semplice (Virtual Warehouses con scaling automatico). ClickHouse eccelle per volumi altissimi, latenza sub-secondo e costo per query.
+
+| Dimensione | ClickHouse | Snowflake |
+|---|---|---|
+| **Latenza query** | Millisecondi (anche su miliardi di righe) | Secondi (su query complesse) |
+| **Costo per TB scansionato** | ~$0.002 (self-managed) / ~$0.01 (cloud) | ~$2-5 (variabile per crediti) |
+| **Real-time ingestion** | Eccellente (Kafka engine, async insert) | Limitato (Snowpipe, latenza minuti) |
+| **Data sharing** | Limitato | Eccellente (Snowflake Data Marketplace) |
+| **SQL compatibility** | Dialetto proprietario (simile a ANSI) | ANSI SQL completo |
+| **Governance/RBAC** | Base | Enterprise-grade |
+| **Migliore per** | Analytics ad alto volume, real-time, costi contenuti | Enterprise BI, governance, collaborazione cross-azienda |
+
+La regola empirica: se il tuo team analytics ha bisogno di query sub-secondo su dataset di decine di miliardi di righe a costi controllati, ClickHouse. Se hai bisogno di condividere dati con partner esterni, governance avanzata e supporto enterprise, Snowflake.
+
+## 12. Riepilogo della Lezione
 
 ClickHouse e radicalmente diverso dai database relazionali tradizionali. La sua velocita emerge da scelte architetturali precise: storage colonnare, compressione aggressiva, processing vettorizzato.
 
@@ -438,3 +542,5 @@ ClickHouse e radicalmente diverso dai database relazionali tradizionali. La sua 
 - Le Materialized Views pre-calcolano i risultati per dashboard istantanee
 - Inserisci sempre in batch: mai riga per riga
 - Mai `Float` per valori monetari: usa sempre `Decimal`
+- ClickHouse Keeper sostituisce ZooKeeper dal 2024: meno dipendenze, più performance
+- ClickHouse Cloud ha un TCO spesso inferiore al self-managed per team piccoli, quando si contabilizza il tempo dell'ingegnere

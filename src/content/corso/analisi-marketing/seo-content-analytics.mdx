@@ -327,3 +327,198 @@ ORDER BY change_pct ASC;
 4. **Il content decay è inevitabile — gestirlo è strategico.** Monitora il traffico trimestre su trimestre e aggiorna i contenuti prima che perdano troppo ranking.
 
 5. **La SEO tecnica è la fondazione.** Core Web Vitals, mobile-friendliness e crawlability sono prerequisiti non negoziabili. Il contenuto migliore del mondo non si posiziona su un sito lento.
+
+## Core Web Vitals e SEO Tecnico: i Dettagli che Contano
+
+Dal maggio 2021, i Core Web Vitals sono fattori di ranking ufficiali di Google. Non sono l'unico fattore — il contenuto e i backlink restano più influenti — ma su siti con qualità di contenuto comparabile, i CWV possono fare la differenza tra la posizione 4 e la posizione 1.
+
+### LCP (Largest Contentful Paint)
+
+LCP misura il tempo necessario a rendere visibile l'elemento più grande della viewport — tipicamente un'immagine hero, un video, o un blocco di testo grande. Il target è < 2.5 secondi su connessioni di rete medie.
+
+**Cause frequenti di LCP lento:**
+- Immagini non ottimizzate (formato WebP invece di JPEG/PNG, dimensioni corrette per ogni dispositivo)
+- Assenza di preloading per le risorse critiche above the fold
+- Render-blocking JavaScript che ritarda il caricamento del DOM
+- Server lenti o CDN non configurata
+
+**Fix prioritari per LCP:**
+```html
+<!-- Preload dell'immagine hero per anticipare il caricamento -->
+<link rel="preload" as="image" href="/images/hero-desktop.webp"
+      media="(min-width: 768px)">
+
+<!-- Immagini in formato WebP con fallback JPEG -->
+<picture>
+  <source srcset="/images/hero.webp" type="image/webp">
+  <img src="/images/hero.jpg" alt="Hero" width="1200" height="600"
+       loading="eager" fetchpriority="high">
+</picture>
+```
+
+Il tag `fetchpriority="high"` sull'immagine hero dice al browser di priorizzzarla rispetto ad altre risorse. Da solo può ridurre il LCP di 300-600ms su siti con molte risorse.
+
+### INP (Interaction to Next Paint)
+
+INP ha sostituito FID (First Input Delay) come metrica di interattività dal marzo 2024. Mentre FID misurava solo il primo input dell'utente, INP misura la latenza di **tutte** le interazioni durante l'intera sessione — click, tap, pressione di tasti. Il target è < 200ms.
+
+INP alto è spesso causato da:
+- JavaScript che blocca il main thread durante l'elaborazione
+- Event listener inefficienti su elementi ad alto volume di interazione
+- Rendering di liste lunghe senza virtualizzazione
+
+Il tool principale per diagnosticare INP è il Chrome DevTools Performance panel, con particolare attenzione alle "Long Tasks" (attività JS che durano più di 50ms).
+
+### CLS (Cumulative Layout Shift)
+
+CLS misura la stabilità visiva della pagina — quanto il contenuto si sposta durante il caricamento. Il target è < 0.1. Un CLS alto si manifesta come elementi che "saltano" mentre l'utente sta per cliccare, facendolo cliccare sull'elemento sbagliato.
+
+**Cause principali di CLS:**
+- Immagini senza attributi `width` e `height` espliciti: il browser non riserva spazio prima del caricamento
+- Ad network che iniettano banner di dimensione variabile
+- Font personalizzati che sostituiscono il font di sistema in modo visibile (FOUT - Flash of Unstyled Text)
+
+**Fix pratico:** imposta sempre `width` e `height` espliciti su ogni immagine, anche se usi CSS per ridimensionarla. Questo permette al browser di calcolare l'aspect ratio e riservare lo spazio prima del caricamento.
+
+### Come monitorare i Core Web Vitals in modo sistematico
+
+I CWV nei report di PageSpeed Insights e Search Console sono basati su dati field (Chrome User Experience Report - CrUX), non su dati lab. Questo significa che riflettono l'esperienza reale degli utenti su diversi dispositivi e connessioni, non solo un test controllato.
+
+```sql
+-- Monitoraggio settimanale dei Core Web Vitals dal CrUX (se esportato in BigQuery)
+-- oppure da una tabella custom popolata con il Web Vitals JS library
+
+SELECT
+  DATE_TRUNC(collection_date, WEEK)       AS settimana,
+  metric_name,
+  APPROX_QUANTILES(metric_value, 100)[OFFSET(75)] AS p75_value,
+  CASE metric_name
+    WHEN 'LCP' THEN IF(APPROX_QUANTILES(metric_value, 100)[OFFSET(75)] < 2500, 'Good', 'Needs Improvement')
+    WHEN 'INP' THEN IF(APPROX_QUANTILES(metric_value, 100)[OFFSET(75)] < 200, 'Good', 'Needs Improvement')
+    WHEN 'CLS' THEN IF(APPROX_QUANTILES(metric_value, 100)[OFFSET(75)] < 0.1, 'Good', 'Needs Improvement')
+  END AS status
+FROM web_vitals_events
+WHERE collection_date >= DATE_SUB(CURRENT_DATE(), INTERVAL 12 WEEK)
+GROUP BY 1, 2
+ORDER BY settimana DESC, metric_name;
+```
+
+## Google Search Console come Fonte Dati per Analytics
+
+Search Console è spesso usata solo per monitorare manualmente le keyword. Ma è molto più potente come fonte dati sistematica quando i suoi dati vengono esportati e analizzati con SQL.
+
+### Esportare Search Console in BigQuery
+
+Google offre un export nativo di Search Console in BigQuery tramite Looker Studio (con connettore diretto) o tramite la Search Console API. L'export include: query, pagina, paese, dispositivo, clicks, impressioni, CTR e posizione media per giorno.
+
+Una volta in BigQuery, puoi costruire analisi che l'interfaccia web di Search Console non permette: trend multisettimanali, segmentazione per tipo di query, correlazioni con i dati di GA4.
+
+### Keyword Cannibalization Detection
+
+La keyword cannibalization avviene quando due o più pagine del tuo sito si posizionano per le stesse keyword, competendo tra loro. Google può non sapere quale pagina preferire e distribuzione le impressioni tra entrambe, abbassando la posizione media di ciascuna rispetto a quanto otterrebbero se una sola pagina si posizionasse.
+
+```sql
+-- Identificare keyword servite da più pagine (possibile cannibalization)
+-- Tabella: search_console_data (query, page, clicks, impressions, position, date)
+
+WITH keyword_pages AS (
+  SELECT
+    query,
+    page,
+    SUM(clicks)                                       AS total_clicks,
+    SUM(impressions)                                   AS total_impressions,
+    ROUND(AVG(position), 1)                            AS avg_position
+  FROM search_console_data
+  WHERE date >= DATE_SUB(CURRENT_DATE(), INTERVAL 90 DAY)
+    AND impressions > 50  -- Filtra query con volume minimo significativo
+  GROUP BY query, page
+),
+
+-- Conta quante pagine si posizionano per ogni keyword
+keyword_page_count AS (
+  SELECT
+    query,
+    COUNT(DISTINCT page)    AS num_pages,
+    SUM(total_clicks)       AS total_clicks_all_pages,
+    MIN(avg_position)       AS best_position,
+    MAX(avg_position)       AS worst_position
+  FROM keyword_pages
+  GROUP BY query
+)
+
+SELECT
+  kpc.query,
+  kpc.num_pages,
+  kpc.total_clicks_all_pages,
+  kpc.best_position,
+  kpc.worst_position,
+  -- Elenca le pagine in conflitto
+  STRING_AGG(kp.page ORDER BY kp.total_clicks DESC LIMIT 5) AS pages_competing
+FROM keyword_page_count kpc
+JOIN keyword_pages kp USING (query)
+WHERE kpc.num_pages >= 2  -- Solo keyword con 2+ pagine
+  AND kpc.best_position <= 20  -- Solo keyword dove almeno una pagina è in top 20
+GROUP BY kpc.query, kpc.num_pages, kpc.total_clicks_all_pages,
+         kpc.best_position, kpc.worst_position
+ORDER BY kpc.total_clicks_all_pages DESC
+LIMIT 50;
+```
+
+**Come risolvere la cannibalization:** identifica la pagina "canonicamente migliore" per quella keyword (di solito quella con più traffico e backlink) e consolida il contenuto dell'altra pagina all'interno di questa, poi usa un redirect 301 per mandare il traffico dell'URL eliminata verso quella consolidata.
+
+### Content Decay Analysis con Search Console
+
+L'analisi del decadimento del contenuto è molto più precisa con i dati di Search Console rispetto ai soli dati di traffico GA4, perché mostra se il calo è dovuto a un peggioramento del posizionamento (problema SEO) o a un calo del CTR a parità di posizione (problema di title/snippet).
+
+```sql
+-- Confronto trimestrale: posizione + CTR per le pagine principali
+-- Aiuta a distinguere "calo di ranking" da "calo di CTR"
+
+WITH q1 AS (
+  SELECT page,
+    SUM(clicks)       AS clicks_q1,
+    SUM(impressions)  AS impressions_q1,
+    ROUND(AVG(position), 1) AS position_q1,
+    ROUND(SUM(clicks) / NULLIF(SUM(impressions), 0) * 100, 2) AS ctr_q1
+  FROM search_console_data
+  WHERE date BETWEEN DATE_SUB(CURRENT_DATE(), INTERVAL 6 MONTH)
+                 AND DATE_SUB(CURRENT_DATE(), INTERVAL 3 MONTH)
+  GROUP BY page
+),
+
+q2 AS (
+  SELECT page,
+    SUM(clicks)       AS clicks_q2,
+    SUM(impressions)  AS impressions_q2,
+    ROUND(AVG(position), 1) AS position_q2,
+    ROUND(SUM(clicks) / NULLIF(SUM(impressions), 0) * 100, 2) AS ctr_q2
+  FROM search_console_data
+  WHERE date >= DATE_SUB(CURRENT_DATE(), INTERVAL 3 MONTH)
+  GROUP BY page
+)
+
+SELECT
+  q1.page,
+  q1.clicks_q1, q2.clicks_q2,
+  ROUND((q2.clicks_q2 - q1.clicks_q1) * 100.0 / NULLIF(q1.clicks_q1, 0), 1) AS clicks_delta_pct,
+  q1.position_q1, q2.position_q2,
+  ROUND(q2.position_q2 - q1.position_q1, 1)                                   AS position_delta,
+  q1.ctr_q1, q2.ctr_q2,
+  ROUND(q2.ctr_q2 - q1.ctr_q1, 2)                                             AS ctr_delta_pp,
+  -- Diagnosi: qual è la causa principale del calo?
+  CASE
+    WHEN (q2.position_q2 - q1.position_q1) > 3 AND (q2.ctr_q2 - q1.ctr_q1) < 0
+      THEN 'Calo ranking + CTR: aggiorna contenuto e ottimizza snippet'
+    WHEN (q2.position_q2 - q1.position_q1) > 3 AND ABS(q2.ctr_q2 - q1.ctr_q1) < 1
+      THEN 'Calo ranking: rafforza contenuto e link building'
+    WHEN ABS(q2.position_q2 - q1.position_q1) <= 1 AND (q2.ctr_q2 - q1.ctr_q1) < -1
+      THEN 'Posizione stabile, CTR in calo: riscrivi title tag e meta description'
+    WHEN (q2.clicks_q2 - q1.clicks_q1) * 100.0 / NULLIF(q1.clicks_q1, 0) < -20
+      THEN 'Calo significativo: indagine prioritaria'
+    ELSE 'Monitoraggio normale'
+  END AS diagnosi
+FROM q1
+JOIN q2 USING (page)
+WHERE q1.clicks_q1 > 50  -- Solo pagine con traffico sufficiente
+ORDER BY clicks_delta_pct ASC
+LIMIT 30;

@@ -347,3 +347,409 @@ Prima di adottare lo streaming, valuta questi aspetti:
 - La **Kappa Architecture** usa solo lo streaming ed e' preferita dai team moderni
 - L'**Event Sourcing** fornisce un audit trail completo e la possibilita' di replay
 - Non adottare streaming per moda: valuta prima se la latenza impatta realmente il tuo marketing
+
+## Framework di Stream Processing: Confronto
+
+Scegliere il framework di processing e' la seconda decisione architetturale piu' importante dopo la scelta del message broker. I tre contendenti principali per il marketing analytics sono Apache Flink, Kafka Streams e Spark Structured Streaming.
+
+### Apache Flink vs Kafka Streams vs Spark Structured Streaming
+
+| Caratteristica | **Apache Flink** | **Kafka Streams** | **Spark Structured Streaming** |
+| --- | --- | --- | --- |
+| **Modello di processing** | True streaming | True streaming | Micro-batch (default) o continuous |
+| **Latenza** | Millisecondi | Millisecondi | Secondi (micro-batch) |
+| **Throughput** | Molto alto | Alto | Molto alto |
+| **Stato (stateful)** | Eccellente (RocksDB) | Buono (RocksDB) | Limitato |
+| **Finestre temporali** | Molto ricche (sliding, session, global) | Buone (tumbling, hopping, session) | Buone |
+| **Join stream-stream** | Eccellente | Buono | Limitato |
+| **Exactly-once** | Si | Si | Si |
+| **Linguaggi** | Java, Scala, Python, SQL | Java, Scala | Java, Scala, Python, SQL, R |
+| **Infrastruttura** | Cluster separato (JobManager + TaskManager) | Libreria embedded nell'app | Cluster Spark |
+| **Integrazione Kafka** | Connector nativo | Nativa (e' Kafka) | Connector Spark-Kafka |
+| **Deployment** | Kubernetes, YARN, standalone | Con l'app Java/Scala | Databricks, EMR, GCP Dataproc |
+| **Complessita' ops** | Alta | Bassa-Media | Media (se usi Databricks) |
+| **Costo** | Infrastruttura Flink | Minimo (embedded) | Alto (cluster Spark) |
+| **Consigliato per** | CEP, ML in streaming, join complessi | Processing leggero in Java | Team con esistente stack Spark |
+
+### Quando Scegliere Apache Flink
+
+Flink e' la scelta giusta quando hai requisiti che gli altri framework non possono soddisfare facilmente:
+
+**1. Complex Event Processing (CEP)**: rilevare pattern di eventi nel tempo
+```plain text
+Esempio: rilevare frode pubblicitaria
+  "Se lo stesso IP genera piu' di 50 click in 10 secondi
+   E la percentuale di conversione e' < 0.1%
+   E gli eventi provengono da piu' di 3 campagne diverse
+   --> ALERT: possibile click fraud"
+
+Flink Pattern API gestisce questo nativamente.
+Kafka Streams richiederebbe stato custom e logica complessa.
+```
+
+**2. Join tra stream con finestre temporali diverse**
+```plain text
+Esempio: calcolare ROAS in tempo reale
+  Stream A: impression (ogni impression pubblicitaria)
+  Stream B: click (ogni click)
+  Stream C: conversione (ogni acquisto)
+
+  Join A + B entro 24h per calcolare CTR
+  Join B + C entro 7 giorni per calcolare tasso conversione
+  Calcola ROAS: (revenue da conversioni) / (costo impression nella stessa finestra)
+
+  Flink gestisce finestre temporali disallineate nativamente.
+```
+
+**3. Machine Learning in streaming** (con Flink ML o integrazione con modelli PyTorch/TF)
+
+Aziende che usano Flink: Uber (rilevamento frodi in <500ms), Alibaba (Double 11: 4.5 miliardi di record/giorno), Netflix (quality of experience monitoring), Lyft (prezzi dinamici).
+
+### Quando Scegliere Kafka Streams
+
+Kafka Streams e' la scelta giusta per team Java/Scala che vogliono la semplicita' di una libreria senza gestire un cluster separato:
+
+```plain text
+Kafka Streams: vantaggi pratici
+
+1. Nessun cluster da gestire:
+   L'app Kafka Streams E' il cluster di processing.
+   Aggiungi istanze dell'app per scalare orizzontalmente.
+   Kubernetes gestisce le istanze, non hai bisogno di Flink/Spark.
+
+2. Stesso ecosistema Kafka:
+   Il topic Kafka e' sia la sorgente sia la destinazione.
+   Lo stato (state store) e' replicato su topic Kafka (changelog).
+   Monitoring via JMX standard.
+
+3. Deployment semplice:
+   E' un JAR Java normale.
+   Puoi deployarlo su AWS Lambda (con alcune limitazioni),
+   Kubernetes, o su qualsiasi VM.
+```
+
+**Esempio di use case marketing per Kafka Streams:**
+
+```plain text
+Calcolo CTR per campagna ogni 5 minuti:
+  Sorgente: topic marketing.clicks e marketing.impressions
+  Processing: aggregazione per campaign_id in finestra tumbling di 5 min
+  Destinazione: topic marketing.ctr_realtime
+
+Questo e' perfetto per Kafka Streams:
+  - Stateful aggregation (contatore per campagna)
+  - Finestra temporale semplice (tumbling)
+  - Un solo join (click + impression)
+  - Nessun ML, nessun CEP complesso
+```
+
+### Quando Scegliere Spark Structured Streaming
+
+Spark Structured Streaming e' la scelta giusta quando:
+
+- Hai gia' un team con esperienza Spark e vuoi aggiungere streaming
+- Usi Databricks come piattaforma data (integrazione nativa)
+- Hai bisogno di processare sia batch sia streaming con lo stesso codice
+- Non hai requisiti di latenza sotto i 30 secondi
+
+```plain text
+Latenza tipica di Spark Structured Streaming:
+  Micro-batch con trigger ogni 30s: ~30-60s end-to-end
+  Micro-batch con trigger every 1s: ~2-5s end-to-end
+  Continuous mode (experimental): ~1s (non production-ready)
+
+Per il marketing analytics, Spark va bene per:
+  - Dashboard aggiornate ogni minuto (non ogni secondo)
+  - Aggregazioni complesse (decine di metriche in parallelo)
+  - Ambienti Databricks con team Spark esistente
+```
+
+## Pipeline End-to-End: Da Producer a ClickHouse
+
+Ecco un'architettura concreta e completa di una pipeline streaming per marketing analytics, con tutti i componenti e le configurazioni.
+
+### Schema Architetturale
+
+```plain text
++---------------------------+
+|         PRODUCERS         |
++---------------------------+
+| Website JavaScript SDK    |  --> events: pageview, click, conversion
+| Mobile SDK (iOS/Android)  |  --> events: app_open, in_app_event
+| Server-side (backend API) |  --> events: order_completed, subscription_created
++---------------------------+
+            |
+            | HTTPS to Kafka REST Proxy (o direct Kafka SDK)
+            v
++---------------------------+
+|    KAFKA CLUSTER          |
++---------------------------+
+| topic: marketing.events   |  6 partizioni, RF=3, retention 7gg
+| Schema Registry (Avro)    |  compatibilita' BACKWARD
+| Kafka Connect Workers     |  3 worker in distributed mode
++---------------------------+
+            |
+     +------+------+
+     |             |
+     v             v
++-----------+  +----------+
+| ClickHouse|  | S3 Lake  |
+| (Kafka    |  | (Connect |
+|  Engine)  |  |  S3 Sink)|
++-----------+  +----------+
+     |
+     v
++-----------+
+| Grafana   |
+| Metabase  |
++-----------+
+```
+
+### 1. Configurazione del Topic
+
+```bash
+# Crea il topic con parametri ottimali per marketing analytics
+kafka-topics.sh --bootstrap-server kafka:9092 \
+  --create \
+  --topic marketing.events \
+  --partitions 6 \
+  --replication-factor 3 \
+  --config retention.ms=604800000 \
+  --config cleanup.policy=delete \
+  --config segment.bytes=524288000 \
+  --config compression.type=lz4 \
+  --config min.insync.replicas=2
+```
+
+### 2. Schema Avro Unificato
+
+```json
+{
+  "type": "record",
+  "name": "MarketingEvent",
+  "namespace": "com.marketing.events",
+  "fields": [
+    {"name": "event_id", "type": "string", "doc": "UUID v4 univoco per ogni evento"},
+    {"name": "event_type", "type": "string", "doc": "Tipo evento: pageview, click, conversion, app_open"},
+    {"name": "timestamp_ms", "type": "long", "logicalType": "timestamp-millis"},
+    {"name": "user_id", "type": "string"},
+    {"name": "session_id", "type": "string"},
+    {"name": "campaign_id", "type": ["null", "string"], "default": null},
+    {"name": "utm_source", "type": ["null", "string"], "default": null},
+    {"name": "utm_medium", "type": ["null", "string"], "default": null},
+    {"name": "device", "type": {"type": "enum", "name": "Device",
+     "symbols": ["desktop", "mobile", "tablet", "other"]}},
+    {"name": "country", "type": "string"},
+    {"name": "revenue", "type": ["null", "double"], "default": null,
+     "doc": "Solo per eventi di conversione"},
+    {"name": "properties", "type": {"type": "map", "values": "string"}, "default": {},
+     "doc": "Proprieta' custom, flessibile per event type specifici"}
+  ]
+}
+```
+
+### 3. Consumer ClickHouse con Kafka Engine
+
+```sql
+-- Tabella di ingestion (buffer temporaneo da Kafka)
+CREATE TABLE marketing_events_queue (
+    event_id     String,
+    event_type   LowCardinality(String),
+    timestamp_ms UInt64,
+    user_id      String,
+    session_id   String,
+    campaign_id  Nullable(String),
+    utm_source   Nullable(String),
+    utm_medium   Nullable(String),
+    device       LowCardinality(String),
+    country      FixedString(2),
+    revenue      Nullable(Float64)
+)
+ENGINE = Kafka
+SETTINGS
+    kafka_broker_list   = 'kafka-1:9092,kafka-2:9092,kafka-3:9092',
+    kafka_topic_list    = 'marketing.events',
+    kafka_group_name    = 'clickhouse-marketing-consumer',
+    kafka_format        = 'Avro',
+    kafka_schema_registry_url = 'http://schema-registry:8081',
+    kafka_num_consumers = 6,
+    kafka_max_block_size = 65536;
+
+-- Tabella di destinazione ottimizzata per query analytics
+CREATE TABLE marketing_events (
+    event_date   Date,
+    event_time   DateTime,
+    event_id     String,
+    event_type   LowCardinality(String),
+    user_id      String,
+    session_id   String,
+    campaign_id  LowCardinality(String),
+    utm_source   LowCardinality(String),
+    utm_medium   LowCardinality(String),
+    device       LowCardinality(String),
+    country      FixedString(2),
+    revenue      Nullable(Float64)
+)
+ENGINE = MergeTree()
+PARTITION BY event_date
+ORDER BY (event_type, campaign_id, user_id, event_time)
+TTL event_date + INTERVAL 90 DAY;
+
+-- Materialized View: collega la queue alla tabella
+CREATE MATERIALIZED VIEW mv_marketing_events
+TO marketing_events AS
+SELECT
+    toDate(fromUnixTimestamp64Milli(timestamp_ms)) AS event_date,
+    fromUnixTimestamp64Milli(timestamp_ms)         AS event_time,
+    event_id, event_type, user_id, session_id,
+    coalesce(campaign_id, 'direct')                AS campaign_id,
+    coalesce(utm_source, 'organic')                AS utm_source,
+    coalesce(utm_medium, 'organic')                AS utm_medium,
+    device, country, revenue
+FROM marketing_events_queue;
+```
+
+## Stateful vs Stateless Processing
+
+La distinzione tra processing stateless e stateful e' fondamentale per progettare pipeline streaming corrette.
+
+### Stateless Processing: Ogni Messaggio e' Indipendente
+
+```plain text
+Caratteristiche:
+  - Ogni messaggio viene processato in isolamento
+  - Non serve memoria di eventi precedenti
+  - Facilmente parallelizzabile (ogni partizione e' indipendente)
+  - Fault tolerance semplice (riprendi dall'offset)
+
+Esempi marketing:
+  - Arricchire ogni evento con dati di geolocalizzazione (IP -> citta')
+  - Filtrare eventi di test (event_type = 'internal_test')
+  - Convertire il formato timestamp
+  - Mascherare campi PII per GDPR
+  - Routing verso topic diversi in base all'event_type
+```
+
+```python
+# Esempio stateless: arricchimento con geolocalizzazione
+def process_event_stateless(msg):
+    """Ogni messaggio e' processato indipendentemente."""
+    event = json.loads(msg.value())
+
+    # Lookup geolocalizzazione (non richiede stato precedente)
+    geo = geoip_client.lookup(event['ip_address'])
+    event['city'] = geo.city
+    event['region'] = geo.region
+    event['country'] = geo.country_code
+
+    # Pulizia PII
+    event.pop('ip_address', None)
+    event.pop('email', None)
+
+    return event  # Ogni evento e' autocontenuto
+```
+
+### Stateful Processing: La Memoria degli Eventi Passati
+
+```plain text
+Caratteristiche:
+  - Richiede memoria degli eventi precedenti (state store)
+  - L'output dipende dalla storia
+  - Partizionamento critico: tutti gli eventi di un'entita' devono
+    andare alla stessa partizione (e allo stesso consumer)
+  - Fault tolerance complessa (lo stato deve sopravvivere ai crash)
+
+Esempi marketing:
+  - Sessionizzazione: raggruppare eventi per sessione utente
+  - Contatori real-time: quante conversioni ha fatto questa campagna oggi?
+  - Deduplicazione: scartare eventi duplicati (stesso event_id)
+  - Rilevamento anomalie: "questo utente ha fatto il doppio dei click normali"
+  - Attribution: qual e' il primo touchpoint per questo utente?
+```
+
+```python
+# Esempio stateful: sessionizzazione con state store in memoria
+class SessionBuilder:
+    """Mantiene lo stato delle sessioni attive."""
+
+    def __init__(self, session_timeout_seconds=1800):
+        self.sessions = {}  # user_id -> session_data
+        self.session_timeout = session_timeout_seconds
+
+    def process_event(self, event):
+        """Aggiorna la sessione dell'utente e ritorna la sessione aggiornata."""
+        user_id = event['user_id']
+        current_time = event['timestamp_ms'] / 1000
+
+        # Controlla se c'e' una sessione attiva
+        if user_id in self.sessions:
+            last_activity = self.sessions[user_id]['last_activity']
+            if (current_time - last_activity) > self.session_timeout:
+                # Sessione scaduta, chiudi la vecchia e inizia una nuova
+                self._close_session(user_id)
+                self._start_session(user_id, event, current_time)
+            else:
+                # Aggiorna la sessione esistente
+                self.sessions[user_id]['events'].append(event)
+                self.sessions[user_id]['last_activity'] = current_time
+                if event['event_type'] == 'conversion':
+                    self.sessions[user_id]['conversions'] += 1
+        else:
+            self._start_session(user_id, event, current_time)
+
+        return self.sessions[user_id]
+
+    def _start_session(self, user_id, event, ts):
+        self.sessions[user_id] = {
+            'session_id': event['session_id'],
+            'start_time': ts,
+            'last_activity': ts,
+            'events': [event],
+            'conversions': 0,
+            'utm_source': event.get('utm_source', 'organic')
+        }
+
+    def _close_session(self, user_id):
+        session = self.sessions.pop(user_id)
+        # Pubblica la sessione chiusa su un topic di output
+        output_producer.produce(
+            topic='marketing.sessions',
+            key=user_id,
+            value=json.dumps(session)
+        )
+```
+
+<Aside type="caution">
+Il processing stateful in Python con Consumer API ha un limite critico: lo stato e' in memoria locale. Se il consumer crasha, lo stato viene perso e devi ricominciare dal consumer group offset. Per stato persistente e fault-tolerant, usa Kafka Streams (Java/Scala) o Apache Flink, che replicano lo stato su topic Kafka o RocksDB distribuito.
+</Aside>
+
+### Windowing: Aggregazioni nel Tempo
+
+Un caso speciale di processing stateful e' il **windowing**: calcolare aggregazioni in finestre temporali.
+
+```plain text
+TUMBLING WINDOW (finestre non sovrapposte):
+  |--window 1--|--window 2--|--window 3--|
+  09:00       09:05        09:10        09:15
+
+  Uso: CTR ogni 5 minuti, revenue per ora, sessioni per giorno
+
+HOPPING WINDOW (finestre sovrapposte):
+  |--window 1--|
+       |--window 2--|
+            |--window 3--|
+  09:00   09:02  09:04   09:06
+
+  Uso: media mobile, trend su finestre scorrevoli
+
+SESSION WINDOW (basata sull'attivita'):
+  [eventi--gap--] [eventi--gap--] [eventi--gap--]
+  Sessione 1     Sessione 2      Sessione 3
+
+  Uso: analisi sessioni utente, customer journey
+
+GLOBAL WINDOW:
+  [--tutti gli eventi--]
+
+  Uso: contatori totali (all-time), deduplicazione lifetime
+```

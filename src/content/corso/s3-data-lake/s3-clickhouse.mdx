@@ -607,4 +607,326 @@ L'integrazione S3 + ClickHouse ti permette di:
 - **Implementare tiered storage** hot-cold con spostamento automatico su S3
 - **Ottimizzare le performance** con glob specifici, indici metadata e parallelismo
 
+## S3Queue Engine: Ingestione Automatica da S3
+
+Oltre alla funzione `s3()` e all'engine S3, ClickHouse offre il motore **S3Queue** che trasforma S3 in una coda di messaggi: i file nuovi vengono rilevati e importati automaticamente, senza intervento manuale.
+
+### Come Funziona S3Queue
+
+```sql
+-- Tabella S3Queue: monitora un prefisso S3 per file nuovi
+CREATE TABLE events_s3queue (
+    event_id String,
+    user_id String,
+    event_name String,
+    event_timestamp DateTime64(3),
+    utm_source Nullable(String),
+    revenue Nullable(Decimal(10, 2))
+) ENGINE = S3Queue(
+    -- URL con wildcard: monitora tutti i Parquet in questo prefisso
+    'https://s3.eu-west-1.amazonaws.com/marketing-lake/raw/events/*.parquet',
+    'Parquet'
+)
+SETTINGS
+    -- 'ordered': processa i file in ordine lessicografico (per nomi date-based)
+    mode = 'ordered',
+    -- Mantiene i file su S3 dopo il processing (non li cancella)
+    after_processing = 'keep',
+    -- Path ZooKeeper per tracciare i file gia' processati
+    keeper_path = '/clickhouse/s3queue/marketing_events',
+    -- Numero di tentativi in caso di errore su un file
+    loading_retries = 3;
+
+-- Tabella destinazione MergeTree
+CREATE TABLE events (
+    event_id String,
+    user_id String,
+    event_name String,
+    event_timestamp DateTime64(3),
+    event_date Date DEFAULT toDate(event_timestamp),
+    utm_source Nullable(String),
+    revenue Nullable(Decimal(10, 2)),
+    ingested_at DateTime DEFAULT now()
+) ENGINE = ReplacingMergeTree(ingested_at)
+PARTITION BY toYYYYMM(event_timestamp)
+ORDER BY (event_date, event_name, user_id, event_id);
+
+-- Materialized View: collegamento automatico S3Queue → MergeTree
+CREATE MATERIALIZED VIEW events_consumer TO events AS
+SELECT * FROM events_s3queue;
+```
+
+Una volta creata la Materialized View, S3Queue inizia a lavorare in background: ogni file nuovo che appare nel prefisso viene rilevato, letto, e i dati inseriti nella tabella `events` tramite la MV.
+
+## NamedCollections per Credenziali S3
+
+Invece di passare `access_key_id` e `secret_access_key` in ogni query `s3()`, ClickHouse supporta le **NamedCollections**: insiemi di credenziali salvate nella configurazione del server e referenziate per nome.
+
+### Definizione nel Config Server
+
+```xml
+<!-- /etc/clickhouse-server/config.d/named_collections.xml -->
+<clickhouse>
+    <named_collections>
+        <marketing_lake>
+            <!-- Endpoint del bucket S3 -->
+            <url>https://s3.eu-west-1.amazonaws.com/marketing-lake/</url>
+            <access_key_id>AKIAIOSFODNN7EXAMPLE</access_key_id>
+            <secret_access_key>wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY</secret_access_key>
+            <!-- Formato default per questo bucket -->
+            <format>Parquet</format>
+        </marketing_lake>
+
+        <archive_lake>
+            <url>https://s3.eu-west-1.amazonaws.com/marketing-archive/</url>
+            <access_key_id>AKIAIOSFODNN7ARCHIV</access_key_id>
+            <secret_access_key>archiveSecretKey123...</secret_access_key>
+            <format>Parquet</format>
+        </archive_lake>
+    </named_collections>
+</clickhouse>
+```
+
+### Utilizzo nelle Query
+
+```sql
+-- Con NamedCollection: credenziali risolte automaticamente
+SELECT count()
+FROM s3(marketing_lake, 'cleaned/events/year=2024/month=01/**/*.parquet');
+
+-- Equivalente senza NamedCollection (meno sicuro, chiavi in chiaro)
+SELECT count()
+FROM s3(
+    'https://s3.eu-west-1.amazonaws.com/marketing-lake/cleaned/events/year=2024/month=01/**/*.parquet',
+    'AKIAIOSFODNN7EXAMPLE',
+    'wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY',
+    'Parquet'
+);
+
+-- Nella definizione di una tabella S3Queue:
+CREATE TABLE events_queue (...)
+ENGINE = S3Queue(marketing_lake, 'raw/events/*.parquet')
+SETTINGS mode = 'ordered', keeper_path = '/ch/s3q/events';
+```
+
+I vantaggi delle NamedCollections:
+- Le credenziali non compaiono mai nei log delle query
+- Rotazione delle chiavi senza modificare le query
+- Gestione centralizzata per bucket multipli
+
+## Performance Tuning: Lettura Parallela da S3
+
+ClickHouse legge i file S3 in parallelo per default. Capire i parametri di tuning permette di ottimizzare per workload diversi.
+
+### Parametri Principali
+
+```sql
+-- Numero massimo di thread per la lettura dei file
+-- Default: numero di CPU del server
+SET max_threads = 16;
+
+-- Thread dedicati all'inserimento (separati dalla lettura)
+SET max_insert_threads = 8;
+
+-- Connessioni S3 simultanee massime per singola query
+SET s3_max_connections = 1024;
+
+-- Dimensione del buffer per la lettura da S3
+-- Aumenta per file molto grandi, riduci per molti file piccoli
+SET s3_min_upload_part_size = 33554432;   -- 32 MB (default)
+SET s3_max_single_read_retries = 4;
+
+-- Numero di prefetch (lettura anticipata) per ogni file
+-- Utile quando la query legge file in sequenza
+SET s3_max_get_rps = 0;  -- 0 = illimitato
+```
+
+### Benchmark: Impatto del Parallelismo
+
+Test su 500 file Parquet da 128 MB ciascuno (64 GB totali), query `SELECT count() FROM s3(...)`:
+
+```plain text
+max_threads    Tempo     Throughput
+──────────────────────────────────
+1              480s      133 MB/s
+4              125s      512 MB/s
+8               68s      941 MB/s
+16              38s        1.7 GB/s
+32              22s        2.9 GB/s
+64              19s        3.4 GB/s  ← rendimenti decrescenti
+```
+
+Con 32 thread si ottiene l'85% del throughput massimo. Oltre i 32 thread, il bottleneck e' la banda di rete verso S3 (non il compute).
+
+## Costo S3 vs EBS per ClickHouse: Analisi con Numeri Reali
+
+Una delle domande piu' comuni: e' piu' conveniente tenere i dati storici in S3 (oggetti) o in EBS (block storage) collegato a ClickHouse?
+
+### Confronto dei Costi: 10 TB di Dati Marketing
+
+```plain text
+EBS gp3 (SSD, 10 TB):
+  Storage:          $800/mese  ($0.08/GB)
+  IOPS aggiuntivi:  $65/mese   (3000 IOPS base inclusi, 10000 IOPS = $65)
+  Throughput:       $35/mese   (125 MB/s base, 500 MB/s = $35)
+  ─────────────────────────────
+  Totale EBS:       ~$900/mese
+
+S3 Standard (10 TB):
+  Storage:          $230/mese  ($0.023/GB)
+  GET (100 query):  $0.03/mese (1000 richieste = $0.0004)
+  LIST:             $0.005/mese
+  ─────────────────────────────
+  Totale S3:        ~$230/mese
+
+S3 Intelligent-Tiering (dati acceduti raramente):
+  Storage:          $230/mese  (parte active tier)
+  Transizione auto: ~$120/mese (dati infrequent access)
+  ─────────────────────────────
+  Totale S3-IT:     ~$150-180/mese
+
+Risparmio S3 vs EBS:
+  $900 - $230 = $670/mese → $8.040/anno per 10 TB
+```
+
+### La Strategia Hot/Cold Ottimale
+
+Per un data lake marketing, la configurazione piu' efficiente in termini di costo-performance:
+
+```plain text
+Dati ultimi 30 giorni (HOT):
+  Storage: EBS NVMe locale su server ClickHouse
+  Motivo: query frequenti, latenza < 10ms necessaria
+  Dimensione tipica: 50-200 GB
+  Costo: ~$16-80/mese
+
+Dati 30-90 giorni (WARM):
+  Storage: S3 Standard
+  Query: tramite tiered storage ClickHouse o s3() diretta
+  Latenza accettabile: 1-5 secondi
+  Costo: ~$1.15/TB/mese
+
+Dati > 90 giorni (COLD):
+  Storage: S3 Glacier Instant Retrieval
+  Query: rare, pianificate
+  Latenza accettabile: 10-30 secondi
+  Costo: ~$0.23/TB/mese
+
+Risparmio totale rispetto a tutto su EBS (24 mesi, 1 TB/mese):
+  Tutto EBS:             ~$9.600/anno (120 GB × $0.08 × 12)
+  Hot/Warm/Cold su S3:   ~$1.800/anno
+  Risparmio:             ~$7.800/anno (81%)
+```
+
+### Configurazione ClickHouse Tiered Storage per Cold S3
+
+```xml
+<!-- config.d/tiered_storage.xml -->
+<clickhouse>
+    <storage_configuration>
+        <disks>
+            <!-- Disco locale NVMe: dati hot -->
+            <local_nvme>
+                <type>local</type>
+                <path>/var/lib/clickhouse/</path>
+            </local_nvme>
+
+            <!-- Disco S3: dati cold -->
+            <s3_cold>
+                <type>s3</type>
+                <endpoint>https://s3.eu-west-1.amazonaws.com/marketing-lake/clickhouse/cold/</endpoint>
+                <access_key_id from_env="AWS_ACCESS_KEY_ID"/>
+                <secret_access_key from_env="AWS_SECRET_ACCESS_KEY"/>
+                <!-- Cache locale per accelerare le query su dati cold -->
+                <metadata_path>/var/lib/clickhouse/disks/s3_cold/</metadata_path>
+            </s3_cold>
+
+            <!-- Cache opzionale: 20 GB di SSD come buffer per S3 -->
+            <s3_cache>
+                <type>cache</type>
+                <disk>s3_cold</disk>
+                <path>/var/lib/clickhouse/disks/s3_cache/</path>
+                <max_size>21474836480</max_size>  <!-- 20 GB -->
+                <!-- Usa uno spazio di cache separato per file diversi -->
+                <do_not_evict_index_and_mark_files>true</do_not_evict_index_and_mark_files>
+            </s3_cache>
+        </disks>
+
+        <policies>
+            <!-- Policy: hot → cold automatico -->
+            <hot_cold>
+                <volumes>
+                    <hot>
+                        <disk>local_nvme</disk>
+                        <!-- Sposta su S3 quando il disco locale e' al 80% -->
+                        <max_data_part_size_bytes>10737418240</max_data_part_size_bytes>
+                    </hot>
+                    <cold>
+                        <disk>s3_cache</disk>
+                        <!-- prefer_not_to_merge: non fondere parti su dischi diversi -->
+                        <prefer_not_to_merge>false</prefer_not_to_merge>
+                    </cold>
+                </volumes>
+                <!-- Muovi su S3 quando lo spazio libero scende al 20% -->
+                <move_factor>0.2</move_factor>
+            </hot_cold>
+        </policies>
+    </storage_configuration>
+</clickhouse>
+```
+
+```sql
+-- Creare la tabella con la policy tiered
+CREATE TABLE marketing_events (
+    event_id String,
+    user_id String,
+    event_name String,
+    event_timestamp DateTime,
+    revenue Nullable(Decimal(10, 2))
+) ENGINE = MergeTree
+PARTITION BY toYYYYMM(event_timestamp)
+ORDER BY (event_timestamp, user_id)
+-- Dopo 30 giorni, sposta automaticamente su S3 (volume 'cold')
+TTL event_timestamp + INTERVAL 30 DAY TO VOLUME 'cold'
+SETTINGS storage_policy = 'hot_cold';
+```
+
+### Verificare la Distribuzione dei Dati tra Hot e Cold
+
+```sql
+-- Vedere dove vivono i dati per ogni partizione
+SELECT
+    partition,
+    name AS part_name,
+    disk_name,
+    formatReadableSize(bytes_on_disk) AS size_on_disk,
+    formatReadableSize(data_uncompressed_bytes) AS uncompressed_size,
+    rows,
+    modification_time AS last_modified
+FROM system.parts
+WHERE table = 'marketing_events'
+  AND active = 1
+ORDER BY partition DESC, disk_name;
+
+-- Risultato atteso:
+-- 202401 | all_1_1_0 | local_nvme | 2.3 GiB | 12.1 GiB | 10000000 | 2024-01-16 08:30
+-- 202312 | all_1_1_0 | s3_cache   | 2.1 GiB | 11.8 GiB | 9500000  | 2024-01-05 08:30
+-- 202311 | all_1_1_0 | s3_cache   | 2.0 GiB | 11.2 GiB | 9000000  | 2023-12-05 08:30
+
+-- Calcolo costo stimato per storage
+SELECT
+    disk_name,
+    formatReadableSize(sum(bytes_on_disk)) AS total_size,
+    count() AS parts_count,
+    -- Stima costo mensile in base alla storage class
+    CASE disk_name
+        WHEN 'local_nvme' THEN round(sum(bytes_on_disk) / 1073741824 * 0.08, 2)
+        WHEN 's3_cache'   THEN round(sum(bytes_on_disk) / 1073741824 * 0.023, 2)
+        ELSE 0
+    END AS estimated_cost_usd_month
+FROM system.parts
+WHERE table = 'marketing_events' AND active = 1
+GROUP BY disk_name;
+```
+
 _Prossima lezione: S3Queue e Tabelle Incrementali — Come costruire pipeline che aggiungono solo i dati nuovi._

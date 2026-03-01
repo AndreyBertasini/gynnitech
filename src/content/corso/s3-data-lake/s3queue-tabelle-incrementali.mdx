@@ -647,4 +647,362 @@ Le tabelle incrementali con S3Queue sono il modo migliore per costruire pipeline
 - **SummingMergeTree** per aggregazioni incrementali real-time
 - **system.s3queue_log** per monitoraggio e debugging
 
+## Failure Recovery e Idempotenza in S3Queue
+
+In un sistema di produzione, i fallimenti sono inevitabili: ClickHouse si riavvia, la sessione ZooKeeper scade, un file e' corrotto. Capire il comportamento di S3Queue in questi scenari e' fondamentale per costruire pipeline affidabili.
+
+### Comportamento al Riavvio
+
+Quando ClickHouse si riavvia, S3Queue recupera il suo stato da ZooKeeper/Keeper e riprende esattamente da dove si era fermato:
+
+```plain text
+Scenario: ClickHouse si riavvia mentre processa file_005.parquet
+
+Prima del riavvio:
+  file_001.parquet → Processato (registrato in ZK)
+  file_002.parquet → Processato (registrato in ZK)
+  file_003.parquet → Processato (registrato in ZK)
+  file_004.parquet → Processato (registrato in ZK)
+  file_005.parquet → In processing... ← CRASH qui
+
+Dopo il riavvio:
+  file_001.parquet → Saltato (gia' in ZK)
+  file_002.parquet → Saltato (gia' in ZK)
+  file_003.parquet → Saltato (gia' in ZK)
+  file_004.parquet → Saltato (gia' in ZK)
+  file_005.parquet → Riprocessato! ← possibili duplicati
+  file_006.parquet → Processato normalmente
+```
+
+**Il rischio duplicati:** se il crash avviene dopo che i dati sono stati inseriti nella MergeTree ma prima che ZooKeeper venga aggiornato, `file_005.parquet` viene riprocessato e inserito due volte.
+
+### Soluzione: Idempotenza con ReplacingMergeTree
+
+```sql
+-- ReplacingMergeTree garantisce che i duplicati vengano rimossi
+-- La colonna version determina quale record "vince" in caso di conflitto
+CREATE TABLE events_idempotent (
+    -- event_id come chiave di deduplicazione
+    event_id String,
+    user_id String,
+    event_name String,
+    event_timestamp DateTime64(3),
+    revenue Nullable(Decimal(10, 2)),
+    -- La versione e' il timestamp di ingestione
+    -- In caso di duplicato, vince il record con version maggiore
+    _version UInt64 DEFAULT toUnixTimestamp64Milli(now64())
+) ENGINE = ReplacingMergeTree(_version)
+PARTITION BY toYYYYMM(event_timestamp)
+-- ORDER BY include event_id: e' la chiave di deduplicazione
+ORDER BY (event_id);
+
+-- Materialized View con deduplicazione automatica
+CREATE MATERIALIZED VIEW events_idempotent_consumer TO events_idempotent AS
+SELECT
+    event_id,
+    user_id,
+    event_name,
+    event_timestamp,
+    revenue,
+    toUnixTimestamp64Milli(now64()) AS _version
+FROM events_s3queue;
+
+-- Query con FINAL per forzare la deduplicazione
+SELECT count() FROM events_idempotent FINAL;
+
+-- OPTIMIZE periodico per eliminare fisicamente i duplicati
+-- (senza FINAL, i duplicati esistono su disco ma vengono filtrati a runtime)
+OPTIMIZE TABLE events_idempotent FINAL;
+```
+
+### Idempotenza per Ordered Mode
+
+In `ordered` mode, il rischio e' diverso: se il server crasha durante il processing, al riavvio ZooKeeper contiene l'ultimo file **completamente processato**. Il file interrotto viene riprovato dall'inizio.
+
+```plain text
+Ordered Mode - Scenario crash:
+
+ZooKeeper state: last_processed = "events_2024_01_14.parquet"
+
+File in S3:
+  events_2024_01_13.parquet → Saltato (< last_processed)
+  events_2024_01_14.parquet → Saltato (= last_processed)
+  events_2024_01_15.parquet → IN PROCESSING... CRASH
+  events_2024_01_16.parquet → In attesa
+
+Dopo riavvio:
+  ZooKeeper state: last_processed = "events_2024_01_14.parquet"  ← invariato
+  events_2024_01_15.parquet → Riprovato dall'inizio
+  (rischio duplicati solo se il crash avviene tra insert e update ZK)
+```
+
+## Monitoring delle Code S3Queue con system.s3queue_log
+
+Il log S3Queue e' la fonte di verita' per il monitoring della pipeline. Configurarlo correttamente e interrogarlo con le query giuste permette di rilevare problemi prima che impattino gli utenti finali.
+
+### Configurazione Completa del Log
+
+```xml
+<!-- /etc/clickhouse-server/config.d/s3queue_log.xml -->
+<clickhouse>
+    <s3queue_log>
+        <!-- Database e tabella dove scrivere i log -->
+        <database>system</database>
+        <table>s3queue_log</table>
+        <!-- Flush ogni 7.5 secondi -->
+        <flush_interval_milliseconds>7500</flush_interval_milliseconds>
+    </s3queue_log>
+</clickhouse>
+```
+
+### Schema di system.s3queue_log
+
+```sql
+DESCRIBE TABLE system.s3queue_log;
+
+-- Colonne principali:
+-- event_time:           DateTime   - Quando e' stato processato il file
+-- database:             String     - Database della tabella S3Queue
+-- table:                String     - Nome della tabella S3Queue
+-- file_name:            String     - Nome completo del file S3
+-- rows_processed:       UInt64     - Righe importate con successo
+-- status:               Enum       - 'Processed', 'Failed', 'Processing'
+-- elapsed_ms:           UInt64     - Tempo di processing in millisecondi
+-- exception:            String     - Messaggio di errore (se Failed)
+-- processing_start_time: DateTime  - Inizio processing
+-- processing_end_time:  DateTime   - Fine processing
+```
+
+### Query di Monitoring Essenziali
+
+```sql
+-- 1. Overview dell'ultima ora
+SELECT
+    status,
+    count() AS files,
+    sum(rows_processed) AS total_rows,
+    round(avg(elapsed_ms) / 1000, 2) AS avg_duration_sec,
+    round(max(elapsed_ms) / 1000, 2) AS max_duration_sec
+FROM system.s3queue_log
+WHERE event_time >= now() - INTERVAL 1 HOUR
+  AND database = 'default'
+  AND table = 'marketing_events_queue'
+GROUP BY status;
+
+-- 2. Throughput per minuto (per rilevare rallentamenti)
+SELECT
+    toStartOfMinute(event_time) AS minute,
+    count() AS files_processed,
+    sum(rows_processed) AS rows_per_minute,
+    round(sum(rows_processed) / 60 / 1000, 1) AS K_rows_per_sec
+FROM system.s3queue_log
+WHERE event_time >= now() - INTERVAL 2 HOUR
+  AND status = 'Processed'
+GROUP BY minute
+ORDER BY minute;
+
+-- 3. File falliti con dettaglio errore (alert)
+SELECT
+    event_time,
+    file_name,
+    rows_processed,
+    exception,
+    -- Estratto del messaggio di errore
+    substring(exception, 1, 200) AS error_summary
+FROM system.s3queue_log
+WHERE status = 'Failed'
+  AND event_time >= now() - INTERVAL 24 HOUR
+ORDER BY event_time DESC;
+
+-- 4. Lag della pipeline: differenza tra file piu' vecchio non processato e ora
+-- Utile per capire se la coda si sta accumulando
+SELECT
+    min(event_time) AS oldest_unprocessed_time,
+    dateDiff('minute', min(event_time), now()) AS lag_minutes
+FROM system.s3queue
+WHERE database = 'default'
+  AND table = 'marketing_events_queue'
+  AND status = 'Processing';
+```
+
+### Dashboard di Salute della Pipeline
+
+```sql
+-- Vista unificata: salute della pipeline nelle ultime 24 ore
+WITH stats AS (
+    SELECT
+        countIf(status = 'Processed') AS files_ok,
+        countIf(status = 'Failed') AS files_failed,
+        sum(rows_processed) AS total_rows,
+        round(countIf(status = 'Failed') / count() * 100, 2) AS error_rate_pct,
+        round(avg(elapsed_ms) / 1000, 1) AS avg_duration_sec,
+        max(event_time) AS last_activity
+    FROM system.s3queue_log
+    WHERE event_time >= now() - INTERVAL 24 HOUR
+      AND table = 'marketing_events_queue'
+)
+
+SELECT
+    files_ok,
+    files_failed,
+    formatReadableQuantity(total_rows) AS total_rows_readable,
+    concat(toString(error_rate_pct), '%') AS error_rate,
+    avg_duration_sec,
+    last_activity,
+    CASE
+        WHEN error_rate_pct > 5 THEN 'CRITICAL: troppe failure'
+        WHEN dateDiff('minute', last_activity, now()) > 60 THEN 'WARNING: pipeline ferma'
+        ELSE 'HEALTHY'
+    END AS health_status
+FROM stats;
+```
+
+## S3Queue vs Kafka → ClickHouse: Confronto per Ingestion
+
+Una domanda comune: quando usare S3Queue e quando usare Kafka con ClickHouse come consumer?
+
+### Architettura con Kafka
+
+```plain text
+Kafka Architecture:
+Producer → Kafka Topic → ClickHouse Kafka Engine → MergeTree
+
+Caratteristiche:
+- Latenza: millisecondi (sub-second)
+- Throughput: centinaia di migliaia di messaggi/sec
+- Ordering garantito per partition
+- Replay: si, ma con limitazioni (retention period)
+- Stato: gestito da Kafka (consumer group offsets)
+- Costo: istanza Kafka (MSK ~$0.21/hr per cluster minimo)
+```
+
+### Architettura con S3Queue
+
+```plain text
+S3Queue Architecture:
+Producer → S3 file → S3Queue Engine → MergeTree
+
+Caratteristiche:
+- Latenza: 5-60 secondi (dipende da polling interval)
+- Throughput: dipende dalla dimensione dei file
+- Ordering: opzionale (ordered mode)
+- Replay: si, senza limiti di tempo (i file sono su S3)
+- Stato: gestito da ZooKeeper/Keeper
+- Costo: solo S3 storage + S3 GET requests
+```
+
+### Quando Scegliere S3Queue
+
+```plain text
+Usa S3Queue quando:
+[+] I dati arrivano gia' su S3 da sistemi esterni (API export, ETL batch)
+[+] La latenza di 30-60 secondi e' accettabile
+[+] Vuoi semplifita' operativa (nessun Kafka da gestire)
+[+] Hai gia' una pipeline che produce file su S3
+[+] Budget limitato (S3 e' piu' economico di un cluster Kafka)
+[+] Hai bisogno di replay facile di file storici
+
+Usa Kafka → ClickHouse quando:
+[+] Hai bisogno di latenza sub-second (real-time vero)
+[+] I dati arrivano da piu' produttori diversi
+[+] Hai gia' Kafka in produzione per altri scopi
+[+] Hai bisogno di fan-out (stesso dato verso piu' consumer)
+[+] Il volume supera 100K messaggi/secondo
+```
+
+### Scenario Ibrido: il Meglio di Entrambi
+
+```plain text
+Architettura ibrida per massima flessibilita':
+
+Produttore → Kafka → S3 Sink Connector → S3 file
+                  ↓                           ↓
+             ClickHouse                   S3Queue
+             (via Kafka Engine)           (via S3Queue Engine)
+             Latenza: 1 sec              Latenza: 60 sec
+             Hot data: 7 giorni          Cold data: 2 anni
+```
+
+## Best Practice: Naming Convention per File S3
+
+Il nome dei file su S3 influenza direttamente le performance di S3Queue in `ordered` mode e la leggibilita' della pipeline.
+
+### Standard Consigliato
+
+```plain text
+Formato: {source}_{type}_{date}_{hour}_{sequence}.{format}
+
+Esempi:
+  ga4_events_20240115_08_0001.parquet     ← GA4 events, 15 gen 2024, ora 8, file 1
+  meta_insights_20240115_00_0001.parquet  ← Meta Ads, daily export
+  hubspot_contacts_20240115_12_0001.parquet
+
+Vantaggi:
+- Ordinamento lessicografico = ordinamento temporale
+- Facile identificare source e tipo dal nome
+- La sequenza (0001) garantisce unicita' per la stessa ora
+- Compatible con ordered mode di S3Queue
+```
+
+### Anti-pattern da Evitare
+
+```plain text
+# SBAGLIATO: Timestamp Unix (non leggibile)
+1705302000_events.parquet
+
+# SBAGLIATO: UUID random (non ordinabile)
+a3f7c9e2-4b8d-11ee-be56-0242ac120002.parquet
+
+# SBAGLIATO: Data in formato europeo (non ordinabile)
+events_15-01-2024.parquet
+
+# SBAGLIATO: Senza padded zeros (ordinamento lessicografico errato)
+events_2024_1_5.parquet   ← Viene dopo events_2024_10_1!
+events_2024_01_05.parquet ← Corretto con zero-padding
+```
+
+### Script Python per Generare Nomi Conformi
+
+```python
+from datetime import datetime, timezone
+
+def s3_file_name(
+    source: str,
+    data_type: str,
+    sequence: int = 1,
+    extension: str = "parquet",
+    dt: datetime | None = None
+) -> str:
+    """
+    Genera un nome file S3 conforme alla naming convention.
+    Compatible con ordered mode di S3Queue.
+
+    Args:
+        source:    Sorgente dei dati ('ga4', 'meta', 'hubspot')
+        data_type: Tipo di dato ('events', 'campaigns', 'contacts')
+        sequence:  Numero sequenziale per file multipli della stessa ora
+        extension: Formato del file ('parquet', 'json', 'csv')
+        dt:        Datetime (default: ora corrente UTC)
+
+    Returns:
+        str: 'ga4_events_20240115_08_0001.parquet'
+    """
+    if dt is None:
+        dt = datetime.now(timezone.utc)
+
+    return (
+        f"{source}_{data_type}_"
+        f"{dt.strftime('%Y%m%d')}_{dt.strftime('%H')}_"
+        f"{sequence:04d}.{extension}"
+    )
+
+# Uso nel pipeline di export:
+# Nome file per il primo export GA4 dell'ora corrente
+filename = s3_file_name('ga4', 'events', sequence=1)
+# → 'ga4_events_20240115_08_0001.parquet'
+
+s3_path = f"s3://marketing-lake/raw/events/{filename}"
+# → 's3://marketing-lake/raw/events/ga4_events_20240115_08_0001.parquet'
+```
+
 _Prossima lezione: Pipeline Real-Time con S3 e ClickHouse — Architetture streaming per analisi in tempo reale._

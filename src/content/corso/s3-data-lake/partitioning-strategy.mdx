@@ -472,5 +472,330 @@ Prima di implementare il partizionamento, rispondi a queste domande:
 ```
 
 
+## Partizionamento Time-Series per Analytics Marketing
+
+Il caso d'uso piu' comune nel marketing analytics e' l'analisi di serie temporali: trend settimanali, confronti mensili, analisi di coorte. Il partizionamento deve essere progettato esattamente per questo.
+
+### Struttura Gerarchica Consigliata
+
+```plain text
+Gerarchia ottimale per marketing analytics:
+
+year=2024/month=01/day=15/
+
+Perche' questo ordine (dal generale allo specifico):
+- Query per anno (confronto annuale): legge /year=2024/
+- Query per mese (analisi mensile): legge /year=2024/month=01/
+- Query per giorno (analisi giornaliera): legge /year=2024/month=01/day=15/
+- Query per range (ultimi 7 giorni): glob {year=2024/month=01/day={15..21}/}
+
+NON fare l'ordine inverso:
+day=15/month=01/year=2024/   ← Per filtrare per mese devi leggere TUTTI i giorni!
+```
+
+### Script Python per Re-Partitioning di Dataset Esistenti
+
+Se hai gia' dati in S3 con una struttura di partizionamento sbagliata o senza partizionamento, questo script li riorganizza:
+
+```python
+import pyarrow.parquet as pq
+import pyarrow.fs as fs
+import pyarrow as pa
+import boto3
+from pathlib import Path
+from datetime import datetime
+import logging
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+def repartition_s3_dataset(
+    source_path: str,
+    dest_path: str,
+    partition_cols: list[str],
+    timestamp_col: str = 'event_timestamp',
+    batch_size_mb: int = 128,
+    region: str = 'eu-west-1'
+) -> dict:
+    """
+    Ripartiziona un dataset S3 esistente con nuova struttura Hive-style.
+
+    Args:
+        source_path:    'bucket-name/path/to/flat/data/'
+        dest_path:      'bucket-name/cleaned/events/'
+        partition_cols: ['year', 'month', 'day']
+        timestamp_col:  colonna da usare per estrarre le partizioni
+        batch_size_mb:  dimensione target dei file di output in MB
+        region:         regione AWS
+
+    Returns:
+        dict: statistiche dell'operazione
+    """
+    s3 = fs.S3FileSystem(region=region)
+    stats = {'files_read': 0, 'files_written': 0, 'rows_processed': 0}
+
+    logger.info(f"Lettura dataset da: s3://{source_path}")
+
+    # Legge tutto il dataset flat (puo' essere diviso in molti file)
+    dataset = pq.ParquetDataset(source_path, filesystem=s3)
+
+    # Processa in batch per non sovraccaricare la memoria
+    # PyArrow ParquetDataset e' lazy: legge solo quando necessario
+    table = dataset.read()
+    stats['files_read'] = len(dataset.files)
+    stats['rows_processed'] = len(table)
+
+    logger.info(f"Letti {stats['rows_processed']:,} record da {stats['files_read']} file")
+
+    # Estrai le colonne di partizione dal timestamp
+    import pyarrow.compute as pc
+
+    if 'year' in partition_cols:
+        table = table.append_column(
+            'year',
+            pc.cast(pc.year(table[timestamp_col]), pa.string())
+        )
+    if 'month' in partition_cols:
+        # Zero-padding: '01' non '1'
+        table = table.append_column(
+            'month',
+            pc.list_flatten(pa.chunked_array([
+                [f"{m:02d}" for m in pc.month(table[timestamp_col]).to_pylist()]
+            ]))
+        )
+    if 'day' in partition_cols:
+        table = table.append_column(
+            'day',
+            pc.list_flatten(pa.chunked_array([
+                [f"{d:02d}" for d in pc.day(table[timestamp_col]).to_pylist()]
+            ]))
+        )
+
+    logger.info(f"Scrittura dataset partizionato su: s3://{dest_path}")
+
+    # Scrivi con partitioning Hive-style
+    pq.write_to_dataset(
+        table,
+        root_path=dest_path,
+        partition_cols=partition_cols,
+        filesystem=s3,
+        compression='zstd',
+        compression_level=3,
+        # Target: file da batch_size_mb
+        max_rows_per_file=batch_size_mb * 1024 * 1024 // 200,  # ~200 bytes/riga compressa
+        existing_data_behavior='overwrite_or_ignore',
+        write_batch_size=1_000_000,
+    )
+
+    # Conta i file scritti
+    response = boto3.client('s3', region_name=region).list_objects_v2(
+        Bucket=dest_path.split('/')[0],
+        Prefix='/'.join(dest_path.split('/')[1:])
+    )
+    stats['files_written'] = response.get('KeyCount', 0)
+
+    logger.info(f"Completato: {stats['files_written']} file scritti")
+    return stats
+
+
+# --- USO PRATICO ---
+
+# Scenario: hai 2 anni di eventi flat (nessun partizionamento)
+# s3://marketing-lake/old/events/*.parquet
+# Vuoi riorganizzarli in year/month/day
+
+if __name__ == '__main__':
+    result = repartition_s3_dataset(
+        source_path='marketing-lake/old/events/',
+        dest_path='marketing-lake/cleaned/events/',
+        partition_cols=['year', 'month', 'day'],
+        timestamp_col='event_timestamp',
+        batch_size_mb=128,
+        region='eu-west-1'
+    )
+    print(f"Repartitioning completato:")
+    print(f"  File letti:    {result['files_read']:,}")
+    print(f"  Righe:         {result['rows_processed']:,}")
+    print(f"  File scritti:  {result['files_written']:,}")
+```
+
+## Il Small Files Problem: Quantificazione e Soluzioni
+
+Il problema dei file piccoli e' il killer silenzioso delle performance nei data lake. Vediamo come quantificarlo e risolverlo in produzione.
+
+### Diagnosi: Rileva i File Piccoli
+
+```python
+import boto3
+import statistics
+from collections import defaultdict
+
+def audit_partition_sizes(
+    bucket: str,
+    prefix: str,
+    region: str = 'eu-west-1'
+) -> dict:
+    """
+    Analizza la dimensione dei file in ogni partizione.
+    Identifica le partizioni con file piccoli.
+    """
+    s3 = boto3.client('s3', region_name=region)
+    partitions = defaultdict(list)
+
+    paginator = s3.get_paginator('list_objects_v2')
+    pages = paginator.paginate(Bucket=bucket, Prefix=prefix)
+
+    for page in pages:
+        for obj in page.get('Contents', []):
+            key = obj['Key']
+            size_mb = obj['Size'] / (1024 * 1024)
+
+            # Estrai il path della partizione (tutto tranne il nome file)
+            partition_path = '/'.join(key.split('/')[:-1])
+            partitions[partition_path].append(size_mb)
+
+    # Analizza le partizioni
+    report = []
+    for partition, sizes in sorted(partitions.items()):
+        report.append({
+            'partition': partition,
+            'files':     len(sizes),
+            'total_mb':  round(sum(sizes), 1),
+            'avg_mb':    round(statistics.mean(sizes), 1),
+            'min_mb':    round(min(sizes), 1),
+            'max_mb':    round(max(sizes), 1),
+            'needs_compaction': (
+                len(sizes) > 10 and statistics.mean(sizes) < 64
+            ),
+        })
+
+    return {
+        'total_partitions': len(partitions),
+        'total_files':      sum(len(s) for s in partitions.values()),
+        'partitions_needing_compaction': sum(
+            1 for r in report if r['needs_compaction']
+        ),
+        'details': report
+    }
+
+# Uso:
+audit = audit_partition_sizes('marketing-lake', 'raw/events/')
+print(f"Partizioni con small files: {audit['partitions_needing_compaction']}")
+for p in audit['details']:
+    if p['needs_compaction']:
+        print(f"  {p['partition']}: {p['files']} file, media {p['avg_mb']:.1f} MB")
+```
+
+### Hive-Style vs Hidden Partitioning (Iceberg)
+
+Il partizionamento Hive-style che abbiamo visto e' lo standard per Parquet su S3. Apache Iceberg introduce il concetto di **hidden partitioning** che risolve alcuni problemi.
+
+```plain text
+Hive-Style Partitioning:
+- Il partizionamento e' visibile nella struttura delle directory
+- Le query devono conoscere lo schema di partizionamento
+- Se cambi il partizionamento, devi riscrivere tutti i file
+
+Problema: vuoi cambiare da partizione mensile a giornaliera?
+  Prima:  events/year=2024/month=01/ → 31 GB per partizione
+  Dopo:   events/year=2024/month=01/day=15/ → 1 GB per partizione
+  → Devi riscrivere TUTTO il dataset (costoso!)
+
+Hidden Partitioning (Iceberg):
+- Il partizionamento e' gestito internamente dai metadati
+- Le query non devono specificare il partizionamento
+- Puoi evolvere il partizionamento senza riscrivere i file
+
+Esempio Iceberg:
+  SELECT * FROM events WHERE event_date = '2024-01-15'
+  → Iceberg legge i metadati, capisce che event_date=2024-01-15
+    corrisponde a partition day=2024-01-15, e legge solo quei file
+  → Non serve glob pattern manuale!
+```
+
+### Compaction Automatica
+
+La compaction (fusione di file piccoli in file grandi) puo' essere schedulata:
+
+```python
+import boto3
+import pyarrow.parquet as pq
+import pyarrow.fs as fs
+from datetime import datetime, timedelta
+
+def compact_partition(
+    bucket: str,
+    partition_path: str,
+    target_file_size_mb: int = 128,
+    region: str = 'eu-west-1'
+) -> dict:
+    """
+    Compatta tutti i file in una partizione in file da target_file_size_mb.
+    Safe: scrive i file compattati, poi cancella gli originali.
+    """
+    s3_fs = fs.S3FileSystem(region=region)
+    s3_client = boto3.client('s3', region_name=region)
+
+    # Leggi tutti i file della partizione
+    table = pq.read_table(
+        f"{bucket}/{partition_path}",
+        filesystem=s3_fs
+    )
+
+    rows = len(table)
+    target_rows_per_file = target_file_size_mb * 1024 * 1024 // 200  # stima
+
+    # Scrivi in un prefisso temporaneo
+    tmp_path = f"{bucket}/{partition_path}_compacting/"
+    pq.write_to_dataset(
+        table,
+        root_path=tmp_path,
+        filesystem=s3_fs,
+        compression='zstd',
+        max_rows_per_file=target_rows_per_file,
+    )
+
+    # Elenca i file originali
+    original_files = [
+        obj['Key'] for obj in
+        s3_client.list_objects_v2(Bucket=bucket, Prefix=partition_path)
+        .get('Contents', [])
+        if obj['Key'].endswith('.parquet')
+        and '_compacting' not in obj['Key']
+    ]
+
+    # Sposta i file compattati nella posizione finale
+    compacted_files = [
+        obj['Key'] for obj in
+        s3_client.list_objects_v2(Bucket=bucket, Prefix=f"{partition_path}_compacting/")
+        .get('Contents', [])
+        if obj['Key'].endswith('.parquet')
+    ]
+
+    # Copia i compattati nella directory originale
+    for f in compacted_files:
+        new_key = f.replace('_compacting/', '')
+        s3_client.copy_object(
+            CopySource={'Bucket': bucket, 'Key': f},
+            Bucket=bucket,
+            Key=new_key
+        )
+
+    # Cancella originali e temporanei
+    keys_to_delete = original_files + compacted_files
+    if keys_to_delete:
+        s3_client.delete_objects(
+            Bucket=bucket,
+            Delete={'Objects': [{'Key': k} for k in keys_to_delete]}
+        )
+
+    return {
+        'partition': partition_path,
+        'rows': rows,
+        'original_files': len(original_files),
+        'compacted_files': len(compacted_files),
+    }
+```
+
 _Prossima lezione: S3 + ClickHouse - Tiered Storage e Query Esterne per un'architettura data lake ad alte prestazioni._
 

@@ -483,5 +483,406 @@ La governance e' l'insieme di regole, processi e responsabilita' che mantengono 
 ```
 
 
+## Medallion Architecture: Implementazione con dbt
+
+La Medallion Architecture non e' solo una convenzione di nomi di directory: e' un contratto di qualita' dei dati. La coppia S3 + dbt permette di implementarla in modo codificato e versionato in Git.
+
+### Struttura del Progetto dbt
+
+```plain text
+dbt_project/
+├── models/
+│   ├── bronze/           ← src() references, raw data
+│   │   └── sources.yml
+│   ├── silver/           ← staging: validazione + tipizzazione
+│   │   ├── stg_ga4__events.sql
+│   │   ├── stg_hubspot__contacts.sql
+│   │   └── stg_meta_ads__insights.sql
+│   └── gold/             ← marts: logica di business
+│       ├── fct_marketing_events.sql
+│       ├── fct_campaign_performance.sql
+│       └── dim_contacts.sql
+├── tests/
+│   └── assert_no_null_user_id.sql
+└── dbt_project.yml
+```
+
+### Modello Silver: Validazione degli Eventi GA4
+
+```sql
+-- models/silver/stg_ga4__events.sql
+-- Trasforma i dati raw JSON in Parquet validato
+
+{{
+  config(
+    materialized='incremental',
+    unique_key='event_id',
+    on_schema_change='append_new_columns',
+    tags=['daily']
+  )
+}}
+
+WITH source AS (
+    -- Legge da S3 tramite external table o Athena/ClickHouse
+    SELECT *
+    FROM {{ source('ga4', 'raw_events') }}
+
+    {% if is_incremental() %}
+    -- In modalita' incrementale: legge solo i nuovi eventi
+    WHERE event_date > (SELECT max(event_date) FROM {{ this }})
+    {% endif %}
+),
+
+validated AS (
+    SELECT
+        -- Chiave primaria costruita per garantire unicita'
+        concat(
+            toString(event_timestamp),
+            '_',
+            user_pseudo_id,
+            '_',
+            event_name
+        ) AS event_id,
+
+        -- Casting esplicito: mai fidarsi dei tipi inferiti da JSON
+        toDateTime64(event_timestamp / 1000000, 3, 'UTC') AS event_timestamp,
+        toDate(event_timestamp / 1000000 / 1000000) AS event_date,
+        toString(user_pseudo_id) AS user_id,
+        toString(event_name) AS event_name,
+
+        -- Normalizzazione UTM: lowercase per coerenza
+        lower(nullIf(toString(traffic_source.source), '(none)')) AS utm_source,
+        lower(nullIf(toString(traffic_source.medium), '(none)')) AS utm_medium,
+        lower(nullIf(toString(traffic_source.name), '(none)')) AS utm_campaign,
+
+        -- Revenue: conversione da microdollar a dollari
+        if(
+            event_name = 'purchase',
+            toDecimal64(ecommerce.purchase_revenue, 2),
+            NULL
+        ) AS revenue
+
+    FROM source
+
+    -- Filtra eventi con timestamp invalidi
+    WHERE event_timestamp IS NOT NULL
+      AND event_timestamp > 0
+      AND user_pseudo_id != ''
+      AND event_name IS NOT NULL
+)
+
+SELECT * FROM validated
+```
+
+### Modello Gold: KPI Giornalieri
+
+```sql
+-- models/gold/fct_campaign_performance.sql
+-- Tabella Gold: metriche di campagna pronte per dashboard
+
+{{
+  config(
+    materialized='table',
+    tags=['daily', 'marketing']
+  )
+}}
+
+WITH events AS (
+    SELECT * FROM {{ ref('stg_ga4__events') }}
+),
+
+campaigns AS (
+    SELECT * FROM {{ ref('stg_meta_ads__insights') }}
+),
+
+-- Unisce eventi web con dati di spesa campagna
+joined AS (
+    SELECT
+        e.event_date,
+        e.utm_source AS channel,
+        e.utm_campaign AS campaign,
+        -- Metriche di engagement
+        countIf(e.event_name = 'page_view') AS page_views,
+        countIf(e.event_name = 'add_to_cart') AS add_to_cart,
+        countIf(e.event_name = 'purchase') AS purchases,
+        uniq(e.user_id) AS unique_users,
+        sum(e.revenue) AS revenue,
+        -- Metriche di spesa (da Meta Ads)
+        sum(c.spend) AS ad_spend,
+        sum(c.impressions) AS impressions,
+        sum(c.clicks) AS link_clicks,
+        -- KPI calcolati
+        if(sum(c.clicks) > 0,
+            sum(c.spend) / sum(c.clicks),
+            NULL
+        ) AS cpc,
+        if(sum(c.spend) > 0,
+            sum(e.revenue) / sum(c.spend),
+            NULL
+        ) AS roas,
+        if(countIf(e.event_name = 'page_view') > 0,
+            countIf(e.event_name = 'purchase') / countIf(e.event_name = 'page_view'),
+            NULL
+        ) AS conversion_rate
+
+    FROM events e
+    LEFT JOIN campaigns c
+        ON e.event_date = c.date
+        AND e.utm_campaign = c.campaign_name
+
+    GROUP BY event_date, channel, campaign
+)
+
+SELECT * FROM joined
+ORDER BY event_date DESC, revenue DESC NULLS LAST
+```
+
+### Test di Qualita' dbt
+
+```yaml
+# models/silver/schema.yml
+models:
+  - name: stg_ga4__events
+    description: "Eventi GA4 puliti e tipizzati"
+    columns:
+      - name: event_id
+        tests:
+          - not_null
+          - unique           # Nessun evento duplicato
+
+      - name: event_timestamp
+        tests:
+          - not_null
+
+      - name: event_name
+        tests:
+          - not_null
+          - accepted_values:
+              values: ['page_view', 'click', 'add_to_cart', 'purchase',
+                       'session_start', 'first_visit', 'scroll', 'form_submit']
+
+      - name: event_date
+        tests:
+          - not_null
+          - dbt_utils.accepted_range:
+              min_value: "'2023-01-01'"
+              max_value: "current_date + 1"
+```
+
+## Governance del Data Lake con AWS Glue Data Catalog
+
+Il metadata catalog e' l'infrastruttura che rende il data lake **scopribile** e **governabile**. AWS Glue Data Catalog e' la soluzione managed per l'ecosistema AWS.
+
+### Anatomia del Glue Catalog
+
+```plain text
+Glue Data Catalog
+├── Database: marketing_lake
+│   ├── Table: ga4_events_cleaned
+│   │   ├── Location: s3://marketing-lake/cleaned/ga4/events/
+│   │   ├── Format: Parquet
+│   │   ├── Partitions: year, month, day
+│   │   ├── Schema: [event_id, user_id, event_name, ...]
+│   │   └── Properties: {owner: data-eng, freshness: daily}
+│   ├── Table: crm_contacts_cleaned
+│   │   └── ...
+│   └── Table: campaign_metrics_gold
+│       └── ...
+└── Database: marketing_raw
+    ├── Table: ga4_raw_events
+    └── ...
+```
+
+### Registrare una Tabella con AWS Glue
+
+```python
+import boto3
+
+glue = boto3.client('glue', region_name='eu-west-1')
+
+# Registrare la tabella ga4_events_cleaned nel catalog
+glue.create_table(
+    DatabaseName='marketing_lake',
+    TableInput={
+        'Name': 'ga4_events_cleaned',
+        'Description': 'Eventi GA4 puliti e normalizzati - BRONZE → SILVER transform',
+        'StorageDescriptor': {
+            'Columns': [
+                {'Name': 'event_id',        'Type': 'string',  'Comment': 'ID univoco evento'},
+                {'Name': 'user_id',         'Type': 'string',  'Comment': 'ID anonimo utente'},
+                {'Name': 'event_name',      'Type': 'string',  'Comment': 'Nome evento GA4'},
+                {'Name': 'event_timestamp', 'Type': 'timestamp', 'Comment': 'UTC timestamp'},
+                {'Name': 'utm_source',      'Type': 'string',  'Comment': 'Sorgente campagna'},
+                {'Name': 'revenue',         'Type': 'double',  'Comment': 'Revenue in USD'},
+            ],
+            'Location': 's3://marketing-lake/cleaned/ga4/events/',
+            'InputFormat':  'org.apache.hadoop.hive.ql.io.parquet.MapredParquetInputFormat',
+            'OutputFormat': 'org.apache.hadoop.hive.ql.io.parquet.MapredParquetOutputFormat',
+            'SerdeInfo': {
+                'SerializationLibrary': 'org.apache.hadoop.hive.ql.io.parquet.serde.ParquetHiveSerDe',
+            },
+        },
+        'PartitionKeys': [
+            {'Name': 'year',  'Type': 'string'},
+            {'Name': 'month', 'Type': 'string'},
+            {'Name': 'day',   'Type': 'string'},
+        ],
+        'TableType': 'EXTERNAL_TABLE',
+        'Parameters': {
+            'classification':    'parquet',
+            'compressionType':   'zstd',
+            'owner':             'data-engineering',
+            'freshness':         'daily-08:00-UTC',
+            'retention_months':  '24',
+            'pii_fields':        'user_id',
+            'last_updated':      '2024-01-15',
+        },
+    }
+)
+```
+
+### Apache Atlas come Alternativa Open Source
+
+Apache Atlas e' il catalogo enterprise open source, usato da Cloudera e HDP. Rispetto a Glue Data Catalog offre:
+
+- **Lineage dei dati**: traccia come ogni dato e' stato trasformato (Bronze → Silver → Gold)
+- **Classificazioni**: etichette sui campi (PII, Confidential, Public)
+- **Auditing**: chi ha acceduto a cosa e quando
+- **Business glossary**: definizioni di business dei termini tecnici
+
+```plain text
+Apache Atlas Lineage per ga4_events_cleaned:
+┌──────────────────┐    Transform    ┌──────────────────────┐
+│ S3://raw/ga4/    │────────────────▶│ cleaned/ga4/events/  │
+│ events/*.json.gz │                 │ year=.../part-*.parq │
+└──────────────────┘                 └──────────────────────┘
+     BRONZE                              SILVER
+     (raw JSON)                          (Parquet+ZSTD)
+                                              │
+                                         dbt model
+                                              │
+                                              ▼
+                                    ┌──────────────────────┐
+                                    │ curated/kpi/         │
+                                    │ daily_dashboard/     │
+                                    └──────────────────────┘
+                                         GOLD
+```
+
+## Data Lake vs Data Lakehouse: Il Confronto Definitivo
+
+Con Delta Lake, Apache Iceberg e Apache Hudi, i confini tra data lake e data warehouse si sono assottigliati. Ecco come si confrontano le tre implementazioni di lakehouse.
+
+### Delta Lake (Databricks/Linux Foundation)
+
+Delta Lake aggiunge transazioni ACID ai file Parquet su S3:
+
+```python
+# Scrittura in Delta Lake
+from delta import *
+from pyspark.sql import SparkSession
+
+spark = (SparkSession.builder
+    .config("spark.jars.packages", "io.delta:delta-core_2.12:2.4.0")
+    .config("spark.sql.extensions", "io.delta.sql.DeltaSparkSessionExtension")
+    .getOrCreate())
+
+# Scrivere in modalita' MERGE (upsert)
+spark.sql("""
+    MERGE INTO delta.`s3://marketing-lake/delta/events` AS target
+    USING new_events AS source
+    ON target.event_id = source.event_id
+    WHEN MATCHED THEN UPDATE SET *
+    WHEN NOT MATCHED THEN INSERT *
+""")
+
+# Time travel: leggere la versione di ieri
+spark.read.format("delta") \
+    .option("timestampAsOf", "2024-01-14") \
+    .load("s3://marketing-lake/delta/events")
+```
+
+**Caratteristiche Delta Lake:**
+- Forte integrazione con Databricks e Spark
+- Transazioni ACID con log delle operazioni
+- Schema enforcement e schema evolution
+- Time travel (versioning delle tabelle)
+- Z-Ordering per ottimizzare le query
+
+### Apache Iceberg (Netflix, ora Apache top-level)
+
+Iceberg nasce in Netflix per gestire tabelle da petabyte con migliaia di aggiornamenti al giorno:
+
+```python
+# Lettura con PyIceberg
+from pyiceberg.catalog import load_catalog
+
+# Configura il catalogo (AWS Glue come backend)
+catalog = load_catalog('glue', **{
+    'type': 'glue',
+    'warehouse': 's3://marketing-lake/iceberg/',
+    'region_name': 'eu-west-1',
+})
+
+# Apri una tabella Iceberg
+table = catalog.load_table('marketing_lake.ga4_events')
+
+# Leggi come Arrow Table (zero-copy verso Pandas)
+arrow_table = table.scan(
+    row_filter="event_date >= '2024-01-01' AND event_name = 'purchase'",
+    selected_fields=('event_date', 'user_id', 'revenue'),
+).to_arrow()
+
+df = arrow_table.to_pandas()
+
+# Schema evolution: aggiunta colonna senza riscrivere i file
+with table.update_schema() as update:
+    update.add_column('device_brand', 'string', 'Brand del dispositivo utente')
+
+# Time travel
+table.scan(snapshot_id=123456789).to_arrow()
+```
+
+**Caratteristiche Apache Iceberg:**
+- Hidden partitioning: il partitioning e' gestito internamente, invisibile alle query
+- Partition evolution: cambia il partizionamento senza riscrivere i dati
+- Row-level deletes efficienti (per GDPR compliance)
+- Supporto per motori multipli: Spark, Flink, Trino, Athena, Dremio
+
+### Apache Hudi (Uber, ora Apache top-level)
+
+Hudi nasce in Uber per sincronizzare i database operazionali con il data lake in near-real-time:
+
+```plain text
+Hudi Table Types:
+1. Copy-on-Write (COW): ogni update riscrive il file Parquet
+   → Ottimo per analytics batch, query veloci
+   → Write lente (riscrive file grandi)
+
+2. Merge-on-Read (MOR): gli update vanno in file delta (Avro log)
+   → Ottimo per streaming, write veloci
+   → Read piu' lente (merge al momento della query)
+```
+
+### Confronto Delta Lake vs Iceberg vs Hudi
+
+| Caratteristica            | Delta Lake           | Apache Iceberg       | Apache Hudi            |
+| ------------------------- | -------------------- | -------------------- | ---------------------- |
+| **Origine**               | Databricks           | Netflix              | Uber                   |
+| **ACID transactions**     | Si                   | Si                   | Si                     |
+| **Time travel**           | Si                   | Si                   | Si                     |
+| **Schema evolution**      | Buona                | Eccellente           | Buona                  |
+| **Hidden partitioning**   | No                   | Si                   | No                     |
+| **Streaming ingestion**   | Buono                | Buono                | Eccellente             |
+| **Row-level operations**  | Si                   | Si                   | Si                     |
+| **Python support**        | Delta-rs             | PyIceberg            | Hudi Python API        |
+| **ClickHouse support**    | Limitato             | In sviluppo          | No                     |
+| **Athena / Glue**         | Si                   | Si (nativo v3)       | Si                     |
+| **Miglior uso**           | Databricks ecosystem | Multi-engine, GDPR   | CDC real-time          |
+
+<Aside type="tip">
+Per un marketing data lake con ClickHouse come query engine primario, la scelta piu' pragmatica e' **Parquet puro + Hive partitioning**. Delta Lake e Iceberg aggiungono complessita' che ha senso solo quando hai bisogno di transazioni ACID, row-level deletes frequenti o time travel.
+</Aside>
+
 _Prossima lezione: Formati Dati - Parquet, Avro, ORC e JSON a confronto per il marketing analytics._
 

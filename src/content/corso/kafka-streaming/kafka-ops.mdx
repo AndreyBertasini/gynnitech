@@ -318,5 +318,559 @@ kafka-acls.sh --bootstrap-server kafka:9092 \
 ```
 
 
+## Kafka Cluster Sizing
+
+Determinare la dimensione giusta del cluster Kafka e' critico: troppo piccolo causa colli di bottiglia, troppo grande spreca risorse. Ecco come calcolare i parametri ottimali.
+
+### Numero di Broker
+
+Il numero minimo di broker dipende dal replication factor desiderato:
+
+```plain text
+Regola di base:
+  Numero broker >= Replication Factor
+
+Con RF=3 (raccomandato per produzione):
+  Minimo: 3 broker
+  Ideale: 4+ broker (failover senza ridurre RF)
+
+Formula per la scalabilita':
+  Broker necessari = ceil(Throughput totale / Throughput per broker)
+
+  Throughput tipico per broker:
+    - Scrittura: 50-100 MB/s (dipende da disco e rete)
+    - Lettura: 100-200 MB/s (I/O sequenziale su pagecache)
+
+Esempio:
+  Target: 300 MB/s di scrittura totale
+  Throughput per broker: 80 MB/s
+  Broker necessari: ceil(300/80) = 4 broker
+  Con RF=3 e sicurezza: usa 5 broker
+```
+
+### Replication Factor Ottimale
+
+| Ambiente | RF | min.insync.replicas | Tolleranza Guasti |
+| --- | --- | --- | --- |
+| Sviluppo | 1 | 1 | Nessuna |
+| Staging | 2 | 1 | 1 broker down |
+| Produzione | 3 | 2 | 1 broker down senza perdita dati |
+| Mission-critical | 3 | 3 | 0 broker down (max durabilita') |
+
+```bash
+# Imposta RF e min.insync.replicas al momento della creazione del topic
+kafka-topics.sh --bootstrap-server kafka:9092 \
+  --create --topic marketing.conversions \
+  --partitions 6 \
+  --replication-factor 3 \
+  --config min.insync.replicas=2
+```
+
+### Formula per il Numero di Partizioni
+
+```plain text
+Partizioni = max(T_produzione / T_produzione_per_partizione,
+                 T_consumo / T_consumo_per_partizione,
+                 N_consumer_desiderati)
+
+Dove T = Throughput (messaggi/secondo o MB/s)
+
+Esempio per marketing.clicks con 10.000 eventi/secondo:
+  - Throughput producer per partizione: ~3.000 eventi/s
+  - Throughput consumer ClickHouse per partizione: ~2.000 eventi/s
+  - Consumer desiderati (per parallelismo): 6
+
+  Partizioni = max(10.000/3.000, 10.000/2.000, 6)
+             = max(3.33, 5, 6)
+             = 6 partizioni
+
+Regola pratica:
+  - Inizia con 3-6 partizioni per topic
+  - Aumenta solo quando vedi bottleneck reali (lag in crescita)
+  - Non diminuire mai il numero di partizioni (non supportato nativamente)
+  - Massimo ~4.000 partizioni per broker (overhead metadata JVM)
+```
+
+### Sizing Hardware per Broker
+
+```plain text
+Componenti critici per le performance Kafka:
+
+1. DISCO (il piu' importante):
+   - Usa SSD NVMe o SAS con controller RAID
+   - Kafka e' I/O bound, non CPU bound
+   - Separare il disco del log da quello dell'OS
+   - Dimensione: vedi formula storage di seguito
+
+2. RETE:
+   - Kafka usa molto la rete per la replicazione
+   - Minimo: 1 Gbps per broker
+   - Produzione ad alto volume: 10 Gbps
+   - Regola: Replication Factor x Throughput scrittua = banda necessaria
+
+3. RAM:
+   - La RAM e' usata principalmente come page cache
+   - Piu' RAM = meno I/O su disco (read from cache)
+   - Formula: Heap JVM (6-8 GB) + Page Cache (RAM rimanente)
+   - Tipico: 32-64 GB per broker ad alto volume
+
+4. CPU:
+   - Kafka non e' CPU-intensive (ameno che non usi compressione)
+   - Con compressione lz4/zstd: 4-8 core sono sufficienti
+   - Con SSL e compressione pesante: 16 core
+
+Sizing per marketing analytics (10.000 eventi/s):
+  - 3 broker, ognuno con:
+    - 8 core, 32 GB RAM
+    - 2x SSD NVMe da 2 TB (RAID-0 per capacita')
+    - 10 Gbps NIC
+    - Costo stimato: ~$800/mese su AWS (r5.2xlarge + storage)
+```
+
+## Topic Configuration Best Practices
+
+La configurazione dei topic ha impatto diretto su costi, performance e durabilita'.
+
+### Retention: Quanti Dati Tenere
+
+```bash
+# retention.ms: mantieni i dati per N millisecondi
+# Calcola in base ai tuoi requisiti di replay e compliance
+
+# Marketing analytics: 7 giorni (sufficiente per replay di incidenti)
+kafka-configs.sh --bootstrap-server kafka:9092 \
+  --alter --entity-type topics --entity-name marketing.events \
+  --add-config retention.ms=604800000   # 7 giorni = 7 * 24 * 3600 * 1000
+
+# CRM events: 30 giorni (potrebbe servire per analisi di trend)
+--add-config retention.ms=2592000000   # 30 giorni
+
+# Audit log: 365 giorni (compliance)
+--add-config retention.ms=31536000000  # 365 giorni
+
+# retention.bytes: mantieni massimo N byte per partizione
+# Utile per controllare lo storage indipendentemente dal tempo
+--add-config retention.bytes=10737418240  # 10 GB per partizione
+
+# Nota: se si imposta sia retention.ms sia retention.bytes,
+# viene applicato il limite che scatta per primo
+```
+
+### segment.bytes: Dimensione dei Segmenti
+
+```bash
+# I log Kafka sono divisi in segmenti. La compaction e il cleanup
+# avvengono a livello di segmento (mai a livello di singolo messaggio).
+
+# Segmento troppo piccolo: troppi file, overhead OS
+# Segmento troppo grande: il cleanup e' piu' lento (pulisce blocchi grandi)
+
+# Default: 1 GB (1073741824 bytes) - va bene per la maggior parte dei casi
+# Per topic con alta frequenza di write e retention breve: 256 MB
+kafka-configs.sh --bootstrap-server kafka:9092 \
+  --alter --entity-type topics --entity-name marketing.events \
+  --add-config segment.bytes=268435456  # 256 MB
+
+# segment.ms: forza la rotazione del segmento dopo N millisecondi
+# Utile per garantire che i segmenti vecchi vengano puliti anche con poco traffico
+--add-config segment.ms=3600000  # Rotazione ogni ora
+```
+
+### cleanup.policy: Delete vs Compact
+
+```bash
+# delete (default): elimina i segmenti vecchi in base a retention
+# Usato per: eventi, log, stream di dati temporali
+
+# compact: mantieni solo l'ultimo valore per ogni key
+# Usato per: stato corrente (user profile, configurazioni)
+
+# compact,delete: mantieni l'ultimo valore E rispetta il retention
+# Usato per: stati con TTL (sessioni, cache temporanee)
+
+# Topic per profili utente (compaction):
+kafka-topics.sh --bootstrap-server kafka:9092 \
+  --create --topic user.profiles \
+  --config cleanup.policy=compact \
+  --config min.cleanable.dirty.ratio=0.1 \
+  --config delete.retention.ms=86400000
+
+# Topic per eventi marketing (delete):
+kafka-topics.sh --bootstrap-server kafka:9092 \
+  --create --topic marketing.events \
+  --config cleanup.policy=delete \
+  --config retention.ms=604800000
+```
+
+### Compression: Risparmia Banda e Storage
+
+```plain text
+Confronto algoritmi di compressione per messaggi JSON:
+
+Messaggio JSON originale: 500 byte
+
+| Algoritmo | Dimensione | CPU overhead | Latenza |
+|-----------|-----------|-------------|---------|
+| none      | 500 byte  | 0           | minima  |
+| gzip      | 160 byte  | Alta        | +5ms    |
+| snappy    | 225 byte  | Bassa       | +1ms    |
+| lz4       | 200 byte  | Molto bassa | +0.5ms  |
+| zstd      | 155 byte  | Media       | +1.5ms  |
+
+Raccomandazione per marketing analytics:
+  - lz4: ottimo compromesso velocita'/compressione
+  - zstd: migliore compressione con overhead accettabile
+  - Evita gzip: ottima compressione ma CPU overhead alto
+
+Imposta la compressione sul producer (non sul broker):
+  producer.config['compression.type'] = 'lz4'
+```
+
+## Monitoring con Prometheus e Grafana
+
+Un cluster Kafka senza monitoring e' una bomba a orologeria. Ecco come costruire un sistema di osservabilita' completo.
+
+### Stack di Monitoring
+
+```plain text
+Kafka JMX (metriche interne)
+    |
+    v
+JMX Exporter (agent Java, espone metriche HTTP)
+    |
+    v
+Prometheus (scraping e storage metriche time-series)
+    |
+    +---> Grafana (dashboard e visualizzazione)
+    |
+    +---> AlertManager (notifiche via Slack/PagerDuty)
+```
+
+### Metriche Chiave: La Triade del Cluster Sano
+
+**1. UnderReplicatedPartitions - La Metrica Piu' Critica**
+
+```yaml
+# Metrica JMX:
+# kafka.server:type=ReplicaManager,name=UnderReplicatedPartitions
+
+# Cosa misura: partizioni con meno repliche sincronizzate del RF configurato
+# Valore normale: 0
+# Quando scatta: broker down, follower lento, rete degradata
+
+alert: KafkaUnderReplicatedPartitions
+  expr: kafka_server_replica_manager_under_replicated_partitions > 0
+  for: 5m
+  severity: critical
+  # Se > 0 per piu' di 5 minuti, il cluster e' degradato e a rischio perdita dati
+```
+
+**2. RequestsPerSec - Throughput del Cluster**
+
+```yaml
+# Metriche JMX:
+# kafka.server:type=BrokerTopicMetrics,name=MessagesInPerSec
+# kafka.server:type=BrokerTopicMetrics,name=BytesInPerSec
+# kafka.server:type=BrokerTopicMetrics,name=BytesOutPerSec
+
+# Cosa misura: volume di messaggi e byte in ingresso e uscita
+# Utile per: capacity planning, rilevare spike anomali, baseline
+
+alert: KafkaThroughputDrop
+  expr: rate(kafka_server_brokertopicmetrics_messagesinpersec[5m]) < baseline * 0.5
+  for: 15m
+  severity: warning
+  # Drop del 50% indica un problema nel producer o nel cluster
+```
+
+**3. ConsumerLag - La Pipeline Funziona?**
+
+```yaml
+# Metrica JMX:
+# kafka.consumer:type=consumer-fetch-manager-metrics,name=records-lag-max
+
+# Metrica esterna (piu' affidabile per tutti i consumer group):
+# Burrow o kafka-consumer-groups.sh
+
+# Query PromQL per consumer lag per gruppo:
+kafka_consumer_group_lag{group="clickhouse_ingestion"} > 10000
+
+alert: KafkaConsumerLagCritical
+  expr: max by(consumer_group, topic) (kafka_consumer_group_lag) > 50000
+  for: 10m
+  severity: critical
+  # 50.000 messaggi in lag = pipeline bloccata
+```
+
+### Dashboard Grafana per Kafka
+
+Struttura raccomandata per la dashboard:
+
+```plain text
+ROW 1: CLUSTER HEALTH
+  - UnderReplicatedPartitions (numero, rosso se > 0)
+  - ActiveControllerCount (deve essere esattamente 1)
+  - OfflinePartitionsCount (deve essere 0)
+  - Broker count (confronta con atteso)
+
+ROW 2: THROUGHPUT
+  - MessagesIn/s per topic (serie temporale)
+  - BytesIn/s e BytesOut/s per broker
+  - Producer request rate e latenza
+
+ROW 3: CONSUMER GROUPS
+  - Consumer lag per gruppo (heatmap o serie)
+  - Lag growth rate (e' in aumento o in diminuzione?)
+  - Commit rate per consumer group
+
+ROW 4: RISORSE BROKER
+  - CPU usage per broker
+  - Network I/O per broker
+  - Disk I/O e spazio disponibile
+  - JVM Heap usage (alert se > 80%)
+```
+
+## Procedure Operative: Leader Election e Rolling Restart
+
+### Leader Election
+
+Quando un broker (che e' leader di alcune partizioni) va offline, Kafka avvia automaticamente la **leader election**:
+
+```plain text
+PROCESSO DI LEADER ELECTION (KRaft mode):
+
+T=0: Broker 2 (leader di P0, P3, P5) va offline
+
+T=0: Group Controller rileva la disconnessione del Broker 2
+
+T=1: Controller legge l'ISR per ogni partizione orfana:
+     P0: ISR = {Broker1, Broker3}  --> Broker1 eletto leader
+     P3: ISR = {Broker1, Broker3}  --> Broker3 eletto leader
+     P5: ISR = {Broker1}           --> Broker1 eletto leader
+
+T=2: Controller aggiorna i metadata del cluster
+
+T=2: Producer e consumer ricevono i nuovi metadata
+     e iniziano a usare i nuovi leader
+
+Tempo totale: <30 secondi (vs ~2 minuti con ZooKeeper)
+```
+
+**Quando la leader election puo' fallire:**
+
+```plain text
+PROBLEMA: unclean.leader.election.enable=true (SCONSIGLIATO)
+  Se ISR e' vuota (tutti i follower sono lenti/down),
+  con unclean.leader.election=true Kafka puo' eleggere
+  una replica non sincronizzata come leader.
+  CONSEGUENZA: perdita dei messaggi non ancora replicati.
+
+SOLUZIONE: mantieni sempre unclean.leader.election.enable=false
+  Con min.insync.replicas=2 e RF=3, puoi perdere 1 broker
+  senza perdita di dati e senza unclean election.
+```
+
+### Rolling Restart: Aggiornare Kafka Senza Downtime
+
+Il **rolling restart** permette di riavviare tutti i broker uno alla volta senza interrompere il servizio:
+
+```bash
+#!/bin/bash
+# rolling_restart.sh - Riavvia i broker Kafka uno alla volta
+
+BROKERS=("kafka-1" "kafka-2" "kafka-3")
+CONNECT_URL="kafka-1:9092"
+WAIT_AFTER_RESTART=60  # secondi
+
+for BROKER in "${BROKERS[@]}"; do
+    echo "Riavvio broker: $BROKER"
+
+    # 1. Verifica che il cluster sia sano prima di procedere
+    UNDER_REPLICATED=$(kafka-topics.sh --bootstrap-server $CONNECT_URL \
+      --describe --under-replicated-partitions 2>/dev/null | wc -l)
+
+    if [ "$UNDER_REPLICATED" -gt 0 ]; then
+        echo "ATTENZIONE: ci sono partizioni sotto-replicate. Attendi prima di continuare."
+        exit 1
+    fi
+
+    # 2. Arresta il broker
+    ssh $BROKER "sudo systemctl stop kafka"
+
+    # 3. Attendi che le partizioni vengano rielette
+    echo "Attendo $WAIT_AFTER_RESTART secondi per il ribilanciamento..."
+    sleep $WAIT_AFTER_RESTART
+
+    # 4. Riavvia il broker
+    ssh $BROKER "sudo systemctl start kafka"
+
+    # 5. Attendi che il broker torni online e le repliche si sincronizzino
+    echo "Attendo che il broker $BROKER sia in sync..."
+    for i in {1..30}; do
+        UNDER=$(kafka-topics.sh --bootstrap-server $CONNECT_URL \
+          --describe --under-replicated-partitions 2>/dev/null | wc -l)
+        if [ "$UNDER" -eq 0 ]; then
+            echo "Broker $BROKER sincronizzato. Passo al prossimo."
+            break
+        fi
+        sleep 10
+    done
+
+    echo "Broker $BROKER OK"
+done
+
+echo "Rolling restart completato."
+```
+
+### Broker Decommission: Rimuovere un Broker dal Cluster
+
+Quando vuoi rimuovere un broker (es. ridimensionamento del cluster), non puoi semplicemente spegnerlo: devi prima migrare le sue partizioni sugli altri broker.
+
+```bash
+# Passo 1: Genera il piano di riassegnazione partizioni
+# Il broker da rimuovere e' il Broker 3 (ID=3)
+
+kafka-reassign-partitions.sh \
+  --bootstrap-server kafka:9092 \
+  --broker-list "1,2" \       # Broker che rimangono
+  --topics-to-move-json-file topics.json \
+  --generate
+
+# Passo 2: Esegui la riassegnazione
+kafka-reassign-partitions.sh \
+  --bootstrap-server kafka:9092 \
+  --reassignment-json-file reassignment.json \
+  --execute
+
+# Passo 3: Monitora il progresso
+kafka-reassign-partitions.sh \
+  --bootstrap-server kafka:9092 \
+  --reassignment-json-file reassignment.json \
+  --verify
+
+# Passo 4: Solo quando la riassegnazione e' completa, spegni il broker 3
+```
+
+## Disaster Recovery con MirrorMaker 2
+
+**MirrorMaker 2** e' lo strumento ufficiale Kafka per replicare i dati tra cluster in datacenter diversi.
+
+### Architettura Multi-Datacenter
+
+```plain text
+DATACENTER PRINCIPALE (Milan, EU)         DATACENTER SECONDARIO (Frankfurt, EU)
++----------------------------+            +----------------------------+
+| Kafka Cluster Primary      |            | Kafka Cluster Secondary    |
+|                            |            |                            |
+| topic: marketing.events    |            | topic: milan.marketing.events |
+| topic: marketing.clicks    |------>---->| topic: milan.marketing.clicks |
+| topic: user.profiles       | MirrorMaker| topic: milan.user.profiles |
+|                            |     2      |                            |
+| Producers (website, app)   |            | Consumer (analytics DR,    |
+| Consumers (ClickHouse)     |            | backup ClickHouse)         |
++----------------------------+            +----------------------------+
+
+In caso di disaster nel datacenter principale:
+  1. Ferma i producer nel datacenter principale
+  2. Attendi che MM2 abbia replicato tutti i messaggi
+  3. Reindirizza i producer verso il datacenter secondario
+  4. I consumer secondari diventano primari
+  5. RTO (Recovery Time Objective): ~5-15 minuti
+```
+
+### Configurazione MirrorMaker 2
+
+```properties
+# mm2.properties
+
+# Definizione dei cluster
+clusters = source, target
+
+# Cluster sorgente (Milan)
+source.bootstrap.servers = kafka-milan-1:9092,kafka-milan-2:9092,kafka-milan-3:9092
+
+# Cluster target (Frankfurt)
+target.bootstrap.servers = kafka-frankfurt-1:9092,kafka-frankfurt-2:9092
+
+# Definizione dei replication flow
+source->target.enabled = true
+source->target.topics = marketing\..*,user\.profiles  # Replica tutti i topic marketing.*
+
+# Prefisso per i topic nel cluster target
+# topic "marketing.events" diventa "source.marketing.events" nel target
+replication.factor = 3
+
+# Sincronizzazione degli offset (permette failover trasparente)
+source->target.emit.heartbeats.enabled = true
+source->target.sync.group.offsets.enabled = true
+source->target.sync.group.offsets.interval.seconds = 60
+```
+
+### RTO e RPO per Marketing Analytics
+
+```plain text
+RTO (Recovery Time Objective) = quanto tempo per tornare operativi?
+RPO (Recovery Point Objective) = quanti dati possiamo perdere?
+
+Con MirrorMaker 2 configurato:
+  Latenza di replica tipica: 1-10 secondi
+  RPO: ~10 secondi (dati prodotti negli ultimi 10s potrebbero essere persi)
+  RTO: ~10-15 minuti (failover manuale o automatico)
+
+Per marketing analytics, questo e' accettabile:
+  - Dashboard ritardate di 10 secondi in caso di disaster: irrilevante
+  - Perdita di 10 secondi di dati di click: ~50-500 click persi, accettabile
+  - Dati di conversione: usa DLQ lato producer per zero perdita
+
+Per dati business-critical (ordini, pagamenti):
+  - Usa transazioni distribuite con Exactly-Once Semantics
+  - Considera DB relazionale con replica sincrona (PostgreSQL HA)
+  - Kafka non e' il posto giusto per zero data loss garantito
+```
+
+## Checklist Operativa per Kafka in Produzione
+
+Prima di andare live con un cluster Kafka in produzione, verifica ogni punto:
+
+**Architettura e Configurazione:**
+
+- Almeno 3 broker in 3 zone di disponibilita' diverse (AZ diversi in cloud)
+- Replication factor = 3, min.insync.replicas = 2 per tutti i topic critici
+- KRaft mode abilitato (nessun ZooKeeper)
+- unclean.leader.election.enable = false
+- auto.create.topics.enable = false (crea topic esplicitamente)
+- log.retention.hours configurato per ogni topic in base ai requisiti
+
+**Security:**
+
+- SASL autenticazione per producer e consumer
+- ACL configurate: ogni service account ha accesso solo ai topic necessari
+- TLS per la comunicazione in transito (tra broker e client)
+- Secrets gestiti con HashiCorp Vault o AWS Secrets Manager (mai in chiaro)
+
+**Monitoring:**
+
+- JMX Exporter installato su ogni broker
+- Dashboard Grafana con le 3 metriche critiche (URP, ConsumerLag, Throughput)
+- Alert su UnderReplicatedPartitions > 0 (critical)
+- Alert su ConsumerLag > soglia per ogni consumer group critico
+- Alert su disco disponibile < 20% (per evitare log.dirs full)
+
+**Operativita':**
+
+- Procedura di rolling restart documentata e testata
+- MirrorMaker 2 configurato per disaster recovery (se hai piu' datacenter)
+- Backup della configurazione del cluster (kafka-configs.sh --describe --all)
+- Runbook per i problemi piu' comuni (consumer lag, broker down, disk full)
+- Accesso SSH ai broker solo via bastion host o VPN
+
+**Testing:**
+
+- Test di carico con producer simulato (kafka-producer-perf-test.sh)
+- Test di failover: spegni un broker e verifica che il cluster rimanga operativo
+- Test di consumer rebalancing: ferma un consumer e verifica il lag recovery
+- Test di DR: simula un failover su MirrorMaker e verifica i dati nel cluster target
+
 ## Checklist Produzione
+
 

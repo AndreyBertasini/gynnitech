@@ -551,5 +551,201 @@ Configura un sistema di monitoring completo per il data warehouse di marketing:
 4. **Progetta la dashboard Grafana** con i pannelli essenziali: SLO status, pipeline status, freshness per tabella, query performance
 5. **Scrivi un runbook** per lo scenario "tabella fact_campaign_performance non aggiornata da 4 ore"
 
+## 10. OpenTelemetry per Data Pipeline
+
+**OpenTelemetry (OTel)** è lo standard open source per l'instrumentazione di applicazioni distribuite. Nato dalla fusione di OpenCensus e OpenTracing, è ora il progetto CNCF più adottato dopo Kubernetes. Per le pipeline dati, OTel offre un'instrumentazione uniforme per i tre segnali: tracce, metriche e log — con un singolo SDK e un protocollo standard (OTLP).
+
+### Perché OTel per le Pipeline Dati
+
+Senza OpenTelemetry, il monitoring di una pipeline Kafka → ClickHouse → dbt richiede:
+- JMX Exporter per Kafka (Java)
+- Un exporter custom per ClickHouse
+- Un plugin dbt per le metriche
+- Tre sistemi di log distinti
+
+Con OpenTelemetry, ogni componente emette dati nel formato OTLP che un OpenTelemetry Collector riceve, processa e instrada verso Prometheus/Grafana o altri backend.
+
+### Instrumentazione di un Pipeline dbt con OTel
+
+```python
+# data_pipeline_otel.py
+from opentelemetry import trace, metrics
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.metrics import MeterProvider
+from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter
+from opentelemetry.sdk.trace.export import BatchSpanProcessor
+import time
+
+# Configura il provider con esportatore OTLP verso il collector
+provider = TracerProvider()
+exporter = OTLPSpanExporter(endpoint="http://otel-collector:4317", insecure=True)
+provider.add_span_processor(BatchSpanProcessor(exporter))
+trace.set_tracer_provider(provider)
+
+tracer = trace.get_tracer("dbt-pipeline")
+
+def run_dbt_model(model_name: str):
+    """Esegue un modello dbt con tracing OTel completo."""
+    with tracer.start_as_current_span(f"dbt.run.{model_name}") as span:
+        span.set_attribute("dbt.model_name", model_name)
+        span.set_attribute("dbt.target", "production")
+
+        start = time.time()
+        try:
+            # Esegui il modello dbt...
+            result = execute_dbt_model(model_name)
+            duration_ms = (time.time() - start) * 1000
+
+            span.set_attribute("dbt.rows_affected", result.rows_affected)
+            span.set_attribute("dbt.duration_ms", duration_ms)
+            span.set_attribute("dbt.status", "success")
+            return result
+
+        except Exception as e:
+            span.record_exception(e)
+            span.set_attribute("dbt.status", "error")
+            span.set_attribute("dbt.error_message", str(e))
+            raise
+```
+
+Il vantaggio principale di OTel per le pipeline: ogni esecuzione dbt diventa una **traccia distribuita** che mostra il tempo speso in ogni modello, le dipendenze tra modelli e i colli di bottiglia. Invece di guardare log testuali, vedi un grafico a cascata che rivela immediatamente dove la pipeline ha rallentato.
+
+### OpenTelemetry Collector per Pipeline Dati
+
+```yaml
+# otel-collector-config.yaml
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+  # Ricevi metriche da Prometheus (ClickHouse, Kafka)
+  prometheus:
+    config:
+      scrape_configs:
+        - job_name: 'clickhouse'
+          static_configs:
+            - targets: ['clickhouse:9363']
+        - job_name: 'kafka'
+          static_configs:
+            - targets: ['kafka-exporter:9308']
+
+processors:
+  # Arricchisci le tracce con attributi del team
+  attributes:
+    actions:
+      - key: team
+        value: data-engineering
+        action: insert
+      - key: environment
+        value: production
+        action: insert
+
+  # Filtra le tracce a bassa latenza (< 100ms) per ridurre il volume
+  filter:
+    spans:
+      include:
+        match_type: regexp
+        attributes:
+          - key: dbt.duration_ms
+            value: "^[1-9][0-9]{2,}.*"  # solo span > 100ms
+
+exporters:
+  # Metriche a Prometheus/Grafana
+  prometheusremotewrite:
+    endpoint: http://prometheus:9090/api/v1/write
+
+  # Tracce a Jaeger o Grafana Tempo
+  jaeger:
+    endpoint: jaeger:14250
+    tls:
+      insecure: true
+
+  # Log a Loki (Grafana stack)
+  loki:
+    endpoint: http://loki:3100/loki/api/v1/push
+
+service:
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [attributes, filter]
+      exporters: [jaeger]
+    metrics:
+      receivers: [otlp, prometheus]
+      processors: [attributes]
+      exporters: [prometheusremotewrite]
+```
+
+### SLI/SLO per Data Engineering: Definizioni Pratiche
+
+La differenza tra SLI, SLO e SLA applicata alle pipeline dati:
+
+- **SLI (Service Level Indicator)**: La metrica misurata. "La percentuale di tabelle aggiornate nelle ultime 2 ore."
+- **SLO (Service Level Objective)**: Il target interno. "Il 99.5% delle tabelle deve essere aggiornato nelle ultime 2 ore."
+- **SLA (Service Level Agreement)**: L'accordo contrattuale con l'esterno. "Garantiamo ai team consumer dati aggiornati entro 4 ore, altrimenti escalation."
+
+Per il data engineering, gli SLO più importanti da definire e monitorare:
+
+**Freshness SLO**: La tabella `fact_campaign_performance` deve essere aggiornata entro 2 ore dal termine del job dbt. Violazione → alert PagerDuty P2.
+
+```promql
+# Query PromQL per calcolare il Freshness SLO
+# Tabelle con dati aggiornati nelle ultime 2 ore / tabelle totali
+(
+  count(time() - dbt_model_last_success_timestamp < 7200)
+  /
+  count(dbt_model_last_success_timestamp)
+) * 100
+```
+
+**Volume Anomaly SLO**: Il volume giornaliero di `fact_events` non deve deviare più del 30% dalla media mobile degli ultimi 7 giorni. Violazione → alert Slack + analisi automatica della causa.
+
+**Query Performance SLO**: Il 95% delle query sulla dashboard executive deve completarsi in meno di 5 secondi. Violazione → ottimizzazione nella prossima sprint, valutare nuove Materialized Views.
+
+### Dashboard Grafana per Data Pipeline Monitoring
+
+Una dashboard Grafana efficace per monitorare le pipeline dati ha questi panel fondamentali:
+
+**Panel 1 — SLO Status Overview (Stat panel)**:
+```
+Freshness SLO: 99.8%   [verde]
+Volume SLO:    97.2%   [verde]
+Query P95 SLO: 94.1%   [giallo — sotto target]
+Pipeline SLO:  99.9%   [verde]
+```
+
+**Panel 2 — Data Freshness per tabella (Table panel con colori condizionali)**:
+```
+Tabella                        Ultimo aggiornamento   Status
+fact_campaign_performance      12 min fa              VERDE
+fact_events                    4 min fa               VERDE
+dim_customers                  1h 45min fa            VERDE
+fact_ad_spend                  2h 18min fa            GIALLO
+dim_products                   4h 12min fa            ROSSO
+```
+
+**Panel 3 — Volume inserimento ClickHouse (Time series)**:
+Query PromQL: `rate(clickhouse_inserted_rows_total[5m])` con banda di confidenza basata sui 7 giorni precedenti.
+
+**Panel 4 — dbt Run History (Bar chart)**:
+Mostra le ultime 50 esecuzioni dbt con status (success/error) e durata, per identificare trend di degradazione delle performance.
+
+**Panel 5 — Query Latency Distribution (Heatmap)**:
+Distribuzione della latenza delle query per ora del giorno, permette di identificare picchi di carico e ottimizzare la pianificazione degli ETL.
+
+La configurazione completa della dashboard Grafana si esporta come JSON e viene versionata in Git insieme al resto dell'infrastruttura — così ogni modifica alla dashboard passa da code review esattamente come ogni modifica al codice.
+
+### Alerting Budget e Error Budget
+
+Il concetto di **error budget** (budget di errore) viene dal Site Reliability Engineering (SRE) di Google. Se il tuo SLO di freshness è 99.5%, significa che puoi permetterti 0.5% di violazioni — cioè circa 3.6 ore di dati stale al mese.
+
+Tracciare il consumo dell'error budget nel tempo è fondamentale per decidere quando investire in affidabilità vs nuove feature. Se a metà mese hai già consumato il 70% del tuo error budget mensile, devi rallentare le modifiche alla pipeline e investire in stabilità prima di procedere con sviluppi.
+
+In Grafana, l'error budget si visualizza come pannello "burn rate": quante volte più velocemente del normale stai consumando il budget. Un burn rate > 1 significa che sei on track per violare il SLO entro la fine del mese; un burn rate > 6 significa che violerai il SLO entro la settimana — trigger per un alert immediato.
+
 _Il monitoring non e un progetto da completare una volta: e una disciplina continua. Ogni incidente rivela una lacuna nel monitoring. Ogni post-mortem genera un nuovo alert, un nuovo check, un nuovo pannello nella dashboard. Il team dati che investe nel monitoring investe nella fiducia che l'organizzazione ripone nei propri dati._
 

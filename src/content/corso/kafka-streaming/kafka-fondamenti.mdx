@@ -426,3 +426,263 @@ Confluent offre Kafka come servizio gestito con componenti aggiuntivi:
 - **KRaft** sostituisce ZooKeeper: meno componenti, piu' scalabilita'
 - Scegli la chiave di partizionamento in base al tuo caso d'uso: `user_id` per journey analysis, `campaign_id` per aggregazioni real-time
 - Valuta **Redpanda** se cerchi semplicita' e bassa latenza con team piccoli
+
+## Kafka vs Alternative: Confronto Tecnico
+
+Scegliere il message broker giusto e' una decisione architetturale che impatta anni di sviluppo. Ecco un confronto onesto tra Kafka, RabbitMQ e Apache Pulsar.
+
+### RabbitMQ vs Kafka vs Pulsar
+
+| Caratteristica | **RabbitMQ** | **Kafka** | **Apache Pulsar** |
+| --- | --- | --- | --- |
+| **Modello fondamentale** | Message Queue (FIFO) | Distributed Log | Distributed Pub/Sub + Queue |
+| **Retention dei messaggi** | Eliminati dopo il consumo | Retention configurabile (giorni/settimane) | Retention configurabile (tiered storage) |
+| **Replay dei messaggi** | Non supportato nativamente | Si, da qualsiasi offset | Si, con cursori flessibili |
+| **Throughput** | Medio (20-50K msg/s) | Molto alto (1M+ msg/s) | Alto (800K+ msg/s) |
+| **Latenza** | Molto bassa (<1ms) | Bassa (2-10ms) | Bassa (3-10ms) |
+| **Ordinamento messaggi** | Per coda | Per partizione | Per partition key |
+| **Consumer model** | Push-based | Pull-based | Push e Pull |
+| **Multi-tenancy** | Limitata (virtual hosts) | Limitata | Nativa (namespace + tenant) |
+| **Geo-replication** | Plugin + config complessa | MirrorMaker 2 | Nativa e built-in |
+| **Storage layer** | In-process | Log su disco locale | Apache BookKeeper (separato) |
+| **Ecosistema** | Ampio (AMQP, STOMP, MQTT) | Enorme (Kafka Connect, Streams) | In crescita |
+| **Complessita' operativa** | Media | Alta | Molto alta |
+| **Consigliato per** | Task queue, RPC async, microservizi | Event streaming, data pipelines | Multi-tenant cloud, telecom |
+
+### Quando usare RabbitMQ
+
+RabbitMQ eccelle nei casi dove il messaggio e' un **comando** che deve essere eseguito da un singolo worker:
+
+- **Task queue distribuite**: elaborazione di email, PDF, thumbnail in background
+- **RPC asincrono**: il producer aspetta una risposta dal consumer (reply queue)
+- **Routing complesso**: messaggi diretti a code specifiche in base a routing key
+- **Microservizi con basso throughput**: < 50.000 messaggi/secondo totali
+
+**Esempio concreto**: un sistema che gestisce la generazione di report PDF per ogni ordine. RabbitMQ invia il task a un worker, il worker genera il PDF, il messaggio viene eliminato. Non ha senso riprocessare il task o avere piu' consumer che leggono lo stesso messaggio.
+
+### Quando usare Kafka
+
+Kafka eccelle quando i dati sono **eventi** che devono essere conservati e possono essere letti da piu' consumer indipendenti:
+
+- **Event streaming ad alto volume**: > 100.000 eventi/secondo
+- **Pipeline di dati**: da sorgenti a data warehouse, real-time analytics
+- **Event Sourcing**: quando il log storico degli eventi e' un asset
+- **Data integration**: connettere sistemi eterogenei tramite Kafka Connect
+- **Marketing analytics**: click, conversioni, sessioni, attribution
+
+**Esempio concreto**: tutti gli eventi click di un e-commerce. Il team analytics li legge per la dashboard ClickHouse, il team ML li legge per aggiornare i modelli di raccomandazione, il team email li legge per i trigger di remarketing. Tre consumer indipendenti, stesso log.
+
+### Quando considerare Pulsar
+
+Apache Pulsar ha alcune caratteristiche uniche che Kafka non ha nativamente:
+
+- **Multi-tenancy nativa**: separazione fisica tra clienti/team con namespace e tenant
+- **Tiered storage**: i dati piu' vecchi vengono spostati automaticamente su S3
+- **Geo-replication built-in**: replica attivo-attivo tra datacenter senza MirrorMaker
+- **Funzioni serverless**: Pulsar Functions per processing leggero senza infrastruttura separata
+
+Il problema di Pulsar e' la complessita' operativa: richiede ZooKeeper + BookKeeper + Broker, tre componenti separati da gestire. Per team di meno di 10 persone, e' raramente giustificato.
+
+## Log Compaction: Come e Quando
+
+La **log compaction** e' una politica di retention alternativa a quella temporale. Invece di eliminare i messaggi piu' vecchi di N giorni, Kafka elimina le versioni precedenti di ogni chiave, mantenendo sempre l'ultima.
+
+### Come Funziona Internamente
+
+```plain text
+Log con compaction abilitata (cleanup.policy=compact):
+
+Stato PRIMA della compaction:
+Offset:  0      1      2      3      4      5      6      7
+Key:    "u1"  "u2"  "u1"  "u3"  "u2"  "u1"  "u4"  "u3"
+Value:   v1    v1    v2    v1    v2    v3    v1    v2
+
+Dopo la compaction:
+Offset:  2      4      5      6      7
+Key:    "u1"  "u2"  "u1"  "u4"  "u3"
+Value:   v2    v2    v3    v1    v2
+
+          --> eliminato (u1 v1, sostituito da v2 poi v3)
+          --> eliminato (u2 v1, sostituito da v2)
+          --> eliminato (u3 v1, sostituito da v2)
+
+L'ultima versione di ogni chiave e' sempre disponibile.
+```
+
+Il processo di compaction avviene in background tramite il **log cleaner thread**, che legge i segmenti del log, identifica le chiavi duplicate e scrive un log compattato.
+
+### Parametri di Configurazione
+
+```bash
+# Configurazione per un topic con compaction
+kafka-topics.sh --bootstrap-server kafka:9092 \
+  --create --topic user.profiles \
+  --partitions 6 \
+  --replication-factor 3 \
+  --config cleanup.policy=compact \
+  --config min.cleanable.dirty.ratio=0.1 \
+  --config segment.bytes=104857600 \
+  --config delete.retention.ms=86400000
+```
+
+| Parametro | Valore | Significato |
+| --- | --- | --- |
+| `cleanup.policy` | `compact` | Abilita la compaction (default e' `delete`) |
+| `min.cleanable.dirty.ratio` | `0.1` | Avvia la compaction quando il 10% del log ha chiavi duplicate |
+| `delete.retention.ms` | `86400000` (1 giorno) | Mantieni i tombstone (messaggi null) per 1 giorno prima di eliminarli |
+| `segment.bytes` | `104857600` (100MB) | Dimensione massima di un segmento prima che sia candidato alla compaction |
+
+### Tombstone: Eliminare una Chiave
+
+Per eliminare una chiave in un topic compatto, si invia un **tombstone**: un messaggio con valore `null`. Dopo `delete.retention.ms`, il tombstone viene eliminato insieme alla chiave.
+
+```python
+# Eliminare il profilo dell'utente u123 (GDPR right to erasure)
+producer.produce(
+    topic='user.profiles',
+    key='u123',
+    value=None  # Tombstone: elimina la chiave dalla compaction
+)
+producer.flush()
+```
+
+### Caso d'uso: User Profiles per Personalizzazione
+
+La compaction e' perfetta per mantenere l'ultimo stato di ogni entita':
+
+| Topic | Chiave | Valore | Caso d'uso |
+| --- | --- | --- | --- |
+| `user.profiles` | `user_id` | Profilo completo | Attributi utente per personalizzazione |
+| `campaign.budgets` | `campaign_id` | Budget corrente | Stato del budget in tempo reale |
+| `product.inventory` | `product_id` | Giacenza attuale | Stock per e-commerce |
+| `ad.bidding.params` | `ad_group_id` | Parametri di bidding | Configurazione campagne |
+
+<Aside type="tip">
+Combina compaction e retention: `cleanup.policy=compact,delete` mantiene l'ultima versione di ogni chiave **e** elimina i dati piu' vecchi di N giorni. Utile quando vuoi sia lo stato corrente sia un po' di storia.
+</Aside>
+
+## Kafka come Event Store: Event Sourcing Pattern
+
+Il **Event Sourcing** e' un pattern architetturale dove invece di salvare solo lo stato corrente di un'entita', salvi la sequenza completa degli eventi che hanno portato a quello stato. Kafka, con la sua natura di log immutabile e la retention configurabile, e' un event store naturale.
+
+### Dal CRUD all'Event Sourcing
+
+```plain text
+Approccio CRUD tradizionale:
+  Database: { user_id: "u123", ltv: 450.00, status: "active" }
+  Problema: come e' arrivato a LTV 450? Quanti acquisti? In quanto tempo?
+
+Approccio Event Sourcing con Kafka:
+  Topic: user.events (retention: 2 anni)
+
+  Evento 1: { user_id: "u123", type: "registered",  ts: "2024-01-10" }
+  Evento 2: { user_id: "u123", type: "purchase",     amount: 89.90,  ts: "2024-01-15" }
+  Evento 3: { user_id: "u123", type: "purchase",     amount: 120.50, ts: "2024-02-03" }
+  Evento 4: { user_id: "u123", type: "referral",     referred: "u456", ts: "2024-02-10" }
+  Evento 5: { user_id: "u123", type: "purchase",     amount: 239.60, ts: "2024-03-22" }
+
+  LTV corrente = sum(amount dove type="purchase") = 450.00
+  Ma SABI ANCHE: 3 acquisti in 2 mesi, ha fatto un referral, il primo acquisto fu 5 giorni dopo la registrazione.
+```
+
+### Proiezioni: Derivare lo Stato dagli Eventi
+
+Una **proiezione** e' una vista materializzata derivata dal log degli eventi. Puoi avere piu' proiezioni diverse dallo stesso log:
+
+```plain text
+Log eventi user.events (Kafka topic, retention 2 anni)
+         |
+         +---> Proiezione 1: LTV per utente
+         |     Consumer che somma gli acquisti per user_id
+         |     Output: ClickHouse table user_ltv
+         |
+         +---> Proiezione 2: Funnel di conversione
+         |     Consumer che conta eventi per tipo e data
+         |     Output: ClickHouse table conversion_funnel
+         |
+         +---> Proiezione 3: Profilo ML
+               Consumer che estrae feature per il modello di scoring
+               Output: Feature store (Redis / DynamoDB)
+```
+
+Vantaggio chiave: se il modello di attribuzione cambia (es. da last-touch a data-driven), puoi **riprocessare** tutti gli eventi storici con la nuova logica.
+
+### Implementazione: Producer con Event Sourcing
+
+```python
+# Pattern Event Sourcing: ogni cambiamento di stato diventa un evento
+class UserEventProducer:
+    """Produce eventi immutabili per ogni cambiamento di stato utente."""
+
+    def __init__(self, producer):
+        self.producer = producer
+        self.topic = 'user.events'
+
+    def user_registered(self, user_id: str, source: str, campaign_id: str = None):
+        """Evento: nuovo utente registrato."""
+        self._send_event(user_id, {
+            'event_type': 'user_registered',
+            'source': source,           # 'organic', 'paid', 'referral'
+            'campaign_id': campaign_id,
+            'registration_channel': source
+        })
+
+    def purchase_completed(self, user_id: str, order_id: str, amount: float, products: list):
+        """Evento: acquisto completato."""
+        self._send_event(user_id, {
+            'event_type': 'purchase_completed',
+            'order_id': order_id,
+            'amount': amount,
+            'currency': 'EUR',
+            'product_count': len(products),
+            'product_ids': products
+        })
+
+    def subscription_cancelled(self, user_id: str, reason: str, ltv_at_cancellation: float):
+        """Evento: abbonamento cancellato (con LTV calcolato al momento)."""
+        self._send_event(user_id, {
+            'event_type': 'subscription_cancelled',
+            'cancellation_reason': reason,  # 'price', 'features', 'competitor', 'other'
+            'ltv_at_cancellation': ltv_at_cancellation
+        })
+
+    def _send_event(self, user_id: str, event_data: dict):
+        """Invia l'evento con chiave user_id per garantire l'ordine."""
+        import uuid, time
+        event = {
+            'event_id': str(uuid.uuid4()),
+            'user_id': user_id,
+            'timestamp_ms': int(time.time() * 1000),
+            **event_data
+        }
+        self.producer.produce(
+            topic=self.topic,
+            key=user_id,
+            value=json.dumps(event).encode('utf-8')
+        )
+        self.producer.poll(0)
+```
+
+### Replay: Il Potere del Log Immutabile
+
+Il vantaggio piu' potente dell'event sourcing con Kafka e' la possibilita' di **replay**: rileggere tutti gli eventi storici con una nuova logica.
+
+```plain text
+Scenario reale: cambiamento del modello di attribuzione
+
+Gen 2024: usi last-touch attribution
+  --> "Campagna Google ha generato €500K di revenue"
+
+Giu' 2024: vuoi passare a data-driven attribution
+  Con CRUD: impossibile, hai solo i dati aggregati
+  Con Event Sourcing:
+    1. Crea un nuovo consumer group "attribution_v2"
+    2. Imposta auto.offset.reset = 'earliest'
+    3. Il consumer riparte dall'inizio del log (6 mesi di storia)
+    4. Applica il nuovo modello di attribuzione a ogni evento
+    5. Dopo il replay, hai la proiezione aggiornata con il nuovo modello
+```
+
+<Aside type="note">
+Per fare replay efficacemente, la retention del topic Kafka deve essere sufficiente. Per marketing analytics, 90 giorni - 1 anno di retention e' un buon punto di partenza. Calcola lo storage: 10.000 eventi/giorno x 500 byte x 365 giorni = ~1.8 GB per anno. Molto gestibile.
+</Aside>

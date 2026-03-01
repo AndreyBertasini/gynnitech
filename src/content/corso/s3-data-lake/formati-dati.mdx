@@ -462,5 +462,221 @@ La scelta del formato dati e' una delle decisioni piu' impattanti nel design del
 - Il **column pruning** di Parquet riduce i costi di query S3 del 90%+
 - ClickHouse legge Parquet da S3 nativamente con la funzione `s3()`
 
+## Apache Iceberg: Il Table Format per il Data Lake Moderno
+
+Apache Iceberg e' un **table format open** progettato per gestire tabelle analitiche enormi su object storage. Non e' un format di file (come Parquet): e' uno strato di metadati che aggiunge transazioni ACID, time travel e schema evolution sopra i file Parquet su S3.
+
+### Perche' Iceberg? Il Problema che Risolve
+
+```plain text
+Parquet puro su S3 (problema):
+  - Vuoi aggiornare 1.000 righe in una tabella da 10 TB?
+    → Devi riscrivere TUTTO il file Parquet
+  - Vuoi leggere i dati "come erano ieri"?
+    → Impossibile: i file sono stati sovrascritti
+  - Due job scrivono contemporaneamente?
+    → Race condition: dati corrotti
+
+Apache Iceberg (soluzione):
+  - Update: scrive solo i delta, i file originali restano
+  - Time travel: ogni versione della tabella e' accessibile
+  - Concorrenza: snapshot isolation garantisce consistenza
+```
+
+### Architettura Iceberg su S3
+
+```plain text
+Iceberg Table su S3:
+
+s3://marketing-lake/iceberg/events/
+├── metadata/
+│   ├── v1.metadata.json          ← Snapshot 1 (stato iniziale)
+│   ├── v2.metadata.json          ← Snapshot 2 (dopo primo aggiornamento)
+│   ├── v3.metadata.json          ← Snapshot 3 (snapshot corrente)
+│   └── snap-123.avro             ← Manifest file (lista di data files)
+└── data/
+    ├── part-00000-a1b2c3.parquet ← Data file (Parquet)
+    ├── part-00001-d4e5f6.parquet ← Data file aggiunto nell'update
+    └── part-00002-g7h8i9.parquet
+         ↑ I file Parquet sono immutabili
+         ↑ Iceberg traccia QUALI file sono "attivi" in ogni snapshot
+```
+
+### Lettura Iceberg con PyIceberg
+
+```python
+# Installa: pip install pyiceberg[s3,glue]
+from pyiceberg.catalog import load_catalog
+import pandas as pd
+
+# --- CONFIGURAZIONE CATALOG ---
+# PyIceberg usa AWS Glue come registry dei metadati
+catalog = load_catalog('glue', **{
+    'type': 'glue',
+    'warehouse': 's3://marketing-lake/iceberg/',
+    'region_name': 'eu-west-1',
+})
+
+# --- OPERAZIONI BASE ---
+
+# Aprire una tabella Iceberg esistente
+table = catalog.load_table('marketing_lake.events')
+
+# Vedere il schema
+print(table.schema())
+# Schema: {
+#   1: event_id (string, required),
+#   2: user_id (string, required),
+#   3: event_name (string, required),
+#   4: event_timestamp (timestamptz, required),
+#   5: revenue (decimal(10, 2), optional)
+# }
+
+# Leggere i dati correnti (snapshot piu' recente)
+df = table.scan(
+    # Filtro pushdown: legge solo le partizioni necessarie
+    row_filter="event_date >= '2024-01-01' AND event_name = 'purchase'",
+    # Column pruning: legge solo queste colonne
+    selected_fields=('event_id', 'event_date', 'user_id', 'revenue'),
+    # Limite per test
+    limit=10000,
+).to_pandas()
+
+print(f"Righe lette: {len(df):,}")
+print(f"Revenue totale: ${df['revenue'].sum():,.2f}")
+
+# --- TIME TRAVEL ---
+
+# Listare tutti gli snapshot disponibili
+for snapshot in table.snapshots():
+    print(f"Snapshot {snapshot.snapshot_id}: {snapshot.timestamp_ms} ms")
+
+# Leggere la versione di ieri (per confronto)
+yesterday = table.scan(
+    snapshot_id=table.snapshot_by_name('yesterday_snapshot').snapshot_id
+).to_pandas()
+
+# Oppure con timestamp diretto
+import datetime
+yesterday_dt = datetime.datetime.now() - datetime.timedelta(days=1)
+df_yesterday = table.scan(
+    as_of_time=int(yesterday_dt.timestamp() * 1000)
+).to_pandas()
+
+# --- SCHEMA EVOLUTION ---
+
+# Aggiungere una nuova colonna (senza riscrivere i file esistenti!)
+with table.update_schema() as update:
+    update.add_column(
+        path='device_brand',
+        field_type='string',
+        doc='Brand del dispositivo (Apple, Samsung, ...)'
+    )
+
+# I file Parquet vecchi non cambiano.
+# Quando vengono letti, la colonna 'device_brand' sara' NULL.
+# Solo i nuovi file scritti dopo l'evoluzione avranno il valore.
+
+print("Schema aggiornato:", table.schema())
+
+# --- CREA TABELLA ICEBERG ---
+
+from pyiceberg.schema import Schema
+from pyiceberg.types import (
+    NestedField, StringType, TimestamptzType, DecimalType, LongType
+)
+from pyiceberg.partitioning import PartitionSpec, PartitionField
+from pyiceberg.transforms import DayTransform
+
+# Definizione schema
+schema = Schema(
+    NestedField(1, "event_id",        StringType(),       required=True),
+    NestedField(2, "user_id",         StringType(),       required=True),
+    NestedField(3, "event_name",      StringType(),       required=True),
+    NestedField(4, "event_timestamp", TimestamptzType(),  required=True),
+    NestedField(5, "utm_source",      StringType(),       required=False),
+    NestedField(6, "revenue",         DecimalType(10, 2), required=False),
+)
+
+# Partition spec: hidden partitioning per giorno
+# Il giorno viene estratto automaticamente da event_timestamp
+partition_spec = PartitionSpec(
+    PartitionField(
+        source_id=4,           # event_timestamp
+        field_id=1000,
+        transform=DayTransform(),
+        name='event_day'       # nome della partizione (nascosta)
+    )
+)
+
+# Crea la tabella nel catalog
+table = catalog.create_table(
+    'marketing_lake.events_iceberg',
+    schema=schema,
+    partition_spec=partition_spec,
+    location='s3://marketing-lake/iceberg/events/',
+    properties={
+        'write.format.default': 'parquet',
+        'write.parquet.compression-codec': 'zstd',
+        'write.metadata.delete-after-commit.enabled': 'true',
+        'write.metadata.previous-versions-max': '10',
+    }
+)
+```
+
+## Delta Lake vs Iceberg vs Hudi: Confronto Operativo
+
+### Quando Passare da Parquet Raw a Table Format?
+
+```plain text
+Segnali che e' il momento di adottare un table format:
+
+1. Hai bisogno di GDPR right-to-erasure efficiente
+   → Iceberg row-level deletes senza riscrivere tutto
+
+2. Hai aggiornamenti frequenti (CRM sync, ordini)
+   → Hudi o Iceberg MERGE per upsert efficienti
+
+3. Hai bisogno di debug "come erano i dati ieri"
+   → Time travel di Delta Lake o Iceberg
+
+4. Piu' job scrivono contemporaneamente sulla stessa tabella
+   → Snapshot isolation di Iceberg o Delta Lake
+
+5. Lo schema cambia frequentemente
+   → Schema evolution di Iceberg (il migliore)
+
+NON serve un table format quando:
+- I file Parquet sono write-once (dati storici immutabili)
+- ClickHouse e' il solo consumer (ha le sue ottimizzazioni)
+- Il team e' piccolo e la complessita' aggiuntiva non vale
+```
+
+### Matrice di Compatibilita' con i Tool
+
+| Tool          | Delta Lake | Iceberg (native) | Hudi   |
+| ------------- | ---------- | ---------------- | ------ |
+| **Spark**     | Nativo     | Nativo           | Nativo |
+| **Athena**    | Si (v2)    | Si (v3)          | Si     |
+| **ClickHouse**| Limitato   | In sviluppo      | No     |
+| **DuckDB**    | Si         | Si               | No     |
+| **Flink**     | Si         | Si               | Si     |
+| **Trino**     | Si         | Si               | Si     |
+| **Pandas**    | delta-rs   | PyIceberg        | No     |
+
+<Aside type="caution">
+Se ClickHouse e' il tuo query engine principale e i dati non cambiano frequentemente, resta su Parquet puro + Hive partitioning. La semplicita' supera i benefici dei table format in questo contesto.
+</Aside>
+
+### Caso Reale: Netflix e Iceberg
+
+Netflix ha creato Apache Iceberg nel 2017 per risolvere i problemi delle sue tabelle Hive da petabyte. Prima di Iceberg, il loro team di data engineering perdeva ore ogni settimana in operazioni di gestione tabelle che rompevano la consistenza dei dati.
+
+**Il problema specifico:** Netflix aveva una tabella di eventi da 500+ TB. Ogni notte un job Spark riscriveva le partizioni del giorno precedente per correggere i dati ritardatari. Durante questa operazione (che durava ore), le query degli analisti potevano leggere stati parzialmente aggiornati — una partizione sovrascritta a meta'.
+
+**La soluzione con Iceberg:** grazie allo snapshot isolation, le query degli analisti leggono sempre uno snapshot consistente. Il job di riscrittura crea uno nuovo snapshot completo prima di renderlo visibile. Il "flip" da vecchio a nuovo snapshot e' atomico (una singola operazione di aggiornamento del puntatore nel catalog).
+
+Oggi Netflix gestisce oltre 10.000 tabelle Iceberg, con alcune da decine di petabyte. L'adozione di Iceberg ha ridotto il tempo di risoluzione dei problemi di consistenza dei dati del 90% e ha eliminato completamente la categoria di bug legata alle race condition in scrittura.
+
 _Prossima lezione: Partitioning e Bucketing Strategy - Come organizzare i file per massimizzare le performance._
 

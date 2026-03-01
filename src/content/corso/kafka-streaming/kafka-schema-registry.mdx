@@ -609,3 +609,354 @@ Topic: marketing.retarget  --> Subject: com.marketing.events.ClickEvent
 - La **validazione** deve avvenire nel producer (Avro Serializer) e nel CI/CD (compatibility check)
 - Ogni modifica allo schema deve passare per una **PR con test automatici** di compatibilita'
 - Usa **union types con default** (`["null", "string"]`) per aggiungere campi opzionali in modo sicuro
+
+## Tipi di Compatibilita' in Dettaglio
+
+La scelta del tipo di compatibilita' e' una delle decisioni piu' importanti nella governance degli schema. Un errore qui puo' causare breaking changes silenziosi o bloccare l'evoluzione del sistema.
+
+### BACKWARD: Il Caso piu' Comune
+
+Con `BACKWARD`, i **nuovi consumer** possono leggere i **vecchi messaggi**. Il consumer viene aggiornato prima del producer.
+
+```plain text
+Regola: aggiorna prima i CONSUMER, poi i PRODUCER
+
+Timeline:
+  Giorno 1: Producer scrive con Schema V1
+  Giorno 2: Deploy Consumer con V2 (deve leggere V1 dai vecchi offset)
+  Giorno 3: Deploy Producer con V2 (ora tutti parlano V2)
+
+Operazioni PERMESSE in BACKWARD:
+  - Aggiungere campo opzionale CON default
+  - Rimuovere campo esistente (il consumer V2 lo ignora)
+
+Operazioni NON PERMESSE in BACKWARD:
+  - Aggiungere campo obbligatorio SENZA default
+    (i vecchi messaggi non hanno il campo, il nuovo consumer fallisce)
+  - Rinominare un campo senza alias
+    (il vecchio nome scompare, il consumer V2 non sa come leggere V1)
+```
+
+**Esempio pratico: aggiungere il campo `device_brand`**
+
+Schema V1:
+```json
+{"name": "device", "type": {"type": "enum", "name": "DeviceType", "symbols": ["desktop", "mobile", "tablet"]}}
+```
+
+Schema V2 (BACKWARD compatible):
+```json
+{"name": "device", "type": {"type": "enum", "name": "DeviceType", "symbols": ["desktop", "mobile", "tablet"]}},
+{"name": "device_brand", "type": ["null", "string"], "default": null,
+ "doc": "Marca del dispositivo, opzionale, aggiunto in V2"}
+```
+
+Il consumer V2 legge i messaggi V1: `device_brand` sara' `null` (il default). Nessun errore.
+
+### FORWARD: Il Consumer e' Conservativo
+
+Con `FORWARD`, i **vecchi consumer** possono leggere i **nuovi messaggi**. Il producer viene aggiornato prima del consumer.
+
+```plain text
+Regola: aggiorna prima i PRODUCER, poi i CONSUMER
+
+Scenario tipico: hai 10 consumer e vuoi aggiornare il producer subito,
+ma i consumer verranno aggiornati gradualmente in settimane
+
+Operazioni PERMESSE in FORWARD:
+  - Aggiungere campo (il vecchio consumer ignora i campi che non conosce)
+  - Rimuovere campo opzionale CON default
+    (il vecchio consumer usa il default per il campo mancante)
+
+Operazioni NON PERMESSE in FORWARD:
+  - Rimuovere campo obbligatorio
+    (il vecchio consumer si aspetta il campo, il nuovo messaggio non lo ha)
+  - Cambiare il tipo di un campo
+```
+
+### FULL: Compatibilita' Bidirezionale
+
+`FULL` combina BACKWARD e FORWARD: lo schema e' compatibile in entrambe le direzioni. E' la modalita' piu' restrittiva ma la piu' sicura per sistemi maturi.
+
+```plain text
+FULL = BACKWARD AND FORWARD
+
+Operazioni PERMESSE in FULL:
+  - Aggiungere campo opzionale con default (BACKWARD + FORWARD OK)
+  - Rimuovere campo opzionale con default (BACKWARD + FORWARD OK)
+
+Operazioni NON PERMESSE in FULL:
+  - Qualsiasi modifica a campi obbligatori
+  - Aggiungere campo obbligatorio senza default
+  - Rimuovere campo obbligatorio
+  - Cambiare il tipo di qualsiasi campo
+
+Scenario: hai consumer vecchi E nuovi che devono leggere
+messaggi vecchi E nuovi. Solo FULL garantisce questo.
+```
+
+### Versioni Transitive: _TRANSITIVE
+
+Le versioni transitive (`BACKWARD_TRANSITIVE`, `FORWARD_TRANSITIVE`, `FULL_TRANSITIVE`) verificano la compatibilita' con **tutte le versioni precedenti**, non solo l'ultima.
+
+```plain text
+Senza TRANSITIVE (verifica solo con la versione precedente):
+  V1 --> V2 (OK, compatibile)
+  V2 --> V3 (OK, compatibile con V2)
+  Ma V3 puo' essere incompatibile con V1!
+  Se un consumer riprocessa messaggi V1 con schema V3 -> errore
+
+Con BACKWARD_TRANSITIVE:
+  V3 deve essere compatibile con V2 E con V1
+  Garantisce che un consumer V3 possa leggere tutti i messaggi storici
+
+Quando usare TRANSITIVE:
+  - Hai retention lunga (>30 giorni) e devi riprocessare dati storici
+  - I consumer sono consumer di replay (leggono dall'inizio del log)
+  - Usi event sourcing (i messaggi storici devono sempre essere leggibili)
+```
+
+### Matrice di Decisione
+
+| Situazione | Compatibilita' Raccomandata |
+| --- | --- |
+| Producer e consumer aggiornati insieme (stesso team, mono-repo) | `NONE` (o `FULL` per sicurezza) |
+| Consumer aggiornati prima dei producer (piu' comune) | `BACKWARD` |
+| Producer aggiornati prima dei consumer (deployment graduale) | `FORWARD` |
+| Sistemi con consumer eterogenei che non puoi aggiornare | `FULL` |
+| Retention lunga, replay dei dati storici | `BACKWARD_TRANSITIVE` |
+| Sistema maturo, zero breaking change accettati | `FULL_TRANSITIVE` |
+
+## Schema Registry in Produzione: Alta Disponibilita'
+
+Il Schema Registry e' un componente critico: se non risponde, i producer non possono inviare messaggi e i consumer non possono deserializzarli. Va configurato per l'alta disponibilita'.
+
+### Topologia HA
+
+```plain text
+Schema Registry HA con 3 istanze:
+
++-------------------+  +-------------------+  +-------------------+
+| Schema Registry 1 |  | Schema Registry 2 |  | Schema Registry 3 |
+| (master)          |  | (slave)           |  | (slave)           |
++-------------------+  +-------------------+  +-------------------+
+         |                      |                      |
+         +----------+-----------+----------+-----------+
+                    |                      |
+         +---------------------+  +---------------------+
+         | Kafka Broker Cluster|  | Load Balancer       |
+         | (storage: _schemas) |  | (round-robin)       |
+         +---------------------+  +---------------------+
+
+Il master gestisce le scritture (registrazione nuovi schemi)
+I slave gestiscono le letture (fetch degli schemi)
+```
+
+### Configurazione per HA
+
+```properties
+# schema-registry.properties
+# Identifica univocamente questa istanza
+host.name=schema-registry-1.internal
+listeners=http://0.0.0.0:8081
+
+# Connessione al cluster Kafka (dove vengono salvati gli schemi)
+kafkastore.bootstrap.servers=kafka-1:9092,kafka-2:9092,kafka-3:9092
+kafkastore.topic=_schemas
+
+# Replication factor per il topic _schemas (CRITICO)
+# Deve corrispondere al replication factor del cluster Kafka
+kafkastore.topic.replication.factor=3
+
+# Compatibilita' di default per tutti i nuovi subject
+schema.compatibility.level=BACKWARD
+
+# Timeout per le operazioni sul topic _schemas
+kafkastore.timeout.ms=10000
+
+# Numero di worker thread per gestire le richieste HTTP
+request.logger.name=io.confluent.rest-utils.requests
+```
+
+<Aside type="danger">
+Il `kafkastore.topic.replication.factor` e' critico: se il topic `_schemas` perde dati (replication factor troppo basso), perdi tutti gli schemi e la pipeline si ferma completamente. Usa sempre `replication.factor=3` con `min.insync.replicas=2` in produzione.
+</Aside>
+
+### Cache Lato Client
+
+Il client Kafka (producer e consumer) mantiene una **cache locale degli schemi** per ridurre le chiamate al Schema Registry:
+
+```python
+# La cache e' automatica nella libreria confluent-kafka
+# Il client fa fetch dell'schema solo la prima volta, poi lo copia in cache
+
+schema_registry_conf = {
+    'url': 'http://schema-registry:8081',
+    # Cache configurazione (valori di default)
+    # 'max.schemas.per.subject': 1000  # Schemi massimi in cache per subject
+}
+
+# In produzione, il Schema Registry client usa una LRU cache
+# Schema con ID=42 viene scaricato una volta e riusato per tutti i messaggi successivi
+```
+
+### Health Check e Monitoring
+
+```bash
+# Verifica che il Schema Registry risponda
+curl -s http://schema-registry:8081/subjects | jq 'length'
+# Ritorna il numero di subject registrati
+
+# Verifica la salute del servizio
+curl -s http://schema-registry:8081/ | jq .
+# { "version": "7.5.0", "commit": "...", "kafka_cluster_id": "..." }
+
+# Lista tutti gli schemi di un subject
+curl -s http://schema-registry:8081/subjects/marketing.clicks-value/versions | jq .
+# [1, 2, 3]
+
+# Fetch di uno schema specifico
+curl -s http://schema-registry:8081/subjects/marketing.clicks-value/versions/2 | jq .
+
+# Verifica compatibilita' senza registrare
+curl -s -X POST \
+  -H "Content-Type: application/vnd.schemaregistry.v1+json" \
+  --data '{"schema": "{\"type\":\"record\",\"name\":\"Test\",...}"}' \
+  http://schema-registry:8081/compatibility/subjects/marketing.clicks-value/versions/latest
+```
+
+## Protobuf vs Avro vs JSON Schema: Confronto Tecnico
+
+Confluent Schema Registry supporta tre formati di serializzazione. La scelta ha impatto su performance, interoperabilita' e complessita' operativa.
+
+### Tabella Comparativa
+
+| Caratteristica | **Avro** | **Protobuf** | **JSON Schema** |
+| --- | --- | --- | --- |
+| **Formato dati** | Binario | Binario | JSON testuale |
+| **Dimensione payload** | Compatto (~40% di JSON) | Molto compatto (~30% di JSON) | Verboso (100%) |
+| **Velocita' serializzazione** | Alta | Molto alta | Bassa |
+| **Schema nel payload** | No (solo ID) | No (solo ID) | No (solo ID con SR) |
+| **Evoluzione schema** | Nativa, flessibile | Buona | Limitata |
+| **Backward compatible** | Eccellente | Buona (field number) | Limitata |
+| **Leggibilita' diretta** | No (binario) | No (binario) | Si (JSON) |
+| **Supporto linguaggi** | Molti, eccellente in JVM | Eccellente (tutti i linguaggi) | Universale |
+| **Integrazione Kafka** | Eccellente (standard de facto) | Buona (librerie disponibili) | Limitata |
+| **Supporto tipi** | Tipi Avro + logical types | Tipi proto (scalars, messages, enums) | Tipi JSON |
+| **Curva di apprendimento** | Media | Media-Alta | Bassa |
+| **Caso d'uso ideale** | Pipeline Kafka, big data | Microservizi gRPC, multi-linguaggio | Prototipazione, team non tecnici |
+
+### Esempio Concreto: Lo Stesso Schema nei Tre Formati
+
+**Avro:**
+```json
+{
+  "type": "record",
+  "name": "ClickEvent",
+  "namespace": "com.marketing",
+  "fields": [
+    {"name": "user_id", "type": "string"},
+    {"name": "campaign_id", "type": "string"},
+    {"name": "amount", "type": ["null", "double"], "default": null},
+    {"name": "device", "type": {"type": "enum", "name": "Device",
+     "symbols": ["desktop", "mobile", "tablet"]}}
+  ]
+}
+```
+
+**Protobuf (.proto):**
+```protobuf
+syntax = "proto3";
+package com.marketing;
+
+enum Device {
+  DESKTOP = 0;
+  MOBILE = 1;
+  TABLET = 2;
+}
+
+message ClickEvent {
+  string user_id = 1;
+  string campaign_id = 2;
+  optional double amount = 3;
+  Device device = 4;
+}
+```
+
+**JSON Schema:**
+```json
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "ClickEvent",
+  "type": "object",
+  "required": ["user_id", "campaign_id", "device"],
+  "properties": {
+    "user_id": {"type": "string"},
+    "campaign_id": {"type": "string"},
+    "amount": {"type": ["number", "null"]},
+    "device": {"type": "string", "enum": ["desktop", "mobile", "tablet"]}
+  }
+}
+```
+
+### Differenza di Dimensione in Pratica
+
+Per un evento click tipico da 200 byte in JSON:
+
+| Formato | Dimensione | Risparmio |
+| --- | --- | --- |
+| JSON raw | 200 byte | baseline |
+| JSON Schema (SR) | 205 byte (+ 5 byte ID) | -2.5% |
+| Avro | ~80 byte | 60% |
+| Protobuf | ~65 byte | 67.5% |
+
+Con 1 milione di messaggi/giorno:
+
+| Formato | Traffico/giorno | Traffico/anno |
+| --- | --- | --- |
+| JSON raw | 200 MB | 73 GB |
+| Avro | 80 MB | 29 GB |
+| Protobuf | 65 MB | 24 GB |
+
+### Evoluzione Schema: Protobuf Field Numbers
+
+In Protobuf, l'evoluzione dello schema funziona tramite i **field numbers**. Non puoi riutilizzare un numero di campo, anche se il campo e' stato rimosso:
+
+```protobuf
+// Schema V1
+message ClickEvent {
+  string user_id = 1;    // field number 1
+  string old_field = 2;  // field number 2, deprecato
+}
+
+// Schema V2 (CORRETTO)
+message ClickEvent {
+  string user_id = 1;
+  reserved 2;               // Marca il field number 2 come riservato
+  reserved "old_field";     // Marca il nome come riservato
+  string new_field = 3;     // Usa il field number 3
+}
+
+// Schema V2 (SBAGLIATO - breaking change!)
+message ClickEvent {
+  string user_id = 1;
+  string different_field = 2;  // Riuso del field number 2 -> INCOMPATIBILE
+}
+```
+
+### Raccomandazione per il Marketing Streaming
+
+**Usa Avro** per la maggior parte dei casi nel marketing analytics:
+- Eccellente supporto nel ecosistema Kafka (ClickHouse Avro format, Kafka Connect AvroConverter)
+- Schema evolution flessibile con `["null", "type"]` union per campi opzionali
+- ClickHouse supporta Avro nativamente nel Kafka Engine
+
+**Considera Protobuf** se:
+- Hai microservizi in Go, Rust, o altri linguaggi non JVM che producono eventi
+- Usi gRPC tra i servizi e vuoi un formato unificato
+- Il risparmio di banda del 10-15% rispetto ad Avro e' rilevante al tuo volume
+
+**Evita JSON Schema** in produzione ad alto volume:
+- Nessun risparmio di dimensione rispetto al JSON raw
+- Validazione piu' lenta
+- Utile solo per prototipazione rapida o team con poca esperienza di schema management

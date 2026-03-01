@@ -770,3 +770,123 @@ Usa `windowFunnel` con una finestra temporale di 48 ore.
 6. **Misura con `system.query_log`** — non ottimizzare a intuito, misura prima
 
 > **Consiglio operativo**: Quando una query è lenta, il flusso di debugging è sempre lo stesso: `EXPLAIN` per vedere il piano → `system.query_log` per misurare → identifica se il collo di bottiglia è I/O (troppe parti lette) o CPU (aggregazione pesante) → intervieni di conseguenza.
+
+---
+
+## SQL Anti-Pattern Specifici del Data Warehouse
+
+Nei sistemi OLAP colonnari come ClickHouse, esistono anti-pattern aggiuntivi rispetto ai database OLTP che meritano attenzione specifica.
+
+### SELECT * in Contesto Colonnare
+
+In un database row-oriented come PostgreSQL, `SELECT *` legge tutte le colonne ma i dati sono già contigui su disco — il costo aggiuntivo è relativamente basso. In ClickHouse, ogni colonna è un file fisico separato. `SELECT *` su una tabella con 50 colonne apre 50 file, anche se la query finale usa solo 3 colonne. Il risultato è I/O 10-15x superiore al necessario.
+
+```sql
+-- ❌ DEVASTANTE in ClickHouse: apre tutti i file colonna
+SELECT * FROM events WHERE event_date = today() LIMIT 100;
+
+-- ✅ CORRETTO: legge solo i 4 file necessari
+SELECT event_name, user_id, event_time, revenue
+FROM events
+WHERE event_date = today()
+LIMIT 100;
+```
+
+La regola è semplice: in qualsiasi query di produzione su ClickHouse, lista esplicitamente le colonne. Non usare mai `SELECT *` al di fuori del debug interattivo.
+
+### Conversione Implicita dei Tipi
+
+Un anti-pattern subdolo: quando filtri su una colonna con un tipo diverso da quello dichiarato nella tabella, ClickHouse applica una conversione implicita che può rendere inutile l'indice.
+
+```sql
+-- Schema: user_id UInt64
+
+-- ❌ SBAGLIATO: confronta UInt64 con stringa → conversione implicita per ogni riga
+WHERE user_id = '12345'
+
+-- ❌ SBAGLIATO: confronta UInt64 con signed int → possibile cast
+WHERE user_id = -1
+
+-- ✅ CORRETTO: stesso tipo
+WHERE user_id = 12345
+
+-- Per i timestamp:
+-- ❌ SBAGLIATO: stringa richiede conversione
+WHERE event_date = '2024-01-15'::String
+
+-- ✅ CORRETTO: tipo Date letterale
+WHERE event_date = toDate('2024-01-15')
+-- oppure
+WHERE event_date = '2024-01-15'  -- ClickHouse converte le stringhe letterali correttamente
+```
+
+Per identificare conversioni implicite problematiche, usa `EXPLAIN SYNTAX` che mostra la query dopo le trasformazioni applicate dal parser:
+
+```sql
+EXPLAIN SYNTAX
+SELECT count() FROM events WHERE user_id = '12345';
+-- Output mostra se c'è un cast applicato
+```
+
+### Subquery Correlate su Grandi Tabelle
+
+La subquery correlata è l'anti-pattern più letale nel data warehouse: viene eseguita una volta per ogni riga della query esterna. Su 100 milioni di righe, significa 100 milioni di subquery.
+
+```sql
+-- ❌ CATASTROFICO: esegue la subquery 100M di volte
+SELECT
+    o.order_id,
+    o.customer_id,
+    o.revenue,
+    -- Questa subquery viene eseguita per OGNI ordine
+    (
+        SELECT count()
+        FROM orders o2
+        WHERE o2.customer_id = o.customer_id
+          AND o2.order_date < o.order_date
+    ) AS prev_orders_count
+FROM orders o
+WHERE o.order_date ≥ '2024-01-01';
+
+-- ✅ SOLUZIONE 1: Window function (esegue una singola passata sui dati)
+SELECT
+    order_id,
+    customer_id,
+    revenue,
+    row_number() OVER (
+        PARTITION BY customer_id
+        ORDER BY order_date
+    ) - 1 AS prev_orders_count
+FROM orders
+WHERE order_date ≥ '2024-01-01';
+
+-- ✅ SOLUZIONE 2: JOIN con aggregazione pre-calcolata
+WITH customer_order_counts AS (
+    SELECT
+        customer_id,
+        order_date,
+        count() OVER (
+            PARTITION BY customer_id
+            ORDER BY order_date
+            ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING
+        ) AS prev_orders_count
+    FROM orders
+)
+SELECT o.order_id, o.customer_id, o.revenue, c.prev_orders_count
+FROM orders o
+JOIN customer_order_counts c
+    ON o.customer_id = c.customer_id
+    AND o.order_date = c.order_date
+WHERE o.order_date ≥ '2024-01-01';
+```
+
+<Aside type="tip">
+**Checklist anti-pattern da verificare prima di ogni query in produzione su ClickHouse:**
+- Nessun `SELECT *` — lista esplicita delle colonne
+- Nessuna funzione applicata alla colonna nei filtri (`WHERE toDate(ts) = ...` → `WHERE event_date = ...`)
+- Nessuna conversione implicita di tipo nei predicati `WHERE`
+- Nessuna subquery correlata — sostituisci con window functions o JOIN pre-aggregati
+- Il filtro principale usa le prime colonne dell'`ORDER BY` della tabella
+- `IN` invece di `OR` multipli sullo stesso campo
+- Tabella piccola a destra nei JOIN
+</Aside>

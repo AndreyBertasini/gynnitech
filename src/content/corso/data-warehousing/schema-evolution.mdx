@@ -466,7 +466,107 @@ La tabella ha 2 miliardi di righe. Da essa dipendono: 5 dashboard Looker, 3 mode
 > **Consiglio:**
 > Per la domanda 4, l'approccio migliore su ClickHouse non e `MODIFY COLUMN` diretto (troppo lento). Crea una nuova tabella `fact_sales_v2` con il tipo corretto, fai `INSERT INTO fact_sales_v2 SELECT ... CAST(amount AS Decimal(10,2)) ... FROM fact_sales`, poi swap atomico con RENAME. Questo mantiene `fact_sales` disponibile per query durante il backfill.
 
-## 9. Riepilogo della Lezione
+## 9. Schema Registry per Sistemi Streaming
+
+Quando i dati arrivano da Kafka o altri message broker, la gestione dello schema diventa molto più complessa rispetto al data warehouse tradizionale. In un pipeline streaming, lo schema del messaggio può cambiare mentre i consumer stanno processando milioni di messaggi al secondo — e un singolo breaking change può causare crash a cascata di tutti i consumer.
+
+La soluzione è il **Confluent Schema Registry**, un servizio centralizzato che:
+- Memorizza le versioni degli schemi Avro, Protobuf o JSON Schema
+- Applica regole di compatibilità prima di permettere la pubblicazione di nuovi schemi
+- Permette ai consumer di deserializzare correttamente i messaggi anche se lo schema è cambiato
+
+### Compatibilità Backward vs Forward
+
+Il Schema Registry supporta quattro modalità di compatibilità, ognuna con implicazioni diverse:
+
+| Modalità | Significato | Regola |
+|---|---|---|
+| **BACKWARD** (default) | Il nuovo schema può leggere messaggi scritti con il vecchio schema | I nuovi consumer funzionano con messaggi vecchi |
+| **FORWARD** | Il vecchio schema può leggere messaggi scritti con il nuovo schema | I consumer vecchi funzionano con messaggi nuovi |
+| **FULL** | Entrambe le compatibilità | Cambiamenti completamente sicuri |
+| **NONE** | Nessuna verifica | Solo per sviluppo, mai in produzione |
+
+**Esempio pratico**: hai uno schema Avro per gli eventi ordine:
+
+```json
+{
+  "type": "record",
+  "name": "OrderEvent",
+  "fields": [
+    {"name": "order_id", "type": "string"},
+    {"name": "customer_id", "type": "string"},
+    {"name": "amount", "type": "double"}
+  ]
+}
+```
+
+Vuoi aggiungere il campo `currency`. Con compatibilità **BACKWARD**, devi fornire un valore di default:
+
+```json
+{
+  "type": "record",
+  "name": "OrderEvent",
+  "fields": [
+    {"name": "order_id", "type": "string"},
+    {"name": "customer_id", "type": "string"},
+    {"name": "amount", "type": "double"},
+    {"name": "currency", "type": "string", "default": "EUR"}
+  ]
+}
+```
+
+Questo è sicuro: i vecchi consumer che non conoscono il campo `currency` lo ignorano, e i vecchi messaggi senza `currency` vengono deserializzati con il valore default "EUR". Rimuovere il campo `order_id` invece fallirebbe la validazione BACKWARD perché i vecchi messaggi che hanno `order_id` non potrebbero essere deserializzati dal nuovo schema.
+
+### Breaking Changes con Feature Flags e Dual-Write
+
+Quando devi fare un breaking change inevitabile (cambiare il tipo di un campo, riorganizzare la struttura), la strategia è la **dual-write** combinata con feature flags:
+
+```
+FASE 1 — Dual-Write con Feature Flag OFF
+  Producer scrive sul topic v1 (vecchio schema)
+  Feature flag "use_v2_schema" = false
+  Consumer legge da topic v1
+
+FASE 2 — Attiva il nuovo topic in parallelo
+  Attiva feature flag "use_v2_schema" = true per i producer
+  Producer scrive simultaneamente su topic v1 e topic v2 (nuovo schema)
+  Consumer v2 legge da topic v2
+  Consumer v1 (legacy) legge ancora da topic v1
+
+FASE 3 — Migra tutti i consumer a v2
+  Aggiorna tutti i consumer al nuovo schema
+  Monitora: nessun consumer legge più da v1
+
+FASE 4 — Depreca il topic v1
+  Disabilita la scrittura su v1
+  Mantieni v1 in read-only per 30 giorni (per eventuali rollback)
+  Elimina v1
+```
+
+In Kafka, questo si traduce in due topic distinti: `orders.v1` e `orders.v2`. Il producer usa un feature flag (gestito da LaunchDarkly o Unleash) per decidere su quale topic scrivere. Questa strategia permette zero downtime anche su breaking changes che cambiano completamente la struttura del messaggio.
+
+### Schema Registry in ClickHouse
+
+ClickHouse supporta la lettura diretta da Kafka con schema da Schema Registry tramite il Kafka Table Engine con formato Avro:
+
+```sql
+CREATE TABLE kafka_orders (
+    order_id String,
+    customer_id String,
+    amount Float64,
+    currency LowCardinality(String)
+) ENGINE = Kafka()
+SETTINGS
+    kafka_broker_list = 'kafka:9092',
+    kafka_topic_list = 'orders.v2',
+    kafka_group_name = 'clickhouse_consumer',
+    kafka_format = 'Avro',
+    kafka_schema_registry_url = 'http://schema-registry:8081';
+```
+
+ClickHouse si connette automaticamente al Schema Registry per ottenere lo schema e deserializzare i messaggi Avro in ingresso.
+
+## 10. Riepilogo della Lezione
 
 Lo schema evolution e inevitabile: i dati cambiano perche il business cambia. La differenza tra un team maturo e uno immaturo non e se fanno migrazioni, ma *come* le fanno.
 
@@ -477,3 +577,4 @@ Lo schema evolution e inevitabile: i dati cambiano perche il business cambia. La
 - Versiona ogni migration con file SQL numerati e tracciala in una tabella dedicata
 - I data contracts formalizzano le aspettative tra produttori e consumer
 - Prima di modificare: disegna il lineage graph e testa su staging con dati reali
+- Per i sistemi streaming, usa Schema Registry con compatibilità BACKWARD e dual-write per i breaking changes
