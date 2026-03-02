@@ -1,4 +1,4 @@
-import { expect, test, describe } from "bun:test";
+import { describe, expect, test } from "vitest";
 import path from "path";
 import { validatePath } from "./validation";
 

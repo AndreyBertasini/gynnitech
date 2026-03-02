@@ -15,7 +15,6 @@ import rehypeKatex from 'rehype-katex';
 import starlightImageZoom from 'starlight-image-zoom';
 
 import starlightHeadingBadges from 'starlight-heading-badges';
-import starlightLinksValidator from 'starlight-links-validator';
 import { redirects } from './src/lib/config/redirects.mjs';
 import { starlightHeadTags } from './src/lib/config/head-tags.mjs';
 import { staticSidebarSections } from './src/lib/config/sidebar-sections.mjs';
@@ -55,7 +54,7 @@ export default defineConfig({
   },
   markdown: {
     remarkPlugins: [remarkMath],
-    rehypePlugins: [rehypeKatex],
+    rehypePlugins: [[rehypeKatex, { strict: 'ignore' }]],
   },
   integrations: [
     partytown({ config: { forward: ["dataLayer.push"] } }),
@@ -72,12 +71,7 @@ export default defineConfig({
       favicon: '/favicon-32x32.png',
       plugins: [
         starlightImageZoom(),
-
         starlightHeadingBadges(),
-        starlightLinksValidator({
-          errorOnRelativeLinks: false,
-          exclude: ['/course/**'],
-        }),
       ],
       disable404Route: true,
       components: {

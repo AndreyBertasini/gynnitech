@@ -15,6 +15,7 @@ export const SearchWidget = ({ mobile = false }: { mobile?: boolean }) => {
   const [isScriptLoaded, setIsScriptLoaded] = useState(false);
   const [isVisible, setIsVisible] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
+  const modalRef = useRef<HTMLDivElement>(null);
   const isLoadingScript = useRef(false);
 
   const loadPagefind = async () => {
@@ -50,6 +51,41 @@ export const SearchWidget = ({ mobile = false }: { mobile?: boolean }) => {
     } else {
       setIsVisible(false);
     }
+  }, [isOpen]);
+
+  useEffect(() => {
+    if (!isOpen) return;
+
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== 'Tab' || !modalRef.current) return;
+
+      const focusableElements = modalRef.current.querySelectorAll<HTMLElement>(
+        'a[href], button:not([disabled]), input, textarea, select, [tabindex]:not([tabindex="-1"])',
+      );
+
+      if (focusableElements.length === 0) return;
+
+      const first = focusableElements[0];
+      const last = focusableElements[focusableElements.length - 1];
+
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    };
+
+    document.addEventListener('keydown', handleKeyDown);
+
+    return () => {
+      document.body.style.overflow = previousOverflow;
+      document.removeEventListener('keydown', handleKeyDown);
+    };
   }, [isOpen]);
 
   useEffect(() => {
@@ -101,6 +137,8 @@ export const SearchWidget = ({ mobile = false }: { mobile?: boolean }) => {
         onFocus={loadPagefind}
         className={`flex items-center gap-2 px-3 py-2 text-slate-300 hover:text-white transition-colors rounded-lg hover:bg-white/5 group ${mobile ? 'w-full justify-start py-3 px-4 bg-white/5 hover:bg-white/10' : ''}`}
         aria-label="Cerca"
+        aria-controls="site-search-dialog"
+        aria-expanded={isOpen}
       >
         <Search className={`text-acid-yellow group-hover:text-acid-yellow/80 transition-colors ${mobile ? 'w-5 h-5' : 'w-5 h-5'}`} />
         <span className={`${mobile ? 'inline text-base' : 'hidden lg:inline text-sm'} font-medium`}>Cerca</span>
@@ -110,12 +148,18 @@ export const SearchWidget = ({ mobile = false }: { mobile?: boolean }) => {
       {isOpen && (
         <div className="fixed inset-0 z-[200] flex items-start justify-center pt-20 px-4">
           <div
+            role="presentation"
             onClick={handleClose}
             className="absolute inset-0 bg-black/60 backdrop-blur-sm transition-opacity duration-200"
             style={{ opacity: isVisible ? 1 : 0 }}
           />
 
           <div
+            ref={modalRef}
+            id="site-search-dialog"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="site-search-title"
             className="relative w-full max-w-2xl bg-[#0F1115] border border-white/10 rounded-2xl shadow-[0_0_50px_rgba(0,0,0,0.5)] overflow-hidden flex flex-col max-h-[80vh] transition-all duration-200"
             style={{
               opacity: isVisible ? 1 : 0,
@@ -125,6 +169,7 @@ export const SearchWidget = ({ mobile = false }: { mobile?: boolean }) => {
             {/* Header / Input */}
             <div className="flex items-center gap-4 p-4 border-b border-white/10 bg-white/5">
               <Search className="w-5 h-5 text-slate-400" />
+              <span id="site-search-title" className="sr-only">Ricerca nel sito</span>
               <input
                 ref={inputRef}
                 type="text"
@@ -135,6 +180,7 @@ export const SearchWidget = ({ mobile = false }: { mobile?: boolean }) => {
               />
               <button
                 onClick={handleClose}
+                aria-label="Chiudi ricerca"
                 className="p-1 text-slate-400 hover:text-white rounded-md hover:bg-white/10 transition-colors"
               >
                 <X className="w-5 h-5" />

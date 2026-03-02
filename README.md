@@ -1,47 +1,53 @@
-# Astro Starter Kit: Basics
+# GinnyTech
 
-```sh
-npm create astro@latest -- --template basics
-```
+Piattaforma editoriale e formativa in italiano su MarTech, data engineering, analytics engineering e marketing data science.
 
-> 🧑‍🚀 **Seasoned astronaut?** Delete this file. Have fun!
+## Stack
 
-## 🚀 Project Structure
+- Astro 5
+- React 19 per componenti interattivi
+- Tailwind CSS 4
+- MDX content collections per blog e corso
+- Mermaid, KaTeX e componenti Starlight usati dentro i contenuti MDX
+- Pagefind per la ricerca full-text
 
-Inside of your Astro project, you'll see the following folders and files:
+## Struttura
 
 ```text
-/
-├── public/
-│   └── favicon.svg
-├── src
-│   ├── assets
-│   │   └── astro.svg
-│   ├── components
-│   │   └── Welcome.astro
-│   ├── layouts
-│   │   └── Layout.astro
-│   └── pages
-│       └── index.astro
-└── package.json
+src/
+  components/      componenti Astro e React
+  content/         contenuti MDX del blog e del corso
+  data/            metadata statici e JSON di supporto
+  layouts/         layout condivisi
+  pages/           route pubbliche
+  utils/           utility e test locali
+scripts/           controlli di qualità e utility editoriali
+tests/             test di schema e regressione
+public/            asset statici e file SEO/AI discovery
 ```
 
-To learn more about the folder structure of an Astro project, refer to [our guide on project structure](https://docs.astro.build/en/basics/project-structure/).
+## Comandi
 
-## 🧞 Commands
+| Comando | Uso |
+| :-- | :-- |
+| `npm install` | Installa le dipendenze |
+| `npm run dev` | Avvia il sito in locale sulla porta `3000` |
+| `npm run validate:content` | Controlla frontmatter e slug dei contenuti |
+| `npm run test` | Esegue i test con Vitest |
+| `npm run check` | Esegue validazione contenuti, type-check Astro e test |
+| `npm run build` | Genera la build di produzione in `dist/` |
+| `npm run preview` | Serve la build locale |
 
-All commands are run from the root of the project, from a terminal:
+## Note operative
 
-| Command                   | Action                                           |
-| :------------------------ | :----------------------------------------------- |
-| `npm install`             | Installs dependencies                            |
-| `npm run dev`             | Starts local dev server at `localhost:4321`      |
-| `npm run build`           | Build your production site to `./dist/`          |
-| `npm run preview`         | Preview your build locally, before deploying     |
-| `npm run astro ...`       | Run CLI commands like `astro add`, `astro check` |
-| `npm run astro -- --help` | Get help using the Astro CLI                     |
+- Il contenuto del corso vive in `src/content/corso`.
+- Il blog vive in `src/content/blog`.
+- La ricerca dipende dagli asset Pagefind generati durante `npm run build`.
+- I link e i metadata condivisi sono centralizzati in `src/consts.ts`.
 
-## 👀 Want to learn more?
+## Qualità minima prima di pubblicare
 
-Feel free to check [our documentation](https://docs.astro.build) or jump into our [Discord server](https://astro.build/chat).
-# GinnyTech
+```sh
+npm run check
+npm run build
+```

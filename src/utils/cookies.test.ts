@@ -1,8 +1,8 @@
-import { describe, test, expect, beforeEach, afterEach } from 'bun:test';
+import { afterEach, beforeEach, describe, expect, test } from 'vitest';
 import { setPartitionedCookie } from './cookies.js';
 
 describe('setPartitionedCookie', () => {
-  let originalDocument;
+  let originalDocument: typeof global.document | undefined;
 
   beforeEach(() => {
     // Save the original document global if it exists

@@ -1,8 +1,13 @@
 import { defineCollection } from 'astro:content';
 import { glob, file } from 'astro/loaders';
+import { docsSchema } from '@astrojs/starlight/schema';
 import { blogSchema, corsoSchema, productsSchema } from './lib/schemas';
 
 export const collections = {
+    docs: defineCollection({
+        loader: glob({ pattern: "**/*.{md,mdx}", base: "./src/content/_starlight" }),
+        schema: docsSchema(),
+    }),
 
     blog: defineCollection({
         loader: glob({ pattern: "**/*.{md,mdx}", base: "./src/content/blog", retainBody: false }),

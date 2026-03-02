@@ -1,4 +1,4 @@
-import { describe, test, expect } from "bun:test";
+import { describe, expect, test } from "vitest";
 import { blogSchema, corsoSchema, productsSchema } from "../src/lib/schemas";
 
 describe("Content Schemas", () => {
@@ -13,7 +13,7 @@ describe("Content Schemas", () => {
             const result = blogSchema.safeParse(valid);
             expect(result.success).toBe(true);
             if (result.success) {
-                 expect(result.data.author).toBe("GynniTech Team");
+                 expect(result.data.author).toBe("Andrii Dyshkantiuk");
                  expect(result.data.date).toBeInstanceOf(Date);
             }
         });
