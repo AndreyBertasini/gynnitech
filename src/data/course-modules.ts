@@ -46,7 +46,7 @@ export const COURSE_MODULES: CourseModule[] = [
   {
     id: 'analisi-marketing',
     title: 'Analisi di Marketing',
-    description: 'Performance Marketing, Branding, Unit Economics e Modelli di Attribuzione.',
+    description: 'Performance Marketing, Martech Ops, Activation, Unit Economics e Modelli di Misurazione.',
     icon: 'Zap',
     color: 'from-orange-500 to-red-400'
   },

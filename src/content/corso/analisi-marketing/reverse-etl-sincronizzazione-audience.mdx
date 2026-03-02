@@ -1,0 +1,234 @@
+---
+title: "Reverse ETL e Sincronizzazione Audience"
+description: "Come portare segmenti, score e segnali dal data warehouse verso CRM, piattaforme advertising e strumenti di marketing automation."
+module: "Modulo 6: Analisi di Marketing"
+order: 7
+category: "Activation"
+---
+
+# Reverse ETL e Sincronizzazione Audience
+
+Quasi tutti i team hanno risolto la meta' facile del problema: portare dati nel warehouse. La meta' difficile e' rendere quei dati utili ai team operativi.
+
+Se il tuo miglior modello di churn resta in BigQuery e il customer success non lo vede mai, non hai costruito un vantaggio. Hai costruito una tabella.
+
+Il Reverse ETL serve a questo: trasformare il warehouse nella fonte di verita' che alimenta sistemi operativi.
+
+---
+
+## Cosa si sincronizza davvero
+
+I casi d'uso piu' utili non sono migliaia di colonne. Sono pochi segnali ad alta leva.
+
+Esempi:
+
+- `customer_health_score` -> Salesforce / HubSpot
+- `high_intent_demo` -> LinkedIn Ads / Meta
+- `predicted_ltv_tier` -> Klaviyo / Braze
+- `churn_risk_flag` -> CRM e customer success
+- `suppression_list` -> piattaforme adv per escludere clienti gia' attivi
+
+Il criterio e' semplice: sincronizza solo cio' che cambia un'azione.
+
+---
+
+## Architettura logica
+
+```text
+Sorgenti -> warehouse -> modelli dbt / mart di activation -> Reverse ETL -> sistemi operativi
+```
+
+Il punto cruciale non e' il tool. E' il modello intermedio.
+
+Se mandi downstream dati raw, ogni destinazione reinterpreta il business in modo diverso. Se mandi un mart gia' modellato, le regole restano centrali e versionabili.
+
+---
+
+## Il mart di activation
+
+Un buon mart di activation ha:
+
+- chiave di matching
+- stato o score da sincronizzare
+- timestamp di aggiornamento
+- motivazione leggibile
+
+### Esempio
+
+```sql
+SELECT
+  customer_id,
+  crm_contact_id,
+  email_hash,
+  lifecycle_stage,
+  health_score,
+  churn_risk_flag,
+  predicted_ltv_tier,
+  high_intent_demo_flag,
+  CURRENT_TIMESTAMP AS synced_at
+FROM mart_customer_activation
+WHERE is_deleted = FALSE;
+```
+
+Questo schema e' molto piu' utile di 200 campi generici.
+
+---
+
+## Chiavi di matching: il dettaglio che decide il progetto
+
+Ogni destinazione ha chiavi migliori o peggiori.
+
+| Destinazione | Chiave preferita |
+|---|---|
+| Salesforce | record ID o email aziendale |
+| HubSpot | contact ID o email |
+| Meta Ads | email_hash, phone_hash |
+| Google Ads customer match | email_hash, phone_hash, address info |
+| Klaviyo / Braze | external_id o email |
+
+Regola pratica: non usare chiavi "comode", usa chiavi stabili.
+
+Esempio pessimo: match su `company_name`.
+
+Esempio corretto: match su `account_id` o `crm_company_id`.
+
+---
+
+## Pattern di sincronizzazione
+
+### Upsert
+
+Il caso piu' comune. Aggiorni lo stato del record se esiste, altrimenti lo crei.
+
+### Add/Remove da audience
+
+Molto usato per advertising e lifecycle. Devi gestire sia ingresso sia uscita dal segmento.
+
+### Mirror field
+
+Scrivi un numero o uno stato in un campo del CRM.
+
+### Suppression
+
+Escludi utenti non piu' eleggibili. Spesso vale piu' dell'aggiunta.
+
+---
+
+## Esempio pratico: high intent lead verso HubSpot e LinkedIn
+
+### Regola business
+
+Lead ad alto intento se:
+
+- ha visitato pricing almeno 2 volte in 7 giorni
+- ha aperto almeno una email nurture
+- non ha ancora creato opportunita'
+
+### Modello SQL
+
+```sql
+SELECT
+  contact_id,
+  email,
+  CASE
+    WHEN pricing_visits_7d >= 2
+     AND nurture_email_clicks_14d >= 1
+     AND opportunity_open_flag = 0
+    THEN TRUE
+    ELSE FALSE
+  END AS high_intent_demo_flag,
+  pricing_visits_7d,
+  nurture_email_clicks_14d,
+  CURRENT_TIMESTAMP AS updated_at
+FROM mart_b2b_contact_signals;
+```
+
+### Attivazione
+
+- HubSpot: aggiorna proprieta' `high_intent_demo_flag`
+- LinkedIn: aggiungi a audience matched
+- Sales: crea task se il lead supera anche una soglia score
+
+La forza del Reverse ETL e' che tutte e tre le azioni derivano dalla stessa logica centrale.
+
+---
+
+## Frequenza di sync
+
+Il miglior sync non e' il piu' veloce. E' il piu' adatto al caso d'uso.
+
+| Caso d'uso | Frequenza ragionevole |
+|---|---|
+| Churn risk per CS | ogni 4-6 ore |
+| Segmenti paid retargeting | ogni 1-3 ore |
+| Suppression clienti attivi | ogni 1-3 ore |
+| Score commerciale B2B | ogni 4 ore o giornaliero |
+| Reporting direzionale in CRM | giornaliero |
+
+Se sincronizzi tutto in real-time senza bisogno, moltiplichi costi e incidenti.
+
+---
+
+## Idempotenza e stato
+
+Ogni sync serio deve essere idempotente. Se lo riesegui due volte, il risultato non deve cambiare.
+
+Campi utili:
+
+- `last_synced_at`
+- `source_updated_at`
+- `sync_hash`
+- `sync_status`
+
+Esempio concettuale:
+
+```text
+if current_payload_hash != last_payload_hash:
+  send update
+else:
+  skip
+```
+
+Questo evita update inutili e rate limit sprecati.
+
+---
+
+## Errori frequenti
+
+### 1. Portare nel CRM metriche inutili
+
+Se il commerciale non sa cosa fare con `page_depth_score`, non sincronizzarlo.
+
+### 2. Nessuna gestione delle uscite dal segmento
+
+Molti team sanno aggiungere utenti a un'audience, ma non rimuoverli. Risultato: retargeting su clienti gia' convertiti.
+
+### 3. Logica duplicata tra tool
+
+Se HubSpot ha una regola, LinkedIn un'altra e BigQuery una terza, non hai governance.
+
+### 4. Nessun SLA
+
+Un segmento "high intent" aggiornato il giorno dopo e' spesso inutile.
+
+---
+
+## KPI di un programma Reverse ETL
+
+| KPI | Cosa misura |
+|---|---|
+| Sync success rate | affidabilita' tecnica |
+| Audience freshness | ritardo operativo |
+| Match rate per destinazione | qualita' dei record |
+| Suppression coverage | quanti utenti non eleggibili vengono esclusi |
+| Action rate downstream | quanti sync portano a vere azioni commerciali o marketing |
+
+---
+
+## Riepilogo operativo
+
+- Il Reverse ETL rende il warehouse operativo, non solo analitico.
+- Devi sincronizzare pochi segnali ad alta leva, non l'intero schema.
+- La chiave di matching conta quanto la logica di segmentazione.
+- Ogni sync deve gestire entrata, uscita, idempotenza e freshness.
+- Se la regola vive nel warehouse, marketing e sales lavorano finalmente sulla stessa definizione.

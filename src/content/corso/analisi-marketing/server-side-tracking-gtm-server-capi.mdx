@@ -1,0 +1,316 @@
+---
+title: "Server-Side Tracking, GTM Server e Conversions API"
+description: "Come spostare gli eventi critici dal browser al server, deduplicare correttamente e migliorare la qualita' dei segnali per Ads e analytics."
+module: "Modulo 6: Analisi di Marketing"
+order: 4
+category: "Tracking"
+---
+
+# Server-Side Tracking, GTM Server e Conversions API
+
+Il browser non e' piu' un ambiente affidabile come dieci anni fa. ITP, ad blocker, restrizioni cookie e perdita di identificatori hanno ridotto la qualita' del tracking client-side, soprattutto sugli eventi piu' importanti: lead, acquisti, trial e upgrade.
+
+Il server-side tracking non sostituisce tutto il tracking browser. Sposta sul server gli eventi dove conta la **verita' transazionale**.
+
+---
+
+## Quando ha senso usare il server-side
+
+Usa il server-side per:
+
+- acquisti e pagamenti confermati
+- lead validati dal backend
+- registrazioni account
+- rinnovi abbonamento
+- eventi offline reimportati in piattaforme ads
+
+Non serve invece per ogni micro-interazione UI. Scroll, click, accordion open e video progress possono restare browser-side.
+
+La regola pratica:
+
+| Tipo evento | Fonte autorevole |
+|---|---|
+| `purchase_completed` | server |
+| `subscription_renewed` | server |
+| `lead_qualified` | server / CRM |
+| `cta_clicked` | browser |
+| `pricing_page_viewed` | browser |
+
+---
+
+## Architettura base
+
+Una struttura tipica e':
+
+```text
+Browser -> Web GTM / SDK
+        -> endpoint first-party
+Backend -> event bus / webhook / GTM server container
+        -> GA4 / Meta CAPI / Google Ads / warehouse
+```
+
+Il punto importante e' questo: il server deve usare un identificatore comune con il browser per poter deduplicare e arricchire.
+
+---
+
+## GTM Web + GTM Server: ruoli diversi
+
+Molti team confondono i due container.
+
+### GTM Web
+
+- legge il `dataLayer`
+- invia pageview e interazioni browser
+- raccoglie contesto client (page URL, referrer, screen)
+
+### GTM Server
+
+- riceve hit o eventi da web / backend
+- normalizza payload
+- inoltra ai vendor
+- applica arricchimenti e logica di routing
+
+Il vantaggio reale non e' "magia anti-cookie". E' controllo operativo:
+
+- endpoint first-party
+- governance centralizzata
+- meno script terzi lato browser
+- possibilita' di arricchire gli eventi con dati backend
+
+---
+
+## Deduplica: il punto piu' importante
+
+Se mandi lo stesso evento sia da browser sia da server senza deduplica, peggiori i dati invece di migliorarli.
+
+### Pattern corretto
+
+1. Generi un `event_id` univoco.
+2. Il browser lo invia a pixel / GA4.
+3. Il server usa lo stesso `event_id` quando manda l'evento server-side.
+4. La piattaforma riconosce i due segnali come lo stesso evento.
+
+### Esempio
+
+```javascript
+window.dataLayer.push({
+  event: 'purchase_completed',
+  event_id: 'ord_784512',
+  order_id: 'ord_784512',
+  value: 149.00,
+  currency: 'EUR'
+});
+```
+
+```json
+{
+  "event_name": "Purchase",
+  "event_time": 1761987600,
+  "event_id": "ord_784512",
+  "action_source": "website",
+  "custom_data": {
+    "currency": "EUR",
+    "value": 149.00,
+    "order_id": "ord_784512"
+  }
+}
+```
+
+Se l'`event_id` cambia, la piattaforma vede due conversioni. Fine del problema.
+
+---
+
+## Meta Conversions API
+
+Meta CAPI serve a inviare eventi dai server del brand ai server di Meta. Il caso piu' comune e' l'acquisto ecommerce, ma vale anche per lead e form B2B.
+
+### Payload minimo
+
+```json
+{
+  "data": [
+    {
+      "event_name": "Lead",
+      "event_time": 1761987600,
+      "event_id": "lead_01JX9P5A",
+      "action_source": "website",
+      "event_source_url": "https://example.com/pricing",
+      "user_data": {
+        "em": ["<sha256_email>"],
+        "client_ip_address": "203.0.113.10",
+        "client_user_agent": "Mozilla/5.0"
+      },
+      "custom_data": {
+        "currency": "EUR",
+        "value": 0
+      }
+    }
+  ]
+}
+```
+
+### Cosa migliora davvero
+
+- recupero di eventi persi lato browser
+- migliore event match quality
+- minore dipendenza dai cookie terzi
+- piu' stabilita' sugli eventi finali
+
+### Cosa non risolve
+
+- consenso negato
+- identita' assente o sporca
+- scarsa qualita' del CRM
+- modelli di attribuzione sbagliati
+
+---
+
+## Google Ads Enhanced Conversions
+
+Su Google, il caso piu' frequente non e' solo la conversione server-side, ma il miglioramento del matching tramite dati first-party hashati.
+
+### Principio
+
+1. raccogli email o telefono con consenso adeguato
+2. normalizzi il dato
+3. calcoli hash SHA-256
+4. invii il valore hashato come segnale di matching
+
+Esempio Node.js:
+
+```javascript
+import crypto from 'node:crypto';
+
+function normalizeEmail(email) {
+  return email.trim().toLowerCase();
+}
+
+function sha256(value) {
+  return crypto.createHash('sha256').update(value).digest('hex');
+}
+
+const emailHashed = sha256(normalizeEmail('mario.rossi@example.com'));
+```
+
+Importante: il dato va normalizzato prima dell'hash. Altrimenti due formati diversi della stessa email producono hash diversi.
+
+---
+
+## Arricchimento server-side
+
+Il vero vantaggio del backend e' che conosce cose che il browser non sa con affidabilita'.
+
+Esempi di campi utili:
+
+- stato reale ordine
+- valore netto vs lordo
+- margin bucket
+- metodo di pagamento
+- piano acquistato
+- first purchase vs renewal
+
+Questo permette di non ottimizzare le campagne su segnali poveri. Se invii a Google Ads solo "lead", l'algoritmo ottimizza per volume. Se invii "qualified_lead" o valore opportunita', l'ottimizzazione migliora.
+
+---
+
+## Schema di implementazione consigliato
+
+### Step 1: mappa degli eventi critici
+
+Definisci massimo 5-8 eventi server-side iniziali:
+
+- `lead_submitted`
+- `lead_qualified`
+- `purchase_completed`
+- `subscription_started`
+- `subscription_renewed`
+
+### Step 2: identificatori condivisi
+
+Per ogni evento definisci:
+
+- `event_id`
+- `user_id` o identificatore CRM
+- timestamp evento
+- eventuale `gclid`, `fbp`, `fbc` quando disponibili
+
+### Step 3: routing
+
+Decidi per ogni evento quali destinazioni ricevono il segnale:
+
+| Evento | GA4 | Meta CAPI | Google Ads | Warehouse |
+|---|---|---|---|---|
+| lead_submitted | si | si | si | si |
+| purchase_completed | si | si | si | si |
+| subscription_renewed | si | no | opzionale | si |
+
+### Step 4: monitoraggio
+
+Misura ogni settimana:
+
+- numero eventi browser
+- numero eventi server
+- dedup rate
+- match rate
+- scarto tra ordini reali e conversioni ads
+
+---
+
+## KPI di salute del setup server-side
+
+| KPI | Perche' conta |
+|---|---|
+| Deduplication rate | Scopre se stai gonfiando conversioni |
+| Event match quality | Misura la capacita' di riconciliare utenti |
+| Coverage ratio | Quota di ordini/leads reali inviati alle piattaforme |
+| Latency | Un evento troppo in ritardo puo' perdere valore per bidding |
+| Error rate endpoint | Se cresce, il pipeline sta perdendo segnali |
+
+---
+
+## Errori comuni
+
+### 1. Mandare tutto server-side
+
+Perdi contesto client utile e aumenti complessita' inutile.
+
+### 2. Nessuna deduplica
+
+E' l'errore piu' costoso: piattaforme ottimizzate su conversioni gonfiate.
+
+### 3. PII inviata male
+
+Email in chiaro dove non dovrebbe, consenso non rispettato, hash applicato in modo incoerente.
+
+### 4. Nessun confronto con la fonte reale
+
+Il benchmark non e' la piattaforma ads. E' il sistema transazionale: CRM, ecommerce, billing.
+
+### 5. Setup tecnico senza ownership martech
+
+Serve una responsabilita' condivisa:
+
+- engineering: delivery e affidabilita'
+- marketing ops: mapping e destinazioni
+- analytics: validazione e reporting
+
+---
+
+## Checklist di go-live
+
+- `event_id` condiviso tra browser e server
+- mapping chiaro per ogni piattaforma
+- consenso verificato
+- hash su email / phone normalizzati
+- confronto con ordini o lead reali
+- alert su errori endpoint
+- documentazione di payload e ownership
+
+---
+
+## Riepilogo operativo
+
+- Il server-side non sostituisce tutto il browser-side: rende affidabili gli eventi critici.
+- GTM Server e' utile se porta controllo, non se aggiunge solo complessita'.
+- Meta CAPI ed Enhanced Conversions funzionano bene solo con identita' pulita e deduplica corretta.
+- Il numero da inseguire non e' "quanti eventi mando", ma quanto il segnale coincide con la realta' transazionale.
