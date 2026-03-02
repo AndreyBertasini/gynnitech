@@ -391,4 +391,435 @@ I fondamenti di S3 per il data lake:
 - **Versioning** protegge i dati processati da cancellazioni accidentali
 - Configura bucket nella **stessa regione** del compute per evitare costi di transfer
 
+## Multipart Upload: Quando e Come Usarlo
+
+Il **multipart upload** e' il meccanismo S3 per caricare file grandi dividendoli in parti parallele. E' obbligatorio per file superiori a 5 GB (limite PUT singolo) e fortemente raccomandato per file sopra 100 MB.
+
+### Come Funziona
+
+```plain text
+Multipart Upload per un file Parquet da 500 MB:
+
+Passo 1: Inizia il multipart upload → ottieni UploadId
+Passo 2: Carica le parti in parallelo
+  Parte 1 (100 MB) → ETag: abc123
+  Parte 2 (100 MB) → ETag: def456  ← parallelo
+  Parte 3 (100 MB) → ETag: ghi789  ← parallelo
+  Parte 4 (100 MB) → ETag: jkl012  ← parallelo
+  Parte 5 (100 MB) → ETag: mno345
+Passo 3: Completa l'upload con la lista degli ETag → file assemblato
+
+Risultato: upload 3-4x piu' veloce grazie al parallelismo
+```
+
+### Soglia Raccomandata: 100 MB
+
+```plain text
+File < 8 MB:    Usa PUT semplice (1 richiesta, overhead minimo)
+File 8-100 MB:  PUT semplice ancora OK (una richiesta)
+File > 100 MB:  Usa multipart upload (velocita' e affidabilita')
+File > 5 GB:    Obbligatorio multipart (limite AWS)
+
+Il motivo del 100 MB come soglia pratica:
+  - Connessione a 100 Mbps: upload 100 MB richiede ~8 secondi
+  - Se la connessione cade dopo 7 secondi: con PUT devi ricominciare
+  - Con multipart: riprendi dall'ultima parte completata
+```
+
+### Implementazione con Boto3
+
+```python
+import boto3
+from boto3.s3.transfer import TransferConfig
+
+s3 = boto3.client('s3', region_name='eu-west-1')
+
+# Configurazione multipart automatica per PyArrow / boto3
+config = TransferConfig(
+    multipart_threshold=104857600,    # 100 MB: usa multipart sopra questa soglia
+    max_concurrency=10,               # Parti parallele simultanee
+    multipart_chunksize=104857600,    # 100 MB per parte
+    use_threads=True
+)
+
+# Upload con multipart automatico (boto3 decide in base alle dimensioni)
+s3.upload_file(
+    Filename='/tmp/large_parquet.parquet',
+    Bucket='marketing-lake',
+    Key='cleaned/events/year=2024/month=01/day=15/part-00000.parquet',
+    Config=config,
+    ExtraArgs={
+        'ContentType': 'application/parquet',
+        'StorageClass': 'STANDARD',
+        'ServerSideEncryption': 'AES256',
+        'Metadata': {
+            'pipeline-version': '2.3.1',
+            'row-count': '2847593'
+        }
+    }
+)
+
+# Per file molto grandi: multipart esplicito con gestione errori
+def upload_large_file_with_retry(
+    file_path: str,
+    bucket: str,
+    key: str,
+    max_retries: int = 3
+) -> bool:
+    """Upload con retry automatico delle parti fallite."""
+
+    # Inizia il multipart upload
+    response = s3.create_multipart_upload(
+        Bucket=bucket,
+        Key=key,
+        ServerSideEncryption='AES256'
+    )
+    upload_id = response['UploadId']
+
+    try:
+        parts = []
+        part_size = 100 * 1024 * 1024  # 100 MB per parte
+
+        with open(file_path, 'rb') as f:
+            part_number = 1
+            while True:
+                data = f.read(part_size)
+                if not data:
+                    break
+
+                # Retry per ogni parte
+                for attempt in range(max_retries):
+                    try:
+                        response = s3.upload_part(
+                            Bucket=bucket,
+                            Key=key,
+                            PartNumber=part_number,
+                            UploadId=upload_id,
+                            Body=data
+                        )
+                        parts.append({
+                            'PartNumber': part_number,
+                            'ETag': response['ETag']
+                        })
+                        break
+                    except Exception as e:
+                        if attempt == max_retries - 1:
+                            raise
+                        print(f"Parte {part_number} fallita, retry {attempt+1}...")
+
+                part_number += 1
+
+        # Completa il multipart upload
+        s3.complete_multipart_upload(
+            Bucket=bucket,
+            Key=key,
+            UploadId=upload_id,
+            MultipartUpload={'Parts': parts}
+        )
+        return True
+
+    except Exception as e:
+        # Abort per liberare storage S3 delle parti incomplete
+        s3.abort_multipart_upload(Bucket=bucket, Key=key, UploadId=upload_id)
+        raise
+```
+
+<Aside type="caution">
+Gli upload multipart incompleti (iniziati ma non completati o abortiti) occupano storage S3 senza essere visibili nel listing normale. Configura sempre una lifecycle rule per abortire i multipart incompleti dopo 7 giorni: `AbortIncompleteMultipartUpload: { DaysAfterInitiation: 7 }`.
+</Aside>
+
+## Byte-Range Fetch: Leggere Solo una Parte del File
+
+Il **byte-range fetch** permette di scaricare solo una porzione di un oggetto S3. Parquet sfrutta questa feature per leggere solo le colonne e i row group necessari senza scaricare l'intero file.
+
+### Come Parquet Usa il Byte-Range Fetch
+
+```plain text
+File Parquet da 500 MB con struttura:
+  [Row Group 0: 50 MB - utenti A-D]
+  [Row Group 1: 50 MB - utenti E-H]
+  [Row Group 2: 50 MB - utenti I-L]
+  ...
+  [Row Group 9: 50 MB - utenti W-Z]
+  [Footer: 4 KB - metadata (schema, statistiche, offsets)]
+
+Query: SELECT revenue FROM events WHERE user_id LIKE 'A%'
+
+Senza byte-range fetch:
+  Download: 500 MB (tutto il file)
+
+Con byte-range fetch:
+  1. GET ultimi 4 KB (footer con metadata)
+  2. Leggi footer: Row Group 0 contiene utenti A-D (byte 0-52428800)
+  3. GET byte 0-52428800: 50 MB (solo Row Group 0)
+  4. Leggi colonna revenue: 5 MB (column pruning)
+  Totale download: 50 MB (90% risparmio!)
+```
+
+### Implementazione Diretta
+
+```python
+import boto3
+import io
+import pyarrow.parquet as pq
+
+def read_parquet_column_from_s3(
+    bucket: str,
+    key: str,
+    columns: list[str],
+    filters: list = None
+) -> 'pyarrow.Table':
+    """
+    Legge un file Parquet da S3 usando byte-range fetch automatico.
+    PyArrow gestisce internamente il byte-range fetch con S3.
+    """
+    s3 = boto3.client('s3')
+
+    # Opzione 1: S3FileSystem di PyArrow (usa byte-range fetch automaticamente)
+    import pyarrow.fs as pa_fs
+    s3_fs = pa_fs.S3FileSystem(region='eu-west-1')
+
+    table = pq.read_table(
+        f"{bucket}/{key}",
+        filesystem=s3_fs,
+        columns=columns,       # Column pruning: legge solo le colonne necessarie
+        filters=filters,       # Predicate pushdown: salta row group non rilevanti
+        use_threads=True,
+        pre_buffer=True,       # Pre-fetching per ridurre la latenza
+        buffer_size=4 * 1024 * 1024  # Buffer da 4 MB
+    )
+
+    return table
+
+# Uso pratico
+table = read_parquet_column_from_s3(
+    bucket='marketing-lake',
+    key='cleaned/events/year=2024/month=01/day=15/part-00000.parquet',
+    columns=['user_id', 'campaign_id', 'revenue'],
+    filters=[('revenue', '>', 0)]  # Salta row group con revenue = null
+)
+```
+
+## S3 Select: SQL Direttamente sui File S3
+
+**S3 Select** permette di eseguire query SQL direttamente su un file S3 senza scaricarlo. E' utile per file CSV o JSON dove non hai Parquet e non vuoi caricare tutto in memoria.
+
+```python
+import boto3
+import json
+
+s3 = boto3.client('s3')
+
+# S3 Select su file CSV
+response = s3.select_object_content(
+    Bucket='marketing-lake',
+    Key='raw/campaigns/meta_ads_20240115.csv',
+    ExpressionType='SQL',
+    Expression="""
+        SELECT s.campaign_id, s.spend, s.impressions, s.clicks
+        FROM s3object s
+        WHERE CAST(s.spend AS FLOAT) > 100.0
+          AND s.date = '2024-01-15'
+    """,
+    InputSerialization={
+        'CSV': {
+            'FileHeaderInfo': 'USE',
+            'FieldDelimiter': ',',
+            'RecordDelimiter': '\n'
+        }
+    },
+    OutputSerialization={
+        'JSON': {}
+    }
+)
+
+# Legge i risultati in streaming
+results = []
+for event in response['Payload']:
+    if 'Records' in event:
+        records = event['Records']['Payload'].decode('utf-8')
+        for line in records.strip().split('\n'):
+            if line:
+                results.append(json.loads(line))
+
+# S3 Select per file Parquet (supporto limitato)
+response = s3.select_object_content(
+    Bucket='marketing-lake',
+    Key='cleaned/events/year=2024/month=01/day=15/part-00000.parquet',
+    ExpressionType='SQL',
+    Expression="SELECT s.user_id, s.revenue FROM s3object s WHERE s.revenue > 0",
+    InputSerialization={'Parquet': {}},
+    OutputSerialization={'JSON': {}}
+)
+```
+
+**Quando usare S3 Select:**
+- File CSV o JSON grezzi dove vuoi filtrare prima di caricarli
+- Query una-tantum dove non vale la pena caricare tutto in ClickHouse
+- Costo: $0.002 per GB scansionato (piu' economico di Athena per query semplici)
+
+**Limitazioni:**
+- Non supporta JOIN tra file
+- Supporto Parquet limitato (non tutti gli engine lo supportano)
+- Per analytics complesse, ClickHouse o Athena sono superiori
+
+## Consistency Model di S3: Strong Consistency dal 2020
+
+Amazon S3 ha introdotto la **strong consistency** nel dicembre 2020. Prima, S3 aveva un modello di consistenza eventuale che causava problemi nelle pipeline.
+
+### Prima del 2020: Consistenza Eventuale
+
+```plain text
+Pipeline con S3 pre-2020:
+  T=0: PUT file.parquet (upload completato)
+  T=1: LIST objects (GET /prefix) → file.parquet non appare!
+       (inconsistenza eventuale: i server S3 non si sono ancora sincronizzati)
+  T=5: LIST objects → file.parquet appare finalmente
+
+  Conseguenza: le pipeline dovevano aggiungere sleep o retry
+  dopo ogni scrittura per assicurarsi che il file fosse visibile.
+```
+
+### Dopo il 2020: Strong Consistency
+
+```plain text
+Pipeline con S3 post-2020:
+  T=0: PUT file.parquet (upload completato)
+  T=0: LIST objects → file.parquet appare IMMEDIATAMENTE
+  T=0: GET file.parquet → ritorna il file corretto IMMEDIATAMENTE
+
+  Garanzie:
+  - Read-after-write consistency: leggi subito il file appena scritto
+  - List-after-write consistency: il listing include subito i file scritti
+  - List-after-delete consistency: il listing esclude subito i file cancellati
+  - Read-after-overwrite consistency: leggi sempre la versione piu' recente
+```
+
+Questo significa che le pipeline moderne non necessitano piu' di ritardi artificiali tra scrittura e lettura. S3Queue, Kafka Connect S3 Sink e altre pipeline possono assumere che un file scritto sia immediatamente disponibile.
+
+## Security: Bucket Policy vs IAM, Block Public Access, S3 Access Analyzer
+
+### Bucket Policy vs IAM Policy: Differenze Chiave
+
+```plain text
+IAM Policy (attaccata a utenti/ruoli/servizi):
+  - "Questo IAM role PUO' fare queste azioni su questi bucket"
+  - Controllo lato IDENTITA'
+  - Best practice per permessi tra account STESSO
+
+Bucket Policy (attaccata al bucket):
+  - "Questi principali POSSONO fare queste azioni su questo bucket"
+  - Controllo lato RISORSA
+  - Necessaria per accesso CROSS-ACCOUNT e PUBLIC (sconsigliato)
+
+Raccomandazione: usa IAM per tutto il traffico interno,
+Bucket Policy solo per accessi cross-account (es: condivisione con partner).
+```
+
+### IAM Policy Minimale per ClickHouse
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "ClickHouseReadCleaned",
+      "Effect": "Allow",
+      "Action": [
+        "s3:GetObject",
+        "s3:ListBucket",
+        "s3:GetBucketLocation"
+      ],
+      "Resource": [
+        "arn:aws:s3:::marketing-lake",
+        "arn:aws:s3:::marketing-lake/cleaned/*",
+        "arn:aws:s3:::marketing-lake/curated/*"
+      ]
+    }
+  ]
+}
+```
+
+ClickHouse ottiene accesso SOLO alle zone cleaned e curated. Non puo' leggere raw, non puo' scrivere niente.
+
+### Block Public Access: La Prima Linea di Difesa
+
+```plain text
+AWS Block Public Access: 4 impostazioni
+
+1. BlockPublicAcls:
+   Impedisce di impostare ACL pubblici su nuovi oggetti
+   → SEMPRE ON
+
+2. IgnorePublicAcls:
+   Ignora eventuali ACL pubblici esistenti
+   → SEMPRE ON
+
+3. BlockPublicPolicy:
+   Impedisce di aggiungere bucket policy che rendono il bucket pubblico
+   → SEMPRE ON
+
+4. RestrictPublicBuckets:
+   Blocca accesso pubblico anche se c'e' una policy pubblica
+   → SEMPRE ON
+
+Abilitali tutti e 4 a livello di account (non solo per bucket):
+```
+
+```python
+import boto3
+
+s3control = boto3.client('s3control')
+
+# Blocca accesso pubblico per tutto l'account AWS
+s3control.put_public_access_block(
+    AccountId='123456789012',  # Il tuo Account ID
+    PublicAccessBlockConfiguration={
+        'BlockPublicAcls': True,
+        'IgnorePublicAcls': True,
+        'BlockPublicPolicy': True,
+        'RestrictPublicBuckets': True
+    }
+)
+```
+
+### S3 Access Analyzer: Rilevare Permessi Eccessivi
+
+S3 Access Analyzer analizza le bucket policy e gli ACL e segnala quando un bucket o un oggetto e' accessibile dall'esterno dell'organizzazione.
+
+```python
+import boto3
+
+access_analyzer = boto3.client('accessanalyzer', region_name='eu-west-1')
+
+# Crea un analyzer per identificare accessi non autorizzati
+access_analyzer.create_analyzer(
+    analyzerName='marketing-lake-analyzer',
+    type='ACCOUNT',  # Analizza risorse nel tuo account
+    tags={
+        'Project': 'marketing-data-lake',
+        'Team': 'data-engineering'
+    }
+)
+
+# Lista i risultati (access non autorizzati)
+findings = access_analyzer.list_findings(
+    analyzerArn='arn:aws:access-analyzer:eu-west-1:123456789012:analyzer/marketing-lake-analyzer',
+    filter={
+        'resourceType': {
+            'eq': ['AWS::S3::Bucket']
+        }
+    }
+)
+
+for finding in findings['findings']:
+    print(f"ATTENZIONE: {finding['resource']} ha accesso pubblico!")
+    print(f"Motivo: {finding['condition']}")
+    print(f"Azione: {finding['action']}")
+```
+
+<Aside type="danger">
+Un singolo bucket S3 accessibile pubblicamente per errore puo' esporre terabyte di dati di marketing con user_id, email, comportamenti di acquisto. Configura Block Public Access a livello di account, non solo di bucket, e abilita S3 Access Analyzer su ogni account AWS che contiene dati personali.
+</Aside>
+
 _Prossima lezione: Data Lake Design Patterns — Architettura a zone, schema-on-read e governance._

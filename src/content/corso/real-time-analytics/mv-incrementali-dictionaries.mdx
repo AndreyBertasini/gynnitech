@@ -554,5 +554,338 @@ SYSTEM RELOAD DICTIONARY campaign_dict;
 | **Manutenzione**       | Meno componenti = meno cose che possono rompersi         |
 
 
-## 8. Checklist Implementazione
+## 8. ClickHouse Dictionaries Avanzate
+
+Oltre ai Dictionary semplici con layout `FLAT()` e `HASHED()`, ClickHouse supporta layout specializzati per casi d'uso avanzati che emergono frequentemente nelle pipeline di marketing analytics.
+
+### Polygon Dictionary per Geo-Lookup
+
+Il layout `POLYGON` permette di associare coordinate geografiche (latitudine/longitudine) a regioni geografiche arbitrarie (province, zone commerciali, aree di consegna). È fondamentale per analisi geospaziali senza dipendere da servizi esterni.
+
+```sql
+-- Tabella sorgente con poligoni delle zone di consegna
+CREATE TABLE geo_zones (
+    zone_id    UInt32,
+    zone_name  String,
+    region     LowCardinality(String),
+    -- Poligono in formato GeoJSON (array di [lon, lat])
+    polygon    Array(Array(Float64))
+) ENGINE = MergeTree()
+ORDER BY zone_id;
+
+-- Inserimento di un poligono (zona di consegna "Centro Milano")
+INSERT INTO geo_zones VALUES (
+    1,
+    'Centro Milano',
+    'lombardia',
+    [[9.174, 45.464], [9.200, 45.464], [9.200, 45.480], [9.174, 45.480], [9.174, 45.464]]
+);
+
+-- Polygon Dictionary: mappa coordinate → zona
+CREATE DICTIONARY geo_zones_dict (
+    zone_id   UInt32,
+    zone_name String,
+    region    String
+)
+PRIMARY KEY polygon
+SOURCE(CLICKHOUSE(TABLE 'geo_zones' DB 'analytics'))
+LAYOUT(POLYGON(STORE_POLYGON_KEY_COLUMN 1))
+LIFETIME(MIN 3600 MAX 7200);
+
+-- Uso: arricchisci ogni evento con la zona geografica
+SELECT
+    event_time,
+    user_id,
+    latitude,
+    longitude,
+    dictGet('geo_zones_dict', 'zone_name', (longitude, latitude)) AS delivery_zone,
+    dictGet('geo_zones_dict', 'region', (longitude, latitude)) AS region
+FROM raw_delivery_events
+WHERE event_date = today();
+```
+
+Il Polygon Dictionary elimina la necessità di un servizio di reverse geocoding esterno (Google Maps, HERE) per ogni evento — la lookup è in-memory e costa microsecondi invece di 50-100ms per chiamata API.
+
+### Range Dictionary per Lookups Temporali
+
+Il layout `RANGE_HASHED` permette di associare un valore a un range temporale: "qual era il prezzo di questo prodotto il 15 marzo 2024?" o "in quale campagna era attivo questo placement il 12 gennaio?".
+
+```sql
+-- Tabella storica dei prezzi (un record per ogni variazione di prezzo)
+CREATE TABLE product_price_history (
+    product_id  UInt32,
+    price       Decimal(10, 2),
+    currency    LowCardinality(String),
+    valid_from  Date,
+    valid_to    Date  -- '9999-12-31' per il record corrente
+) ENGINE = MergeTree()
+ORDER BY (product_id, valid_from);
+
+-- Range Dictionary: product_id + data → prezzo storico
+CREATE DICTIONARY product_price_dict (
+    product_id  UInt32,
+    price       Decimal(10, 2),
+    currency    String,
+    valid_from  Date,
+    valid_to    Date
+)
+PRIMARY KEY product_id
+RANGE MIN valid_from MAX valid_to
+SOURCE(CLICKHOUSE(TABLE 'product_price_history' DB 'analytics'))
+LAYOUT(RANGE_HASHED())
+LIFETIME(MIN 300 MAX 600);
+
+-- Lookup del prezzo storico per ogni ordine
+SELECT
+    o.order_id,
+    o.product_id,
+    o.order_date,
+    o.quantity,
+    dictGetOrNull(
+        'product_price_dict',
+        'price',
+        o.product_id,
+        o.order_date  -- ← La data di riferimento per il range lookup
+    ) AS historical_price,
+    o.quantity * historical_price AS line_total
+FROM orders o
+WHERE o.order_date >= '2024-01-01';
+```
+
+Il Range Dictionary risolve un problema classico di SCD Type 2: invece di fare un JOIN su `valid_from <= order_date AND valid_to > order_date` (lento su tabelle grandi), la lookup è O(1) in memoria.
+
+### Materialized View Chaining: Pipeline Incrementale a Cascade
+
+Il pattern più potente per le pipeline dati in ClickHouse è il **MV chaining**: ogni MV produce dati che alimentano la MV successiva, formando una pipeline di trasformazione completamente incrementale senza ETL esterno.
+
+```sql
+-- STAGE 0: Tabella raw (da Kafka o HTTP endpoint)
+CREATE TABLE raw_ad_events (
+    event_time    DateTime,
+    user_id       UInt64,
+    ad_id         UInt32,
+    campaign_id   UInt32,
+    event_type    Enum8('impression'=1, 'click'=2, 'conversion'=3),
+    bid_price_eur Decimal(8, 4),
+    revenue_eur   Decimal(10, 2)
+) ENGINE = MergeTree()
+ORDER BY (event_time, campaign_id)
+PARTITION BY toYYYYMM(event_time);
+
+-- STAGE 1: MV di pulizia e filtraggio bot
+-- Tabella target del primo stage
+CREATE TABLE clean_ad_events (
+    event_time    DateTime,
+    user_id       UInt64,
+    ad_id         UInt32,
+    campaign_id   UInt32,
+    event_type    Enum8('impression'=1, 'click'=2, 'conversion'=3),
+    bid_price_eur Decimal(8, 4),
+    revenue_eur   Decimal(10, 2)
+) ENGINE = MergeTree()
+ORDER BY (event_time, campaign_id)
+PARTITION BY toYYYYMM(event_time);
+
+CREATE MATERIALIZED VIEW mv_stage1_clean
+TO clean_ad_events
+AS SELECT *
+FROM raw_ad_events
+-- Filtra utenti con più di 100 click al minuto (bot)
+WHERE user_id NOT IN (
+    SELECT user_id FROM raw_ad_events
+    WHERE event_time >= now() - INTERVAL 1 MINUTE
+      AND event_type = 2  -- click
+    GROUP BY user_id
+    HAVING count() > 100
+);
+
+-- STAGE 2: MV di aggregazione oraria (legge da clean_ad_events)
+CREATE TABLE campaign_hourly_agg (
+    hour          DateTime,
+    campaign_id   UInt32,
+    campaign_name String,  -- dal Dictionary
+    impressions   UInt64,
+    clicks        UInt64,
+    conversions   UInt32,
+    spend_eur     Decimal(12, 4),
+    revenue_eur   Decimal(12, 2)
+) ENGINE = SummingMergeTree()
+ORDER BY (hour, campaign_id)
+PARTITION BY toYYYYMM(hour);
+
+CREATE MATERIALIZED VIEW mv_stage2_hourly
+TO campaign_hourly_agg
+AS SELECT
+    toStartOfHour(event_time)                          AS hour,
+    campaign_id,
+    dictGet('campaign_dict', 'campaign_name', campaign_id) AS campaign_name,
+    countIf(event_type = 1)                            AS impressions,
+    countIf(event_type = 2)                            AS clicks,
+    countIf(event_type = 3)                            AS conversions,
+    sum(bid_price_eur)                                 AS spend_eur,
+    sum(revenue_eur)                                   AS revenue_eur
+FROM clean_ad_events
+GROUP BY hour, campaign_id, campaign_name;
+
+-- STAGE 3: MV di alert (legge da campaign_hourly_agg via query su dati freschi)
+-- Questo stage usa un pattern diverso: scrive alert quando il ROAS scende
+CREATE TABLE roas_alerts (
+    alert_time    DateTime DEFAULT now(),
+    campaign_id   UInt32,
+    campaign_name String,
+    hour          DateTime,
+    roas          Float32,
+    threshold     Float32,
+    severity      LowCardinality(String)
+) ENGINE = MergeTree()
+ORDER BY (alert_time, campaign_id);
+```
+
+Il flusso risultante:
+```
+raw_ad_events (INSERT)
+    ↓ MV Stage 1 (filtraggio bot)
+clean_ad_events
+    ↓ MV Stage 2 (aggregazione oraria + arricchimento)
+campaign_hourly_agg
+    ↓ Query dashboard (sub-secondo)
+```
+
+Ogni stage aggiunge latenza di pochi millisecondi. La pipeline completa, da evento raw a dato disponibile in dashboard, impiega meno di 200ms.
+
+### Monitoraggio delle MV con system.parts e system.mutations
+
+Le Materialized View in ClickHouse possono silenziosamente accumulare problemi: parti troppo numerose, mutazioni in coda, lag di ingestione. Monitorarle proattivamente è fondamentale.
+
+```sql
+-- Stato delle parti per tabelle con MV
+SELECT
+    database,
+    table,
+    count()                                    AS parts_count,
+    sum(rows)                                  AS total_rows,
+    formatReadableSize(sum(bytes_on_disk))     AS disk_size,
+    max(modification_time)                     AS last_modified,
+    countIf(active = 0)                        AS inactive_parts  -- parti in attesa di merge
+FROM system.parts
+WHERE database = 'analytics'
+  AND active = 1
+GROUP BY database, table
+ORDER BY parts_count DESC;
+```
+
+Un alto numero di parti attive (>300 per una tabella) indica un problema di ingestione: si stanno inserendo batch troppo piccoli, generando tanti piccoli file che ClickHouse non riesce a mergere abbastanza velocemente.
+
+```sql
+-- Mutazioni in corso (ALTER TABLE che modificano dati esistenti)
+SELECT
+    database,
+    table,
+    command,                    -- Il comando ALTER che ha generato la mutazione
+    create_time,
+    is_done,
+    parts_to_do,               -- Quante parti devono ancora essere processate
+    parts_to_do_names          -- Nomi delle parti in attesa
+FROM system.mutations
+WHERE is_done = 0
+ORDER BY create_time ASC;
+```
+
+Le mutazioni pendenti (`is_done = 0`) con molti `parts_to_do` indicano un ALTER TABLE pesante in corso. Se una mutazione rimane ferma per ore, potrebbe aver fallito silenziosamente:
+
+```sql
+-- Verifica le mutazioni fallite
+SELECT
+    database,
+    table,
+    command,
+    create_time,
+    latest_fail_time,
+    latest_fail_reason
+FROM system.mutations
+WHERE is_done = 0
+  AND latest_fail_reason != ''
+ORDER BY create_time DESC;
+```
+
+### Strategia di Rebuild MV: POPULATE vs Incremental Backfill
+
+Un problema frequente: hai una MV su una tabella che contiene già milioni di righe storiche. La MV processa solo i nuovi INSERT — i dati esistenti non vengono processati automaticamente.
+
+**Opzione 1: POPULATE (semplice ma pericoloso in produzione)**
+
+```sql
+-- CREATE MATERIALIZED VIEW con POPULATE popola i dati esistenti
+-- ⚠️ ATTENZIONE: blocca la tabella sorgente durante il populate
+CREATE MATERIALIZED VIEW mv_campaign_hourly
+TO campaign_hourly_agg
+POPULATE  -- ← popola subito con i dati esistenti
+AS SELECT
+    toStartOfHour(event_time) AS hour,
+    campaign_id,
+    count() AS clicks
+FROM raw_ad_events
+GROUP BY hour, campaign_id;
+```
+
+Il problema di `POPULATE`: durante il populate, nuovi INSERT nella tabella sorgente potrebbero essere processati due volte (una volta dal populate, una volta dalla MV). Per tabelle con alta ingestione, questo causa duplicati.
+
+**Opzione 2: Incremental Backfill (sicuro per produzione)**
+
+La strategia corretta per le tabelle con dati storici e ingestione continuativa:
+
+```sql
+-- Step 1: Crea la MV SENZA POPULATE (inizia a catturare solo i nuovi INSERT)
+CREATE MATERIALIZED VIEW mv_campaign_hourly
+TO campaign_hourly_agg
+AS SELECT
+    toStartOfHour(event_time) AS hour,
+    campaign_id,
+    count() AS clicks,
+    sum(revenue_eur) AS revenue
+FROM raw_ad_events
+GROUP BY hour, campaign_id;
+
+-- Step 2: Backfill dei dati storici con INSERT SELECT manuale
+-- Partiziona il backfill per mese per evitare OOM
+INSERT INTO campaign_hourly_agg
+SELECT
+    toStartOfHour(event_time) AS hour,
+    campaign_id,
+    count() AS clicks,
+    sum(revenue_eur) AS revenue
+FROM raw_ad_events
+WHERE event_time >= '2024-01-01'
+  AND event_time <  '2024-02-01'  -- Un mese alla volta
+GROUP BY hour, campaign_id;
+
+-- Ripeti per ogni mese storico:
+INSERT INTO campaign_hourly_agg
+SELECT ...
+FROM raw_ad_events
+WHERE event_time >= '2024-02-01'
+  AND event_time <  '2024-03-01'
+GROUP BY hour, campaign_id;
+
+-- Step 3: Verifica la completezza del backfill
+SELECT
+    toStartOfMonth(hour) AS month,
+    count()              AS rows_in_agg,
+    -- Confronta con i dati raw
+    (
+        SELECT count(DISTINCT toStartOfHour(event_time))
+        FROM raw_ad_events
+        WHERE event_time >= toStartOfMonth(campaign_hourly_agg.hour)
+          AND event_time < toStartOfMonth(addMonths(campaign_hourly_agg.hour, 1))
+    ) AS expected_hours
+FROM campaign_hourly_agg
+GROUP BY month
+ORDER BY month;
+```
+
+**Quando usare POPULATE**: solo in ambienti di sviluppo o per tabelle senza ingestione attiva (tabelle storiche "frozen").
+
+**Quando usare Incremental Backfill**: sempre in produzione, specialmente per tabelle con pipeline di ingestione attiva (Kafka, HTTP collector).
+
+## 9. Checklist Implementazione
 

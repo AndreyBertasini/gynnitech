@@ -286,4 +286,409 @@ L'object storage e' il fondamento del data lake moderno:
 - **Caso d'uso ideale:** dati write-once read-many (data lake, backup, archivio)
 - **S3 e' lo standard de facto** con molte alternative compatibili
 
+## Alternative a S3: GCS, Azure Blob, MinIO
+
+Amazon S3 e' lo standard de facto, ma non e' l'unica opzione. Ecco le principali alternative e quando sceglierle.
+
+### Google Cloud Storage (GCS)
+
+GCS e' l'object storage di Google, nativo nell'ecosistema GCP:
+
+```plain text
+GCS Punti di forza:
+  - Integrazione nativa con BigQuery, Dataflow, Vertex AI
+  - Transfer Appliance per migrazione dati massivi
+  - Multi-regional (dati replicati in piu' regioni automaticamente)
+  - Strong consistency nativa (prima di S3)
+  - gsutil e client library Google Cloud
+  - Prezzo competitivo: $0.020/GB/mese (Standard)
+
+GCS Limitazioni:
+  - Ecosistema piu' piccolo di S3
+  - Meno connettori disponibili (Kafka Connect, ecc.)
+  - Lock-in nel cloud Google se usi Vertex AI/BigQuery nativamente
+
+Quando scegliere GCS:
+  - Il tuo stack e' GCP (BigQuery, GKE, Pub/Sub)
+  - Usi BigQuery come data warehouse (integrazione nativa ottimale)
+  - Il team conosce l'ecosistema Google meglio di AWS
+```
+
+**S3-compatibility di GCS:**
+
+```python
+# GCS offre un endpoint S3-compatible (XML API)
+# Puoi usare boto3 con GCS con configurazione minima
+
+import boto3
+
+gcs_s3_client = boto3.client(
+    's3',
+    region_name='auto',
+    endpoint_url='https://storage.googleapis.com',
+    aws_access_key_id='GOOG_HMAC_KEY',
+    aws_secret_access_key='GOOG_HMAC_SECRET'
+)
+
+# Ora funziona come S3 (listing, upload, download)
+response = gcs_s3_client.list_objects_v2(
+    Bucket='my-gcs-bucket',
+    Prefix='cleaned/events/'
+)
+```
+
+ClickHouse puo' leggere da GCS usando la stessa function `s3()` con endpoint GCS.
+
+### Azure Blob Storage
+
+Azure Blob e' l'object storage Microsoft, integrato nell'ecosistema Azure:
+
+```plain text
+Azure Blob Punti di forza:
+  - Integrazione con Azure Data Factory, Synapse Analytics, Power BI
+  - Premium tier per latenza bassa (SSD-backed)
+  - Azure Blob Lifecycle Management (come S3 lifecycle rules)
+  - Hot/Cool/Archive tiers (come S3 Standard/IA/Glacier)
+  - Integrazione con Active Directory per accesso aziendale
+
+Azure Blob Limitazioni:
+  - API diversa da S3 (non nativamente compatibile)
+  - S3 API disponibile solo tramite proxy (Blob Storage S3 Compatibility Layer)
+  - Meno connettori nativi per Kafka, Spark, ecc.
+  - Sintassi URL diversa: abfss://container@account.dfs.core.windows.net/path
+
+Quando scegliere Azure Blob:
+  - Azienda Microsoft-first (Office 365, Azure AD, Dynamics)
+  - Compliance enterprise con Azure Government Cloud
+  - Team con esperienza Azure/Power BI piu' che AWS
+```
+
+### MinIO: Object Storage Self-Hosted
+
+MinIO e' un object storage open source completamente compatibile con l'API S3, progettato per il self-hosting:
+
+```plain text
+MinIO Caratteristiche:
+  - Compatibilita' S3 API al 100% (drop-in replacement)
+  - Scritto in Go (altissime performance, bassa latenza)
+  - Erasure coding (ridondanza dati senza RAID)
+  - Multi-site replication (per HA e DR)
+  - Funziona su qualsiasi infrastruttura: VM, bare metal, Kubernetes
+  - Console web inclusa
+  - Licenza: GNU AGPL v3 (open source) o commercial
+
+MinIO Limitazioni:
+  - Gestione operativa a carico tuo (aggiornamenti, monitoring)
+  - Non ha la scalabilita' "infinita" di S3 (dipende dall'infrastruttura)
+  - Costo nascosto: tempo ingegnere per operare
+
+Quando scegliere MinIO:
+  - On-premise obbligatorio (compliance, dati sensibili, no cloud)
+  - Sviluppo locale: serve S3-compatible senza costo AWS
+  - Costi cloud molto alti: auto-hosting su bare metal economico
+  - Ambiente air-gapped (nessun accesso internet)
+```
+
+**Setup MinIO locale per sviluppo:**
+
+```bash
+# Avvia MinIO con Docker per sviluppo locale
+docker run -d \
+  --name minio \
+  -p 9000:9000 \
+  -p 9001:9001 \
+  -e MINIO_ROOT_USER=minioadmin \
+  -e MINIO_ROOT_PASSWORD=minioadmin123 \
+  -v /tmp/minio-data:/data \
+  minio/minio server /data --console-address ":9001"
+
+# Ora puoi usare boto3 con MinIO come se fosse S3
+import boto3
+
+minio_client = boto3.client(
+    's3',
+    endpoint_url='http://localhost:9000',
+    aws_access_key_id='minioadmin',
+    aws_secret_access_key='minioadmin123',
+    region_name='us-east-1'  # Richiesto ma ignorato da MinIO
+)
+
+# Crea bucket
+minio_client.create_bucket(Bucket='marketing-lake-dev')
+
+# Upload file
+minio_client.upload_file('/tmp/test.parquet', 'marketing-lake-dev', 'test.parquet')
+```
+
+**ClickHouse con MinIO in sviluppo:**
+
+```sql
+-- Query ClickHouse su MinIO locale
+SELECT count()
+FROM s3(
+    'http://localhost:9000/marketing-lake-dev/cleaned/events/**/*.parquet',
+    'minioadmin',
+    'minioadmin123',
+    'Parquet'
+);
+```
+
+## Object Storage per ML: DVC e Feature Store
+
+L'object storage non e' utile solo per i dati analitici. Nel machine learning, S3 e' la base per gestire dataset di training e feature store.
+
+### DVC (Data Version Control) su S3
+
+DVC e' un tool open source che porta il version control (tipo Git) ai dataset e ai modelli ML:
+
+```plain text
+Problema che DVC risolve:
+  - Dataset e modelli ML sono file binari grandi (GB/TB)
+  - Git non gestisce file binari grandi
+  - Come tracciare quale dataset ha prodotto quale modello?
+
+Soluzione DVC:
+  - I metadati del dataset vivono in Git (file .dvc, leggibili)
+  - Il dataset vero e' su S3 (gestito da DVC)
+  - Git traccia chi ha modificato il dataset e quando
+  - DVC ricrea esattamente l'ambiente di training
+```
+
+```bash
+# Setup DVC con S3 come remote storage
+pip install dvc dvc-s3
+
+dvc init                          # Inizializza DVC nel repo Git
+dvc remote add -d myremote s3://marketing-lake/dvc/  # Configura S3
+
+# Aggiungi dataset al tracking DVC
+dvc add data/training_events_2024.parquet
+# Crea: data/training_events_2024.parquet.dvc (va in Git)
+# Sposta il file effettivo su S3
+
+git add data/training_events_2024.parquet.dvc
+git commit -m "dataset: aggiungi training set Q4 2024"
+
+dvc push  # Carica il file su S3
+dvc pull  # Scarica il file da S3 (su un'altra macchina)
+```
+
+### Feature Store con S3
+
+Un feature store salva le feature pre-calcolate per i modelli ML. S3 e' il layer di storage per feature store semplici:
+
+```python
+import pyarrow as pa
+import pyarrow.parquet as pq
+import pyarrow.fs as pa_fs
+from datetime import datetime, date
+
+class SimpleFeatureStore:
+    """
+    Feature store semplice su S3 con Parquet.
+    Le feature sono organizzate per entity (user_id) e timestamp.
+    """
+
+    def __init__(self, bucket: str, prefix: str = 'features/', region: str = 'eu-west-1'):
+        self.bucket = bucket
+        self.prefix = prefix
+        self.s3 = pa_fs.S3FileSystem(region=region)
+
+    def write_features(self, features: pa.Table, feature_group: str, date: date) -> str:
+        """
+        Salva feature per un determinato giorno.
+        Le feature sono partizionate per feature_group e data.
+        """
+        path = f"{self.bucket}/{self.prefix}{feature_group}/date={date.isoformat()}/features.parquet"
+
+        pq.write_table(
+            features,
+            path,
+            filesystem=self.s3,
+            compression='zstd',
+            write_statistics=True  # Per predicate pushdown
+        )
+
+        return f"s3://{path}"
+
+    def read_features(
+        self,
+        feature_group: str,
+        entity_ids: list[str],
+        as_of_date: date
+    ) -> pa.Table:
+        """
+        Legge le feature per una lista di entity_id alla data specificata.
+        Point-in-time correctness: legge il dato valido per quella data.
+        """
+        path = f"{self.bucket}/{self.prefix}{feature_group}/date={as_of_date.isoformat()}/features.parquet"
+
+        table = pq.read_table(
+            path,
+            filesystem=self.s3,
+            filters=[('entity_id', 'in', entity_ids)]  # Predicate pushdown
+        )
+        return table
+
+
+# Uso: calcolate feature LTV e salva
+feature_store = SimpleFeatureStore(bucket='marketing-lake')
+
+# Feature: LTV a 30 giorni per ogni utente
+ltv_features = pa.table({
+    'entity_id': ['u001', 'u002', 'u003'],
+    'ltv_30d': [250.0, 89.90, 0.0],
+    'purchase_count_30d': [3, 1, 0],
+    'days_since_last_purchase': [5, 15, 180]
+})
+
+path = feature_store.write_features(
+    features=ltv_features,
+    feature_group='user_ltv',
+    date=date(2024, 1, 15)
+)
+```
+
+## Confronto Object Storage vs HDFS
+
+Prima di S3, il Hadoop Distributed File System (HDFS) era lo standard per i big data. Capire la differenza aiuta a capire perche' il settore e' migrato verso l'object storage.
+
+### Cos'e' HDFS
+
+HDFS e' un filesystem distribuito progettato per girare su cluster di macchine commodity. I dati sono divisi in blocchi (tipicamente 128-256 MB) e replicati tra i nodi del cluster.
+
+### Confronto Tecnico
+
+| Caratteristica | HDFS | Object Storage (S3) |
+| --- | --- | --- |
+| **Costo infrastruttura** | Alto (cluster dedicato, ~$50K+) | Basso ($23/TB/mese) |
+| **Scalabilita'** | Scalabilita' orizzontale (aggiungi nodi) | Virtualmente illimitata |
+| **Operativita'** | Complessa (NameNode, DataNode, manutenzione) | Zero operativita' |
+| **Latenza** | Bassa (dati locali al compute) | Media (network) |
+| **Separazione compute-storage** | No (accoppiati) | Si (indipendenti) |
+| **POSIX compliance** | Si (quasi-POSIX) | No (solo HTTP) |
+| **Modifica parziale** | Si (append, seek) | No (solo PUT completo) |
+| **Costo per GB** | ~$0.05-0.10/GB (capex) | $0.023/GB (opex) |
+| **Disaster recovery** | Replica manuale tra cluster | Multi-AZ automatica |
+| **Ecosistema** | Hadoop, Spark | Tutto (Spark, ClickHouse, Python, ecc.) |
+
+### Perche' il Mercato ha Abbandonato HDFS
+
+```plain text
+Il problema fondamentale di HDFS: compute e storage accoppiati
+
+Cluster HDFS con 10 nodi (40 core + 10 TB storage):
+  - Hai bisogno di piu' compute (elaborazione pesante questo mese)?
+    → Aggiungi nodi → devi aggiungere anche storage (non ti serve!)
+  - Hai bisogno di piu' storage (dati crescono)?
+    → Aggiungi nodi → devi aggiungere anche compute (non ti serve!)
+
+  Risultato: provisionamento inefficiente, sempre over o under
+
+Con S3 + ClickHouse:
+  - Hai bisogno di piu' compute? → Scala ClickHouse (paga per ore)
+  - Hai bisogno di piu' storage? → S3 si scala automaticamente
+  - Fine mese con poco lavoro? → Riduci ClickHouse (risparmia)
+  - S3 non cambia: paghi solo per GB usati
+```
+
+L'unico caso dove HDFS rimane superiore e' quando hai necessita' di latenza molto bassa per operazioni di I/O complesse (es. HBase, operazioni Spark con molte scritture). Ma per il marketing analytics — dove si scrive una volta e si legge molte volte — S3 e' sempre la scelta migliore.
+
+## Pricing Model S3 Dettagliato: Storage, Request e Transfer
+
+Capire il modello di pricing S3 e' fondamentale per evitare sorprese in fattura.
+
+### Componente 1: Storage
+
+```plain text
+S3 Standard (eu-west-1, Irlanda):
+  Primo TB/mese:         $0.023/GB
+  Successivi 49 TB:      $0.022/GB
+  Oltre 50 TB:           $0.021/GB
+
+S3 Standard-IA:          $0.0125/GB (min 128 KB, min 30 giorni)
+S3 One Zone-IA:          $0.01/GB   (min 128 KB, min 30 giorni)
+S3 Glacier Instant:      $0.004/GB  (min 128 KB, min 90 giorni)
+S3 Glacier Flexible:     $0.0036/GB (min 40 KB, min 90 giorni)
+S3 Glacier Deep Archive: $0.00099/GB (min 40 KB, min 180 giorni)
+
+ATTENZIONE: la minimum storage duration si paga sempre!
+  File da 1 GB su Glacier (min 90 giorni):
+  Se lo cancelli dopo 30 giorni → paghi comunque 90 giorni
+```
+
+### Componente 2: Request e Operazioni
+
+```plain text
+S3 Standard:
+  PUT, COPY, POST, LIST:  $0.0053 per 1.000 request
+  GET, SELECT:            $0.00042 per 1.000 request
+  Data Retrieval:         $0 (gratuito per Standard)
+
+S3 Standard-IA:
+  PUT, COPY, POST, LIST:  $0.0106 per 1.000 request  (2x Standard!)
+  GET:                    $0.001 per 1.000 request
+  Data Retrieval:         $0.01/GB
+
+S3 Glacier Flexible:
+  Data Retrieval Expedited: $0.03/GB + $0.01 per 1.000 request
+  Data Retrieval Standard:  $0.01/GB (3-5 ore)
+  Data Retrieval Bulk:      $0.0025/GB (5-12 ore)
+
+Implicazione per data lake:
+  Con 1 milione di file in Standard-IA:
+  Lista tutti i file (10.000 LIST request):
+  $0.0106 × 10 = $0.106 (vs $0.053 per Standard)
+  → Standard-IA ha costi di richiesta PIU' ALTI che Standard!
+```
+
+### Componente 3: Data Transfer
+
+```plain text
+Data Transfer IN (upload su S3):    GRATIS (sempre)
+
+Data Transfer OUT:
+  Verso Internet:                   $0.09/GB (prime 10 TB/mese)
+  Verso EC2 stessa regione:         $0 (gratis! stessa regione)
+  Verso EC2 altra regione:          $0.02/GB
+  Verso CloudFront:                 $0 (gratis, per distribuzione)
+
+Data Transfer BETWEEN S3 buckets:
+  Stessa regione:                   $0
+  Regioni diverse:                  $0.02/GB
+
+REGOLA D'ORO: tieni sempre ClickHouse e S3 nella STESSA REGIONE
+  Se ClickHouse e' in eu-west-1 (Irlanda) e S3 e' in eu-west-1:
+  Transfer gratuito, query veloci
+
+  Se ClickHouse e' in eu-west-1 e S3 e' in us-east-1:
+  $0.02/GB di dati letti → per 1 TB di query/giorno: $20/giorno!
+```
+
+### Esempio Completo di Fattura Mensile
+
+```plain text
+Scenario: marketing data lake, 5 TB totali, 1 TB hot
+
+Storage:
+  1 TB Standard (hot, ultimi 30gg):     1024 GB × $0.023 = $23.55
+  2 TB Standard-IA (30-90gg):           2048 GB × $0.0125 = $25.60
+  2 TB Glacier Instant (90-365gg):      2048 GB × $0.004 = $8.19
+
+Request (stima 50M query/mese):
+  LIST operations (partitioning):        500K × $0.0053/K = $2.65
+  GET operations (download):            49.5M × $0.00042/K = $20.79
+
+Data Transfer (ClickHouse stessa regione):
+  Lettura S3 → ClickHouse eu-west-1:    $0 (stessa regione)
+  Dati verso Internet (export):          50 GB × $0.09 = $4.50
+
+Totale stimato: $85.28/mese per 5 TB di dati marketing
+Costo per GB: ~$0.017/GB/mese (media pesata su tutte le classi)
+```
+
+<Aside type="tip">
+Il costo piu' grande nel data lake non e' lo storage ma le operazioni. Un glob pattern mal costruito che genera milioni di LIST su file piccoli puo' costare piu' dello storage stesso. Misura i costi reali con AWS Cost Explorer e S3 Storage Lens prima di scalare.
+</Aside>
+
 _Prossima lezione: Amazon S3: Fondamenti e Architettura — Bucket, oggetti, storage classes e configurazione._

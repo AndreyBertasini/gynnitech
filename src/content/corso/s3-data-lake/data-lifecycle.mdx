@@ -384,4 +384,322 @@ La gestione del ciclo di vita e l'ottimizzazione dei costi sono fondamentali per
 - **GDPR** richiede pseudonimizzazione o riprocessamento per il diritto alla cancellazione
 - **Monitoraggio** dei costi con Storage Lens e query su `system.parts`
 
+## S3 Intelligent-Tiering vs Lifecycle Rules: Confronto Dettagliato
+
+Hai due modi per ottimizzare automaticamente i costi dello storage: le Lifecycle Rules (che hai gia' visto) e S3 Intelligent-Tiering. La scelta dipende dalla prevedibilita' dei tuoi pattern di accesso.
+
+### Come Funziona S3 Intelligent-Tiering
+
+S3 Intelligent-Tiering monitora l'accesso di ogni oggetto e lo sposta automaticamente tra tier:
+
+```plain text
+S3 Intelligent-Tiering: livelli automatici
+
+Frequent Access Tier         → $0.023/GB (come Standard)
+   ↕ oggetto non acceduto per 30 giorni
+Infrequent Access Tier       → $0.0125/GB (come Standard-IA)
+   ↕ oggetto non acceduto per 90 giorni (opzionale)
+Archive Instant Access Tier  → $0.004/GB (come Glacier Instant)
+   ↕ oggetto non acceduto per 180 giorni (opzionale)
+Deep Archive Access Tier     → $0.00099/GB (come Deep Archive)
+
+Costo di monitoraggio: $0.0025 per 1.000 oggetti/mese
+Nessun costo di retrieval tra i tier automatici
+```
+
+### Confronto Costi: Intelligent-Tiering vs Lifecycle Rules
+
+Per un dataset da 10 TB con pattern di accesso **imprevedibile**:
+
+| Scenario | Lifecycle Rules | Intelligent-Tiering |
+| --- | --- | --- |
+| Accesso frequente (tutto il mese) | $230 (Standard) | $230 + $0.25 monitoring |
+| Accesso a meta' degli oggetti | $175 (mix Standard/IA) | $182 (IT ottimizza auto) |
+| Nessun accesso dopo 60 giorni | $125 (IA dopo 30gg) | $125 (IT sposta auto) |
+| Pattern variabile per campagna | Difficile da prevedere | IT si adatta automaticamente |
+
+**Regola pratica:**
+
+```plain text
+USA Lifecycle Rules quando:
+  - Il pattern di accesso e' PREVEDIBILE e STABILE
+  - Dati raw: sempre meno accessi nel tempo → lifecycle definita
+  - ETL pipeline: accessi concentrati subito dopo ingestione
+  - Risparmio monitoring fee: $0.0025/1000 oggetti/mese
+
+USA Intelligent-Tiering quando:
+  - Il pattern e' IMPREVEDIBILE (es. analisi retroattive)
+  - Non vuoi gestire le regole manualmente
+  - Hai molti dataset diversi con comportamenti diversi
+  - Accetti il costo di monitoraggio (~$2.50/mese per 1M oggetti)
+```
+
+### Calcolo del Punto di Break-Even
+
+Quando conviene Intelligent-Tiering rispetto a Standard?
+
+```plain text
+Costo monitoring IT: $0.0025 per 1.000 oggetti/mese
+
+Esempio: 1 milione di oggetti
+  Monitoring fee: $0.0025 × 1.000 = $2.50/mese
+
+  Risparmio IT (se oggetti passano a IA dopo 30gg):
+  Per oggetto da 1 MB in IA invece di Standard:
+  ($0.023 - $0.0125) × 1 GB / 1024 = $0.0000102/mese per MB
+  Per 1 GB di oggetti in IA: $0.0105/mese
+  Break-even: devi spostare almeno 238 GB in IA per coprire il monitoring
+
+  Conclusione: conviene se almeno 238 GB dei tuoi 1M oggetti
+  passano al tier IA nel mese.
+```
+
+## GDPR Right to Erasure: Implementazione su Data Lake
+
+Il diritto alla cancellazione (Art. 17 GDPR) richiede che un utente possa richiedere l'eliminazione di tutti i suoi dati personali. Implementarlo su un data lake Parquet e' tecnicamente complesso perche' i file sono immutabili.
+
+### Strategia 1: Pseudonimizzazione con Mapping Table
+
+Questa e' la strategia piu' efficiente per i data lake ad alto volume:
+
+```python
+import boto3
+import hashlib
+import secrets
+from datetime import datetime
+
+# --- Componente 1: Tabella di mapping (DB relazionale separato) ---
+# Questa tabella NON sta nel data lake, ma in un DB separato (RDS, PostgreSQL)
+# con accesso molto ristretto
+
+# Schema tabella di mapping:
+# CREATE TABLE identity_mapping (
+#     user_id TEXT PRIMARY KEY,
+#     pseudonym TEXT UNIQUE NOT NULL,
+#     created_at TIMESTAMP,
+#     deleted_at TIMESTAMP,  -- NULL se utente attivo, data se cancellato
+#     deletion_requested_by TEXT
+# );
+
+def get_or_create_pseudonym(user_id: str, db_conn) -> str:
+    """
+    Ritorna lo pseudonimo per un user_id.
+    Se non esiste, ne crea uno nuovo.
+    """
+    result = db_conn.execute(
+        "SELECT pseudonym FROM identity_mapping WHERE user_id = %s AND deleted_at IS NULL",
+        (user_id,)
+    ).fetchone()
+
+    if result:
+        return result[0]
+
+    # Crea nuovo pseudonimo: hash irreversibile + salt casuale
+    salt = secrets.token_hex(16)
+    pseudonym = hashlib.sha256(f"{user_id}:{salt}".encode()).hexdigest()[:32]
+
+    db_conn.execute(
+        "INSERT INTO identity_mapping (user_id, pseudonym, created_at) VALUES (%s, %s, %s)",
+        (user_id, pseudonym, datetime.utcnow())
+    )
+    return pseudonym
+
+
+# --- Componente 2: Pipeline di ingestione con pseudonimizzazione ---
+
+def ingest_event_with_pseudonym(event: dict, db_conn) -> dict:
+    """
+    Prima di salvare l'evento nel data lake, sostituisci user_id
+    con lo pseudonimo. Il dato lake non contiene mai user_id reali.
+    """
+    original_user_id = event['user_id']
+    pseudonym = get_or_create_pseudonym(original_user_id, db_conn)
+
+    # Sostituisci l'ID reale con lo pseudonimo
+    anonymized_event = event.copy()
+    anonymized_event['user_id'] = pseudonym  # sovrascrive con pseudonimo
+    anonymized_event.pop('email', None)       # rimuovi email se presente
+    anonymized_event.pop('ip_address', None)  # rimuovi IP
+
+    return anonymized_event
+
+
+# --- Componente 3: Gestione della cancellazione GDPR ---
+
+def process_deletion_request(user_id: str, db_conn, request_id: str):
+    """
+    Processo di cancellazione GDPR Right to Erasure.
+    Passo 1: Disabilita lo pseudonimo nella mapping table.
+    I dati nel data lake rimangono ma sono ora irreversibilmente anonimi.
+    """
+    result = db_conn.execute(
+        "UPDATE identity_mapping SET deleted_at = %s, deletion_requested_by = %s "
+        "WHERE user_id = %s AND deleted_at IS NULL",
+        (datetime.utcnow(), request_id, user_id)
+    ).rowcount
+
+    if result == 0:
+        print(f"Utente {user_id} non trovato o gia' cancellato")
+        return False
+
+    # Il mapping e' ora inaccessibile: user_id -> pseudonimo non e' piu' risolvibile
+    # I dati nel data lake con quel pseudonimo restano ma non sono riconducibili all'utente
+
+    # Log per audit GDPR
+    db_conn.execute(
+        "INSERT INTO gdpr_deletion_log (user_id, request_id, processed_at, status) "
+        "VALUES (%s, %s, %s, 'pseudonym_deleted')",
+        (user_id, request_id, datetime.utcnow())
+    )
+
+    print(f"Pseudonimo per {user_id} disabilitato. Dati nel lake ora anonimi.")
+    return True
+```
+
+### Strategia 2: Batch Deletion con Riscrittura dei File
+
+Quando la pseudonimizzazione non e' applicabile (dati gia' esistenti senza pseudonimizzazione):
+
+```python
+import pyarrow.parquet as pq
+import pyarrow as pa
+import pyarrow.fs as fs
+import boto3
+from typing import Set
+
+def delete_user_from_parquet_files(
+    bucket: str,
+    prefix: str,
+    user_ids_to_delete: Set[str],
+    user_id_column: str = 'user_id',
+    region: str = 'eu-west-1'
+) -> dict:
+    """
+    Riscrive i file Parquet escludendo gli user_id specificati.
+    USA SOLO per volumi limitati: riscrivere grandi dataset e' costoso.
+    Per grandi volumi: usa la pseudonimizzazione.
+
+    Returns: statistiche dell'operazione
+    """
+    s3_fs = fs.S3FileSystem(region=region)
+    s3_client = boto3.client('s3', region_name=region)
+    stats = {'files_processed': 0, 'rows_deleted': 0, 'files_unchanged': 0}
+
+    # Lista tutti i file Parquet nel prefisso
+    paginator = s3_client.get_paginator('list_objects_v2')
+    pages = paginator.paginate(Bucket=bucket, Prefix=prefix)
+
+    for page in pages:
+        for obj in page.get('Contents', []):
+            key = obj['Key']
+            if not key.endswith('.parquet'):
+                continue
+
+            # Leggi il file
+            table = pq.read_table(f"{bucket}/{key}", filesystem=s3_fs)
+
+            # Filtra le righe da cancellare
+            mask = pa.compute.is_in(
+                table[user_id_column],
+                value_set=pa.array(list(user_ids_to_delete))
+            )
+            rows_to_delete = pa.compute.sum(mask).as_py()
+
+            if rows_to_delete == 0:
+                stats['files_unchanged'] += 1
+                continue
+
+            # Mantieni solo le righe che NON devono essere cancellate
+            filtered_table = table.filter(pa.compute.invert(mask))
+
+            # Riscrivi il file
+            pq.write_table(
+                filtered_table,
+                f"{bucket}/{key}",
+                filesystem=s3_fs,
+                compression='zstd',
+            )
+
+            stats['files_processed'] += 1
+            stats['rows_deleted'] += rows_to_delete
+
+    return stats
+
+
+# Uso: cancellazione per richiesta GDPR
+result = delete_user_from_parquet_files(
+    bucket='marketing-lake',
+    prefix='cleaned/events/',
+    user_ids_to_delete={'u12345', 'u67890'},
+    region='eu-west-1'
+)
+print(f"File riscritti: {result['files_processed']}")
+print(f"Righe cancellate: {result['rows_deleted']}")
+```
+
+<Aside type="caution">
+La riscrittura dei file Parquet per cancellazione GDPR e' costosa per dataset grandi: leggi tutto, riscrivi tutto, cancella originale. Per dataset con milioni di file, questo processo puo' richiedere ore e costare centinaia di dollari. La pseudonimizzazione preventiva e' sempre preferibile.
+</Aside>
+
+## S3 Glacier Instant vs Flexible Retrieval: Qual e' la Differenza?
+
+Due classi di Glacier che causano confusione:
+
+### S3 Glacier Instant Retrieval
+
+```plain text
+Costo storage: $0.004/GB/mese
+Latenza retrieval: millisecondi (come Standard)
+Costo retrieval: $0.03/GB
+Durata minima di storage: 90 giorni
+Dimensione minima oggetto: 128 KB (oggetti piu' piccoli fatturati a 128 KB)
+
+QUANDO USARLO:
+  - Dati che accedi raramente MA quando li accedi li vuoi subito
+  - Archivi di campagne marketing: li recuperi per audit o dispute
+  - Backup mensili: accesso immediato necessario per ripristino
+  - Log di pipeline vecchi: debugging urgente possibile
+```
+
+### S3 Glacier Flexible Retrieval
+
+```plain text
+Costo storage: $0.0036/GB/mese
+Latenza retrieval: 1 minuto (Expedited, $0.03/GB extra) a 5-12 ore (Bulk, $0.0025/GB)
+Costo retrieval: $0.01/GB (Standard, 3-5 ore)
+Durata minima: 90 giorni
+
+QUANDO USARLO:
+  - Compliance e audit: sai che ti servono massimo una volta l'anno
+  - Backup per disaster recovery: accettabile aspettare ore
+  - Dati storici pre-2020: probabilmente non li rivedrai mai
+  - Il costo ridotto vale la latenza alta
+
+CALCOLO: per 1 TB di dati vecchi acceduto 1 volta l'anno
+  Glacier Instant:  $0.004 × 1000 × 12 = $48/anno storage
+                  + $0.03 × 1000 = $30 retrieval
+                  = $78/anno totale
+
+  Glacier Flexible: $0.0036 × 1000 × 12 = $43.2/anno storage
+                  + $0.01 × 1000 = $10 retrieval (Standard tier)
+                  = $53.2/anno totale
+
+  Risparmio: $24.8/anno per TB — Flexible conviene se la latenza e' accettabile
+```
+
+### Decision Tree per la Scelta
+
+```plain text
+Hai bisogno di accedere ai dati entro...
+  < 1 secondo → S3 Standard o Standard-IA
+  < 1 minuto  → S3 Glacier Instant Retrieval
+  < 5 ore     → S3 Glacier Flexible (tier Standard)
+  < 12 ore    → S3 Glacier Flexible (tier Bulk, piu' economico)
+  > 12 ore    → S3 Glacier Deep Archive (tier Bulk)
+
+Domanda chiave: quanto vale 1 ora di attesa per il tuo use case?
+  Se non puoi aspettare: paga di piu' per Instant
+  Se puoi pianificare: risparmia con Flexible o Deep Archive
+```
+
 _Prossima lezione: Formati Dati: Parquet, Avro, ORC e JSON — Come scegliere il formato giusto per il data lake._

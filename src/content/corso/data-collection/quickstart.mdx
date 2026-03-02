@@ -6,6 +6,8 @@ order: 2
 prerequisites: ["data-collection/introduction"]
 category: "Pratico"
 ---
+import { Aside } from '@astrojs/starlight/components'
+
 ## Quick Start: Costruisci il Tuo Tracker
 
 > **Consiglio:**
@@ -535,3 +537,157 @@ Il nostro tracker è didattico. Un SDK di produzione aggiunge:
 Questo esercizio ti darà un'intuizione profonda di come funziona il tracking — un'intuizione che ti sarà utile ogni volta che dovrai debuggare problemi di dati.
 
 *Nella prossima lezione, affronteremo un tema critico: Privacy, GDPR e Consent Mode — perché raccogliere dati senza rispettare la legge non è un'opzione.*
+
+---
+
+## Quick Start per Stack Reali
+
+Una volta capita la meccanica interna di un tracker, la domanda pratica è: quale stack usare in produzione? La risposta dipende dall'obiettivo del team che raccoglie i dati.
+
+### Stack 1: GA4 + GTM per Marketing
+
+Google Analytics 4 combinato con Google Tag Manager è lo stack di fatto per team di marketing con focus su traffico web e conversioni.
+
+**Come funziona il flusso:**
+
+```
+Utente → Sito Web → GTM (trigger + tag) → GA4 (eventi) → BigQuery (export)
+```
+
+Google Tag Manager agisce come dispatcher: intercetta le azioni dell'utente tramite trigger (click, pageview, scroll, form submit) e "spara" i tag configurati — nel nostro caso il tag GA4. Il vantaggio è zero modifiche al codice del sito per aggiungere nuovi eventi: tutto si configura nell'interfaccia GTM.
+
+**Configurazione essenziale in GTM per GA4:**
+
+```javascript
+// Livello dati: il contratto tra sito e GTM
+// Nel codice del sito (e-commerce):
+window.dataLayer = window.dataLayer || [];
+window.dataLayer.push({
+  event: 'purchase',
+  ecommerce: {
+    transaction_id: 'T-12345',
+    value: 99.99,
+    currency: 'EUR',
+    items: [{
+      item_id: 'P-123',
+      item_name: 'Corso Data Engineering',
+      price: 99.99,
+      quantity: 1
+    }]
+  }
+});
+
+// GTM legge dal dataLayer e invia a GA4
+// Trigger: evento 'purchase' nel dataLayer
+// Tag: GA4 Event tag con variabili prese dal dataLayer
+```
+
+**Limiti di GA4+GTM**: i dati restano nell'ecosistema Google. Per analisi avanzate, è necessario l'export verso BigQuery (gratuito). I dati cross-device sono approssimativi per via di ITP e AdBlockers. Il campionamento sui report free è un problema reale oltre le 10M di sessioni/mese.
+
+**Quando sceglierlo**: team di marketing fino a 5 persone, priorità SEO e Google Ads, budget limitato, nessun data engineer dedicato.
+
+### Stack 2: Mixpanel + Segment per Product
+
+Segment è una Customer Data Platform (CDP): riceve gli eventi dal sito o dall'app tramite il proprio SDK, e li "distribuisce" a qualsiasi destinazione configurata (Mixpanel, Amplitude, warehouse, CRM). Mixpanel è la destinazione ottimale per product analytics: funnel, retention per coorte, analisi comportamentale.
+
+```javascript
+// Inizializzazione Segment (sostituisce il nostro tracker custom)
+analytics.load('YOUR_WRITE_KEY');
+
+// Stesso pattern, ma Segment gestisce tutto il resto
+analytics.page();
+
+analytics.identify('user-456', {
+  email: 'mario@example.com',
+  plan: 'pro',
+  company: 'Acme Corp',
+});
+
+analytics.track('Feature Used', {
+  feature_name: 'export_csv',
+  records_exported: 1250,
+  file_format: 'csv'
+});
+```
+
+Il vantaggio principale di Segment è la separazione tra **raccolta** e **destinazione**: cambi destinazione senza toccare il codice del sito. Aggiungi Mixpanel oggi, Amplitude domani, il warehouse dopodomani — tutto dalla UI di Segment.
+
+**Quando sceglierlo**: SaaS B2B o B2C con focus su retention e feature adoption, team product con data analyst, 20.000+ MAU dove l'analisi comportamentale guida le decisioni di roadmap.
+
+### Stack 3: ClickHouse + dbt per Data Engineering
+
+Per team con volumi elevati e necessità di analisi personalizzate, ClickHouse come warehouse + dbt per le trasformazioni è lo stack più potente e flessibile.
+
+```sql
+-- Tabella raw in ClickHouse (sostituisce il server Express della lezione)
+CREATE TABLE raw_events (
+    event_name    LowCardinality(String),
+    event_time    DateTime64(3),
+    message_id    String,
+    user_id       String,
+    anonymous_id  String,
+    -- Proprietà come JSON (estrai con JSONExtract nelle query o nei modelli dbt)
+    properties    String,
+    -- Contesto arricchito automaticamente
+    page_url      String,
+    page_path     LowCardinality(String),
+    user_agent    String,
+    received_at   DateTime64(3)
+) ENGINE = MergeTree()
+ORDER BY (event_name, event_time)
+PARTITION BY toYYYYMM(event_time);
+```
+
+Con dbt poi trasformi i raw events in modelli analitici:
+
+```sql
+-- models/marts/fct_user_journeys.sql
+-- Analisi del funnel: dalla visita alla conversione
+SELECT
+    user_id,
+    min(event_time)   AS first_event_time,
+    max(event_time)   AS last_event_time,
+    count()           AS total_events,
+    countIf(event_name = 'page_view')           AS page_views,
+    countIf(event_name = 'product_click')       AS product_clicks,
+    countIf(event_name = 'add_to_cart')         AS cart_additions,
+    countIf(event_name = 'purchase')            AS purchases,
+    sumIf(
+        JSONExtractFloat(properties, 'revenue'),
+        event_name = 'purchase'
+    )                                           AS total_revenue
+FROM {{ source('raw', 'raw_events') }}
+WHERE event_time >= dateadd('day', -30, now())
+GROUP BY user_id
+```
+
+**Quando sceglierlo**: volumi superiori a 100M eventi/mese, team data engineering dedicato, necessità di query ad-hoc su dati granulari, integrazione con pipeline Kafka.
+
+### Errori Comuni nel Primo Mese
+
+Qualsiasi stack tu scelga, i primi 30 giorni di un progetto di tracking sono quelli in cui si commettono gli errori più costosi — perché i dati corrotti si accumulano silenziosamente e si scoprono solo settimane dopo.
+
+**Errore 1: Duplicati per doppio firing degli eventi**. Accade quando il tag GTM viene sparato due volte perché il trigger è configurato su `All Pages` e anche su un trigger specifico. Oppure quando il tracker viene inizializzato due volte nel codice. Il sintomo: il conteggio degli ordini supera gli ordini reali di Stripe del 15-30%.
+
+Soluzione: configura il `messageId` come identificatore univoco e usa una tabella con `ReplacingMergeTree` in ClickHouse, o abilita la deduplicazione in Segment.
+
+**Errore 2: Identificazione tardiva degli utenti**. Il `identify()` viene chiamato solo dopo il login, ma non al momento della registrazione. Risultato: le azioni di onboarding (step 1, step 2, completamento) sono tutte associate all'`anonymousId`, non all'`userId`. L'identity stitching funziona solo se il backend fa il merge esplicito.
+
+Soluzione: chiama `identify()` immediatamente dopo la registrazione, non solo al login. Configura il backend per persistere la coppia `anonymousId + userId` al momento della creazione dell'account.
+
+**Errore 3: Proprietà inconsistenti tra piattaforme**. Su desktop si invia `product_id: "P-123"` (stringa), su mobile `product_id: 123` (intero). I tool di analytics trattano i due tipi come valori diversi. Nelle query SQL il cast implicito può nascondere il problema.
+
+Soluzione: definisci uno **schema di eventi** esplicito con tipi di dato prima di iniziare il tracking. Usa JSON Schema o Protobuf. Validalo server-side prima di accettare gli eventi.
+
+**Errore 4: Trackare troppo, capire troppo poco**. La tentazione è di tracciare ogni click, ogni hover, ogni scroll. Dopo un mese hai 200 tipi di eventi e nessuna risposta alle domande di business. Il dato inutilizzato non è un asset, è rumore.
+
+Soluzione: per ogni evento che aggiungi al tracking plan, definisci prima la domanda di business a cui risponde e la metrica che calcola. Se non riesci a definirla, non trackare quell'evento.
+
+<Aside type="tip">
+**Checklist del primo mese di tracking**: verifica questi punti dopo 30 giorni di raccolta dati.
+- Il conteggio degli ordini nel warehouse corrisponde (±2%) agli ordini in Stripe o Shopify?
+- Gli utenti identificati coprono almeno l'80% degli eventi post-registrazione?
+- Nessun tipo di evento ha zero occorrenze (evento definito ma mai sparato)?
+- Le proprietà chiave (`product_id`, `revenue`, `user_id`) hanno meno del 2% di valori nulli?
+- Hai un runbook per debuggare quando un evento smette di arrivare?
+</Aside>
