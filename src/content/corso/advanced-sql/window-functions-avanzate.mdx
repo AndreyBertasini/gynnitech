@@ -1,0 +1,334 @@
+---
+title: "Window Functions Avanzate per Analytics"
+description: "Ranking, contribution, running total e variazioni temporali con window functions pensate per casi reali di business analytics."
+module: "Modulo 14: Advanced SQL"
+order: 1
+category: "Fondamenti Avanzati"
+prerequisites: ["dashboard-visualizzazione/sql-per-analisti", "data-warehousing/sql"]
+---
+
+import { Aside } from '@astrojs/starlight/components'
+
+Una dashboard mostra che il canale paid cresce del 12%. Il CFO chiede: "Su quali prodotti? In quali paesi? E quanto pesa davvero questo contributo sul totale?". Con `GROUP BY` rispondi a una domanda per volta. Con le window functions inizi a costruire tabelle che mantengono il dettaglio e aggiungono contesto.
+
+## Perche' questa skill conta davvero
+
+Nel corso base hai gia' visto come aggregare. Qui facciamo il salto successivo:
+
+- `GROUP BY` collassa le righe
+- `OVER (...)` conserva le righe e aggiunge una metrica contestuale
+
+Quando devi costruire KPI table, ranking, trend e comparazioni senza perdere granularita', le window functions diventano la tua arma principale.
+
+## Schema dati condiviso del modulo
+
+```sql
+users(
+    user_id UInt64,
+    signup_at DateTime,
+    country LowCardinality(String),
+    acquisition_channel LowCardinality(String),
+    plan LowCardinality(String)
+)
+
+orders(
+    order_id UInt64,
+    user_id UInt64,
+    order_time DateTime,
+    amount Float64,
+    country LowCardinality(String),
+    channel LowCardinality(String),
+    status LowCardinality(String)
+)
+
+order_items(
+    order_id UInt64,
+    product_id UInt64,
+    category LowCardinality(String),
+    quantity UInt32,
+    net_revenue Float64,
+    margin Float64
+)
+```
+
+## Anatomia di una window function
+
+```sql
+funzione() OVER (
+    PARTITION BY colonna_gruppo
+    ORDER BY colonna_ordinamento
+    ROWS BETWEEN ... AND ...
+)
+```
+
+Tre concetti da separare sempre:
+
+- `PARTITION BY`: definisce il gruppo logico
+- `ORDER BY`: definisce la sequenza dentro il gruppo
+- `ROWS BETWEEN`: definisce quante righe la funzione puo' vedere
+
+<Aside type="tip">
+`PARTITION BY` non equivale a `GROUP BY`. Con una window ogni riga resta viva e riceve una metrica aggiuntiva.
+</Aside>
+
+## Ranking senza perdere il dettaglio
+
+### Top prodotti per categoria
+
+```sql
+WITH product_revenue AS (
+    SELECT
+        category,
+        product_id,
+        sum(net_revenue) AS total_revenue,
+        sum(margin) AS total_margin
+    FROM order_items
+    GROUP BY category, product_id
+)
+SELECT
+    category,
+    product_id,
+    total_revenue,
+    total_margin,
+    row_number() OVER (
+        PARTITION BY category
+        ORDER BY total_revenue DESC
+    ) AS row_num,
+    rank() OVER (
+        PARTITION BY category
+        ORDER BY total_revenue DESC
+    ) AS rank_with_gaps,
+    dense_rank() OVER (
+        PARTITION BY category
+        ORDER BY total_revenue DESC
+    ) AS rank_without_gaps
+FROM product_revenue
+ORDER BY category, row_num;
+```
+
+Quando usare cosa:
+
+- `row_number()`: classifica secca, senza pareggi
+- `rank()`: pareggi mantenuti, con buchi
+- `dense_rank()`: pareggi mantenuti, senza buchi
+
+### Contribution percent sul totale categoria
+
+```sql
+WITH product_revenue AS (
+    SELECT
+        category,
+        product_id,
+        sum(net_revenue) AS total_revenue
+    FROM order_items
+    GROUP BY category, product_id
+)
+SELECT
+    category,
+    product_id,
+    total_revenue,
+    round(
+        total_revenue
+        / sum(total_revenue) OVER (PARTITION BY category),
+        4
+    ) AS revenue_share_in_category
+FROM product_revenue
+ORDER BY category, total_revenue DESC;
+```
+
+Questa colonna e' perfetta per una tabella Pareto o una bar chart ordinata per contributo.
+
+## Running total e moving average
+
+### Revenue cumulativa per giorno
+
+```sql
+WITH daily_revenue AS (
+    SELECT
+        toDate(order_time) AS day,
+        sum(amount) AS revenue
+    FROM orders
+    WHERE status = 'completed'
+      AND order_time >= toDateTime('2025-01-01 00:00:00')
+      AND order_time < toDateTime('2025-02-01 00:00:00')
+    GROUP BY day
+)
+SELECT
+    day,
+    revenue,
+    sum(revenue) OVER (
+        ORDER BY day
+        ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+    ) AS cumulative_revenue,
+    avg(revenue) OVER (
+        ORDER BY day
+        ROWS BETWEEN 6 PRECEDING AND CURRENT ROW
+    ) AS revenue_ma_7d
+FROM daily_revenue
+ORDER BY day;
+```
+
+### MoM per canale
+
+```sql
+WITH monthly_channel AS (
+    SELECT
+        toStartOfMonth(order_time) AS month,
+        channel,
+        sum(amount) AS revenue
+    FROM orders
+    WHERE status = 'completed'
+      AND order_time >= toDateTime('2024-10-01 00:00:00')
+    GROUP BY month, channel
+),
+with_prev AS (
+    SELECT
+        month,
+        channel,
+        revenue,
+        lagInFrame(revenue) OVER (
+            PARTITION BY channel
+            ORDER BY month
+        ) AS prev_month_revenue
+    FROM monthly_channel
+)
+SELECT
+    month,
+    channel,
+    revenue,
+    prev_month_revenue,
+    round(
+        (revenue - prev_month_revenue) / nullIf(prev_month_revenue, 0),
+        4
+    ) AS mom_growth_pct
+FROM with_prev
+ORDER BY channel, month;
+```
+
+## LAG e LEAD per leggere la sequenza
+
+```sql
+WITH user_orders AS (
+    SELECT
+        user_id,
+        order_id,
+        order_time,
+        amount
+    FROM orders
+    WHERE status = 'completed'
+)
+SELECT
+    user_id,
+    order_id,
+    order_time,
+    amount,
+    lagInFrame(amount) OVER (
+        PARTITION BY user_id
+        ORDER BY order_time
+    ) AS previous_order_amount,
+    leadInFrame(order_time) OVER (
+        PARTITION BY user_id
+        ORDER BY order_time
+    ) AS next_order_time,
+    dateDiff(
+        'day',
+        order_time,
+        leadInFrame(order_time) OVER (
+            PARTITION BY user_id
+            ORDER BY order_time
+        )
+    ) AS days_to_next_order
+FROM user_orders
+ORDER BY user_id, order_time;
+```
+
+Questo pattern serve per:
+
+- time-to-next-purchase
+- gap tra eventi
+- analisi churn pre-abbandono
+- lettura del ciclo di riacquisto
+
+## FIRST_VALUE e LAST_VALUE: l'errore piu' comune
+
+`last_value()` senza frame completo spesso restituisce l'ultima riga vista fino a quel punto, non l'ultimo valore del gruppo.
+
+```sql
+WITH user_orders AS (
+    SELECT
+        user_id,
+        order_id,
+        order_time,
+        amount
+    FROM orders
+    WHERE status = 'completed'
+)
+SELECT
+    user_id,
+    order_id,
+    order_time,
+    amount,
+    first_value(amount) OVER (
+        PARTITION BY user_id
+        ORDER BY order_time
+        ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING
+    ) AS first_order_amount,
+    last_value(amount) OVER (
+        PARTITION BY user_id
+        ORDER BY order_time
+        ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING
+    ) AS last_order_amount
+FROM user_orders
+ORDER BY user_id, order_time;
+```
+
+## Errori comuni e anti-pattern
+
+### Non costruire uno step intermedio aggregato
+
+Se vuoi fare revenue mensile e poi MoM, costruisci prima la tabella mensile e solo dopo applica la window.
+
+### Dimenticare il frame
+
+Se il risultato sembra "quasi giusto", controlla subito `ROWS BETWEEN`.
+
+### Usare `row_number()` quando servono i pareggi
+
+In una classifica business, un pareggio va trattato esplicitamente.
+
+### Fare il percentuale su totale con subquery inutili
+
+Molte subquery per il totale possono essere sostituite da `sum(...) OVER (...)`.
+
+## Output atteso
+
+Con queste query puoi produrre:
+
+- ranking prodotto per categoria
+- quota percentuale sul totale categoria
+- revenue cumulativa e media mobile
+- differenza tra ordini consecutivi
+
+Le visualizzazioni migliori sono:
+
+- bar chart ordinata
+- line chart con cumulata
+- KPI table con rank e share
+- tabella eventi o ordini con contesto sequenziale
+
+## Riepilogo operativo
+
+- Le window functions servono quando vuoi contesto, non solo aggregazione.
+- `PARTITION BY`, `ORDER BY` e `ROWS BETWEEN` vanno sempre pensati insieme.
+- Ranking, contribution, cumulata e confronto con la riga precedente sono i pattern piu' usati in analytics.
+- Se una query sta diventando una catena di subquery, controlla se una window function la rende piu' leggibile.
+
+## Mini esercizio
+
+Partendo da `orders`, costruisci una tabella mensile per `country` con:
+
+1. revenue del mese
+2. revenue del mese precedente
+3. crescita MoM
+4. rank del paese dentro ogni mese
+5. quota percentuale del paese sul revenue totale del mese

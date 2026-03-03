@@ -1,0 +1,263 @@
+---
+title: "Date Spine, Rolling Metrics e OHLC"
+description: "Come colmare i buchi temporali, costruire metriche rolling e generare tabelle OHLC pronte per line chart e candlestick."
+module: "Modulo 14: Advanced SQL"
+order: 2
+category: "Fondamenti Avanzati"
+prerequisites: ["advanced-sql/window-functions-avanzate"]
+---
+
+import { Aside } from '@astrojs/starlight/components'
+
+Una revenue line con tre giorni mancanti puo' sembrare una crescita pulita. In realta' potrebbe significare tracking rotto, pipeline ferma o semplicemente zero ordini. Se il tempo non e' modellato bene in SQL, il grafico racconta una storia falsa.
+
+## Perche' i buchi temporali sono pericolosi
+
+Le tabelle transazionali mostrano solo i giorni in cui e' successo qualcosa. I grafici, invece, hanno bisogno di una sequenza temporale continua.
+
+Quando mancano i giorni a zero:
+
+- le medie mobili vengono distorte
+- la cumulata corre su un asse temporale incompleto
+- gli alert possono scattare tardi
+- il management interpreta male il trend
+
+La soluzione classica e' la **date spine**: una tabella o CTE con tutte le date del periodo.
+
+## Costruire una date spine in ClickHouse
+
+```sql
+WITH
+    toDate('2025-01-01') AS start_date,
+    toDate('2025-01-31') AS end_date
+SELECT
+    start_date + number AS day
+FROM numbers(dateDiff('day', start_date, end_date) + 1)
+ORDER BY day;
+```
+
+Questo e' il mattone base per riempire i vuoti.
+
+## Riempire i giorni senza ordini
+
+```sql
+WITH
+    toDate('2025-01-01') AS start_date,
+    toDate('2025-01-31') AS end_date,
+    date_spine AS (
+        SELECT start_date + number AS day
+        FROM numbers(dateDiff('day', start_date, end_date) + 1)
+    ),
+    daily_orders AS (
+        SELECT
+            toDate(order_time) AS day,
+            sum(amount) AS revenue,
+            count() AS orders_count
+        FROM orders
+        WHERE status = 'completed'
+          AND order_time >= toDateTime(start_date)
+          AND order_time < toDateTime(end_date + 1)
+        GROUP BY day
+    )
+SELECT
+    d.day,
+    coalesce(o.revenue, 0) AS revenue,
+    coalesce(o.orders_count, 0) AS orders_count
+FROM date_spine d
+LEFT JOIN daily_orders o USING (day)
+ORDER BY d.day;
+```
+
+Ora hai una serie continua pronta per grafici affidabili.
+
+## Rolling metrics: leggere il trend, non il rumore
+
+### Media mobile a 7 e 30 giorni
+
+```sql
+WITH
+    toDate('2025-01-01') AS start_date,
+    toDate('2025-03-31') AS end_date,
+    date_spine AS (
+        SELECT start_date + number AS day
+        FROM numbers(dateDiff('day', start_date, end_date) + 1)
+    ),
+    daily_orders AS (
+        SELECT
+            toDate(order_time) AS day,
+            sum(amount) AS revenue
+        FROM orders
+        WHERE status = 'completed'
+          AND order_time >= toDateTime(start_date)
+          AND order_time < toDateTime(end_date + 1)
+        GROUP BY day
+    ),
+    daily_series AS (
+        SELECT
+            d.day,
+            coalesce(o.revenue, 0) AS revenue
+        FROM date_spine d
+        LEFT JOIN daily_orders o USING (day)
+    )
+SELECT
+    day,
+    revenue,
+    avg(revenue) OVER (
+        ORDER BY day
+        ROWS BETWEEN 6 PRECEDING AND CURRENT ROW
+    ) AS revenue_ma_7d,
+    avg(revenue) OVER (
+        ORDER BY day
+        ROWS BETWEEN 29 PRECEDING AND CURRENT ROW
+    ) AS revenue_ma_30d,
+    sum(revenue) OVER (
+        ORDER BY day
+        ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+    ) AS cumulative_revenue
+FROM daily_series
+ORDER BY day;
+```
+
+Il pattern corretto e':
+
+1. costruire una serie completa
+2. trasformare i vuoti in `0`
+3. applicare le window sulle righe complete
+
+## OHLC da `fx_ticks`: base SQL per candlestick
+
+```sql
+fx_ticks(
+    symbol LowCardinality(String),
+    ts DateTime,
+    price Float64
+)
+```
+
+### OHLC giornaliero
+
+```sql
+SELECT
+    symbol,
+    toDate(ts) AS day,
+    argMin(price, ts) AS open_price,
+    max(price) AS high_price,
+    min(price) AS low_price,
+    argMax(price, ts) AS close_price
+FROM fx_ticks
+WHERE symbol = 'EURUSD'
+  AND ts >= toDateTime('2025-01-01 00:00:00')
+  AND ts < toDateTime('2025-02-01 00:00:00')
+GROUP BY symbol, day
+ORDER BY day;
+```
+
+`argMin` e `argMax` sono perfetti in ClickHouse:
+
+- `argMin(price, ts)` restituisce il prezzo associato al timestamp minimo
+- `argMax(price, ts)` restituisce il prezzo associato al timestamp massimo
+
+### Aggiungere range e daily return
+
+```sql
+WITH daily_ohlc AS (
+    SELECT
+        symbol,
+        toDate(ts) AS day,
+        argMin(price, ts) AS open_price,
+        max(price) AS high_price,
+        min(price) AS low_price,
+        argMax(price, ts) AS close_price
+    FROM fx_ticks
+    WHERE symbol = 'EURUSD'
+      AND ts >= toDateTime('2025-01-01 00:00:00')
+      AND ts < toDateTime('2025-02-01 00:00:00')
+    GROUP BY symbol, day
+)
+SELECT
+    symbol,
+    day,
+    open_price,
+    high_price,
+    low_price,
+    close_price,
+    high_price - low_price AS daily_range,
+    round((close_price - open_price) / nullIf(open_price, 0), 4) AS daily_return
+FROM daily_ohlc
+ORDER BY day;
+```
+
+## Variante business: OHLC su metriche di prodotto
+
+Lo stesso pattern si puo' applicare anche fuori dalla finanza.
+
+```sql
+SELECT
+    toDate(order_time) AS day,
+    argMin(amount, order_time) AS first_order_value,
+    max(amount) AS max_order_value,
+    min(amount) AS min_order_value,
+    argMax(amount, order_time) AS last_order_value
+FROM orders
+WHERE status = 'completed'
+  AND order_time >= toDateTime('2025-01-01 00:00:00')
+  AND order_time < toDateTime('2025-01-15 00:00:00')
+GROUP BY day
+ORDER BY day;
+```
+
+Non e' un candlestick finanziario classico, ma e' lo stesso modello logico: open, high, low, close di una metrica nel tempo.
+
+## Errori comuni e anti-pattern
+
+### Costruire la media mobile sui soli giorni con attivita'
+
+Se mancano i giorni a zero, la media mobile e' falsa.
+
+### Non usare `COALESCE`
+
+Un giorno senza ordini, in ottica dashboard, spesso va letto come `0`, non come `NULL`.
+
+### Fare OHLC senza agganciare il prezzo corretto
+
+Per open e close non basta sapere il timestamp minimo e massimo. Devi riportare il valore associato, quindi `argMin` e `argMax`.
+
+### Mischiare granularita'
+
+Se l'asse finale e' giornaliero, tutte le trasformazioni intermedie devono rispettare quella granularita'.
+
+<Aside type="caution">
+Quando una metrica alimenta un grafico visto dal management, la date spine non e' un dettaglio tecnico. E' un requisito di affidabilita'.
+</Aside>
+
+## Output atteso
+
+Dovresti saper produrre:
+
+- una tabella giornaliera continua con revenue e ordini
+- una serie temporale con media mobile e cumulata
+- una tabella OHLC pronta per candlestick
+- una tabella con range giornaliero e daily return
+
+Le visualizzazioni naturali sono:
+
+- line chart
+- line chart con smoothing
+- candlestick
+- tabella alert per volatilita' o range anomalo
+
+## Riepilogo operativo
+
+- La serie temporale va resa continua prima di essere analizzata.
+- La date spine e' il pattern base per qualsiasi dashboard temporale serio.
+- Le rolling metrics funzionano bene solo se il tempo e' modellato correttamente.
+- Il pattern OHLC e' un modo generale di aggregare una metrica nel tempo, non solo un trucco da finanza.
+
+## Mini esercizio
+
+Costruisci una tabella settimanale con:
+
+1. revenue totale
+2. revenue media giornaliera
+3. media mobile a 4 settimane
+4. differenza tra settimana corrente e settimana precedente

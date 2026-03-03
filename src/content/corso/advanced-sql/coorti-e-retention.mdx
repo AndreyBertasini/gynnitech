@@ -1,0 +1,362 @@
+---
+title: "Analisi di Coorte e Retention in SQL"
+description: "Cohort month, logo retention e revenue retention: come trasformare eventi e ordini in tabelle leggibili per heatmap e dashboard."
+module: "Modulo 14: Advanced SQL"
+order: 3
+category: "Behavioral Analytics"
+prerequisites: ["advanced-sql/date-spine-e-metriche-temporali"]
+---
+
+import { Aside } from '@astrojs/starlight/components'
+
+Dire che "la retention e' al 28%" non basta. La domanda utile e': retention di quali utenti, acquisiti quando, su quale comportamento e con quale valore economico nel tempo? Le coorti servono a questo: trasformare una media ingannevole in una lettura strutturata del ciclo di vita cliente.
+
+## Perche' la cohort analysis cambia la qualita' della lettura
+
+Una media aggregata confonde periodi diversi e utenti diversi. Le coorti, invece, separano gli utenti in base alla loro data di ingresso e misurano cosa succede nel tempo.
+
+Con le coorti puoi rispondere a domande come:
+
+- i clienti acquisiti a gennaio tornano meglio di quelli di febbraio?
+- il nuovo onboarding ha migliorato la retention dopo 30 giorni?
+- i clienti paid hanno revenue retention migliore degli organic?
+
+```mermaid
+graph LR
+    A["Signup / First Purchase"] --> B["Definizione coorte"]
+    B --> C["Attivita' o revenue nei periodi successivi"]
+    C --> D["Calcolo month_number / week_number"]
+    D --> E["Tabella lunga retention"]
+    E --> F["Heatmap / scorecard / confronto canali"]
+    style A fill:#1a3a5c,color:#ffffff
+    style B fill:#1a5c3a,color:#ffffff
+    style C fill:#1a5c3a,color:#ffffff
+    style D fill:#7a5c00,color:#ffffff
+    style E fill:#2d5016,color:#ffffff
+    style F fill:#2d5016,color:#ffffff
+```
+
+## Schema minimo per questa lezione
+
+```sql
+users(
+    user_id UInt64,
+    signup_at DateTime,
+    country LowCardinality(String),
+    acquisition_channel LowCardinality(String),
+    plan LowCardinality(String)
+)
+
+events(
+    user_id UInt64,
+    event_time DateTime,
+    event_name LowCardinality(String),
+    session_id String,
+    page String,
+    product_id UInt64
+)
+
+orders(
+    order_id UInt64,
+    user_id UInt64,
+    order_time DateTime,
+    amount Float64,
+    country LowCardinality(String),
+    channel LowCardinality(String),
+    status LowCardinality(String)
+)
+```
+
+## Costruire la cohort month
+
+```sql
+WITH signup_cohort AS (
+    SELECT
+        user_id,
+        toStartOfMonth(signup_at) AS cohort_month,
+        acquisition_channel,
+        plan
+    FROM users
+)
+SELECT *
+FROM signup_cohort
+ORDER BY cohort_month, user_id
+LIMIT 20;
+```
+
+La `cohort_month` e' la chiave logica che porteremo poi su eventi e ordini.
+
+## Due letture diverse: SaaS signup cohort vs repeat-purchase cohort
+
+Nel SaaS la coorte e' spesso la data di signup. Nell'ecommerce, invece, puo' avere piu' senso costruire la coorte sul **primo acquisto**.
+
+```sql
+WITH first_purchase_cohort AS (
+    SELECT
+        user_id,
+        toStartOfMonth(min(order_time)) AS first_purchase_month
+    FROM orders
+    WHERE status = 'completed'
+    GROUP BY user_id
+)
+SELECT
+    first_purchase_month,
+    count() AS customers_in_cohort
+FROM first_purchase_cohort
+GROUP BY first_purchase_month
+ORDER BY first_purchase_month;
+```
+
+Questa variante e' utile quando la registrazione non ha ancora un valore economico chiaro e vuoi misurare la qualita' delle coorti paganti.
+
+## Logo retention: utenti attivi per mese dalla coorte
+
+```sql
+WITH
+    signup_cohort AS (
+        SELECT
+            user_id,
+            toStartOfMonth(signup_at) AS cohort_month
+        FROM users
+    ),
+    monthly_activity AS (
+        SELECT DISTINCT
+            user_id,
+            toStartOfMonth(event_time) AS activity_month
+        FROM events
+        WHERE event_name IN ('app_open', 'product_view', 'purchase')
+    ),
+    cohort_activity AS (
+        SELECT
+            c.cohort_month,
+            a.activity_month,
+            dateDiff('month', c.cohort_month, a.activity_month) AS month_number,
+            countDistinct(c.user_id) AS active_users
+        FROM signup_cohort c
+        INNER JOIN monthly_activity a USING (user_id)
+        WHERE a.activity_month >= c.cohort_month
+        GROUP BY c.cohort_month, a.activity_month, month_number
+    )
+SELECT
+    cohort_month,
+    month_number,
+    active_users,
+    first_value(active_users) OVER (
+        PARTITION BY cohort_month
+        ORDER BY month_number
+        ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING
+    ) AS cohort_size,
+    round(
+        active_users
+        / nullIf(first_value(active_users) OVER (
+            PARTITION BY cohort_month
+            ORDER BY month_number
+            ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING
+        ), 0),
+        4
+    ) AS retention_pct
+FROM cohort_activity
+ORDER BY cohort_month, month_number;
+```
+
+Questa e' la tabella lunga classica, perfetta per heatmap e line chart per coorte.
+
+### Come leggere l'output
+
+- `cohort_month`: il mese di ingresso dell'utente
+- `month_number = 0`: il mese di ingresso
+- `month_number = 1`: il mese successivo
+- `retention_pct`: quota di utenti ancora attivi rispetto alla dimensione iniziale della coorte
+
+## Revenue retention: non solo quanti tornano, ma quanto valgono
+
+```sql
+WITH
+    signup_cohort AS (
+        SELECT
+            user_id,
+            toStartOfMonth(signup_at) AS cohort_month
+        FROM users
+    ),
+    monthly_revenue AS (
+        SELECT
+            user_id,
+            toStartOfMonth(order_time) AS revenue_month,
+            sum(amount) AS revenue
+        FROM orders
+        WHERE status = 'completed'
+        GROUP BY user_id, revenue_month
+    ),
+    cohort_revenue AS (
+        SELECT
+            c.cohort_month,
+            r.revenue_month,
+            dateDiff('month', c.cohort_month, r.revenue_month) AS month_number,
+            sum(r.revenue) AS cohort_revenue
+        FROM signup_cohort c
+        INNER JOIN monthly_revenue r USING (user_id)
+        WHERE r.revenue_month >= c.cohort_month
+        GROUP BY c.cohort_month, r.revenue_month, month_number
+    )
+SELECT
+    cohort_month,
+    month_number,
+    cohort_revenue,
+    first_value(cohort_revenue) OVER (
+        PARTITION BY cohort_month
+        ORDER BY month_number
+        ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING
+    ) AS month_zero_revenue,
+    round(
+        cohort_revenue
+        / nullIf(first_value(cohort_revenue) OVER (
+            PARTITION BY cohort_month
+            ORDER BY month_number
+            ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING
+        ), 0),
+        4
+    ) AS revenue_retention_pct
+FROM cohort_revenue
+ORDER BY cohort_month, month_number;
+```
+
+Ora hai due letture complementari:
+
+- **logo retention**: quanti utenti restano
+- **revenue retention**: quanto valore economico resta
+
+Se logo retention e revenue retention divergono molto, il messaggio e' forte:
+
+- pochi utenti ma ad alto valore possono reggere la revenue
+- tanti utenti retained ma con revenue bassa possono creare un'illusione di salute
+
+## Long table vs matrice per heatmap
+
+La forma piu' robusta da calcolare e' la tabella lunga. Ma per una heatmap o un export spesso serve una matrice.
+
+```sql
+WITH retention_long AS (
+    SELECT
+        cohort_month,
+        month_number,
+        round(
+            active_users
+            / nullIf(first_value(active_users) OVER (
+                PARTITION BY cohort_month
+                ORDER BY month_number
+                ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING
+            ), 0),
+            4
+        ) AS retention_pct
+    FROM (
+        WITH
+            signup_cohort AS (
+                SELECT user_id, toStartOfMonth(signup_at) AS cohort_month
+                FROM users
+            ),
+            monthly_activity AS (
+                SELECT DISTINCT
+                    user_id,
+                    toStartOfMonth(event_time) AS activity_month
+                FROM events
+            )
+        SELECT
+            c.cohort_month,
+            dateDiff('month', c.cohort_month, a.activity_month) AS month_number,
+            countDistinct(c.user_id) AS active_users
+        FROM signup_cohort c
+        INNER JOIN monthly_activity a USING (user_id)
+        WHERE a.activity_month >= c.cohort_month
+        GROUP BY c.cohort_month, month_number
+    )
+)
+SELECT
+    cohort_month,
+    maxIf(retention_pct, month_number = 0) AS m0,
+    maxIf(retention_pct, month_number = 1) AS m1,
+    maxIf(retention_pct, month_number = 2) AS m2,
+    maxIf(retention_pct, month_number = 3) AS m3,
+    maxIf(retention_pct, month_number = 4) AS m4
+FROM retention_long
+GROUP BY cohort_month
+ORDER BY cohort_month;
+```
+
+## Slice utile: coorti per acquisition channel
+
+```sql
+WITH
+    signup_cohort AS (
+        SELECT
+            user_id,
+            toStartOfMonth(signup_at) AS cohort_month,
+            acquisition_channel
+        FROM users
+    ),
+    monthly_activity AS (
+        SELECT DISTINCT
+            user_id,
+            toStartOfMonth(event_time) AS activity_month
+        FROM events
+    )
+SELECT
+    cohort_month,
+    acquisition_channel,
+    dateDiff('month', cohort_month, activity_month) AS month_number,
+    countDistinct(user_id) AS active_users
+FROM signup_cohort
+INNER JOIN monthly_activity USING (user_id)
+WHERE activity_month >= cohort_month
+GROUP BY cohort_month, acquisition_channel, month_number
+ORDER BY cohort_month, acquisition_channel, month_number;
+```
+
+Questa slice e' quasi sempre il punto in cui compare il vero insight operativo: non tutte le coorti peggiorano allo stesso modo, e spesso il problema e' concentrato in un canale o in un piano specifico.
+
+## Errori comuni e anti-pattern
+
+### Non fare `DISTINCT` sulle attivita'
+
+Se uno user fa 18 eventi nello stesso mese, per la retention va contato una sola volta.
+
+### Calcolare il mese zero nel modo sbagliato
+
+Se la coorte e' mensile, anche l'attivita' va troncata al mese.
+
+### Guardare solo la retention percentuale
+
+Una coorte piccola puo' avere percentuali ottime ma impatto economico minimo. Guarda sempre anche `cohort_size` o `cohort_revenue`.
+
+### Mescolare signup e first activity senza una definizione condivisa
+
+Per alcuni business la coorte corretta e' `signup_at`, per altri e' il primo acquisto o la prima attivazione reale.
+
+<Aside type="tip">
+Prima di scrivere la query, definisci con il team una frase semplice: "Un utente e' retained se...". Senza questa frase, la query puo' essere formalmente corretta ma concettualmente sbagliata.
+</Aside>
+
+## Output atteso
+
+Dovresti poter generare:
+
+- tabella lunga di cohort retention
+- matrice per heatmap
+- revenue retention per coorte
+- slice per canale o piano
+
+## Riepilogo operativo
+
+- Le coorti separano utenti entrati in momenti diversi.
+- La retention va letta sia in termini di utenti sia in termini di valore.
+- La tabella lunga e' il formato migliore per il calcolo; la matrice e' un formato di presentazione.
+- Il dettaglio piu' importante non e' la sintassi SQL, ma la definizione corretta di "attivo" e di "coorte".
+
+## Mini esercizio
+
+Costruisci una cohort retention settimanale per `plan` con:
+
+1. settimana di signup
+2. settimana di attivita'
+3. `week_number`
+4. utenti retained
+5. retention percentuale

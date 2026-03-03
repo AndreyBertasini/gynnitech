@@ -98,5 +98,12 @@ export const COURSE_MODULES: CourseModule[] = [
     description: 'CI/CD, Cost Management, Monitoring, Terraform e Documentazione tecnica.',
     icon: 'GitMerge',
     color: 'from-gray-400 to-slate-500'
+  },
+  {
+    id: 'advanced-sql',
+    title: 'Advanced SQL',
+    description: 'Window functions, retention, funnel, sessionizzazione, KPI table e pattern SQL avanzati per analytics.',
+    icon: 'Database',
+    color: 'from-emerald-400 to-cyan-500'
   }
 ];

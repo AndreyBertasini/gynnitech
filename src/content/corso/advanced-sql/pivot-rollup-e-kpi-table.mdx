@@ -1,0 +1,277 @@
+---
+title: "Pivot, ROLLUP e KPI Table per Reporting"
+description: "Come trasformare righe in colonne, generare subtotali e costruire tabelle KPI leggibili per dashboard executive."
+module: "Modulo 14: Advanced SQL"
+order: 5
+category: "Reporting Avanzato"
+prerequisites: ["advanced-sql/funnel-e-sessionizzazione"]
+---
+
+import { Aside } from '@astrojs/starlight/components'
+
+Molte dashboard falliscono non per colpa del grafico, ma per colpa della tabella che lo alimenta. Se la tabella di partenza non e' leggibile, coerente e pronta per il drill-down, il reporting resta fragile. Qui lavoriamo sul livello intermedio piu' utile: la KPI table.
+
+## Perche' la tabella viene prima del grafico
+
+Prima di decidere se usare bar chart, line chart o heatmap, devi produrre un output che il business possa gia' leggere da solo.
+
+Una buona KPI table:
+
+- risponde a una domanda chiara
+- ha granularita' definita
+- mostra subtotali utili
+- puo' essere esportata senza perdere significato
+
+```mermaid
+graph LR
+    A["Tabella lunga"] --> B["Pivot / aggregazioni"]
+    B --> C["Subtotali con ROLLUP"]
+    C --> D["KPI table leggibile"]
+    D --> E["Dashboard o export"]
+    style A fill:#1a3a5c,color:#ffffff
+    style B fill:#1a5c3a,color:#ffffff
+    style C fill:#7a5c00,color:#ffffff
+    style D fill:#2d5016,color:#ffffff
+    style E fill:#2d5016,color:#ffffff
+```
+
+## Schema minimo
+
+```sql
+orders(
+    order_id UInt64,
+    user_id UInt64,
+    order_time DateTime,
+    amount Float64,
+    country LowCardinality(String),
+    channel LowCardinality(String),
+    status LowCardinality(String)
+)
+```
+
+## Pivot manuale con `CASE WHEN`
+
+Il pivot trasforma righe in colonne. E' il modo piu' semplice per creare una tabella comparativa per mese e canale.
+
+```sql
+SELECT
+    toStartOfMonth(order_time) AS month,
+    sum(if(channel = 'google', amount, 0)) AS revenue_google,
+    sum(if(channel = 'meta', amount, 0)) AS revenue_meta,
+    sum(if(channel = 'organic', amount, 0)) AS revenue_organic,
+    sum(amount) AS revenue_total
+FROM orders
+WHERE status = 'completed'
+  AND order_time >= toDateTime('2025-01-01 00:00:00')
+GROUP BY month
+ORDER BY month;
+```
+
+Questa tabella e' perfetta per:
+
+- scorecard management
+- confronto canali mese su mese
+- export verso fogli di lavoro o BI tool
+
+## KPI table con tassi, non solo valori assoluti
+
+```sql
+WITH monthly_channel AS (
+    SELECT
+        toStartOfMonth(order_time) AS month,
+        channel,
+        sum(amount) AS revenue,
+        count() AS orders_count,
+        countDistinct(user_id) AS customers
+    FROM orders
+    WHERE status = 'completed'
+      AND order_time >= toDateTime('2025-01-01 00:00:00')
+    GROUP BY month, channel
+)
+SELECT
+    month,
+    channel,
+    revenue,
+    orders_count,
+    customers,
+    round(revenue / nullIf(orders_count, 0), 2) AS avg_order_value,
+    round(revenue / nullIf(customers, 0), 2) AS revenue_per_customer
+FROM monthly_channel
+ORDER BY month, revenue DESC;
+```
+
+Una tabella cosi' e' spesso piu' utile di un grafico, perche' contiene gia' indicatori interpretabili.
+
+## `ROLLUP`: subtotali gerarchici
+
+Quando il management vuole dettaglio + subtotale paese + totale generale, non servono tre query diverse.
+
+```sql
+SELECT
+    country,
+    channel,
+    sum(amount) AS revenue,
+    countDistinct(user_id) AS customers
+FROM orders
+WHERE status = 'completed'
+  AND order_time >= toDateTime('2025-01-01 00:00:00')
+GROUP BY ROLLUP(country, channel)
+ORDER BY country, channel;
+```
+
+L'output contiene:
+
+- righe di dettaglio `country + channel`
+- una riga subtotale per `country`
+- una riga totale generale
+
+Nella pratica, le righe aggregate avranno `NULL` nelle dimensioni non valorizzate.
+
+### Etichettare i subtotali per evitare ambiguita'
+
+```sql
+SELECT
+    coalesce(country, 'ALL_COUNTRIES') AS country_label,
+    coalesce(channel, 'ALL_CHANNELS') AS channel_label,
+    sum(amount) AS revenue
+FROM orders
+WHERE status = 'completed'
+GROUP BY ROLLUP(country, channel)
+ORDER BY country_label, channel_label;
+```
+
+Questa piccola rifinitura rende l'output molto piu' leggibile quando la tabella viene esportata o condivisa fuori dal team data.
+
+## `GROUPING SETS`: controllare esattamente i livelli
+
+Quando ti servono livelli specifici, `GROUPING SETS` e' piu' flessibile.
+
+```sql
+SELECT
+    country,
+    channel,
+    sum(amount) AS revenue
+FROM orders
+WHERE status = 'completed'
+  AND order_time >= toDateTime('2025-01-01 00:00:00')
+GROUP BY GROUPING SETS (
+    (country, channel),
+    (country),
+    (channel),
+    ()
+)
+ORDER BY country, channel;
+```
+
+Con una sola query puoi ottenere:
+
+- dettaglio per `country + channel`
+- subtotale per paese
+- subtotale per canale
+- totale generale
+
+## Quando usare tabella invece di grafico
+
+Usa una tabella quando:
+
+- il confronto richiede piu' metriche contemporaneamente
+- il lettore deve cercare un valore preciso
+- i subtotali sono parte centrale del messaggio
+- il report deve essere esportabile e riutilizzabile
+
+Usa un grafico quando:
+
+- la domanda e' trend o confronto visivo rapido
+- l'ordine relativo conta piu' del numero esatto
+
+## Costruire una scorecard executive
+
+```sql
+WITH monthly_summary AS (
+    SELECT
+        toStartOfMonth(order_time) AS month,
+        sum(amount) AS revenue,
+        count() AS orders_count,
+        countDistinct(user_id) AS customers
+    FROM orders
+    WHERE status = 'completed'
+      AND order_time >= toDateTime('2025-01-01 00:00:00')
+    GROUP BY month
+),
+with_prev AS (
+    SELECT
+        month,
+        revenue,
+        orders_count,
+        customers,
+        lagInFrame(revenue) OVER (ORDER BY month) AS prev_revenue
+    FROM monthly_summary
+)
+SELECT
+    month,
+    revenue,
+    orders_count,
+    customers,
+    round(revenue / nullIf(orders_count, 0), 2) AS avg_order_value,
+    round((revenue - prev_revenue) / nullIf(prev_revenue, 0), 4) AS revenue_mom_pct
+FROM with_prev
+ORDER BY month;
+```
+
+Questa e' la base perfetta per una pagina executive: poche colonne, tutte interpretabili.
+
+### Come leggere bene una scorecard
+
+Una scorecard ha senso quando ogni riga risponde a una domanda tipo:
+
+- quanto vale questo segmento?
+- con quanta efficienza monetizza?
+- sta migliorando o peggiorando?
+
+<Aside type="tip">
+Una KPI table utile non e' quella con piu' colonne. E' quella in cui ogni colonna cambia una decisione possibile.
+</Aside>
+
+## Errori comuni e anti-pattern
+
+### Usare il pivot troppo presto
+
+Il calcolo piu' robusto di solito avviene in formato lungo. Pivota solo alla fine, per il layer di presentazione.
+
+### Mettere assieme granularita' incompatibili
+
+Se la riga e' mensile, non inserire nella stessa tabella un KPI giornaliero non aggregato.
+
+### Trattare i subtotali come righe normali
+
+Le righe `ROLLUP` vanno etichettate o interpretate correttamente, altrimenti il lettore non capisce cosa sta guardando.
+
+### Costruire tabelle senza tassi
+
+Revenue e ordini da soli non bastano. In una KPI table quasi sempre servono anche indicatori derivati.
+
+## Output atteso
+
+Da questa lezione dovresti saper creare:
+
+- tabella pivot per mese e canale
+- subtotali gerarchici con `ROLLUP`
+- combinazioni controllate con `GROUPING SETS`
+- scorecard executive con valore assoluto e delta
+
+## Riepilogo operativo
+
+- La tabella e' spesso il vero layer semantico del reporting.
+- `CASE WHEN`, `ROLLUP` e `GROUPING SETS` sono strumenti chiave per renderla leggibile.
+- Pivota tardi, quando il calcolo e' gia' corretto.
+- Ogni tabella buona dovrebbe essere utile anche senza grafico.
+
+## Mini esercizio
+
+Costruisci una tabella mensile con:
+
+1. revenue per `country`
+2. subtotale per `country`
+3. totale generale
+4. avg order value
+5. quota percentuale del paese sul totale mese
