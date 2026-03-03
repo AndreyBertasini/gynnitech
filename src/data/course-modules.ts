@@ -105,5 +105,12 @@ export const COURSE_MODULES: CourseModule[] = [
     description: 'Window functions, retention, funnel, sessionizzazione, KPI table e pattern SQL avanzati per analytics.',
     icon: 'Database',
     color: 'from-emerald-400 to-cyan-500'
+  },
+  {
+    id: 'matematica-analisi-dati',
+    title: 'Matematica per l\'Analisi Dati',
+    description: 'Algebra lineare, calcolo, probabilita\' e inferenza applicate a analytics, ML e sperimentazione.',
+    icon: 'BrainCircuit',
+    color: 'from-sky-400 to-indigo-500'
   }
 ];
