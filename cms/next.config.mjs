@@ -7,7 +7,7 @@ const nextConfig = {
   },
   // pg uses native TCP/TLS which works on Cloudflare Workers via nodejs_compat
   // Keep it as external so @opennextjs/cloudflare can handle it correctly
-  serverExternalPackages: ['pg', 'pg-native'],
+  serverExternalPackages: ['@vercel/og'],
 }
 
 export default withPayload(nextConfig)

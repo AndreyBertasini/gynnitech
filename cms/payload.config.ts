@@ -1,7 +1,7 @@
 import path from 'path'
 import { fileURLToPath } from 'url'
 import { buildConfig } from 'payload'
-import { postgresAdapter } from '@payloadcms/db-postgres'
+import { sqliteAdapter } from '@payloadcms/db-sqlite'
 import { lexicalEditor } from '@payloadcms/richtext-lexical'
 import { r2Storage } from '@payloadcms/storage-r2'
 import type { R2StorageOptions } from '@payloadcms/storage-r2'
@@ -60,10 +60,13 @@ export default buildConfig({
     outputFile: path.resolve(dirname, 'payload-types.ts'),
   },
 
-  // ── Database: PostgreSQL (Neon serverless — compatibile Cloudflare Workers) ──
-  db: postgresAdapter({
-    pool: {
-      connectionString: process.env.DATABASE_URI || '',
+  // ── Database: Turso (SQLite via libsql — compatibile Cloudflare Workers) ──────
+  // Local dev: usa file locale ./dev.db
+  // Produzione: TURSO_DATABASE_URL + TURSO_AUTH_TOKEN
+  db: sqliteAdapter({
+    client: {
+      url: process.env.TURSO_DATABASE_URL || 'file:./dev.db',
+      authToken: process.env.TURSO_AUTH_TOKEN,
     },
   }),
 
@@ -73,8 +76,6 @@ export default buildConfig({
       collections: {
         media: true,
       },
-      // createR2BucketProxy() returns a lazy object that resolves the live
-      // env.R2_MEDIA binding at runtime (Cloudflare Workers context).
       bucket: createR2BucketProxy(),
     }),
   ],
