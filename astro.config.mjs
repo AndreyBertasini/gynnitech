@@ -19,6 +19,9 @@ import { redirects } from './src/lib/config/redirects.mjs';
 import { starlightHeadTags } from './src/lib/config/head-tags.mjs';
 import { staticSidebarSections } from './src/lib/config/sidebar-sections.mjs';
 
+import sentry from '@sentry/astro';
+import spotlightjs from '@spotlightjs/astro';
+
 const loadSidebar = () => {
   try {
     const data = fs.readFileSync('./src/data/sidebar-generated.json', 'utf-8');
@@ -56,55 +59,49 @@ export default defineConfig({
     remarkPlugins: [remarkMath],
     rehypePlugins: [[rehypeKatex, { strict: 'ignore' }]],
   },
-  integrations: [
-    partytown({ config: { forward: ["dataLayer.push"] } }),
-    react(),
-    mermaid({
-      theme: 'dark',
-    }),
-    sitemap(),
-    starlight({
-      title: 'GinnyTech',
-      logo: {
-        src: './src/assets/logo-ginnytech.png',
+  integrations: [partytown({ config: { forward: ["dataLayer.push"] } }), react(), mermaid({
+    theme: 'dark',
+  }), sitemap(), starlight({
+    title: 'GinnyTech',
+    logo: {
+      src: './src/assets/logo-ginnytech.png',
+    },
+    favicon: '/favicon-32x32.png',
+    plugins: [
+      starlightImageZoom(),
+      starlightHeadingBadges(),
+    ],
+    disable404Route: true,
+    components: {
+      Sidebar: './src/components/starlight/Sidebar.astro',
+      Search: './src/components/starlight/Empty.astro', // Remove from header
+    },
+    expressiveCode: {
+      themes: ['github-dark', 'github-light'],
+      styleOverrides: {
+        codeFontFamily: "'Geist Mono', 'Menlo', 'Monaco', 'Courier New', monospace",
+        uiFontFamily: "'Inter', sans-serif",
       },
-      favicon: '/favicon-32x32.png',
-      plugins: [
-        starlightImageZoom(),
-        starlightHeadingBadges(),
-      ],
-      disable404Route: true,
-      components: {
-        Sidebar: './src/components/starlight/Sidebar.astro',
-        Search: './src/components/starlight/Empty.astro', // Remove from header
-      },
-      expressiveCode: {
-        themes: ['github-dark', 'github-light'],
-        styleOverrides: {
-          codeFontFamily: "'Geist Mono', 'Menlo', 'Monaco', 'Courier New', monospace",
-          uiFontFamily: "'Inter', sans-serif",
-        },
-      },
-      head: /** @type {any} */ (starlightHeadTags),
+    },
+    head: /** @type {any} */ (starlightHeadTags),
 
-      social: [
-        {
-          label: 'GitHub',
-          href: 'https://github.com/openai',
-          icon: 'github',
-        },
-      ],
-      customCss: [
-        './src/styles/custom.css',
-        '@fontsource/inter/400.css',
-        '@fontsource/inter/600.css',
-      ],
-      sidebar: [
-        staticSidebarSections[0],
-        ...(dynamicSidebar.length > 0 ? [{ label: 'Notion Content', items: dynamicSidebar }] : []),
-        ...staticSidebarSections.slice(1),
-      ],
+    social: [
+      {
+        label: 'GitHub',
+        href: 'https://github.com/openai',
+        icon: 'github',
+      },
+    ],
+    customCss: [
+      './src/styles/custom.css',
+      '@fontsource/inter/400.css',
+      '@fontsource/inter/600.css',
+    ],
+    sidebar: [
+      staticSidebarSections[0],
+      ...(dynamicSidebar.length > 0 ? [{ label: 'Notion Content', items: dynamicSidebar }] : []),
+      ...staticSidebarSections.slice(1),
+    ],
 
-    }),
-  ],
+  }), sentry(), spotlightjs()],
 });
