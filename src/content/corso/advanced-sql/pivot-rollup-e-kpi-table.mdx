@@ -9,18 +9,18 @@ prerequisites: ["advanced-sql/funnel-e-sessionizzazione"]
 
 import { Aside } from '@astrojs/starlight/components'
 
-Molte dashboard falliscono non per colpa del grafico, ma per colpa della tabella che lo alimenta. Se la tabella di partenza non e' leggibile, coerente e pronta per il drill-down, il reporting resta fragile. Qui lavoriamo sul livello intermedio piu' utile: la KPI table.
+Il CFO chiede una tabella con revenue per paese × canale × mese in un foglio Excel. Senza ROLLUP, devi scrivere una subquery per ogni totale parziale — uno per paese, uno per canale, uno per il totale generale — poi unire tutto con UNION ALL. Con ROLLUP costruisci l'intera gerarchia in una query sola, con un output coerente e già etichettabile. Questa lezione copre quella transizione: dal dato grezzo alla KPI table che il business può leggere, esportare e usare per decidere.
 
-## Perche' la tabella viene prima del grafico
+## Perché la tabella viene prima del grafico
 
-Prima di decidere se usare bar chart, line chart o heatmap, devi produrre un output che il business possa gia' leggere da solo.
+Prima di decidere se usare bar chart, line chart o heatmap, devi produrre un output che il business possa già leggere da solo.
 
 Una buona KPI table:
 
 - risponde a una domanda chiara
-- ha granularita' definita
+- ha granularità definita
 - mostra subtotali utili
-- puo' essere esportata senza perdere significato
+- può essere esportata senza perdere significato
 
 ```mermaid
 graph LR
@@ -35,31 +35,55 @@ graph LR
     style E fill:#2d5016,color:#ffffff
 ```
 
-## Schema minimo
+Il grafico è lo strato finale di comunicazione. La tabella è lo strato semantico: se è sbagliata, ogni grafico sopra di essa è sbagliato. Costruire prima la tabella corretta non è un passaggio tecnico, è un atto di chiarezza analitica.
+
+## Schema di riferimento
+
+Le query in questa lezione usano le tabelle seguenti.
 
 ```sql
+users(
+    user_id    UInt64,
+    signup_at  DateTime,
+    country    LowCardinality(String),
+    acquisition_channel LowCardinality(String),
+    plan       LowCardinality(String)
+)
+
 orders(
-    order_id UInt64,
-    user_id UInt64,
+    order_id   UInt64,
+    user_id    UInt64,
     order_time DateTime,
-    amount Float64,
-    country LowCardinality(String),
-    channel LowCardinality(String),
-    status LowCardinality(String)
+    amount     Float64,
+    country    LowCardinality(String),
+    channel    LowCardinality(String),
+    status     LowCardinality(String)
+)
+
+order_items(
+    order_id   UInt64,
+    product_id UInt64,
+    category   LowCardinality(String),
+    quantity   UInt32,
+    net_revenue Float64,
+    margin      Float64
 )
 ```
 
-## Pivot manuale con `CASE WHEN`
+## Pivot manuale con aggregazione condizionale
 
-Il pivot trasforma righe in colonne. E' il modo piu' semplice per creare una tabella comparativa per mese e canale.
+Il pivot trasforma righe in colonne. È il modo più diretto per creare una tabella comparativa dove ogni canale o categoria diventa una colonna separata, invece di occupare righe diverse in un formato lungo.
+
+La tecnica si basa su aggregazione condizionale: si sommano i valori solo quando la dimensione ha un certo valore, altrimenti si restituisce zero o NULL.
 
 ```sql
 SELECT
-    toStartOfMonth(order_time) AS month,
-    sum(if(channel = 'google', amount, 0)) AS revenue_google,
-    sum(if(channel = 'meta', amount, 0)) AS revenue_meta,
-    sum(if(channel = 'organic', amount, 0)) AS revenue_organic,
-    sum(amount) AS revenue_total
+    toStartOfMonth(order_time)                          AS month,
+    sum(if(channel = 'google',  amount, 0))             AS revenue_google,
+    sum(if(channel = 'meta',    amount, 0))             AS revenue_meta,
+    sum(if(channel = 'organic', amount, 0))             AS revenue_organic,
+    sum(if(channel = 'email',   amount, 0))             AS revenue_email,
+    sum(amount)                                         AS revenue_total
 FROM orders
 WHERE status = 'completed'
   AND order_time >= toDateTime('2025-01-01 00:00:00')
@@ -67,50 +91,60 @@ GROUP BY month
 ORDER BY month;
 ```
 
-Questa tabella e' perfetta per:
+L'output è già nella forma attesa da un analista che vuole confrontare i canali colonna per colonna. Ogni riga è un mese, ogni colonna è un canale.
 
-- scorecard management
-- confronto canali mese su mese
-- export verso fogli di lavoro o BI tool
+### Quando il pivot è utile e quando no
 
-## KPI table con tassi, non solo valori assoluti
+Il pivot è lo strumento giusto quando:
+
+- il numero di valori distinti della dimensione è piccolo e stabile (3-8 canali, non 200 SKU)
+- il consumatore finale è un foglio Excel, un BI tool che non supporta unpivot, o un report PDF
+- vuoi mettere a confronto canali in un'unica riga, senza che il lettore debba fare pivot mentalmente
+
+Il pivot è lo strumento sbagliato quando:
+
+- i valori della dimensione cambiano nel tempo (nuovi canali che si aggiungono ogni quarter)
+- devi fare calcoli downstream sul formato lungo (window functions, percentili, join)
+- il numero di colonne cresce a dismisura
+
+<Aside type="tip">
+Regola pratica: tieni i dati in formato lungo il più a lungo possibile. Esegui il pivot solo nell'ultimo stadio della pipeline, quando il dato deve essere presentato.
+</Aside>
+
+### Pivot su categoria di prodotto con margine
+
+Estendendo il pattern a `order_items`, puoi costruire una tabella che mostra revenue e margine per categoria di prodotto, tutto in una sola riga per mese.
 
 ```sql
-WITH monthly_channel AS (
-    SELECT
-        toStartOfMonth(order_time) AS month,
-        channel,
-        sum(amount) AS revenue,
-        count() AS orders_count,
-        countDistinct(user_id) AS customers
-    FROM orders
-    WHERE status = 'completed'
-      AND order_time >= toDateTime('2025-01-01 00:00:00')
-    GROUP BY month, channel
-)
 SELECT
-    month,
-    channel,
-    revenue,
-    orders_count,
-    customers,
-    round(revenue / nullIf(orders_count, 0), 2) AS avg_order_value,
-    round(revenue / nullIf(customers, 0), 2) AS revenue_per_customer
-FROM monthly_channel
-ORDER BY month, revenue DESC;
+    toStartOfMonth(o.order_time)                                    AS month,
+    sum(if(oi.category = 'electronics', oi.net_revenue, 0))        AS rev_electronics,
+    sum(if(oi.category = 'apparel',     oi.net_revenue, 0))        AS rev_apparel,
+    sum(if(oi.category = 'food',        oi.net_revenue, 0))        AS rev_food,
+    sum(if(oi.category = 'electronics', oi.margin, 0))             AS margin_electronics,
+    sum(if(oi.category = 'apparel',     oi.margin, 0))             AS margin_apparel,
+    sum(if(oi.category = 'food',        oi.margin, 0))             AS margin_food,
+    sum(oi.net_revenue)                                             AS rev_total,
+    round(sum(oi.margin) / nullIf(sum(oi.net_revenue), 0), 4)      AS margin_pct_total
+FROM orders o
+JOIN order_items oi USING (order_id)
+WHERE o.status = 'completed'
+  AND o.order_time >= toDateTime('2025-01-01 00:00:00')
+GROUP BY month
+ORDER BY month;
 ```
 
-Una tabella cosi' e' spesso piu' utile di un grafico, perche' contiene gia' indicatori interpretabili.
+Questa tabella risponde alla domanda: "In quale categoria stiamo migliorando o perdendo margine?" senza che il lettore debba sommare manualmente righe separate.
 
-## `ROLLUP`: subtotali gerarchici
+## ROLLUP: subtotali gerarchici
 
-Quando il management vuole dettaglio + subtotale paese + totale generale, non servono tre query diverse.
+Quando il management vuole dettaglio + subtotale paese + totale generale, non servono tre query diverse concatenate con UNION ALL. `GROUP BY ROLLUP` genera automaticamente tutti i livelli della gerarchia specificata.
 
 ```sql
 SELECT
     country,
     channel,
-    sum(amount) AS revenue,
+    sum(amount)           AS revenue,
     countDistinct(user_id) AS customers
 FROM orders
 WHERE status = 'completed'
@@ -119,83 +153,162 @@ GROUP BY ROLLUP(country, channel)
 ORDER BY country, channel;
 ```
 
-L'output contiene:
+L'output contiene tre classi di righe:
 
-- righe di dettaglio `country + channel`
-- una riga subtotale per `country`
-- una riga totale generale
+- righe di dettaglio con `country` e `channel` valorizzati
+- righe subtotale con `country` valorizzato e `channel = NULL`
+- una riga totale generale con entrambi a `NULL`
 
-Nella pratica, le righe aggregate avranno `NULL` nelle dimensioni non valorizzate.
+Il motore calcola `n+1` livelli, dove `n` è il numero di dimensioni specificate nel ROLLUP. Con due dimensioni ottieni tre livelli: dettaglio, subtotale sulla prima dimensione, totale assoluto.
 
-### Etichettare i subtotali per evitare ambiguita'
+### Leggere l'output ROLLUP: identificare i subtotali
+
+I valori `NULL` nell'output ROLLUP sono marcatori di aggregazione, non dati mancanti. Per chi consuma la tabella fuori dal contesto SQL, questo non è ovvio. La soluzione è etichettarli esplicitamente.
 
 ```sql
 SELECT
-    coalesce(country, 'ALL_COUNTRIES') AS country_label,
-    coalesce(channel, 'ALL_CHANNELS') AS channel_label,
-    sum(amount) AS revenue
+    coalesce(country, 'TOTALE')          AS country_label,
+    coalesce(channel, 'TUTTI_I_CANALI')  AS channel_label,
+    sum(amount)                           AS revenue,
+    countDistinct(user_id)                AS customers,
+    round(sum(amount) / nullIf(countDistinct(user_id), 0), 2) AS revenue_per_customer
 FROM orders
 WHERE status = 'completed'
+  AND order_time >= toDateTime('2025-01-01 00:00:00')
 GROUP BY ROLLUP(country, channel)
 ORDER BY country_label, channel_label;
 ```
 
-Questa piccola rifinitura rende l'output molto piu' leggibile quando la tabella viene esportata o condivisa fuori dal team data.
+Con `coalesce` trasformi i NULL in etichette leggibili. Il risultato può essere esportato direttamente in Excel o condiviso con stakeholder non tecnici senza spiegazioni aggiuntive.
 
-## `GROUPING SETS`: controllare esattamente i livelli
+### La funzione GROUPING()
 
-Quando ti servono livelli specifici, `GROUPING SETS` e' piu' flessibile.
+In alcuni casi la dimensione può essere genuinamente NULL nel dato originale — un ordine con canale non tracciato, per esempio. In quel caso `coalesce` non distingue tra "NULL perché subtotale ROLLUP" e "NULL perché dato mancante".
+
+`GROUPING()` risolve l'ambiguità: restituisce `1` quando la colonna è NULL a causa dell'aggregazione ROLLUP, `0` altrimenti.
+
+```sql
+SELECT
+    if(GROUPING(country) = 1, 'TOTALE',  country) AS country_label,
+    if(GROUPING(channel) = 1, 'TOTALE',  channel) AS channel_label,
+    GROUPING(country)                              AS is_country_subtotal,
+    GROUPING(channel)                              AS is_channel_subtotal,
+    sum(amount)                                    AS revenue
+FROM orders
+WHERE status = 'completed'
+  AND order_time >= toDateTime('2025-01-01 00:00:00')
+GROUP BY ROLLUP(country, channel)
+ORDER BY country_label, channel_label;
+```
+
+La colonna `is_country_subtotal` è utile se consumi l'output in un tool che può applicare stili diversi alle righe di subtotale (grassetto, separatore, sfondo colorato).
+
+## ROLLUP vs GROUPING SETS vs CUBE
+
+I tre costrutti condividono la stessa idea di base — produrre aggregazioni a livelli diversi in una sola query — ma hanno comportamenti diversi che li rendono adatti a scenari distinti.
+
+**ROLLUP** genera una gerarchia ordinata. Con `ROLLUP(A, B, C)` ottieni: `(A, B, C)`, `(A, B)`, `(A)`, `()`. Ogni livello è incluso nel livello precedente. È il costruttore giusto quando le dimensioni hanno una relazione gerarchica naturale: regione > paese > città, anno > trimestre > mese.
+
+**GROUPING SETS** ti dà controllo totale: specifichi esattamente quali combinazioni vuoi, senza vincoli di ordine o inclusione.
 
 ```sql
 SELECT
     country,
     channel,
-    sum(amount) AS revenue
+    toStartOfMonth(order_time) AS month,
+    sum(amount)                AS revenue
 FROM orders
 WHERE status = 'completed'
   AND order_time >= toDateTime('2025-01-01 00:00:00')
 GROUP BY GROUPING SETS (
-    (country, channel),
-    (country),
-    (channel),
-    ()
+    (country, channel, month),  -- dettaglio completo
+    (country, month),           -- subtotale paese × mese
+    (channel, month),           -- subtotale canale × mese
+    (month),                    -- totale mensile
+    ()                          -- totale assoluto
 )
-ORDER BY country, channel;
+ORDER BY country, channel, month;
 ```
 
-Con una sola query puoi ottenere:
+Con una sola query ottieni cinque livelli di aggregazione, scelti in modo indipendente. Puoi avere `(country, month)` senza necessariamente avere `(country, channel, month)` prima.
 
-- dettaglio per `country + channel`
-- subtotale per paese
-- subtotale per canale
-- totale generale
+**CUBE** genera tutte le possibili combinazioni delle dimensioni specificate. Con `CUBE(A, B, C)` ottieni tutti gli 8 sottoinsiemi: `(A, B, C)`, `(A, B)`, `(A, C)`, `(B, C)`, `(A)`, `(B)`, `(C)`, `()`. È utile per l'analisi esplorativa quando vuoi vedere ogni slicing possibile, ma produce output molto grande e raramente è ciò che serve per un report operativo.
 
-## Quando usare tabella invece di grafico
+### Tabella di confronto
 
-Usa una tabella quando:
+| Costruttore | Numero di livelli | Controllo | Caso d'uso tipico |
+|---|---|---|---|
+| `ROLLUP(A, B)` | n+1 fisso | Nessuno, gerarchia automatica | Report gerarchici: anno > mese, regione > paese |
+| `GROUPING SETS(...)` | Esattamente quanti specificati | Totale | Dashboard con combinazioni non gerarchiche |
+| `CUBE(A, B)` | 2^n | Nessuno, tutte le combo | Analisi esplorativa multi-dimensionale |
+| Window function | 1 (aggiunge colonne) | Totale | Percentuali sul totale, ranking, delta |
+| Query separate | n query distinte | Totale | Da evitare: manutenzione alta, rischio incoerenza |
 
-- il confronto richiede piu' metriche contemporaneamente
-- il lettore deve cercare un valore preciso
-- i subtotali sono parte centrale del messaggio
-- il report deve essere esportabile e riutilizzabile
+## Tabella di confronto vs periodo precedente: YoY e MoM
 
-Usa un grafico quando:
+Una KPI table che mostra solo i valori assoluti di un periodo è incompleta. Il business legge sempre in relativo: "rispetto al mese scorso, rispetto allo stesso periodo dell'anno precedente".
 
-- la domanda e' trend o confronto visivo rapido
-- l'ordine relativo conta piu' del numero esatto
-
-## Costruire una scorecard executive
+### MoM (Month-over-Month)
 
 ```sql
-WITH monthly_summary AS (
+WITH monthly AS (
     SELECT
         toStartOfMonth(order_time) AS month,
-        sum(amount) AS revenue,
-        count() AS orders_count,
-        countDistinct(user_id) AS customers
+        country,
+        sum(amount)                AS revenue,
+        count()                    AS orders_count,
+        countDistinct(user_id)     AS customers
     FROM orders
     WHERE status = 'completed'
-      AND order_time >= toDateTime('2025-01-01 00:00:00')
+      AND order_time >= toDateTime('2024-01-01 00:00:00')
+    GROUP BY month, country
+),
+with_prev_month AS (
+    SELECT
+        month,
+        country,
+        revenue,
+        orders_count,
+        customers,
+        lagInFrame(revenue) OVER (
+            PARTITION BY country
+            ORDER BY month
+        ) AS prev_month_revenue,
+        lagInFrame(orders_count) OVER (
+            PARTITION BY country
+            ORDER BY month
+        ) AS prev_month_orders
+    FROM monthly
+)
+SELECT
+    month,
+    country,
+    revenue,
+    orders_count,
+    customers,
+    round(revenue / nullIf(orders_count, 0), 2)                         AS aov,
+    prev_month_revenue,
+    round((revenue - prev_month_revenue)
+          / nullIf(prev_month_revenue, 0), 4)                           AS revenue_mom_pct,
+    round((orders_count - prev_month_orders)
+          / nullIf(prev_month_orders, 0), 4)                            AS orders_mom_pct
+FROM with_prev_month
+ORDER BY month DESC, revenue DESC;
+```
+
+### YoY (Year-over-Year) nella stessa query
+
+Per confrontare con lo stesso mese dell'anno precedente, si usa `lagInFrame` con un offset pari a 12 (12 mesi indietro nella partition ordinata per mese).
+
+```sql
+WITH monthly AS (
+    SELECT
+        toStartOfMonth(order_time) AS month,
+        sum(amount)                AS revenue,
+        count()                    AS orders_count
+    FROM orders
+    WHERE status = 'completed'
+      AND order_time >= toDateTime('2023-01-01 00:00:00')
     GROUP BY month
 ),
 with_prev AS (
@@ -203,75 +316,398 @@ with_prev AS (
         month,
         revenue,
         orders_count,
+        lagInFrame(revenue, 1)  OVER (ORDER BY month) AS prev_month_revenue,
+        lagInFrame(revenue, 12) OVER (ORDER BY month) AS prev_year_revenue
+    FROM monthly
+)
+SELECT
+    month,
+    revenue,
+    orders_count,
+    round(revenue / nullIf(orders_count, 0), 2)                     AS aov,
+    round((revenue - prev_month_revenue)
+          / nullIf(prev_month_revenue, 0) * 100, 2)                 AS revenue_mom_pct,
+    round((revenue - prev_year_revenue)
+          / nullIf(prev_year_revenue, 0) * 100, 2)                  AS revenue_yoy_pct
+FROM with_prev
+WHERE month >= toStartOfMonth(toDateTime('2024-01-01 00:00:00'))
+ORDER BY month;
+```
+
+L'accorgimento `WHERE month >= ...` nel SELECT finale filtra solo i mesi del periodo che vuoi presentare, pur avendo calcolato il lag sui 24 mesi precedenti. Questo garantisce che i delta YoY siano disponibili per tutti i mesi del 2024 senza esporre i mesi intermedi del 2023 nell'output.
+
+<Aside type="tip">
+Quando costruisci delta YoY con lag, assicurati che la CTE di input copra almeno 13 mesi per MoM o 25 mesi per YoY. Un lag calcolato su una finestra troppo corta restituirà NULL per i primi mesi.
+</Aside>
+
+## KPI table executive: una query completa
+
+Questo pattern combina tutto quanto visto: ROLLUP per i subtotali, aggregazione condizionale per il pivot per canale, window functions per i delta temporali, e calcolo dell'AOV e della conversion rate in un unico risultato.
+
+```sql
+WITH base AS (
+    SELECT
+        toStartOfMonth(o.order_time)  AS month,
+        o.country,
+        o.channel,
+        sum(o.amount)                 AS revenue,
+        count()                       AS orders_count,
+        countDistinct(o.user_id)      AS paying_customers
+    FROM orders o
+    WHERE o.status = 'completed'
+      AND o.order_time >= toDateTime('2024-01-01 00:00:00')
+    GROUP BY month, o.country, o.channel
+),
+all_users AS (
+    SELECT
+        toStartOfMonth(signup_at)     AS month,
+        country,
+        count()                       AS signups
+    FROM users
+    WHERE signup_at >= toDateTime('2024-01-01 00:00:00')
+    GROUP BY month, country
+),
+joined AS (
+    SELECT
+        b.month,
+        b.country,
+        b.channel,
+        b.revenue,
+        b.orders_count,
+        b.paying_customers,
+        coalesce(au.signups, 0)       AS signups
+    FROM base b
+    LEFT JOIN all_users au
+        ON b.month = au.month AND b.country = au.country
+),
+with_rollup AS (
+    SELECT
+        month,
+        country,
+        channel,
+        sum(revenue)                  AS revenue,
+        sum(orders_count)             AS orders_count,
+        sum(paying_customers)         AS paying_customers,
+        sum(signups)                  AS signups
+    FROM joined
+    GROUP BY ROLLUP(month, country, channel)
+)
+SELECT
+    coalesce(toString(month), 'TUTTI_I_MESI')   AS month_label,
+    coalesce(country, 'TUTTI_I_PAESI')           AS country_label,
+    coalesce(channel, 'TUTTI_I_CANALI')          AS channel_label,
+    revenue,
+    orders_count,
+    paying_customers,
+    signups,
+    round(revenue / nullIf(orders_count, 0), 2)          AS aov,
+    round(paying_customers / nullIf(signups, 0), 4)       AS conversion_rate
+FROM with_rollup
+ORDER BY month_label, country_label, channel_label;
+```
+
+Questa query è già nella forma che un BI tool come Metabase o Superset può consumare direttamente, applicando filtri sulle label invece di gestire NULL grezzi.
+
+## KPI table con variazione WoW per dashboard settimanali
+
+Per report operativi settimanali (comuni nei team e-commerce e growth), il pattern si adatta sostituendo `toStartOfMonth` con `toStartOfWeek` e usando un offset di 1 nel lag.
+
+```sql
+WITH weekly AS (
+    SELECT
+        toStartOfWeek(order_time, 1) AS week_start,
+        sum(amount)                  AS revenue,
+        count()                      AS orders_count,
+        countDistinct(user_id)       AS customers
+    FROM orders
+    WHERE status = 'completed'
+      AND order_time >= toDateTime('2024-01-01 00:00:00')
+    GROUP BY week_start
+),
+with_prev AS (
+    SELECT
+        week_start,
+        revenue,
+        orders_count,
         customers,
-        lagInFrame(revenue) OVER (ORDER BY month) AS prev_revenue
-    FROM monthly_summary
+        lagInFrame(revenue)       OVER (ORDER BY week_start) AS prev_week_revenue,
+        lagInFrame(orders_count)  OVER (ORDER BY week_start) AS prev_week_orders
+    FROM weekly
+)
+SELECT
+    week_start,
+    revenue,
+    orders_count,
+    customers,
+    round(revenue / nullIf(orders_count, 0), 2)                   AS aov,
+    round((revenue - prev_week_revenue)
+          / nullIf(prev_week_revenue, 0) * 100, 2)                AS revenue_wow_pct,
+    round((orders_count - prev_week_orders)
+          / nullIf(prev_week_orders, 0) * 100, 2)                 AS orders_wow_pct
+FROM with_prev
+ORDER BY week_start DESC;
+```
+
+`toStartOfWeek(date, 1)` in ClickHouse fa iniziare la settimana di lunedì. Il `1` come secondo argomento è il mode ISO.
+
+## ClickHouse: specificità e performance su ROLLUP grandi
+
+### Supporto GROUPING SETS in ClickHouse
+
+ClickHouse supporta `ROLLUP`, `CUBE` e `GROUPING SETS` dalla versione 20.6 in poi. La sintassi è standard SQL, compatibile con quanto visto nelle sezioni precedenti.
+
+Una differenza rilevante rispetto ad altri engine: ClickHouse **non supporta** `GROUPING()` in tutte le versioni. Prima di usarlo in produzione, verifica la versione del cluster con `SELECT version()`. In alternativa, usa `GROUPING SETS` con combinazioni esplicite e confronta i NULL con `isNull()`.
+
+### Performance di ROLLUP su dataset grandi
+
+Con ROLLUP su tabelle da centinaia di milioni di righe, ClickHouse esegue scansioni multiple — una per ogni livello dell'albero di aggregazione. Su colonne `LowCardinality(String)`, la compressione del dizionario riduce il costo, ma il numero di passaggi resta lo stesso.
+
+Strategie per contenere il costo:
+
+**Pre-filtro aggressivo.** Applica sempre un predicato temporale che ClickHouse può pushare sulle partizioni. Se la tabella è partizionata per mese, una condizione `WHERE order_time >= toDateTime('2025-01-01 00:00:00')` evita la scansione di tutte le partizioni storiche.
+
+```sql
+-- Buono: ClickHouse usa la partition pruning
+WHERE order_time >= toDateTime('2025-01-01 00:00:00')
+  AND order_time <  toDateTime('2025-04-01 00:00:00')
+
+-- Meno buono: la funzione impedisce il pruning diretto
+WHERE toYear(order_time) = 2025
+```
+
+**Aggregazione in CTE prima del ROLLUP.** Invece di applicare ROLLUP direttamente sulla tabella raw, aggrega prima ai livelli più granulari, poi esegui il ROLLUP sulla CTE risultante. La CTE ha molte meno righe.
+
+```sql
+-- Pattern efficiente
+WITH grain AS (
+    SELECT country, channel, toStartOfMonth(order_time) AS month,
+           sum(amount) AS revenue
+    FROM orders
+    WHERE status = 'completed'
+      AND order_time >= toDateTime('2025-01-01 00:00:00')
+    GROUP BY country, channel, month
+)
+SELECT country, channel, month, sum(revenue) AS revenue
+FROM grain
+GROUP BY ROLLUP(country, channel, month);
+```
+
+**Materializzazione per report frequenti.** Se la stessa KPI table viene richiesta molte volte al giorno, considera di materializzarla (vedi sezione successiva).
+
+### LowCardinality e dizionari
+
+Le colonne `LowCardinality(String)` come `country` e `channel` sono ottimizzate per GROUP BY: ClickHouse lavora internamente sugli indici del dizionario invece che sulle stringhe. Questo riduce il memory footprint e accelera l'aggregazione di 2-5x rispetto a `String` su cardinalità bassa (< 10.000 valori distinti).
+
+## Quando materializzare una KPI table
+
+Calcolare una KPI table on the fly è conveniente durante lo sviluppo, ma a un certo punto il tradeoff si inverte. Ecco come valutare la scelta.
+
+**Calcola on the fly quando:**
+
+- i dati cambiano frequentemente e la freschezza è critica (meno di 1 ora di lag accettabile)
+- la query è abbastanza veloce da completarsi in pochi secondi anche sui volumi correnti
+- il pattern di accesso è irregolare (la query non viene eseguita frequentemente)
+- sei ancora in fase esplorativa e la struttura del report cambia spesso
+
+**Materializza quando:**
+
+- la stessa query viene eseguita da molti utenti contemporaneamente (dashboard condivise)
+- il tempo di risposta deve essere sotto il secondo per una buona UX
+- i dati del giorno precedente sono sufficienti (batch giornaliero accettabile)
+- la query è costosa (ROLLUP su tabelle raw con miliardi di righe)
+
+### Pattern di materializzazione in ClickHouse
+
+In ClickHouse la materializzazione più comune per KPI table è una **Materialized View** che popola una tabella AggregatingMergeTree o SummingMergeTree in real-time, oppure un job schedulato (cron o dbt run) che esegue una `INSERT INTO ... SELECT` giornaliera su una tabella separata.
+
+```sql
+-- Tabella destinazione per KPI giornaliera
+CREATE TABLE kpi_daily_summary
+(
+    report_date Date,
+    country     LowCardinality(String),
+    channel     LowCardinality(String),
+    revenue     Float64,
+    orders_count UInt32,
+    customers   UInt32,
+    aov         Float64,
+    updated_at  DateTime DEFAULT now()
+)
+ENGINE = ReplacingMergeTree(updated_at)
+PARTITION BY toYYYYMM(report_date)
+ORDER BY (report_date, country, channel);
+
+-- Job giornaliero: INSERT INTO kpi_daily_summary
+INSERT INTO kpi_daily_summary
+SELECT
+    toDate(order_time)                                           AS report_date,
+    country,
+    channel,
+    sum(amount)                                                  AS revenue,
+    count()                                                      AS orders_count,
+    countDistinct(user_id)                                       AS customers,
+    round(sum(amount) / nullIf(count(), 0), 2)                  AS aov,
+    now()                                                        AS updated_at
+FROM orders
+WHERE status = 'completed'
+  AND toDate(order_time) = yesterday()
+GROUP BY report_date, country, channel;
+```
+
+Con `ReplacingMergeTree(updated_at)` ogni riesecuzione del job sovrascrive le righe del giorno precedente invece di duplicarle.
+
+## ROLLUP vs window functions vs query separate
+
+Quando si affronta un problema di reporting multi-livello, esistono tre approcci principali. Scegliere quello sbagliato produce query fragili, lente o difficili da manutenere.
+
+| Scenario | Approccio consigliato | Motivo |
+|---|---|---|
+| Subtotali gerarchici (regione > paese) | `ROLLUP` | Genera tutti i livelli in un passaggio, output coerente |
+| Percentuale sul totale per riga | Window function (`sum() OVER ()`) | Non altera la granularità, aggiunge la colonna percentuale in linea |
+| Delta rispetto al periodo precedente | Window function (`lagInFrame`) | Legge righe precedenti senza duplicare la query |
+| Confronto tra due segmenti disgiunti | Query separate o `CASE WHEN` pivot | ROLLUP non gestisce bene aggregazioni non gerarchiche |
+| Tutti i subtotali incrociati di 3 dimensioni | `CUBE` | Genera tutte le 2^3 combinazioni automaticamente |
+| Report con combinazioni specifiche non gerarchiche | `GROUPING SETS` | Controllo preciso senza generare livelli non necessari |
+| Frequenza molto alta, dati stabili | Materializzazione | Evita ricalcoli ripetuti su dati che non cambiano |
+
+Il caso più comune di errore è usare query separate per produrre subtotali, poi unirle con UNION ALL. Questo approccio:
+
+- richiede di scrivere e mantenere n query invece di una
+- rende incoerente l'output se le condizioni WHERE divergono tra le query
+- non scala quando le dimensioni di aggregazione cambiano
+
+ROLLUP o GROUPING SETS eliminano questi problemi alla radice.
+
+## Costruire una scorecard executive completa
+
+La scorecard executive è la KPI table più densa: poche righe (solitamente una per mese o per settimana), molte colonne, ogni colonna risponde a una domanda operativa precisa.
+
+```sql
+WITH monthly_summary AS (
+    SELECT
+        toStartOfMonth(order_time) AS month,
+        sum(amount)                AS revenue,
+        count()                    AS orders_count,
+        countDistinct(user_id)     AS customers
+    FROM orders
+    WHERE status = 'completed'
+      AND order_time >= toDateTime('2024-01-01 00:00:00')
+    GROUP BY month
+),
+monthly_signups AS (
+    SELECT
+        toStartOfMonth(signup_at) AS month,
+        count()                   AS signups
+    FROM users
+    WHERE signup_at >= toDateTime('2024-01-01 00:00:00')
+    GROUP BY month
+),
+joined AS (
+    SELECT
+        ms.month,
+        ms.revenue,
+        ms.orders_count,
+        ms.customers,
+        coalesce(su.signups, 0) AS signups
+    FROM monthly_summary ms
+    LEFT JOIN monthly_signups su USING (month)
+),
+with_prev AS (
+    SELECT
+        month,
+        revenue,
+        orders_count,
+        customers,
+        signups,
+        lagInFrame(revenue)       OVER (ORDER BY month) AS prev_revenue,
+        lagInFrame(orders_count)  OVER (ORDER BY month) AS prev_orders,
+        lagInFrame(revenue, 12)   OVER (ORDER BY month) AS prev_year_revenue
+    FROM joined
 )
 SELECT
     month,
     revenue,
     orders_count,
     customers,
-    round(revenue / nullIf(orders_count, 0), 2) AS avg_order_value,
-    round((revenue - prev_revenue) / nullIf(prev_revenue, 0), 4) AS revenue_mom_pct
+    signups,
+    round(revenue / nullIf(orders_count, 0), 2)                       AS aov,
+    round(customers / nullIf(signups, 0), 4)                          AS conversion_rate,
+    round((revenue - prev_revenue) / nullIf(prev_revenue, 0) * 100, 2) AS revenue_mom_pct,
+    round((orders_count - prev_orders) / nullIf(prev_orders, 0) * 100, 2) AS orders_mom_pct,
+    round((revenue - prev_year_revenue) / nullIf(prev_year_revenue, 0) * 100, 2) AS revenue_yoy_pct
 FROM with_prev
+WHERE month >= toStartOfMonth(toDateTime('2025-01-01 00:00:00'))
 ORDER BY month;
 ```
 
-Questa e' la base perfetta per una pagina executive: poche colonne, tutte interpretabili.
+Questa è la base perfetta per una pagina executive: poche colonne, tutte interpretabili, con i delta già calcolati. Il lettore non deve fare aritmetica manualmente.
 
 ### Come leggere bene una scorecard
 
 Una scorecard ha senso quando ogni riga risponde a una domanda tipo:
 
-- quanto vale questo segmento?
-- con quanta efficienza monetizza?
-- sta migliorando o peggiorando?
+- quanto vale questo segmento in termini assoluti?
+- con quanta efficienza monetizza (AOV, revenue per customer)?
+- quante persone stanno entrando nella pipeline (signups)?
+- quante si convertono effettivamente (conversion rate)?
+- il trend è positivo o negativo rispetto al periodo di riferimento?
 
 <Aside type="tip">
-Una KPI table utile non e' quella con piu' colonne. E' quella in cui ogni colonna cambia una decisione possibile.
+Una KPI table utile non è quella con più colonne. È quella in cui ogni colonna cambia una decisione possibile. Se una colonna non modifica nessuna azione del business, è rumore, non segnale.
 </Aside>
 
 ## Errori comuni e anti-pattern
 
 ### Usare il pivot troppo presto
 
-Il calcolo piu' robusto di solito avviene in formato lungo. Pivota solo alla fine, per il layer di presentazione.
+Il calcolo più robusto avviene sempre in formato lungo. Window functions, join, percentili — tutto funziona meglio su righe separate per dimensione. Pivota solo alla fine, quando il dato deve essere presentato.
 
-### Mettere assieme granularita' incompatibili
+### Mettere assieme granularità incompatibili
 
-Se la riga e' mensile, non inserire nella stessa tabella un KPI giornaliero non aggregato.
+Se la riga è mensile, non inserire nella stessa tabella un KPI giornaliero non aggregato. Il join tra granularità diverse produce fan-out silenzioso: i valori sembrano corretti ma sono moltiplicati per il numero di righe del join.
 
-### Trattare i subtotali come righe normali
+### Trattare i subtotali ROLLUP come righe normali
 
-Le righe `ROLLUP` vanno etichettate o interpretate correttamente, altrimenti il lettore non capisce cosa sta guardando.
+Le righe prodotte da ROLLUP hanno NULL nelle dimensioni non valorizzate. Se passi l'output grezzo a un grafico o a un calcolo successivo senza filtrare o etichettare, i subtotali si sommano ai dettagli e il totale risulta doppio. Usa sempre `GROUPING()` o filtra con `WHERE GROUPING(country) = 0` per isolare solo le righe di dettaglio.
 
 ### Costruire tabelle senza tassi
 
-Revenue e ordini da soli non bastano. In una KPI table quasi sempre servono anche indicatori derivati.
+Revenue e ordini da soli non bastano. In una KPI table quasi sempre servono anche indicatori derivati: AOV, revenue per customer, conversion rate, margine percentuale. I valori assoluti crescono con il volume, ma i tassi rivelano l'efficienza del business indipendentemente dalla scala.
+
+### Dimenticare nullIf() nelle divisioni
+
+Una divisione per zero in ClickHouse non genera un errore: restituisce `inf` o `nan`. Questi valori si propagano silenziosamente attraverso calcoli successivi e possono corrompere righe downstream. Usa sempre `nullIf(denominatore, 0)` per convertire lo zero in NULL, così la divisione restituisce NULL (ignorabile) invece di `inf` (invisibilmente problematico).
 
 ## Output atteso
 
 Da questa lezione dovresti saper creare:
 
-- tabella pivot per mese e canale
-- subtotali gerarchici con `ROLLUP`
-- combinazioni controllate con `GROUPING SETS`
-- scorecard executive con valore assoluto e delta
-
-## Riepilogo operativo
-
-- La tabella e' spesso il vero layer semantico del reporting.
-- `CASE WHEN`, `ROLLUP` e `GROUPING SETS` sono strumenti chiave per renderla leggibile.
-- Pivota tardi, quando il calcolo e' gia' corretto.
-- Ogni tabella buona dovrebbe essere utile anche senza grafico.
+- tabella pivot per mese e canale con aggregazione condizionale
+- subtotali gerarchici con `ROLLUP` e etichettatura con `coalesce` e `GROUPING()`
+- combinazioni controllate con `GROUPING SETS` per livelli non gerarchici
+- delta MoM e YoY nella stessa query con `lagInFrame`
+- scorecard executive con valore assoluto, tassi e delta temporali
+- KPI table materializzata per uso ad alta frequenza
 
 ## Mini esercizio
 
-Costruisci una tabella mensile con:
+Costruisci una tabella mensile con le seguenti caratteristiche:
 
-1. revenue per `country`
-2. subtotale per `country`
-3. totale generale
-4. avg order value
-5. quota percentuale del paese sul totale mese
+1. Revenue per `country`, con subtotale per paese e totale generale usando `ROLLUP`
+2. Etichette leggibili sui subtotali (no NULL grezzi nell'output)
+3. AOV calcolato per ogni riga inclusi i subtotali
+4. Quota percentuale di ogni paese sul totale del mese (usa una window function sul totale per mese)
+5. Delta MoM sulla revenue per ogni paese
+
+La soluzione richiede una CTE per l'aggregazione base, una CTE per il ROLLUP con lag, e un SELECT finale con le label. Prova a costruirla senza guardare gli esempi precedenti, poi confronta.
+
+## Riepilogo operativo
+
+- La tabella è spesso il vero layer semantico del reporting. Un grafico sopra una tabella sbagliata è sempre un grafico sbagliato.
+- `CASE WHEN` aggregation è il pivot manuale: trasforma righe in colonne, si usa tardi nella pipeline, quando il dato deve essere presentato.
+- `ROLLUP` genera subtotali gerarchici automaticamente. I NULL nell'output sono marcatori di aggregazione, non dati mancanti. Etichettali sempre con `coalesce` o `GROUPING()`.
+- `GROUPING SETS` dà controllo totale: scegli esattamente quali combinazioni vuoi. È più espressivo di ROLLUP per aggregazioni non gerarchiche.
+- `CUBE` genera tutte le combinazioni possibili: utile per esplorazione, raramente per report operativi.
+- Per delta MoM e YoY usa `lagInFrame` con offset 1 o 12, in una window partizionata per dimensione e ordinata per periodo temporale.
+- Materializza quando la query è costosa e la frequenza di accesso è alta. Calcola on the fly durante lo sviluppo o quando la freschezza è critica.
+- `nullIf(denominatore, 0)` è obbligatorio per ogni divisione: evita `inf` e `nan` silenzioso nell'output.

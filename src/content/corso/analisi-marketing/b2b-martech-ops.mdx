@@ -6,23 +6,593 @@ order: 11
 category: "Operations"
 ---
 
-# B2B Martech Ops: Lead Scoring, Offline Conversion e Revenue Attribution
+Salesforce ha pubblicato nel 2023 che il 67% dei responsabili marketing B2B non riesce a misurare l'impatto delle attività di marketing sulle revenue. Non è un problema di dati — la maggior parte ha CRM e MAP. È un problema di integrazione e governance tra sistemi.
 
-Nel B2B il problema non e' generare lead. E' capire quali lead meritano attenzione commerciale e quali campagne stanno davvero producendo pipeline e fatturato.
+Il dato suona paradossale finché non entri nei dettagli tecnici. Le aziende B2B moderne hanno spesso HubSpot o Salesforce, Marketo o Pardot, LinkedIn Ads, Google Ads, e magari qualche strumento di intent data come 6sense o Bombora. Il problema è che questi sistemi parlano tra loro in modo incompleto, con identificatori diversi, senza un unico modello dati condiviso. Il risultato: il marketing sa quanti MQL ha generato, il sales sa quante opportunità ha chiuso, ma nessuno sa con certezza quale campagna ha contribuito a quale revenue.
 
-Se il marketing si ferma a MQL e il sales team ragiona per opportunita' chiuse, stai guardando due realta' diverse.
+Questa lezione risolve quel problema. Partiremo dall'architettura dello stack B2B, costruiremo un modello di lead scoring difendibile, scriveremo query SQL operative per audit e funnel analysis, e arriveremo all'attribution multi-touch che il board può usare per allocare il budget.
+
+---
+
+## Lo stack B2B tipico e i suoi problemi di integrazione
+
+Uno stack martech B2B maturo ha solitamente quattro layer funzionali.
+
+**Layer 1: CRM** — Salesforce o HubSpot. È il sistema di record per lead, contatti, account e opportunità. Qui vivono i dati firmografici, lo storico delle interazioni commerciali, lo stage del funnel.
+
+**Layer 2: Marketing Automation Platform (MAP)** — Marketo, HubSpot Marketing Hub, Pardot. Gestisce email campaigns, lead nurturing, scoring behaviorale, form e landing page. Comunica con il CRM tramite sync bidirezionale.
+
+**Layer 3: Intent data e enrichment** — 6sense, Bombora, Clearbit, Apollo, ZoomInfo. Portano dati esterni: chi sta cercando attivamente soluzioni come la tua, dati aziendali aggiornati (dipendenti, settore, tecnologie usate), contatti verificati.
+
+**Layer 4: Data warehouse e analytics** — BigQuery, Snowflake, dbt. Il layer dove confluiscono tutti i dati dei layer precedenti per analisi avanzate, attribution e reporting executive.
+
+Il problema nasce tra i layer. Considera questo scenario reale:
+
+Un lead arriva da una campagna LinkedIn. Il form viene compilato con email aziendale. HubSpot crea il record lead e avvia un'automazione di nurturing. Tre settimane dopo il lead scarica un whitepaper — HubSpot lo registra. Due settimane dopo ancora, un SDR fa outreach su Apollo e il lead risponde. Il SDR crea manualmente un contatto in Salesforce senza collegarlo al lead HubSpot. Il lead diventa opportunity in Salesforce. Viene chiuso come won sei mesi dopo.
+
+Risultato: LinkedIn non vedrà mai la conversione. HubSpot conta un lead che non è mai diventato MQL ufficiale. Salesforce ha un'opportunity senza source corretto. BigQuery non riesce a fare attribution perché non c'è un ID comune che unisce la touch LinkedIn con l'opportunità Salesforce.
+
+Questo è lo scenario tipico, non l'eccezione. I problemi di integrazione più frequenti sono:
+
+- **Duplicati tra CRM e MAP**: lo stesso contatto esiste come lead in HubSpot e come contact in Salesforce con email leggermente diversa
+- **Click ID non persistiti**: il `gclid` di Google Ads o il `li_fat_id` di LinkedIn viene perso al momento del form submit
+- **Account matching mancante**: il lead è agganciato a un account diverso da quello corretto perché il dominio email differisce dal dominio aziendale principale
+- **Stage non sincronizzati**: MQL in HubSpot non corrisponde a SQL in Salesforce perché le definizioni non sono allineate
+- **Timestamp inaffidabili**: i campi `mql_at`, `sql_at` vengono sovrascritti anziché registrati come primo evento
+
+<Aside type="caution">
+Prima di costruire qualsiasi modello di attribution, fai un audit dei tuoi campi CRM. Controlla quanti record hanno `lead_source` null, quanti hanno `created_date` non affidabile, quanti contatti esistono duplicati per lo stesso dominio email. Se l'audit rivela più del 20% di record con dati mancanti sulle source, il problema è upstream nella data collection — non nel modello di attribution.
+</Aside>
+
+---
+
+## Lead scoring: dati firmografici vs comportamentali
+
+Il lead scoring è spesso il primo sistema che le aziende B2B implementano e il primo che smettono di usare perché "non funziona". La causa quasi sempre non è il modello — è la mancanza di separazione tra due dimensioni fondamentalmente diverse.
+
+### Fit score (firmografico)
+
+Il fit score misura quanto il lead assomiglia al tuo cliente ideale (ICP, Ideal Customer Profile). Usa dati statici o lentamente variabili:
+
+- **Settore** (industry): il tuo prodotto risolve problemi specifici per settori specifici
+- **Dimensione aziendale** (employee count, ARR stimato): diversi profili di acquisto
+- **Geografie target**: dove sei presente commercialmente
+- **Seniority e funzione del contatto**: chi ha potere decisionale o di influenza nel buying committee
+- **Tecnologie già in uso** (tech stack): segnale di maturità tecnologica e compatibilità
+
+Questi dati vengono in parte dal form, in parte dall'enrichment automatico (Clearbit, Apollo, ZoomInfo arricchiscono il record al momento della creazione con dati aziendali da fonti esterne).
+
+### Engagement score (comportamentale)
+
+L'engagement score misura l'intensità e la qualità del comportamento osservato. Usa dati dinamici:
+
+- **Visite a pagine ad alta intenzione**: pricing, case study, comparison page, demo request
+- **Contenuti scaricati**: whitepaper tecnici > guide generiche
+- **Email engagement**: click su email commercial > open su email newsletter
+- **Frequenza di ritorno**: 3+ sessioni in 7 giorni è un segnale molto più forte di 3 sessioni in 3 mesi
+- **Partecipazione a webinar o eventi**: specialmente se con domande attive
+
+### BANT vs scoring multidimensionale
+
+Il modello BANT (Budget, Authority, Need, Timeline) è lo standard tradizionale per la qualificazione. È utile come checklist per i SDR, ma è difficile da automatizzare perché richiede conversazione diretta. Lo scoring automatico compensa raccogliendo segnali proxy:
+
+| Dimensione BANT | Proxy misurabile automaticamente |
+|---|---|
+| Budget | Dimensione azienda, settore, pagine pricing visitate |
+| Authority | Seniority del contatto, presenza nel buying committee |
+| Need | Intent data esterno, pagine problemi/soluzioni visitate |
+| Timeline | Frequenza visite recenti, richiesta demo, download comparativi |
+
+### Mappa regola → punteggio
+
+Una versione operativa di scoring bilanciato tra fit e engagement:
+
+| Segnale | Categoria | Punti |
+|---|---|---|
+| Job title C-level o VP | Fit | +25 |
+| Job title Director o Manager | Fit | +15 |
+| Azienda tier A (ICP perfetto) | Fit | +20 |
+| Azienda tier B (ICP parziale) | Fit | +10 |
+| Settore target | Fit | +10 |
+| Dimensione azienda target | Fit | +10 |
+| Visita pagina pricing | Engagement | +12 |
+| Download case study | Engagement | +10 |
+| Partecipazione webinar | Engagement | +15 |
+| Richiesta demo esplicita | Engagement | +35 |
+| 3+ visite in 7 giorni | Engagement | +8 |
+| Click su email commercial | Engagement | +5 |
+| Email personale generica (gmail, yahoo) | Fit | -15 |
+| Settore non target | Fit | -20 |
+| Nessuna attività da 30+ giorni | Engagement | -10 |
+
+Il totale massimo teorico è indicativo — ciò che conta è la calibrazione empirica. Ogni 90 giorni, confronta i lead con score alto che sono diventati closed won con quelli che non sono mai avanzati. Aggiusta i pesi di conseguenza.
+
+<Aside type="tip">
+Un modello di scoring deve essere spiegabile in 2 minuti a un sales rep. Se non lo è, non verrà adottato. Prima di implementare modelli ML per il scoring, costruisci una versione rule-based trasparente e usala per 6 mesi per raccogliere ground truth. Solo dopo i dati supporteranno un approccio più sofisticato.
+</Aside>
+
+### Da score a stage
+
+Lo score numerico da solo non produce azione. Deve essere tradotto in stage operativi con owner chiari:
+
+| Regola | Stage | Azione |
+|---|---|---|
+| score < 30 | Cold / Nurture | Entra in sequence email automatica |
+| score 30-59 | MQL | Notifica SDR per review entro 24h |
+| score ≥ 60 e company fit alto | SQL | Routing immediato a AE, SLA 4h |
+| Demo request validata | Meeting Booked | AE notificato, calendario confermato |
+| Inattivo da 60+ giorni con score < 20 | Recycled | Rimosso da active pipeline, rientra in nurture long-term |
+
+Se score e stage non sono collegati da automazioni nel MAP/CRM, il modello resta teorico.
+
+---
+
+## SQL query per lead quality audit
+
+Prima di ottimizzare il funnel, devi sapere dove si trova il problema. Queste query BigQuery identificano le categorie principali di degradazione della qualità dei dati.
+
+### Trovare lead duplicati per dominio email
+
+```sql
+-- Identifica domini con più di un lead, potenziale duplicazione
+SELECT
+  REGEXP_EXTRACT(email, r'@(.+)') AS email_domain,
+  COUNT(DISTINCT lead_id) AS lead_count,
+  MIN(created_at) AS first_seen,
+  MAX(created_at) AS last_seen,
+  STRING_AGG(DISTINCT lead_source ORDER BY lead_source) AS sources
+FROM crm_leads
+WHERE email IS NOT NULL
+  AND email NOT LIKE '%gmail%'
+  AND email NOT LIKE '%yahoo%'
+  AND email NOT LIKE '%hotmail%'
+GROUP BY email_domain
+HAVING COUNT(DISTINCT lead_id) > 1
+ORDER BY lead_count DESC
+LIMIT 100;
+```
+
+### Lead senza owner o senza follow-up
+
+```sql
+-- Lead MQL rimasti senza owner o senza touch sales
+SELECT
+  lead_id,
+  email,
+  lead_source,
+  mql_at,
+  owner_id,
+  last_activity_at,
+  DATE_DIFF(CURRENT_DATE(), DATE(mql_at), DAY) AS days_since_mql
+FROM crm_leads
+WHERE mql_at IS NOT NULL
+  AND (owner_id IS NULL OR last_activity_at IS NULL OR last_activity_at < mql_at)
+  AND DATE_DIFF(CURRENT_DATE(), DATE(mql_at), DAY) > 3
+ORDER BY days_since_mql DESC;
+```
+
+### Lead bloccati nel funnel per stage
+
+```sql
+-- Lead fermi in ogni stage con distribuzione per anzianità
+SELECT
+  current_stage,
+  COUNT(*) AS lead_count,
+  AVG(DATE_DIFF(CURRENT_DATE(), DATE(stage_entered_at), DAY)) AS avg_days_in_stage,
+  COUNTIF(DATE_DIFF(CURRENT_DATE(), DATE(stage_entered_at), DAY) > 30) AS stuck_over_30_days,
+  COUNTIF(DATE_DIFF(CURRENT_DATE(), DATE(stage_entered_at), DAY) > 60) AS stuck_over_60_days
+FROM crm_leads
+WHERE current_stage NOT IN ('closed_won', 'closed_lost', 'disqualified')
+  AND stage_entered_at IS NOT NULL
+GROUP BY current_stage
+ORDER BY avg_days_in_stage DESC;
+```
+
+### Audit campi chiave per completezza
+
+```sql
+-- Percentuale di completamento dei campi critici per lead
+SELECT
+  COUNT(*) AS total_leads,
+  ROUND(COUNTIF(lead_source IS NOT NULL) * 100.0 / COUNT(*), 1) AS pct_with_source,
+  ROUND(COUNTIF(company_size IS NOT NULL) * 100.0 / COUNT(*), 1) AS pct_with_company_size,
+  ROUND(COUNTIF(industry IS NOT NULL) * 100.0 / COUNT(*), 1) AS pct_with_industry,
+  ROUND(COUNTIF(gclid IS NOT NULL OR linkedin_click_id IS NOT NULL) * 100.0 / COUNT(*), 1) AS pct_with_click_id,
+  ROUND(COUNTIF(mql_at IS NOT NULL) * 100.0 / COUNT(*), 1) AS pct_reached_mql
+FROM crm_leads
+WHERE created_at >= DATE_SUB(CURRENT_DATE(), INTERVAL 90 DAY);
+```
+
+<Aside type="note">
+Esegui queste query ogni mese e mantieni un trend. Un calo della percentuale di lead con `lead_source` compilato segnala un problema nel tracking delle UTM o nel form submission handling. Un aumento dei lead stuck in stage indica un problema di processo commerciale o di definizione degli stage.
+</Aside>
+
+---
+
+## Account-based marketing (ABM) e i dati necessari
+
+L'ABM capovolge la logica del demand gen tradizionale. Invece di generare lead e sperare che il fit sia giusto, l'ABM identifica prima gli account target e poi costruisce campagne specifiche per quegli account.
+
+Ci sono tre tier di ABM per intensità di personalizzazione:
+
+- **ABM 1:1** — Pochi account strategici (5-20), personalizzazione totale, campagne dedicate
+- **ABM 1:few** — Cluster di account simili (20-100), personalizzazione per cluster
+- **ABM 1:many** — Segmento ampio ma definito (100-1000), automazione alta, personalizzazione moderata
+
+### I segnali necessari per costruire la target account list
+
+Per selezionare i target account, combini tre tipologie di dati:
+
+**Fit score dell'account**: quanto l'azienda corrisponde al tuo ICP. Si calcola sui dati firmografici (settore, dimensione, geografie, tecnologie in uso, modello di business). Fonti: CRM storico dei clienti won, Clearbit, ZoomInfo, Apollo.
+
+**Intent signals**: segnali di intenzione d'acquisto nel mercato. Non dal tuo sito — da fonti esterne. 6sense e Bombora aggregano dati da milioni di siti B2B e identificano le aziende che stanno ricercando attivamente categorie di prodotti. Un'azienda che negli ultimi 30 giorni ha aumentato di 4x le ricerche su termini legati alla tua categoria di prodotto è un segnale molto più forte di un'azienda che ha visitato una volta il tuo sito.
+
+**Engagement score dell'account**: quanto questo account ha interagito con i tuoi contenuti o canali. Include visite al sito (anche anonime, identificate tramite reverse IP lookup), interazioni con le tue email, partecipazione a tuoi webinar, connessioni LinkedIn con il tuo team.
+
+### Costruire la target account list con SQL
+
+```sql
+-- Target account list combinando fit, intent e engagement
+WITH account_fit AS (
+  SELECT
+    account_id,
+    account_name,
+    industry,
+    employee_count,
+    -- Fit score semplificato
+    CASE
+      WHEN industry IN ('SaaS', 'Fintech', 'Enterprise Software') THEN 30
+      WHEN industry IN ('Consulting', 'Agency') THEN 20
+      ELSE 5
+    END +
+    CASE
+      WHEN employee_count BETWEEN 200 AND 2000 THEN 25
+      WHEN employee_count BETWEEN 50 AND 199 THEN 15
+      ELSE 5
+    END AS fit_score
+  FROM crm_accounts
+),
+account_intent AS (
+  SELECT
+    account_id,
+    intent_score,  -- da 6sense o Bombora via integrazione
+    intent_category,
+    intent_updated_at
+  FROM intent_data_accounts
+  WHERE intent_updated_at >= DATE_SUB(CURRENT_DATE(), INTERVAL 30 DAY)
+),
+account_engagement AS (
+  SELECT
+    a.account_id,
+    COUNT(DISTINCT l.lead_id) AS known_contacts,
+    COUNT(DISTINCT e.event_id) AS total_engagements,
+    MAX(e.event_at) AS last_engagement_at
+  FROM crm_accounts a
+  LEFT JOIN crm_leads l ON l.account_id = a.account_id
+  LEFT JOIN engagement_events e ON e.lead_id = l.lead_id
+  WHERE e.event_at >= DATE_SUB(CURRENT_DATE(), INTERVAL 90 DAY)
+  GROUP BY a.account_id
+)
+SELECT
+  af.account_id,
+  af.account_name,
+  af.fit_score,
+  COALESCE(ai.intent_score, 0) AS intent_score,
+  COALESCE(ae.total_engagements, 0) AS engagement_count,
+  COALESCE(ae.known_contacts, 0) AS known_contacts,
+  af.fit_score + COALESCE(ai.intent_score, 0) + LEAST(COALESCE(ae.total_engagements, 0) * 2, 20) AS composite_score
+FROM account_fit af
+LEFT JOIN account_intent ai USING (account_id)
+LEFT JOIN account_engagement ae USING (account_id)
+WHERE af.fit_score >= 20  -- solo account con fit minimo
+ORDER BY composite_score DESC
+LIMIT 500;
+```
+
+<Aside type="tip">
+La target account list non è statica. Aggiornala ogni mese con nuovi segnali di intent. Un account che era tier B sei mesi fa potrebbe essere diventato tier A perché ha ricevuto funding o ha assunto un nuovo CTO. Bombora e 6sense aggiornano i loro modelli settimanalmente — usa quell'aggiornamento per mantenere la lista fresca.
+</Aside>
+
+---
+
+## MQL → SQL → Opportunity: il funnel B2B in SQL
+
+Il funnel B2B non è solo una visualizzazione marketing — è il modello operativo che connette marketing, SDR e sales. Misurare ogni stage con precisione permette di identificare dove il funnel perde valore.
+
+### Conversion rates e velocity per stage
+
+```sql
+-- Funnel completo con conversion rates e velocity media
+WITH funnel_stages AS (
+  SELECT
+    lead_id,
+    lead_source,
+    first_touch_channel,
+    created_at AS lead_created_at,
+    mql_at,
+    sql_at,
+    opportunity_created_at,
+    closed_at,
+    deal_status,
+    opportunity_amount_eur
+  FROM mart_b2b_funnel
+  WHERE created_at >= DATE_TRUNC(DATE_SUB(CURRENT_DATE(), INTERVAL 6 MONTH), MONTH)
+)
+SELECT
+  first_touch_channel,
+
+  -- Volume
+  COUNT(DISTINCT lead_id) AS leads,
+  COUNT(DISTINCT CASE WHEN mql_at IS NOT NULL THEN lead_id END) AS mqls,
+  COUNT(DISTINCT CASE WHEN sql_at IS NOT NULL THEN lead_id END) AS sqls,
+  COUNT(DISTINCT CASE WHEN opportunity_created_at IS NOT NULL THEN lead_id END) AS opps,
+  COUNT(DISTINCT CASE WHEN deal_status = 'closed_won' THEN lead_id END) AS won,
+
+  -- Conversion rates
+  ROUND(
+    COUNT(DISTINCT CASE WHEN mql_at IS NOT NULL THEN lead_id END) * 100.0 /
+    NULLIF(COUNT(DISTINCT lead_id), 0), 1
+  ) AS lead_to_mql_pct,
+  ROUND(
+    COUNT(DISTINCT CASE WHEN sql_at IS NOT NULL THEN lead_id END) * 100.0 /
+    NULLIF(COUNT(DISTINCT CASE WHEN mql_at IS NOT NULL THEN lead_id END), 0), 1
+  ) AS mql_to_sql_pct,
+  ROUND(
+    COUNT(DISTINCT CASE WHEN opportunity_created_at IS NOT NULL THEN lead_id END) * 100.0 /
+    NULLIF(COUNT(DISTINCT CASE WHEN sql_at IS NOT NULL THEN lead_id END), 0), 1
+  ) AS sql_to_opp_pct,
+  ROUND(
+    COUNT(DISTINCT CASE WHEN deal_status = 'closed_won' THEN lead_id END) * 100.0 /
+    NULLIF(COUNT(DISTINCT CASE WHEN opportunity_created_at IS NOT NULL THEN lead_id END), 0), 1
+  ) AS opp_to_won_pct,
+
+  -- Velocity (giorni medi per avanzare)
+  ROUND(AVG(DATE_DIFF(DATE(mql_at), DATE(lead_created_at), DAY)), 1) AS avg_days_lead_to_mql,
+  ROUND(AVG(DATE_DIFF(DATE(sql_at), DATE(mql_at), DAY)), 1) AS avg_days_mql_to_sql,
+  ROUND(AVG(DATE_DIFF(DATE(closed_at), DATE(opportunity_created_at), DAY)), 1) AS avg_days_opp_to_close,
+
+  -- Revenue
+  SUM(CASE WHEN deal_status = 'closed_won' THEN opportunity_amount_eur ELSE 0 END) AS won_revenue_eur
+
+FROM funnel_stages
+GROUP BY first_touch_channel
+ORDER BY won_revenue_eur DESC;
+```
+
+### Leakage analysis: dove il funnel perde lead
+
+```sql
+-- Lead che si fermano a ogni stage senza avanzare
+SELECT
+  'Lead → MQL' AS stage_transition,
+  COUNT(*) AS leads_stuck,
+  ROUND(AVG(DATE_DIFF(CURRENT_DATE(), DATE(created_at), DAY)), 0) AS avg_days_stuck
+FROM mart_b2b_funnel
+WHERE mql_at IS NULL
+  AND created_at <= DATE_SUB(CURRENT_DATE(), INTERVAL 30 DAY)
+  AND lead_status NOT IN ('disqualified', 'unsubscribed')
+
+UNION ALL
+
+SELECT
+  'MQL → SQL' AS stage_transition,
+  COUNT(*) AS leads_stuck,
+  ROUND(AVG(DATE_DIFF(CURRENT_DATE(), DATE(mql_at), DAY)), 0) AS avg_days_stuck
+FROM mart_b2b_funnel
+WHERE mql_at IS NOT NULL
+  AND sql_at IS NULL
+  AND mql_at <= DATE_SUB(CURRENT_DATE(), INTERVAL 14 DAY)
+  AND lead_status NOT IN ('disqualified', 'recycled')
+
+UNION ALL
+
+SELECT
+  'SQL → Opportunity' AS stage_transition,
+  COUNT(*) AS leads_stuck,
+  ROUND(AVG(DATE_DIFF(CURRENT_DATE(), DATE(sql_at), DAY)), 0) AS avg_days_stuck
+FROM mart_b2b_funnel
+WHERE sql_at IS NOT NULL
+  AND opportunity_created_at IS NULL
+  AND sql_at <= DATE_SUB(CURRENT_DATE(), INTERVAL 7 DAY)
+  AND lead_status NOT IN ('disqualified', 'recycled');
+```
+
+<Aside type="note">
+La leakage analysis va disaggregata per canale, per SDR e per segmento di mercato. Il MQL→SQL rate che per il canale LinkedIn è al 45% e per il canale Content è al 12% non è un problema di modello di scoring — è un segnale che quei due canali stanno attirando profili completamente diversi.
+</Aside>
+
+---
+
+## Enrichment automatico
+
+L'enrichment automatico risolve un problema pratico: i form che chiedono troppe informazioni hanno tassi di compilazione più bassi. Con l'enrichment, chiedi solo email e nome, e arricchisci il record con tutto il resto automaticamente.
+
+### I principali strumenti di enrichment
+
+| Strumento | Punti di forza | Limiti principali | Prezzo indicativo |
+|---|---|---|---|
+| Clearbit | Dati firmografici accurati, integrazione nativa HubSpot/Salesforce, Reveal per visitor ID anonimo | Database focalizzato su mercato anglosassone, costo elevato per alto volume | Da ~$12K/anno |
+| Apollo | Database contatti molto ampio (270M+), ottimo per prospecting outbound, enrichment via API | Qualità dei dati inferiore a Clearbit per mercati europei | Da ~$1.2K/anno |
+| Clay | Aggregatore multi-fonte (Clearbit + Apollo + LinkedIn + altri), waterfall enrichment, automazioni no-code | Richiede tempo di setup, learning curve per uso avanzato | Pay-per-credit |
+| ZoomInfo | Database enterprise, ottimo per North America, conformità GDPR migliorata | Costo molto elevato, contratti annuali, overkill per PMI | Da ~$20K/anno |
+
+### Il pattern webhook per enrichment real-time
+
+Il flusso ottimale è questo:
+
+1. Il lead compila il form con email aziendale
+2. Il MAP (HubSpot, Marketo) crea il record e invia un webhook al tuo sistema di enrichment
+3. Il sistema chiama le API di Clearbit/Apollo con l'email
+4. I dati arricchiti vengono scritti nel record CRM tramite API
+5. Se l'enrichment conferma l'account come ICP tier A, viene triggerata la notifica immediata al SDR
+
+In pseudocodice dbt/Python:
+
+```python
+# Esempio webhook handler per enrichment via Clearbit
+def enrich_lead(lead_id: str, email: str):
+    # Chiama Clearbit Enrichment API
+    clearbit_data = clearbit.Enrichment.find(email=email, stream=True)
+
+    if clearbit_data and clearbit_data.get('company'):
+        company = clearbit_data['company']
+
+        # Calcola fit score base
+        fit_score = 0
+        if company.get('metrics', {}).get('employees', 0) > 100:
+            fit_score += 20
+        if company.get('category', {}).get('industry') in TARGET_INDUSTRIES:
+            fit_score += 25
+
+        # Aggiorna CRM tramite API
+        update_crm_lead(lead_id, {
+            'company_size': company.get('metrics', {}).get('employees'),
+            'industry': company.get('category', {}).get('industry'),
+            'company_domain': company.get('domain'),
+            'fit_score': fit_score,
+            'enrichment_source': 'clearbit',
+            'enrichment_at': datetime.utcnow().isoformat()
+        })
+
+        # Trigger notifica se ICP
+        if fit_score >= 40:
+            notify_sdr(lead_id, priority='high')
+```
+
+<Aside type="caution">
+L'enrichment automatico ha implicazioni GDPR in Europa. Se arricchisci un record con dati che il contatto non ha fornito direttamente, devi avere una legittima base legale (legitimate interest o consenso). Consulta il tuo DPO prima di implementare enrichment automatico su scala. Clearbit e ZoomInfo hanno documentazione specifica sulla conformità GDPR.
+</Aside>
+
+---
+
+## Marketing attribution in B2B
+
+Il motivo per cui last-touch attribution è quasi inutile nel B2B non è filosofico — è matematico. In B2C, un ciclo di acquisto dura ore o giorni. In B2B, dura da 3 a 18 mesi, con un buying committee di 6-10 persone, ognuna con touchpoint diversi.
+
+In quel contesto, attribuire il 100% del merito all'ultima touch prima della firma del contratto (spesso una ricerca branded su Google) è come attribuire la vittoria di una partita solo al giocatore che ha segnato il gol finale.
+
+### I modelli di attribution multi-touch rilevanti per il B2B
+
+**Linear attribution**: distribuisce il credito equamente tra tutti i touchpoint. Vantaggio: semplice. Svantaggio: assegna lo stesso peso a una visita da newsletter e a una richiesta demo.
+
+**W-shape attribution**: assegna il 30% al primo touch, il 30% al touchpoint che ha creato il lead (form submit), il 30% al touchpoint che ha creato l'opportunity, e distribuisce il 10% restante tra i touch intermedi. È il modello più diffuso in B2B perché enfatizza i tre momenti di conversione chiave.
+
+**Full-path (U-shape esteso)**: W-shape con l'aggiunta del touchpoint che ha portato alla chiusura del deal. Utile per aziende con cicli di vendita lunghi dove l'ultimo push è importante quanto i touch iniziali.
+
+**Data-driven (Shapley value)**: distribuisce il credito in base al contributo marginale di ogni canale, calcolato su dati storici. Richiede volumi significativi (almeno 500-1000 conversioni) per essere statisticamente stabile. È il più accurato ma anche il più difficile da spiegare al CFO.
+
+<Aside type="tip">
+Per la maggior parte delle aziende B2B con meno di 200 deal/anno, W-shape attribution è il punto ottimale tra accuratezza e semplicità. Inizia da lì. Il modello data-driven diventa rilevante solo quando hai volume sufficiente per l'analisi statistica.
+</Aside>
+
+---
+
+## Pipeline revenue attribution
+
+L'attribution multi-touch rimane teorica finché non è collegata alle revenue reali nel CRM. La pipeline influenced report è il documento che porta questa analisi al board.
+
+### Query SQL per pipeline influenced by channel
+
+```sql
+-- Pipeline e revenue attribuita per canale con modello W-shape
+WITH touchpoints AS (
+  SELECT
+    t.lead_id,
+    t.channel,
+    t.touch_type,  -- 'first_touch', 'lead_create', 'opp_create', 'opp_close', 'other'
+    t.touched_at,
+    o.opportunity_id,
+    o.opportunity_amount_eur,
+    o.deal_status,
+    o.closed_at,
+    -- W-shape weight
+    CASE t.touch_type
+      WHEN 'first_touch'  THEN 0.30
+      WHEN 'lead_create'  THEN 0.30
+      WHEN 'opp_create'   THEN 0.30
+      ELSE 0.10 / NULLIF(COUNT(*) OVER (
+        PARTITION BY t.lead_id
+        WHERE t.touch_type = 'other'
+      ), 0)
+    END AS attribution_weight
+  FROM attribution_touchpoints t
+  JOIN crm_opportunities o USING (lead_id)
+  WHERE o.created_at >= DATE_TRUNC(DATE_SUB(CURRENT_DATE(), INTERVAL 12 MONTH), MONTH)
+)
+SELECT
+  channel,
+  COUNT(DISTINCT opportunity_id) AS influenced_opportunities,
+  ROUND(SUM(opportunity_amount_eur * attribution_weight), 0) AS attributed_pipeline_eur,
+  ROUND(SUM(
+    CASE WHEN deal_status = 'closed_won'
+    THEN opportunity_amount_eur * attribution_weight
+    ELSE 0 END
+  ), 0) AS attributed_won_revenue_eur,
+  ROUND(
+    SUM(CASE WHEN deal_status = 'closed_won' THEN opportunity_amount_eur * attribution_weight ELSE 0 END) /
+    NULLIF(SUM(opportunity_amount_eur * attribution_weight), 0) * 100, 1
+  ) AS win_rate_pct
+FROM touchpoints
+GROUP BY channel
+ORDER BY attributed_pipeline_eur DESC;
+```
+
+Questa tabella risponde alla domanda del board: "Dove stiamo investendo il budget marketing e quale ritorno stiamo vedendo sul pipeline?"
+
+---
+
+## Governance e data quality nel CRM
+
+La governance CRM è spesso il lavoro invisibile che determina se tutti gli altri sistemi funzionano. Puoi avere il miglior modello di attribution, ma se il 30% dei tuoi lead ha `lead_source = 'Other'`, il modello produce garbage.
+
+### Regole fondamentali di governance
+
+**Deduplication**: implementa una regola di deduplication che merga i lead duplicati automaticamente quando il dominio email è identico e la creazione è avvenuta entro 24 ore. Per duplicati meno chiari, genera una coda manuale per la review.
+
+**Normalization**: standardizza i valori dei campi. `industry = 'SaaS'` e `industry = 'Software as a Service'` e `industry = 'Cloud Software'` sono la stessa cosa — ma SQL le tratterà come tre segmenti diversi. Usa lookup table per normalizzare.
+
+**Mandatory fields**: definisci campi obbligatori al momento della creazione. `lead_source` non dovrebbe mai essere null. Usa valori default controllati (`'organic_direct'`, `'paid_search'`, `'referral'`) anziché lasciare null o `'Other'`.
+
+**Audit periodico**: oltre alle query di audit già presentate, monitora:
+
+```sql
+-- Report mensile qualità dati CRM
+SELECT
+  DATE_TRUNC(created_at, MONTH) AS month,
+  COUNT(*) AS leads_created,
+  ROUND(COUNTIF(lead_source IS NULL OR lead_source = 'Other') * 100.0 / COUNT(*), 1) AS pct_missing_source,
+  ROUND(COUNTIF(company_name IS NULL) * 100.0 / COUNT(*), 1) AS pct_missing_company,
+  ROUND(COUNTIF(industry IS NULL) * 100.0 / COUNT(*), 1) AS pct_missing_industry,
+  ROUND(COUNTIF(score IS NULL) * 100.0 / COUNT(*), 1) AS pct_missing_score
+FROM crm_leads
+WHERE created_at >= DATE_SUB(CURRENT_DATE(), INTERVAL 12 MONTH)
+GROUP BY month
+ORDER BY month DESC;
+```
+
+Se vedi un mese dove `pct_missing_source` sale improvvisamente dal 5% al 25%, c'è stato un problema nel tracking UTM o nel form integration. Identificarlo in tempo reale evita di scoprirlo sei mesi dopo quando fai l'attribution review.
+
+### Gestione del buying committee
+
+Nel B2B, l'opportunità non appartiene a un solo lead — appartiene a un account. Un deal enterprise tipico coinvolge il champion (chi usa il prodotto), l'economic buyer (chi approva il budget) e il technical evaluator (chi valida l'integrazione). Se nel CRM hai solo il champion, stai perdendo informazioni critiche su chi influenza la decisione.
+
+La governance del buying committee richiede:
+
+- collegare ogni lead a un account in modo affidabile (non solo per email domain, ma con matching esplicito)
+- tracciare il ruolo di ogni contatto nell'opportunity (champion, sponsor, blocker, influencer)
+- misurare quanti contatti dell'account sono stati raggiunti prima della chiusura — i deal con 3+ contatti ingaggiati hanno generalmente win rate più alto
 
 ---
 
 ## Il funnel B2B reale
 
-Il funnel utile non e' solo:
+Il funnel utile non è solo:
 
 ```text
 click -> form -> conversione
 ```
 
-E':
+È:
 
 ```text
 visitor -> lead -> MQL -> SQL -> opportunity -> pipeline -> closed_won
@@ -30,70 +600,10 @@ visitor -> lead -> MQL -> SQL -> opportunity -> pipeline -> closed_won
 
 Per ogni passaggio devi avere:
 
-- definizione condivisa
-- owner
-- timestamp
-- criterio di ingresso e uscita
-
----
-
-## Lead scoring: esplicito + implicito
-
-Uno scoring serio combina due dimensioni.
-
-### Fit score
-
-Quanto il lead assomiglia al cliente ideale.
-
-Esempi:
-
-- industry target
-- company size
-- geografia
-- job seniority
-
-### Intent score
-
-Quanto il comportamento suggerisce intenzione reale.
-
-Esempi:
-
-- visite pricing
-- download case study
-- demo request
-- ritorni multipli in 7 giorni
-
-### Modello semplice
-
-```text
-total_score = fit_score + intent_score
-```
-
-Esempio tabella:
-
-| Segnale | Punti |
-|---|---|
-| Job title decision maker | +20 |
-| Azienda target tier A | +15 |
-| Visita pricing | +8 |
-| Download case study | +10 |
-| Richiesta demo | +30 |
-| Email personale generica | -10 |
-
----
-
-## Da score a stage
-
-Lo score da solo non basta. Va tradotto in azione.
-
-| Regola | Output |
-|---|---|
-| score < 30 | resta in nurture |
-| score 30-59 | MQL |
-| score >= 60 e company fit alto | routing sales |
-| demo request validata | SQL o meeting booked |
-
-Se score e stage non sono collegati, il modello resta teorico.
+- definizione condivisa con il team sales
+- owner esplicito con SLA
+- timestamp affidabile scritto al primo evento (non sovrascritto)
+- criterio di ingresso e uscita documentato
 
 ---
 
@@ -105,47 +615,31 @@ Le piattaforme adv vedono facilmente il form submit. Molto meno facilmente vedon
 - opportunity creata
 - closed won
 
-L'offline conversion import serve a rimandare questi esiti alle piattaforme.
+L'offline conversion import serve a rimandare questi esiti alle piattaforme. Il flusso operativo:
 
-### Esempio di flusso
+1. Click adv con `gclid` (Google) o `li_fat_id` (LinkedIn) salvato nel form hidden field
+2. Form submit crea record CRM con click ID persistito
+3. Quando il lead avanza a MQL, SQL o opportunity, il CRM invia la conversione tramite API alle piattaforme adv
+4. Gli algoritmi di bidding ottimizzano verso i lead che diventano pipeline, non solo form fill
 
-1. click adv con `gclid` o altro click ID
-2. form lead crea record CRM
-3. CRM conserva click ID
-4. quando il lead diventa opportunity o deal vinto, il sistema reimporta la conversione a Google Ads o LinkedIn
+Questo permette agli algoritmi di ottimizzare verso lead di qualità, non solo volume. In mercati B2B competitivi, la differenza tra ottimizzare su form fill e ottimizzare su opportunity created può cambiare il ROI delle campagne del 40-60%.
 
-Questo permette agli algoritmi di ottimizzare verso lead di qualita', non solo volume.
+### Mapping minimo da salvare nel CRM
 
----
-
-## Mapping minimo da salvare nel CRM
-
-| Campo | Perche' serve |
+| Campo | Perché serve |
 |---|---|
-| first_touch_source | analisi top funnel |
-| latest_touch_source | gestione domanda attiva |
-| `gclid` / click_id | offline conversion import |
-| campaign_id | riconciliazione spend |
-| lead_created_at | coorti |
-| mql_at / sql_at | velocita' funnel |
-| opportunity_amount | revenue attribution |
+| `first_touch_source` | Analisi top funnel e sourced pipeline |
+| `latest_touch_source` | Gestione domanda attiva, last-touch fallback |
+| `gclid` / `li_fat_id` | Offline conversion import per piattaforme adv |
+| `utm_campaign` | Riconciliazione spend campagna |
+| `lead_created_at` | Coorti, velocity analysis |
+| `mql_at` | Velocity MQL, leakage analysis |
+| `sql_at` | Velocity SQL, SDR performance |
+| `opportunity_created_at` | Pipeline timing |
+| `opportunity_amount_eur` | Revenue attribution |
+| `enrichment_source` | Audit qualità enrichment |
 
-Se questi campi non entrano nel CRM al momento della lead creation, recuperarli dopo e' sempre piu' difficile.
-
----
-
-## Revenue attribution B2B
-
-Nel B2B semplice il last touch porta quasi sempre a sovrastimare branded search e retargeting. Ma anche un first touch puro e' insufficiente.
-
-Un modello pragmatico spesso funziona cosi':
-
-- first touch per misurare sourced demand
-- last touch per misurare capture demand
-- opportunity attribution multi-touch per allocazione budget
-
-La domanda giusta non e' "qual e' il modello perfetto?".
-E': "quale modello usa il board per decidere il budget senza autoinganni evidenti?".
+Se questi campi non entrano nel CRM al momento della lead creation, recuperarli dopo è sempre più difficile — e spesso impossibile per i click ID che scadono.
 
 ---
 
@@ -155,54 +649,22 @@ E': "quale modello usa il board per decidere il budget senza autoinganni evident
 
 | KPI | Significato |
 |---|---|
-| MQL volume | volume potenziale |
-| MQL -> SQL rate | qualita' del lead e allineamento sales |
-| SQL -> Opportunity rate | qualita' commerciale |
-| Pipeline generated | impatto economico intermedio |
-| Closed won revenue | impatto finale |
-| CAC payback | sostenibilita' |
+| MQL volume per canale | Volume potenziale disaggregato |
+| MQL → SQL rate | Qualità del lead e allineamento marketing-sales |
+| SQL → Opportunity rate | Qualità commerciale dello stadio di discovery |
+| Pipeline generated (attributito) | Impatto economico intermedio del marketing |
+| Closed won revenue (attributito) | Impatto finale sulle revenue |
+| CAC payback period | Sostenibilità dell'acquisizione |
 
 ### KPI di processo
 
-- time to MQL
-- time to first sales touch
-- no-show rate demo
-- lead aging
-- routing SLA rispettati
+- Time to MQL: media giorni dalla lead creation al MQL status
+- Time to first sales touch: ore dalla notifica SDR al primo contatto
+- No-show rate demo: percentuale di demo prenotate e non avvenute
+- Lead aging report: distribuzione lead per anzianità in ogni stage
+- Routing SLA compliance: percentuale di lead gestiti entro SLA concordato
 
-Se misuri solo CPL e non il tempo di follow-up, stai spiegando meta' del problema.
-
----
-
-## Query esempio: conversione da lead a pipeline
-
-```sql
-SELECT
-  first_touch_channel,
-  COUNT(DISTINCT lead_id) AS leads,
-  COUNT(DISTINCT CASE WHEN mql_at IS NOT NULL THEN lead_id END) AS mql,
-  COUNT(DISTINCT CASE WHEN sql_at IS NOT NULL THEN lead_id END) AS sql,
-  COUNT(DISTINCT opportunity_id) AS opportunities,
-  SUM(opportunity_amount_eur) AS pipeline_eur,
-  SUM(CASE WHEN deal_status = 'closed_won' THEN won_amount_eur ELSE 0 END) AS won_revenue_eur
-FROM mart_b2b_revenue_funnel
-GROUP BY first_touch_channel
-ORDER BY pipeline_eur DESC;
-```
-
-Questa tabella vale piu' di qualsiasi dashboard lead-gen basata solo su CPL.
-
----
-
-## Governance tra marketing e sales
-
-Tre accordi devono essere espliciti:
-
-1. definizione MQL
-2. SLA di presa in carico sales
-3. definizione SQL / opportunity qualificata
-
-Senza questi accordi, il marketing dira' "vi abbiamo mandato lead buoni" e il sales dira' "erano tutti freddi". Nessun dato risolve una definizione assente.
+Se misuri solo CPL e non il tempo di follow-up, stai spiegando meno di metà del problema — e probabilmente la metà meno interessante.
 
 ---
 
@@ -210,30 +672,32 @@ Senza questi accordi, il marketing dira' "vi abbiamo mandato lead buoni" e il sa
 
 ### 1. Scoring troppo complesso
 
-Se nessuno sa spiegare perche' un lead ha score 73, il modello non verra' usato.
+Se nessuno sa spiegare perché un lead ha score 73, il modello non verrà usato. Inizia con 10-15 regole massimo, poi aggiungi complessità solo dove i dati lo giustificano.
 
 ### 2. Nessun feedback loop da sales
 
-Il modello di scoring deve imparare da:
-
-- lead respinti
-- motivi di disqualifica
-- velocity verso opportunity
+Il modello di scoring deve imparare da lead respinti, motivi di disqualifica, e velocity verso opportunity. Senza questo feedback, il modello si cristallizza su ipotesi iniziali che potrebbero non corrispondere alla realtà commerciale.
 
 ### 3. Piattaforme ads ottimizzate su form fill
 
-Nel B2B questo porta quasi sempre a lead quantity over quality.
+Nel B2B questo porta quasi sempre a lead quantity over quality. Le campagne LinkedIn che ottimizzano su Lead Gen Form generano volume — ma senza offline conversion import, la piattaforma non sa distinguere i lead che diventano deal da quelli che non rispondono al secondo email.
 
 ### 4. Nessuna persistenza dei click ID
 
-Senza `gclid` o equivalente, l'offline conversion import salta.
+Senza `gclid` o equivalente, l'offline conversion import salta. Il `gclid` dura 90 giorni — se il lead diventa opportunity oltre quel periodo, va importato comunque come conversione offline ma senza matching preciso al click.
+
+### 5. Attribution come conversazione interna infinita
+
+L'attribution perfetta non esiste. Il rischio è passare mesi a discutere quale modello è più giusto senza mai arrivare a una decisione. Scegli un modello, implementalo, usalo per 6 mesi, poi raffinalo. Un W-shape imperfetto usato dal board è infinitamente più utile di un modello data-driven perfetto che non ha stakeholder.
 
 ---
 
 ## Riepilogo operativo
 
-- Il funnel B2B va misurato fino a pipeline e revenue, non fermato al lead.
-- Lead scoring funziona quando combina fit e intent ed e' collegato a stage operativi.
-- L'offline conversion import e' una leva chiave per migliorare il bidding B2B.
-- Marketing e sales devono condividere definizioni, timestamp e SLA.
-- La vera dashboard B2B non misura solo MQL: misura velocita', qualita' e fatturato.
+- Il funnel B2B va misurato fino a pipeline e revenue, non fermato al lead. Le query di funnel analysis presentate in questa lezione sono il punto di partenza per ogni conversazione con il board.
+- Lead scoring funziona quando combina fit firmografico e engagement comportamentale, ed è collegato a stage operativi con owner e SLA. Un modello semplice e usato batte un modello complesso e ignorato.
+- L'enrichment automatico (Clearbit, Apollo, Clay) risolve il problema dei form corti: meno dati chiesti al lead, più dati arricchiti automaticamente. Implementa un webhook pattern per arricchire i record al momento della creazione.
+- L'offline conversion import è una leva chiave per migliorare il bidding B2B. Persisti i click ID nel CRM e reimporta le conversioni significative (MQL, opportunity, closed won) alle piattaforme adv.
+- Per l'attribution in B2B, W-shape è il punto di equilibrio tra accuratezza e adottabilità. Last-touch nel B2B con cicli da 3-18 mesi è quasi sempre fuorviante.
+- La governance CRM — deduplication, normalization, campi obbligatori, audit periodici — è il lavoro invisibile che determina la qualità di tutti gli altri sistemi. Metti un processo di audit mensile in produzione prima di investire in strumenti di attribution più sofisticati.
+- Marketing e sales devono condividere definizioni scritte di MQL, SQL e opportunity, con SLA espliciti. Nessun dato risolve una definizione assente.

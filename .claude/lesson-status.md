@@ -1,221 +1,293 @@
-# GinnyTech — Stato Lezioni
-_Aggiornato: 2026-03-02 (sessione finale) | Path lezioni: `src/content/corso/`_
+# Lesson Status
+
+> Aggiornato: 2026-03-07
+> Totale: 157 lezioni — ✅ 122 OK / ⚠️ 8 incomplete / ❌ 0 stub / 📋 12 cheat-sheet
 
 ## Legenda
-- ✅ **OK** — ≥3000 parole, alta qualità, non toccare
-- ⚠️ **INCOMPLETA** — 1500–3000 parole, contenuto ma troppo sottile, espandere
-- ❌ **STUB** — <1500 parole per lezione regolare, da scrivere da zero
-- 📋 **CHEAT SHEET** — formato riassunto, standard diversi (<1500 parole OK)
-- 📊 **CASO STUDIO** — dovrebbe essere ≥1500 parole con dati reali
+- ✅ **OK** — ≥3000 parole, struttura MDX valida, nessun anti-pattern grave
+- ⚠️ **incomplete** — 1500–2999 parole, o anti-pattern, o contenuto sottile
+- ❌ **stub** — <1500 parole, da scrivere da zero
+- 📋 **cheat-sheet** — formato riassunto, standard diversi (<1500w accettabili)
+- 📊 **caso-studio** — standard ≥1500w con dati reali
 
 ---
 
-## Stato attuale — TUTTE LE LEZIONI REGOLARI COMPLETATE ✅
+## panoramica
 
-Nessuna lezione regolare con status ⚠️ o ❌ rimasta.
-Tutti i file ≥3000 parole tranne i caso-studio (standard ≥1500w).
-
----
-
-## Lezioni OK — non toccare (✅)
-
-### panoramica
-| Lezione | Parole | Note |
-|---------|--------|------|
-| `mappe-concettuali.mdx` | ~3500 | ✅ Riscritto da zero |
-
-### marketing-data-science (TUTTE OK)
-| Lezione | Parole | Note |
-|---------|--------|------|
-| `text-generation.mdx` | 4767 | ✅ |
-| `embeddings.mdx` | 4489 | ✅ |
-| `python.mdx` | 4399 | ✅ |
-| `hadi-cycles.mdx` | 4287 | ✅ |
-| `strategy.mdx` | 4345 | ✅ |
-| `trigger-analytics.mdx` | 4088 | ✅ |
-| `brand.mdx` | 3903 | ✅ |
-| `user-centricity.mdx` | 3711 | ✅ |
-| `experimentation.mdx` | 3466 | ✅ Riferimento qualità |
-| `customer-analytics.mdx` | 3725 | ✅ |
-| `retention.mdx` | 4716 | ✅ |
-| `attribution.mdx` | 3146 | ✅ |
-| `analytic-traps.mdx` | 3059 | ✅ |
-| `nps-critique.mdx` | 3127 | ✅ Espanso |
-| `cluster-analysis.mdx` | 3170 | ✅ Espanso |
-| `unit-economics.mdx` | 3300 | ✅ Espanso |
-| `pmf.mdx` | 3265 | ✅ Espanso |
-| `caso-studio.mdx` | 1878 | 📊 OK |
-
-### gestione-data-driven
-| Lezione | Parole | Note |
-|---------|--------|------|
-| `framework-jtbd.mdx` | 3312 | ✅ Riferimento qualità |
-| `ciclo-deming-hadi.mdx` | 3338 | ✅ Riferimento qualità |
-| `ricerca-quantitativa.mdx` | 3393 | ✅ |
-| `interviste-profondita.mdx` | 3594 | ✅ Espanso |
-| `okr-e-kpi.mdx` | 3344 | ✅ Espanso |
-| `decision-making-dati.mdx` | 3589 | ✅ Espanso |
-| `cultura-data-driven.mdx` | 3596 | ✅ Espanso |
-| `caso-studio.mdx` | 2624 | 📊 OK |
-
-### analisi-prodotto
-| Lezione | Parole | Note |
-|---------|--------|------|
-| `analisi-coorte.mdx` | 3404 | ✅ Riferimento qualità |
-| `customer-development.mdx` | 3701 | ✅ |
-| `ab-testing.mdx` | 3921 | ✅ Espanso |
-| `onboarding-attivazione.mdx` | 3719 | ✅ Espanso |
-| `product-market-fit.mdx` | 3407 | ✅ Espanso |
-| `retention-framework.mdx` | 3475 | ✅ Espanso |
-| `prioritizzazione-feature.mdx` | 3183 | ✅ Espanso |
-| `nps-net-promoter-score.mdx` | 3085 | ✅ Espanso |
-| `strumenti-product-analytics.mdx` | 3122 | ✅ Espanso |
-| `ux-research.mdx` | 3288 | ✅ Espanso |
-| `caso-studio.mdx` | 1919 | 📊 OK |
-
-### analisi-marketing
-| Lezione | Parole | Note |
-|---------|--------|------|
-| `funnel-unit-economics.mdx` | 3225 | ✅ |
-| `marketing-data-pipeline.mdx` | 3142 | ✅ |
-| `performance-marketing.mdx` | 3475 | ✅ Espanso |
-| `modelli-attribuzione.mdx` | 3376 | ✅ Espanso |
-| `crm-email-analytics.mdx` | 3932 | ✅ Espanso |
-| `costruire-brand-forte.mdx` | 3504 | ✅ Espanso |
-| `seo-content-analytics.mdx` | 3385 | ✅ Espanso |
-| `efficacia-brand.mdx` | 3674 | ✅ Espanso |
-| `social-media-analytics.mdx` | 3578 | ✅ Espanso |
-| `ga4-avanzato.mdx` | 3144 | ✅ Espanso |
-| `customer-journey-mapping.mdx` | 3139 | ✅ Espanso |
-| `analisi-end-to-end-utm.mdx` | 3148 | ✅ Espanso |
-| `caso-studio.mdx` | 2244 | 📊 OK |
-
-### metriche-fondamenti
-| Lezione | Parole | Note |
-|---------|--------|------|
-| `statistica-fondamenti.mdx` | 3967 | ✅ |
-| `metriche-fondamentali.mdx` | 5202 | ✅ |
-| `approccio-analitico.mdx` | 4376 | ✅ |
-| `inizio-successo.mdx` | 3167 | ✅ |
-| `generazione-idee.mdx` | 3115 | ✅ Espanso |
-| `ricerca-desk.mdx` | 3077 | ✅ Espanso |
-| `caso-studio.mdx` | 848 | 📊 STUB — da espandere |
-
-### data-collection
-| Lezione | Parole | Note |
-|---------|--------|------|
-| `introduction.mdx` | 4358 | ✅ |
-| `event-tracking.mdx` | 4965 | ✅ |
-| `framework.mdx` | 5001 | ✅ |
-| `integrations.mdx` | 3009 | ✅ CDP, Reverse ETL |
-| `privacy.mdx` | 3014 | ✅ GDPR, erasure, cookie-less |
-| `quickstart.mdx` | 3341 | ✅ Espanso |
-| `terminology.mdx` | 3172 | ✅ Espanso |
-| `jtbd.mdx` | 3108 | ✅ Espanso |
-
-### dashboard-visualizzazione
-| Lezione | Parole | Note |
-|---------|--------|------|
-| `data-visualization.mdx` | 4678 | ✅ |
-| `dashboard-strategiche.mdx` | 4743 | ✅ Riferimento qualità |
-| `storytelling-dati.mdx` | 3981 | ✅ |
-| `python-data-analysis.mdx` | 3634 | ✅ |
-| `sql-per-analisti.mdx` | 3002 | ✅ |
-| `etl-data-pipeline.mdx` | 3005 | ✅ |
-| `caso-studio.mdx` | 2169 | 📊 OK |
-
-### real-time-analytics
-| Lezione | Parole | Note |
-|---------|--------|------|
-| `clickhouse-fondamenti.mdx` | 4319 | ✅ |
-| `clickhouse-ottimizzazione.mdx` | 4696 | ✅ |
-| `cdc-pattern.mdx` | 3029 | ✅ |
-| `streaming.mdx` | 3068 | ✅ |
-| `clickhouse-rt.mdx` | 3010 | ✅ |
-| `dashboards.mdx` | 3024 | ✅ |
-| `mv-incrementali-dictionaries.mdx` | 3205 | ✅ Espanso |
-| `caso-studio.mdx` | 3263 | 📊 OK |
-
-### kafka-streaming
-| Lezione | Parole | Note |
-|---------|--------|------|
-| `kafka-clickhouse.mdx` | 3612 | ✅ |
-| `kafka-fondamenti.mdx` | 3700 | ✅ Espanso |
-| `kafka-producers-consumers.mdx` | 3800 | ✅ Espanso |
-| `kafka-schema-registry.mdx` | 3839 | ✅ Espanso |
-| `kafka-connect.mdx` | 3366 | ✅ Espanso |
-| `introduzione-streaming.mdx` | 3617 | ✅ Espanso |
-| `kafka-ops.mdx` | 3600 | ✅ Espanso |
-| `caso-studio.mdx` | 1551 | 📊 OK |
-
-### s3-data-lake
-| Lezione | Parole | Note |
-|---------|--------|------|
-| `data-lake-design.mdx` | 3569 | ✅ Espanso |
-| `architetture-avanzate.mdx` | 3010 | ✅ Espanso |
-| `s3-clickhouse.mdx` | 3120 | ✅ Espanso |
-| `s3queue-tabelle-incrementali.mdx` | 3497 | ✅ Espanso |
-| `formati-dati.mdx` | 3009 | ✅ Espanso |
-| `partitioning-strategy.mdx` | 3317 | ✅ Espanso |
-| `data-lifecycle.mdx` | 3199 | ✅ Espanso |
-| `pipeline-realtime.mdx` | 3060 | ✅ Espanso |
-| `s3-fondamenti.mdx` | 3266 | ✅ Espanso |
-| `introduzione-object-storage.mdx` | 3268 | ✅ Espanso |
-| `caso-studio.mdx` | 1727 | 📊 OK |
-
-### data-warehousing
-| Lezione | Parole | Note |
-|---------|--------|------|
-| `sql.mdx` | 3478 | ✅ Espanso |
-| `schema-evolution.mdx` | 3070 | ✅ Espanso |
-| `clickhouse.mdx` | 3158 | ✅ Espanso |
-| `olap.mdx` | 3132 | ✅ Espanso |
-| `data-modeling.mdx` | 3035 | ✅ Espanso |
-| `caso-studio.mdx` | 2843 | 📊 OK |
-
-### infrastructure-ops
-| Lezione | Parole | Note |
-|---------|--------|------|
-| `costs.mdx` | 3663 | ✅ |
-| `documentation.mdx` | 4386 | ✅ |
-| `iac-terraform.mdx` | 3020 | ✅ Testing, Infracost, Terragrunt |
-| `cicd.mdx` | 3145 | ✅ Espanso |
-| `monitoring-observability.mdx` | 3027 | ✅ Espanso |
-| `caso-studio.mdx` | 2008 | 📊 OK |
+✅ `mappe-concettuali.mdx` — 4111w
 
 ---
 
-## Cheat Sheets (📋 standard diversi)
-| File | Parole | Note |
-|------|--------|------|
-| `gestione-data-driven/cheat-sheet.mdx` | 1834 | 📋 |
-| `data-warehousing/cheat-sheet.mdx` | 1900 | 📋 |
-| `analisi-marketing/cheat-sheet.mdx` | 1300 | 📋 |
-| `s3-data-lake/cheat-sheet.mdx` | 980 | 📋 |
-| `analisi-prodotto/cheat-sheet.mdx` | 832 | 📋 |
-| `metriche-fondamenti/cheat-sheet.mdx` | 636 | 📋 |
-| `kafka-streaming/cheat-sheet.mdx` | 318 | 📋 |
-| `dashboard-visualizzazione/cheat-sheet.mdx` | 339 | 📋 |
-| `marketing-data-science/cheat-sheet.mdx` | 349 | 📋 |
-| `real-time-analytics/cheat-sheet.mdx` | 299 | 📋 |
-| `infrastructure-ops/cheat-sheet.mdx` | 294 | 📋 |
+## data-collection
+
+✅ `introduction.mdx` — 4418w
+✅ `event-tracking.mdx` — 5024w
+✅ `framework.mdx` — 5001w
+✅ `terminology.mdx` — 3172w
+✅ `jtbd.mdx` — 3112w
+✅ `privacy.mdx` — 3070w
+✅ `integrations.mdx` — 3077w
+✅ `quickstart.mdx` — 3484w
 
 ---
 
-## Conteggio riepilogativo (aggiornato 2026-03-02)
-| Status | Lezioni |
-|--------|---------|
-| ✅ OK (≥3000w) | ~86 lezioni regolari |
-| ⚠️ INCOMPLETA | 0 — tutte completate |
-| ❌ STUB | 0 — tutti completati |
-| 📋 Cheat Sheet | 11 |
-| 📊 Caso Studio OK (≥1500w) | 8 |
-| 📊 Caso Studio STUB | 1 (metriche-fondamenti/caso-studio 848w) |
-| **Totale** | **~107** |
+## metriche-fondamenti
+
+✅ `metriche-fondamentali.mdx` — 5202w
+✅ `statistica-fondamenti.mdx` — 4092w
+✅ `approccio-analitico.mdx` — 4509w
+✅ `inizio-successo.mdx` — 3300w
+✅ `generazione-idee.mdx` — 3115w
+✅ `ricerca-desk.mdx` — 3142w
+⚠️ `caso-studio.mdx` — 1512w
+📋 `cheat-sheet.mdx` — 765w
 
 ---
 
-## Prossimi step
-1. **Nuovo modulo dbt & Data Transformation** — aggiungere a `src/data/course-modules.ts` e creare ~8-10 lezioni in `src/content/corso/dbt-transformation/`
-2. **metriche-fondamenti/caso-studio.mdx** — espandere da 848w a ≥1500w
-3. **Cheat sheet** — considerare se espandere quelli più corti (<500w)
+## gestione-data-driven
+
+✅ `framework-jtbd.mdx` — 3378w
+✅ `ciclo-deming-hadi.mdx` — 3395w
+✅ `ricerca-quantitativa.mdx` — 3454w
+✅ `interviste-profondita.mdx` — 3663w
+✅ `okr-e-kpi.mdx` — 3414w
+✅ `decision-making-dati.mdx` — 3653w
+✅ `cultura-data-driven.mdx` — 3651w
+✅ `caso-studio.mdx` — 3116w
+📋 `cheat-sheet.mdx` — 1947w
+
+---
+
+## analisi-prodotto
+
+✅ `analisi-coorte.mdx` — 3521w
+✅ `ab-testing.mdx` — 3985w
+✅ `customer-development.mdx` — 3756w
+✅ `onboarding-attivazione.mdx` — 3787w
+✅ `product-market-fit.mdx` — 3477w
+✅ `retention-framework.mdx` — 3548w
+✅ `prioritizzazione-feature.mdx` — 3247w
+✅ `nps-net-promoter-score.mdx` — 3158w
+✅ `strumenti-product-analytics.mdx` — 3191w
+✅ `ux-research.mdx` — 3359w
+⚠️ `caso-studio.mdx` — 1986w
+📋 `cheat-sheet.mdx` — 969w
+
+---
+
+## analisi-marketing
+
+✅ `performance-marketing.mdx` — 3604w
+✅ `modelli-attribuzione.mdx` — 3376w
+✅ `crm-email-analytics.mdx` — 3932w
+✅ `costruire-brand-forte.mdx` — 3504w
+✅ `seo-content-analytics.mdx` — 3385w
+✅ `efficacia-brand.mdx` — 3674w
+✅ `social-media-analytics.mdx` — 3578w
+✅ `ga4-avanzato.mdx` — 3144w
+✅ `customer-journey-mapping.mdx` — 3145w
+✅ `analisi-end-to-end-utm.mdx` — 3154w
+✅ `funnel-unit-economics.mdx` — 3225w
+✅ `marketing-data-pipeline.mdx` — 3142w
+✅ `gtm-datalayer-qa-tracking.mdx` — 3029w
+✅ `server-side-tracking-gtm-server-capi.mdx` — 3028w
+✅ `cdp-identity-resolution-audience-activation.mdx` — 3031w
+✅ `b2b-martech-ops.mdx` — 5026w
+✅ `mmm-incrementality.mdx` — 4400w
+✅ `lifecycle-orchestration-multicanale.mdx` — 4583w
+✅ `martech-dashboard-operativi.mdx` — 5030w
+✅ `reverse-etl-sincronizzazione-audience.mdx` — 4678w
+⚠️ `caso-studio.mdx` — 2244w, incompleto
+📋 `cheat-sheet.mdx` — 1388w
+
+---
+
+## dashboard-visualizzazione
+
+✅ `dashboard-strategiche.mdx` — 4743w
+✅ `data-visualization.mdx` — 4678w
+✅ `storytelling-dati.mdx` — 3981w
+✅ `python-data-analysis.mdx` — 3702w
+✅ `etl-data-pipeline.mdx` — 3070w
+✅ `sql-per-analisti.mdx` — 3062w
+✅ `caso-studio.mdx` — 3007w
+📋 `cheat-sheet.mdx` — 1358w
+
+---
+
+## marketing-data-science
+
+✅ `text-generation.mdx` — 4767w
+✅ `retention.mdx` — 4778w
+✅ `python.mdx` — 4399w
+✅ `hadi-cycles.mdx` — 4347w
+✅ `embeddings.mdx` — 4554w
+✅ `strategy.mdx` — 4345w
+✅ `trigger-analytics.mdx` — 4088w
+✅ `brand.mdx` — 3903w
+✅ `customer-analytics.mdx` — 3789w
+✅ `user-centricity.mdx` — 3783w
+✅ `experimentation.mdx` — 3530w
+✅ `cluster-analysis.mdx` — 3232w
+✅ `attribution.mdx` — 3210w
+✅ `nps-critique.mdx` — 3196w
+✅ `unit-economics.mdx` — 3375w
+✅ `pmf.mdx` — 3331w
+✅ `analytic-traps.mdx` — 3123w
+⚠️ `caso-studio.mdx` — 2002w, incompleto
+📋 `cheat-sheet.mdx` — 1414w
+
+---
+
+## data-warehousing
+
+✅ `sql.mdx` — 3613w
+✅ `clickhouse.mdx` — 3211w
+✅ `olap.mdx` — 3263w
+✅ `data-modeling.mdx` — 3101w
+✅ `schema-evolution.mdx` — 3124w
+⚠️ `caso-studio.mdx` — 2986w, quasi OK (appena sotto soglia)
+📋 `cheat-sheet.mdx` — 2019w
+
+---
+
+## s3-data-lake
+
+✅ `data-lake-design.mdx` — 3636w
+✅ `s3queue-tabelle-incrementali.mdx` — 3497w
+✅ `partitioning-strategy.mdx` — 3384w
+✅ `data-lifecycle.mdx` — 3199w
+✅ `s3-fondamenti.mdx` — 3266w
+✅ `introduzione-object-storage.mdx` — 3268w
+✅ `s3-clickhouse.mdx` — 3120w
+✅ `architetture-avanzate.mdx` — 3010w
+✅ `formati-dati.mdx` — 3009w
+✅ `pipeline-realtime.mdx` — 3060w
+⚠️ `caso-studio.mdx` — 1811w
+📋 `cheat-sheet.mdx` — 1045w
+
+---
+
+## kafka-streaming
+
+✅ `kafka-producers-consumers.mdx` — 3873w
+✅ `kafka-schema-registry.mdx` — 3899w
+✅ `kafka-ops.mdx` — 3782w
+✅ `kafka-fondamenti.mdx` — 3766w
+✅ `introduzione-streaming.mdx` — 3681w
+✅ `kafka-clickhouse.mdx` — 3612w
+✅ `kafka-connect.mdx` — 3435w
+⚠️ `caso-studio.mdx` — 1693w
+📋 `cheat-sheet.mdx` — 1370w
+
+---
+
+## real-time-analytics
+
+✅ `clickhouse-ottimizzazione.mdx` — 4794w
+✅ `clickhouse-fondamenti.mdx` — 4319w
+✅ `mv-incrementali-dictionaries.mdx` — 3329w
+✅ `cdc-pattern.mdx` — 3096w
+✅ `dashboards.mdx` — 3086w
+✅ `clickhouse-rt.mdx` — 3074w
+✅ `streaming.mdx` — 3068w
+✅ `caso-studio.mdx` — 3341w
+📋 `cheat-sheet.mdx` — 1470w
+
+---
+
+## infrastructure-ops
+
+✅ `documentation.mdx` — 4557w
+✅ `costs.mdx` — 3793w
+✅ `cicd.mdx` — 3282w
+✅ `monitoring-observability.mdx` — 3096w
+✅ `iac-terraform.mdx` — 3087w
+✅ `caso-studio.mdx` — 3018w
+📋 `cheat-sheet.mdx` — 1511w
+
+---
+
+## advanced-sql
+
+✅ `window-functions-avanzate.mdx` — 3625w
+✅ `date-spine-e-metriche-temporali.mdx` — 3914w
+✅ `coorti-e-retention.mdx` — 4140w
+✅ `funnel-e-sessionizzazione.mdx` — 3966w
+✅ `pivot-rollup-e-kpi-table.mdx` — 4008w
+✅ `anomalie-pareto-e-segmentazione.mdx` — 3837w
+⚠️ `caso-studio.mdx` — 1846w, sotto standard (≥3000w) ma caso studio accettabile
+📋 `cheat-sheet.mdx` — 676w
+
+---
+
+## matematica-analisi-dati
+
+✅ `vettori-norme-e-similarita.mdx` — 4700w
+✅ `matrici-trasformazioni-e-sistemi-lineari.mdx` — 3605w
+✅ `integrali-gradienti-e-funzioni-multivariate.mdx` — 3907w
+✅ `probabilita-distribuzioni-e-bayes.mdx` — 4123w
+✅ `autovalori-svd-e-riduzione-dimensionale.mdx` — 4011w
+✅ `funzioni-derivate-e-ottimizzazione.mdx` — 3952w
+✅ `campionamento-clt-e-intervalli.mdx` — 3922w
+✅ `test-ipotesi-e-test-non-parametrici.mdx` — 3949w
+⚠️ `caso-studio.mdx` — 1838w, sotto standard (≥3000w) ma caso studio accettabile
+📋 `cheat-sheet.mdx` — 718w
+
+---
+
+## File fuori modulo
+
+❌ `learning-path.mdx` — 766w, indice navigazione (non è una lezione)
+
+---
+
+## Riepilogo per modulo
+
+| Modulo | OK | incomplete | stub | cheat-sheet | Totale |
+|--------|----|-----------:|-----:|------------:|-------:|
+| panoramica | 1 | 0 | 0 | 0 | 1 |
+| data-collection | 8 | 0 | 0 | 0 | 8 |
+| metriche-fondamenti | 6 | 1 | 0 | 1 | 8 |
+| gestione-data-driven | 8 | 0 | 0 | 1 | 9 |
+| analisi-prodotto | 10 | 1 | 0 | 1 | 12 |
+| analisi-marketing | 20 | 1 | 0 | 1 | 22 |
+| dashboard-visualizzazione | 7 | 0 | 0 | 1 | 8 |
+| marketing-data-science | 17 | 1 | 0 | 1 | 19 |
+| data-warehousing | 5 | 1 | 0 | 1 | 7 |
+| s3-data-lake | 10 | 1 | 0 | 1 | 12 |
+| kafka-streaming | 7 | 1 | 0 | 1 | 9 |
+| real-time-analytics | 8 | 0 | 0 | 1 | 9 |
+| infrastructure-ops | 6 | 0 | 0 | 1 | 7 |
+| advanced-sql | 6 | 1 | 0 | 1 | 8 |
+| matematica-analisi-dati | 8 | 1 | 0 | 1 | 10 |
+| **TOTALE** | **122** | **8** | **0** | **12** | **142** |
+
+> Nota: i conteggi sopra escludono `learning-path.mdx` (file radice, non una lezione del corso).
+> I "stub" di `advanced-sql` e `matematica-analisi-dati` sono interi moduli nuovi ancora da sviluppare.
+
+---
+
+## Priorità intervento
+
+### ✅ COMPLETATO (sessioni 2026-03-06 + 2026-03-07)
+
+**`advanced-sql`** — tutte le 6 lezioni principali ora ≥3600w. Caso studio espanso a 1846w.
+
+**`matematica-analisi-dati`** — tutte le 8 lezioni principali ora ≥3600w. Caso studio espanso a 1838w.
+
+**`analisi-marketing`** — tutte le 8 lezioni incomplete ora ≥3000w (range 3028w–5030w).
+
+**`gestione-data-driven/caso-studio.mdx`** — espanso da 2687w a 3116w ✅
+
+**`dashboard-visualizzazione/caso-studio.mdx`** — espanso da 2301w a 3007w ✅
+
+**`infrastructure-ops/caso-studio.mdx`** — espanso da 2144w a 3018w ✅
+
+**`metriche-fondamenti/caso-studio.mdx`** — espanso da 937w a 1512w ⚠️ (accettabile come caso studio)
+
+### ANCORA SOTTO SOGLIA — caso studi
+
+- `metriche-fondamenti/caso-studio.mdx` — 1512w (accettabile come caso studio ≥1500w)
+- `advanced-sql/caso-studio.mdx` — 1846w (accettabile come caso studio)
+- `matematica-analisi-dati/caso-studio.mdx` — 1838w (accettabile come caso studio)

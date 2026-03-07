@@ -71,6 +71,10 @@ Tre concetti da separare sempre:
 `PARTITION BY` non equivale a `GROUP BY`. Con una window ogni riga resta viva e riceve una metrica aggiuntiva.
 </Aside>
 
+La finestra — il "window" del nome — e' il sottoinsieme di righe che la funzione considera per calcolare il suo risultato. Ogni riga puo' avere una finestra diversa, definita dalla combinazione di `PARTITION BY`, `ORDER BY` e `ROWS BETWEEN`. Questo e' il motivo per cui puoi avere in una singola `SELECT` sia il valore puntuale della riga sia la sua quota sul totale, sia il suo confronto con la riga precedente: ognuna di queste colonne usa una finestra distinta, calcolata in modo indipendente.
+
+Capire bene questi tre componenti evita la maggior parte degli errori che si vedono in produzione: finestre troppo ampie che rallentano le query, frame dimenticati che restituiscono risultati "quasi giusti", `ORDER BY` mancanti che rendono il risultato non deterministico.
+
 ## Ranking senza perdere il dettaglio
 
 ### Top prodotti per categoria
@@ -106,11 +110,15 @@ FROM product_revenue
 ORDER BY category, row_num;
 ```
 
+Il CTE aggrega prima il revenue per prodotto. Poi nella `SELECT` finale calcoliamo tre tipi di ranking in parallelo sulla stessa finestra partizionata per categoria, senza riaggregare. Questo e' il vantaggio rispetto a una subquery: le tre funzioni di ranking leggono lo stesso risultato intermedio, senza rilanci di scan.
+
 Quando usare cosa:
 
 - `row_number()`: classifica secca, senza pareggi
 - `rank()`: pareggi mantenuti, con buchi
 - `dense_rank()`: pareggi mantenuti, senza buchi
+
+La scelta tra i tre dipende da come la classifica verra' usata. Se stai filtrando i top-5 prodotti per pagina, `row_number()` e' la scelta piu' sicura perche' garantisce esattamente 5 risultati. Se stai costruendo una tabella che mostra posizioni di mercato, `rank()` o `dense_rank()` comunicano meglio la situazione competitiva reale.
 
 ### Contribution percent sul totale categoria
 
@@ -137,6 +145,8 @@ ORDER BY category, total_revenue DESC;
 ```
 
 Questa colonna e' perfetta per una tabella Pareto o una bar chart ordinata per contributo.
+
+Il pattern `valore / sum(valore) OVER (PARTITION BY gruppo)` e' uno dei piu' utili in analytics perche' risponde alla domanda "quanto pesa questa riga sul suo gruppo?" senza una join esplicita o una subquery separata per il totale. La divisione avviene riga per riga, ma il denominatore viene calcolato una volta sola per ogni partizione.
 
 ## Running total e moving average
 
@@ -167,6 +177,8 @@ SELECT
 FROM daily_revenue
 ORDER BY day;
 ```
+
+Il frame `ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW` dice alla funzione di sommare dalla prima riga della partizione fino alla riga corrente: questo produce il classico "running total". Il frame `6 PRECEDING AND CURRENT ROW` limita invece la finestra alle ultime 7 righe (la corrente piu' sei precedenti), producendo una media mobile a 7 giorni. I due frame coesistono nella stessa query senza interferirsi.
 
 ### MoM per canale
 
@@ -204,6 +216,8 @@ SELECT
 FROM with_prev
 ORDER BY channel, month;
 ```
+
+`lagInFrame` — la variante ClickHouse di `LAG` — legge il valore della riga precedente all'interno della partizione ordinata per mese. Il secondo CTE `with_prev` separa il calcolo del lag dal calcolo del MoM: questo rende il codice leggibile e consente di riutilizzare `prev_month_revenue` in altri calcoli (es. differenza assoluta) senza duplicare la logica. `nullIf(prev_month_revenue, 0)` protegge dalla divisione per zero quando il mese precedente ha revenue nulla.
 
 ## LAG e LEAD per leggere la sequenza
 
@@ -249,6 +263,8 @@ Questo pattern serve per:
 - analisi churn pre-abbandono
 - lettura del ciclo di riacquisto
 
+`lagInFrame` guarda indietro, `leadInFrame` guarda avanti nella sequenza ordinata. La colonna `days_to_next_order` e' particolarmente utile per segmentare gli utenti per frequenza di acquisto: chi ha un gap medio sotto i 30 giorni e' un cliente ad alta frequenza, chi supera i 90 giorni e' a rischio churn. Questo calcolo sarebbe molto piu' complesso con un self-join su `orders`.
+
 ## FIRST_VALUE e LAST_VALUE: l'errore piu' comune
 
 `last_value()` senza frame completo spesso restituisce l'ultima riga vista fino a quel punto, non l'ultimo valore del gruppo.
@@ -282,6 +298,243 @@ FROM user_orders
 ORDER BY user_id, order_time;
 ```
 
+Il frame `ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING` e' il punto critico. Senza di esso, il frame predefinito con `ORDER BY` e' `ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW`: `last_value()` restituisce la riga corrente stessa, non l'ultimo elemento della partizione. Questo e' uno degli errori piu' silenziosi in SQL — il risultato sembra plausibile ma e' sbagliato. Specificare sempre il frame esplicitamente con `FIRST_VALUE` e `LAST_VALUE` e' una regola di igiene del codice.
+
+<Aside type="caution">
+Con `last_value()` e `first_value()`, il frame predefinito (`UNBOUNDED PRECEDING` to `CURRENT ROW`) produce quasi sempre un risultato sbagliato. Specifica sempre `ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING` per leggere l'intera partizione.
+</Aside>
+
+## Window functions in ClickHouse vs SQL standard
+
+ClickHouse supporta le window functions dalla versione 21.6, con una sintassi per lo piu' compatibile con lo standard SQL:2003. Ci sono pero' alcune differenze concrete che chi viene da PostgreSQL o BigQuery deve conoscere.
+
+### lagInFrame e leadInFrame invece di LAG e LEAD
+
+In ClickHouse standard le funzioni si chiamano `lagInFrame` e `leadInFrame`, non `LAG` e `LEAD`. La differenza non e' solo nominale: `lagInFrame` opera sul frame corrente, mentre il `LAG` standard di PostgreSQL ignora il frame e guarda sempre alla riga precedente nella partizione. Nella maggior parte dei casi il comportamento e' equivalente, ma se usi finestre con frame personalizzati il risultato puo' divergere.
+
+```sql
+-- PostgreSQL / BigQuery
+LAG(amount) OVER (PARTITION BY user_id ORDER BY order_time)
+
+-- ClickHouse
+lagInFrame(amount) OVER (PARTITION BY user_id ORDER BY order_time)
+```
+
+Entrambe le sintassi restituiscono lo stesso risultato per i casi comuni. Usa sempre la forma `lagInFrame` in ClickHouse per evitare comportamenti inattesi con frame personalizzati.
+
+### RANGE vs ROWS
+
+ClickHouse supporta sia `ROWS` che `RANGE` come tipo di frame. La differenza e' importante quando i valori di `ORDER BY` hanno duplicati:
+
+- `ROWS BETWEEN`: conta righe fisiche, indipendente dai valori
+- `RANGE BETWEEN`: include tutte le righe con lo stesso valore di `ORDER BY`
+
+Con dati di e-commerce questo emerge spesso quando si aggrega per giorno e ci sono piu' righe con la stessa data. Un `RANGE BETWEEN CURRENT ROW AND CURRENT ROW` include tutte le righe con la stessa data, non solo quella corrente.
+
+```sql
+-- Calcola la somma includendo tutte le righe dello stesso giorno
+sum(revenue) OVER (
+    ORDER BY day
+    RANGE BETWEEN CURRENT ROW AND CURRENT ROW
+)
+
+-- Calcola la somma solo per la riga corrente (ignorando i duplicati di data)
+sum(revenue) OVER (
+    ORDER BY day
+    ROWS BETWEEN CURRENT ROW AND CURRENT ROW
+)
+```
+
+In analytics su dati time-series con granularita' giornaliera, usa quasi sempre `ROWS` per avere comportamento deterministico.
+
+### Limitazioni delle window functions in ClickHouse
+
+ClickHouse non supporta tutte le funzioni standard. Le principali assenti rispetto a PostgreSQL sono:
+
+- `NTILE(n)`: non disponibile nativamente, si puo' simulare con `floor((row_number() - 1) / count(*) OVER () * n)`
+- `PERCENT_RANK` e `CUME_DIST`: non disponibili in tutte le versioni, verifica sulla tua versione
+- Window functions nelle subquery di `WHERE` e `HAVING`: non consentite, devono essere nel `SELECT` o in un CTE
+
+<Aside type="tip">
+Se una query con window function in ClickHouse produce un errore di parsing, sposta la window function in un CTE. ClickHouse e' piu' restrittivo di PostgreSQL su dove le window functions possono apparire all'interno della query.
+</Aside>
+
+### Differenze con BigQuery
+
+Chi lavora su BigQuery trova due differenze principali. Prima: in BigQuery `LAG` e `LEAD` esistono con questi nomi (non `lagInFrame`). Seconda: BigQuery supporta le window functions nelle clausole `QUALIFY`, che permette di filtrare direttamente sul risultato di una window senza un CTE esterno. In ClickHouse non esiste `QUALIFY`, quindi devi sempre avvolgere in un CTE.
+
+```sql
+-- BigQuery: filtra direttamente con QUALIFY
+SELECT user_id, order_id, amount,
+       ROW_NUMBER() OVER (PARTITION BY user_id ORDER BY order_time) AS rn
+FROM orders
+QUALIFY rn = 1;
+
+-- ClickHouse equivalente: serve un CTE
+WITH ranked AS (
+    SELECT user_id, order_id, amount,
+           row_number() OVER (PARTITION BY user_id ORDER BY order_time) AS rn
+    FROM orders
+)
+SELECT user_id, order_id, amount
+FROM ranked
+WHERE rn = 1;
+```
+
+## KPI table completa: combinare piu' window functions
+
+Nella pratica le query piu' utili combinano piu' window functions in una singola `SELECT`. Questo esempio costruisce una KPI table mensile per canale che un team analytics potrebbe usare come fonte per una dashboard executive.
+
+```sql
+WITH monthly_channel AS (
+    SELECT
+        toStartOfMonth(order_time)          AS month,
+        channel,
+        count(DISTINCT order_id)             AS orders_count,
+        countDistinct(user_id)               AS unique_buyers,
+        sum(amount)                          AS revenue,
+        avg(amount)                          AS avg_order_value
+    FROM orders
+    WHERE status = 'completed'
+      AND order_time >= toDateTime('2024-01-01 00:00:00')
+      AND order_time < toDateTime('2025-01-01 00:00:00')
+    GROUP BY month, channel
+)
+SELECT
+    month,
+    channel,
+    orders_count,
+    unique_buyers,
+    revenue,
+    round(avg_order_value, 2)                                       AS aov,
+
+    -- Quota del canale sul revenue totale di quel mese
+    round(revenue / sum(revenue) OVER (PARTITION BY month), 4)     AS revenue_share_monthly,
+
+    -- Quota del canale sul revenue totale dell'anno intero
+    round(revenue / sum(revenue) OVER (), 4)                        AS revenue_share_yearly,
+
+    -- Rank del canale per revenue dentro ogni mese
+    rank() OVER (
+        PARTITION BY month
+        ORDER BY revenue DESC
+    )                                                                AS rank_in_month,
+
+    -- Revenue del mese precedente per lo stesso canale
+    lagInFrame(revenue) OVER (
+        PARTITION BY channel
+        ORDER BY month
+    )                                                                AS prev_month_revenue,
+
+    -- Crescita MoM
+    round(
+        (revenue - lagInFrame(revenue) OVER (PARTITION BY channel ORDER BY month))
+        / nullIf(lagInFrame(revenue) OVER (PARTITION BY channel ORDER BY month), 0),
+        4
+    )                                                                AS mom_growth_pct,
+
+    -- Revenue cumulativa per canale dall'inizio dell'anno
+    sum(revenue) OVER (
+        PARTITION BY channel
+        ORDER BY month
+        ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+    )                                                                AS ytd_revenue
+
+FROM monthly_channel
+ORDER BY month, rank_in_month;
+```
+
+Questa query risponde in un solo blocco a sei domande distinte: qual e' il peso di ogni canale nel mese, qual e' il suo peso sull'anno, dove si posiziona nella classifica mensile, come e' cresciuto rispetto al mese prima, e quanto ha accumulato da gennaio. Un analista che costruisce questa query con `GROUP BY` e join separati scriverebbe probabilmente 80-100 righe invece di 50. La leggibilita' del risultato e' anche molto piu' alta: ogni colonna ha un nome semantico e il lettore della query capisce subito cosa calcola ogni finestra.
+
+<Aside type="tip">
+Nella KPI table qui sopra, `lagInFrame(revenue)` appare due volte nella stessa query (per `prev_month_revenue` e per `mom_growth_pct`). Se la query diventa pesante, considera di spostare il lag in un CTE dedicato e di referenziarlo due volte dal CTE: ClickHouse puo' ottimizzare meglio la lettura quando la finestra e' calcolata una volta sola.
+</Aside>
+
+## Un caso reale: un retailer con 400K ordini mensili
+
+Un team analytics di un retailer di moda con circa 400.000 ordini mensili aveva costruito nel tempo un sistema di report MoM su Looker: ogni metrica (revenue per categoria, rank dei canali, quota percentuale) era una view SQL separata, alcune con join tra loro. Il tempo di rendering del dashboard principale era arrivato a 18 secondi.
+
+Il problema principale era strutturale: nove view separate, ognuna con il suo `GROUP BY` e in alcuni casi con subquery per i totali. Ogni cella della dashboard scatenava una query indipendente.
+
+Il team ha unificato le logiche in una singola query con window functions, materializzata come tabella aggregata mensile su ClickHouse tramite un job Airflow. La query finale, simile alla KPI table mostrata sopra, aggregava tutte le metriche in un unico passaggio e le scriveva in una tabella `kpi_channel_monthly`. Looker leggeva poi da questa tabella senza fare calcoli aggiuntivi.
+
+Il rendering del dashboard e' sceso da 18 secondi a 1.2 secondi. La tabella aggregata mensile pesava circa 2 MB. Ma la riduzione di tempo non era il beneficio principale: il beneficio era che le metriche erano ora calcolate in un unico posto, con logica consistente. Quando il team ha aggiunto il canale "marketplace" a meta' anno, ha aggiunto una riga nella query sorgente invece di aggiornare nove view separate.
+
+Questo schema — window functions per produrre una tabella aggregata comprensiva, materializzata su schedule, letta dalla BI senza calcoli aggiuntivi — e' uno dei pattern piu' robusti per analytics su volumi di ordine medio-alti.
+
+## Window functions e performance in ClickHouse
+
+Le window functions in ClickHouse sono potenti ma hanno un costo. Capire quando rallentano e come mitigare il problema e' essenziale prima di portarle in produzione su tabelle grandi.
+
+### Quando le window functions sono lente
+
+Il problema principale e' che le window functions richiedono di materializzare e ordinare un sottoinsieme di dati in memoria prima di calcolare il risultato. Su ClickHouse, questo significa che la query non puo' sfruttare appieno la lettura colonnare parallela durante la fase di windowing.
+
+I casi piu' critici sono:
+
+**Partizioni molto grandi**: se hai una `PARTITION BY country` e un paese ha 10 milioni di righe, tutta quella partizione deve stare in memoria durante il calcolo. ClickHouse usa il parametro `max_bytes_before_external_sort` per gestire lo spill su disco, ma questo rallenta ulteriormente.
+
+**Molte window functions nella stessa query**: ogni finestra con una definizione `OVER (...)` diversa richiede una passata separata. Una query con cinque finestre diverse e' piu' lenta di cinque query separate sullo stesso CTE.
+
+**Window functions su dati non partizionati**: senza `PARTITION BY`, la funzione vede l'intera tabella come un'unica partizione. Su 50 milioni di righe, `row_number() OVER (ORDER BY order_time)` e' molto piu' lento di `row_number() OVER (PARTITION BY channel ORDER BY order_time)`.
+
+### Strategie di ottimizzazione
+
+**Pre-aggrega prima di applicare la window**. La regola generale: le window functions vanno applicate su dati gia' aggregati, non su dati raw. Un `lagInFrame` su una tabella di 50 milioni di righe e' molto piu' lento di un `lagInFrame` su una tabella di 5.000 righe aggregate per mese e canale.
+
+```sql
+-- Lento: window function su dati raw
+SELECT
+    user_id,
+    order_time,
+    sum(amount) OVER (PARTITION BY user_id ORDER BY order_time ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS cumulative
+FROM orders;
+
+-- Veloce: pre-aggrega per utente e giorno, poi applica la window
+WITH daily_user AS (
+    SELECT user_id, toDate(order_time) AS day, sum(amount) AS daily_amount
+    FROM orders
+    GROUP BY user_id, day
+)
+SELECT
+    user_id,
+    day,
+    sum(daily_amount) OVER (PARTITION BY user_id ORDER BY day ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS cumulative
+FROM daily_user;
+```
+
+**Usa tabelle materializzate per window functions ricorrenti**. Se calcoli gli stessi ranking o running totals ogni giorno su dati storici che non cambiano, materializza il risultato con un job schedulato invece di ricalcolarlo a ogni query.
+
+**Limita il range temporale prima della window**. Filtra sempre per periodo prima di applicare la window, non dopo. Un `WHERE order_time >= '2025-01-01'` nel CTE sorgente riduce drasticamente le righe che la window deve processare.
+
+```sql
+-- Subottimale: filtra dopo la window
+WITH ranked AS (
+    SELECT order_id, channel, amount,
+           row_number() OVER (PARTITION BY channel ORDER BY amount DESC) AS rn
+    FROM orders  -- scansiona tutta la tabella
+)
+SELECT * FROM ranked WHERE rn <= 10;
+
+-- Ottimale: filtra il periodo nel sorgente
+WITH filtered AS (
+    SELECT order_id, channel, amount
+    FROM orders
+    WHERE order_time >= toDateTime('2025-01-01 00:00:00')
+      AND status = 'completed'
+),
+ranked AS (
+    SELECT order_id, channel, amount,
+           row_number() OVER (PARTITION BY channel ORDER BY amount DESC) AS rn
+    FROM filtered
+)
+SELECT * FROM ranked WHERE rn <= 10;
+```
+
+**Considera `arraySort` come alternativa per ranking semplici**. ClickHouse ha funzioni array molto ottimizzate. Per casi semplici come "top-10 prodotti per categoria", a volte e' piu' veloce aggregare in array e ordinare con `arraySort` che usare `rank()` su una grande tabella. Questa e' una ottimizzazione avanzata, da valutare con `EXPLAIN` e misurazioni reali.
+
+**Monitora con `EXPLAIN PIPELINE`**. Prima di mandare in produzione una query con window functions complesse, esegui `EXPLAIN PIPELINE SELECT ...` per vedere quante fasi di ordinamento sta pianificando ClickHouse. Piu' fasi di ordinamento separate significa piu' overhead.
+
 ## Errori comuni e anti-pattern
 
 ### Non costruire uno step intermedio aggregato
@@ -300,6 +553,14 @@ In una classifica business, un pareggio va trattato esplicitamente.
 
 Molte subquery per il totale possono essere sostituite da `sum(...) OVER (...)`.
 
+### Scrivere window functions su tabelle raw invece di aggregati
+
+Le window functions su 50 milioni di righe sono quasi sempre sostituibili con window functions su qualche migliaia di righe aggregate. Pre-aggrega nel CTE sorgente.
+
+### Ripetere la stessa finestra piu' volte nella SELECT
+
+Se la stessa definizione `OVER (PARTITION BY x ORDER BY y)` appare tre volte nella stessa query, ClickHouse potrebbe non deduplare il calcolo. Spostala in un CTE dedicato e riusala.
+
 ## Output atteso
 
 Con queste query puoi produrre:
@@ -308,6 +569,7 @@ Con queste query puoi produrre:
 - quota percentuale sul totale categoria
 - revenue cumulativa e media mobile
 - differenza tra ordini consecutivi
+- KPI table mensile per canale con MoM, YTD e quota
 
 Le visualizzazioni migliori sono:
 
@@ -318,10 +580,13 @@ Le visualizzazioni migliori sono:
 
 ## Riepilogo operativo
 
-- Le window functions servono quando vuoi contesto, non solo aggregazione.
-- `PARTITION BY`, `ORDER BY` e `ROWS BETWEEN` vanno sempre pensati insieme.
-- Ranking, contribution, cumulata e confronto con la riga precedente sono i pattern piu' usati in analytics.
-- Se una query sta diventando una catena di subquery, controlla se una window function la rende piu' leggibile.
+- Le window functions servono quando vuoi contesto, non solo aggregazione: ogni riga mantiene il suo valore originale e riceve una o piu' metriche aggiuntive calcolate su una finestra di righe.
+- `PARTITION BY`, `ORDER BY` e `ROWS BETWEEN` vanno sempre pensati insieme: dimenticare uno dei tre produce risultati silenziosamente sbagliati.
+- Ranking, contribution, cumulata e confronto con la riga precedente sono i quattro pattern piu' usati in analytics: impara a riconoscere quale serve prima di scrivere la query.
+- In ClickHouse usa `lagInFrame` e `leadInFrame` invece di `LAG` e `LEAD`, e specifica sempre il frame esplicitamente con `FIRST_VALUE` e `LAST_VALUE`.
+- Pre-aggrega prima di applicare la window: le window functions su dati aggregati sono ordini di grandezza piu' veloci di quelle su dati raw.
+- La KPI table mensile combinando piu' window functions in un CTE e materializzandola su schedule e' lo schema piu' robusto per analytics ad alto volume.
+- Se una query sta diventando una catena di subquery, controlla se una window function la rende piu' leggibile — e se una tabella materializzata la rende piu' veloce.
 
 ## Mini esercizio
 

@@ -16,6 +16,8 @@ Hai un SaaS con tre problemi contemporanei:
 
 Questo caso studio usa gli strumenti del modulo senza trasformarli in esercizio accademico.
 
+Il punto importante non e' che ogni strumento matematico "funziona": e' che ogni strumento risponde a un tipo di domanda diverso. La similarita' risponde a "chi assomiglia a chi". L'ottimizzazione risponde a "dove si massimizza". Bayes risponde a "quanto devo aggiornare la mia stima". Inferenza e test rispondono a "posso fidarmi di questo segnale". Usarli insieme dentro la stessa decisione e' molto piu' potente che usarli separatamente.
+
 ## Mappa del caso
 
 ```mermaid
@@ -68,6 +70,27 @@ Output utile: shortlist di utenti da spingere verso upsell o sales assistita.
 
 Questa prima parte non decide ancora nulla. Serve a restringere il campo: quali utenti assomigliano abbastanza al target premium da meritare un'azione dedicata.
 
+Un punteggio di similarita' sopra 0.90 indica un match molto forte: stessa combinazione di attivita', profondita' di utilizzo delle feature, frequenza di sessione. Sotto 0.70 il match e' debole e l'azione probabilmente non vale l'effort commerciale.
+
+**Attenzione alla scala delle feature**: la cosine similarity non e' sensibile alla scala solo se le feature sono gia' comparabili tra loro. Nel nostro esempio, `sessions_30d` va da 0 a 50, `projects_created` da 0 a 10, `feature_adoption` da 0 a 1. Un utente con 40 sessioni e 0.3 di feature_adoption ha un vettore dominato dalle sessioni. Se vuoi una similarita' bilanciata tra le tre dimensioni, devi normalizzare prima.
+
+```python
+from sklearn.preprocessing import StandardScaler
+
+scaler = StandardScaler()
+features_scaled = scaler.fit_transform(
+    customers[["sessions_30d", "projects_created", "feature_adoption"]]
+)
+target_scaled = scaler.transform([target])
+
+customers["premium_similarity_scaled"] = [
+    cosine_similarity(row, target_scaled[0])
+    for row in features_scaled
+]
+```
+
+La versione scalata cambia i ranking: un utente con alta feature_adoption e poche sessioni puo' risultare piu' simile al target premium rispetto a uno che ha molte sessioni ma usa pochissime feature.
+
 ## Step 2 - Prezzo e profitto marginale
 
 Assumiamo una curva profitto semplificata:
@@ -95,9 +118,25 @@ print(critical)
 
 Se il prezzo attuale e' molto lontano dal punto critico, hai un'indicazione forte di revisione pricing.
 
+Con i nostri parametri:
+
+```python
+# derivata prima: 520 - 8p = 0 → p_ottimo = 65
+# profitto a p=65: 520*65 - 4*65^2 - 3000 = 33800 - 16900 - 3000 = 13900
+```
+
+Se il prezzo attuale e' 40€, il gap rispetto all'ottimo teorico e' 25€ per unita'. Prima di muoversi, vale la pena stimare l'elasticita' reale della domanda con dati storici.
+
 ### Cosa non dice questa curva
 
 La curva proposta e' un modello utile, non la realta' finale. Va letta come supporto a una decisione, non come verita' definitiva sul mercato.
+
+I limiti principali sono:
+- la funzione di domanda e' assunta lineare, ma spesso non lo e' (ci sono price points psicologici, concorrenza, effetti di ancoraggio)
+- i parametri `520` e `4` sono ipotesi: cambiali con dati storici reali di conversione per canale di prezzo
+- il modello ignora i costi variabili aggiuntivi a volumi diversi
+
+Usala per orientarti sul range ragionevole di prezzo, non per giustificare un numero preciso al board.
 
 ## Step 3 - Bayes su segnale di churn
 
@@ -112,7 +151,16 @@ p_churn_given_signal = p_signal_given_churn * p_churn / p_signal
 print(round(p_churn_given_signal, 4))
 ```
 
+Il risultato: `p_churn_given_signal ≈ 0.232`. Un utente che mostra il segnale di calo attivita' ha il 23% di probabilita' di churning, rispetto al 5% baseline.
+
 Questo valore guida soglie di alert e priorita' del team success.
+
+**Interpretazione operativa**: se il team CS ha capacita' per 50 interventi proattivi a settimana, e hai 300 utenti con il segnale attivo, non puoi intervenire su tutti. Con il posterior Bayesiano, puoi:
+1. ordinare gli utenti per probabilita' di churn
+2. aggiungere altri segnali (ticket aperti, NPS basso, calo frequenza login) per raffinare la stima
+3. concentrare le risorse sul top 50 per probability
+
+Senza Bayes, il team interverrebbe su tutti i 300 per "sicurezza", sprecando effort su utenti che non avrebbero churna comunque.
 
 ## Step 4 - Intervallo di confidenza sull'effetto email
 
@@ -128,6 +176,8 @@ ci = (mean - critical * se, mean + critical * se)
 print(np.round(ci, 4))
 ```
 
+Se l'IC risulta `(0.0118, 0.0192)`, entrambi gli estremi sono positivi: l'email ha un effetto significativo anche nel caso pessimistico. Un lift medio dell'1.5% su una base di 10.000 utenti attivi significa 150 utenti in piu' che superano il periodo critico ogni mese.
+
 Qui non guardi solo il lift medio: guardi quanto e' incerto.
 
 ## Step 5 - Test d'ipotesi sul churn rate
@@ -142,11 +192,15 @@ z_stat, p_value = proportions_ztest(churned, exposed)
 print(round(z_stat, 3), round(p_value, 4))
 ```
 
-Se il p-value e' compatibile con la decisione, unisci il risultato a:
+Con i nostri dati: controllo 96/1800 = 5.33%, variante 74/1785 = 4.15%. Una riduzione del churn rate dell'1.2 punti percentuali assoluti.
 
-- effect size
-- costo della variante
-- rischio operativo
+Se il p-value e' significativo (es: 0.023), unisci il risultato a:
+
+- **effect size**: 1.2pp di riduzione assoluta del churn → annualizzato, quanto vale in MRR?
+- **costo della variante**: quanto costa configurare e inviare questa sequenza email per tutti gli utenti?
+- **rischio operativo**: ci sono effetti collaterali negativi (es: piu' unsubscribe, peggioramento di altra metrica)?
+
+**Il calcolo di valore**: se il churn mensile scende dall'5.33% al 4.15% su 10.000 utenti con ARR medio di 500€, la riduzione di churn salva circa `10000 * 0.0118 * 500 / 12 ≈ 4.916€/mese` di MRR. Con un costo di implementazione stimato in 2-3 mesi di effort, il ROI e' chiaramente positivo. Il test non ha solo dimostrato che "l'email funziona": ha dato i numeri per costruire il business case.
 
 ## Estensione notebook con librerie reali
 
@@ -180,23 +234,35 @@ Il punto non e' accumulare tecniche. Il punto e' vedere che:
 
 Una tabella finale credibile potrebbe essere:
 
-| Decisione | Segnale |
-|-----------|---------|
-| Upsell mirato | utenti con similarity premium alta |
-| Review pricing | prezzo attuale lontano dal massimo teorico |
-| Churn intervention | posterior Bayes elevata dato il segnale |
-| Rollout email | p-value + effect size + IC coerenti |
+| Decisione | Segnale matematico | Azione concreta |
+|-----------|---------|---------|
+| Upsell mirato | similarity premium > 0.88 | sequenza email commerciale o trial esteso |
+| Review pricing | prezzo attuale (40€) lontano da ottimo teorico (65€) | test di prezzo graduale con coorti |
+| Churn intervention | posterior Bayes > 20% dato il segnale | priorita' CS sui top 50 per probability |
+| Rollout email | p-value 0.023 + lift 1.2pp + IC positivo | attivazione su tutti i nuovi trial |
 
 <Aside type="note">
 Questo e' il punto del modulo: usare matematica diversa dentro la stessa decisione, non trattare ogni formula come un mondo separato.
 </Aside>
 
+## Decisione finale integrata
+
+Le quattro analisi convergono verso una risposta coerente:
+
+- **Breve termine**: concentra il CS sui 50 utenti con churn risk piu' alto (Bayes). Attiva l'email di onboarding su tutti i nuovi trial (test).
+- **Medio termine**: revisione graduale del pricing partendo da un A/B test a 55€ su nuove acquisizioni (derivate + dati storici di conversione).
+- **Lungo termine**: costruisci un sistema di scoring continuativo basato sulla similarity premium per alimentare il funnel commerciale.
+
+Le decisioni non si escludono. Ognuna usa uno strumento diverso perche' risponde a una domanda diversa. Questa e' la differenza tra un analista che "conosce la matematica" e uno che sa quale matematica usare per quale domanda.
+
 ## Errori da evitare nel caso reale
 
-- similarity calcolata su feature non scalate
-- curva pricing costruita con pochi punti eccessivamente rumorosi
-- Bayes senza tasso base
-- test lanciato e fermato in anticipo
+- **similarity calcolata su feature non scalate**: i risultati sono dominati dalla feature con il range piu' ampio
+- **curva pricing costruita con pochi punti eccessivamente rumorosi**: la derivata di una curva rumorosa non ha senso — fai smoothing prima
+- **Bayes senza tasso base**: il p(churn) senza prior porta a stime molto ottimistiche o pessimistiche
+- **test lanciato e fermato in anticipo**: il p-value cambia continuamente durante un test — decidere quando vedi "p<0.05 per la prima volta" e' un bias sistematico (peeking problem)
+- **effect size ignorato**: un risultato statisticamente significativo con effect size trascurabile non giustifica l'investimento
+- **ignorare i costi di implementazione nell'interpretazione**: un IC positivo non basta — serve un'analisi costo-beneficio esplicita
 
 ## Riepilogo operativo
 

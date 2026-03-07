@@ -35,6 +35,8 @@ Beaucoup.it (nome fittizio) è un e-commerce italiano di moda vintage con €8.3
 
 **Il momento di rottura:** a novembre 2023, durante il Black Friday, le campagne Meta stavano performando male (ROAS 1.2 su un target di 3.5). Nessuno l'ha scoperto fino al martedì successivo, quando è arrivato il report. €12.000 di budget spesi su campagne non profittevoli nel weekend più importante dell'anno.
 
+Questo evento ha fatto scattare una domanda nel board: "Se perdessimo €12.000 in un weekend perche' i dati arrivano con 3 giorni di ritardo, qual e' il costo del nostro processo di reporting attuale?" La risposta — €9.360 di costo del lavoro annuo + rischio di €12.000 ogni Black Friday — ha reso il progetto una priorita' immediata con budget approvato in un giorno.
+
 ## Obiettivi del Progetto
 
 Il CEO ha definito 3 obiettivi non negoziabili:
@@ -43,7 +45,7 @@ Il CEO ha definito 3 obiettivi non negoziabili:
 2. **Dashboard aggiornata al massimo ogni 6 ore** (non 7 giorni)
 3. **Una sola versione della verità**: CEO e CFO devono vedere gli stessi numeri dallo stesso posto
 
-Budget: €500/mese per tool e infrastruttura. Timeline: 8 settimane.
+Budget: €500/mese per tool e infrastruttura. Timeline: 8 settimane. Vincolo aggiuntivo: nessuna interruzione del sito e-commerce durante la migrazione, e nessuna dipendenza da un singolo data engineer per il mantenimento futuro del sistema.
 
 ## Fase 1: Definire le Metriche Prima della Tecnologia
 
@@ -111,7 +113,7 @@ La prima settimana non ha toccato nessun tool. Il data analyst ingaggiato per il
 | Metabase (self-hosted) | Dashboard | €0 (self-hosted) |
 | **Totale** | | **€55/mese** |
 
-Notare: €55/mese vs il costo di €9.360/anno del processo manuale precedente.
+Notare: €55/mese vs il costo di €9.360/anno del processo manuale precedente. Il ROI si ammorta nel primo mese e mezzo. Ogni mese successivo e' risparmio netto, senza contare il valore delle decisioni piu' rapide abilitate dai dati aggiornati ogni 4 ore.
 
 ## I Modelli dbt Chiave
 
@@ -352,6 +354,80 @@ Il Marketing Manager ha iniziato ad usare il report Slack ogni lunedì. L'adozio
 
 **Il caso del Black Friday 2024** (un anno dopo): durante il Black Friday 2024, il Marketing Manager ha visto alle 11:00 del mattino che 3 campagne Meta avevano ROAS 0.8 (budget già speso, zero conversioni). Ha pausato le campagne entro 15 minuti e riallocato il budget sulle campagne Google che performavano a ROAS 5.2. Stima del salvataggio: €8.000-15.000 di budget che altrimenti sarebbe stato sprecato.
 
+## Il Ciclo di Miglioramento Post Go-Live
+
+Il progetto non si e' concluso al go-live. Nei 3 mesi successivi sono emerse iterazioni importanti.
+
+### Iterazione 1: la dashboard CEO era ancora troppo complessa
+
+Dopo 2 settimane dal lancio, il CEO ha segnalato che guardava la dashboard solo per il numero "Revenue Oggi". Il resto non riusciva a interpretarlo velocemente.
+
+La soluzione: creare una dashboard "CEO one-pager" con un singolo numero grande, un trend 30 giorni, e una sola domanda: "questa settimana stiamo meglio o peggio della precedente?". Tempo di implementazione: 2 ore. Utilizzo: aumentato del 300%.
+
+Il principio che ne e' emerso: la dashboard piu' usata non e' quella piu' completa, ma quella che risponde alla domanda del suo utente nel minor numero di click possibili.
+
+### Iterazione 2: la Head of Buying non aveva la granularita' giusta
+
+L'Head of Buying aveva bisogno di identificare i prodotti da scontare prima di un weekend. La dashboard mostrava il sell-through per categoria, ma non il singolo prodotto con la sua velocita' di vendita degli ultimi 7 giorni.
+
+```sql
+-- Vista aggiuntiva: prodotti a bassa velocita' di vendita
+SELECT
+    product_id,
+    product_name,
+    category,
+    current_stock_qty,
+    sold_qty_last_7d,
+    ROUND(sold_qty_last_7d / NULLIF(current_stock_qty, 0), 3) AS weekly_sell_rate,
+    ROUND(current_stock_qty / NULLIF(sold_qty_last_7d / 7.0, 0), 0) AS days_of_stock_remaining,
+    initial_price,
+    CASE
+        WHEN days_of_stock_remaining > 90 AND sell_through_pct < 25 THEN 'sconto urgente'
+        WHEN days_of_stock_remaining > 60 THEN 'monitorare'
+        ELSE 'ok'
+    END AS action
+FROM mart_inventory_health
+WHERE current_stock_qty > 0
+ORDER BY days_of_stock_remaining DESC;
+```
+
+Questa query ha permesso all'Head of Buying di identificare ogni settimana i 10-15 prodotti da inserire nella sezione "sale" prima che il valore di inventario si deteriorasse ulteriormente.
+
+### Iterazione 3: alert anomalie in tempo reale
+
+Il caso del Black Friday 2023 (campagne con ROAS 1.2 scoperte 3 giorni dopo) ha spinto a configurare alert automatici:
+
+```python
+# Controllo ROAS ogni 2 ore durante le campagne attive
+def check_roas_alert(campaigns_df, threshold=2.5, min_spend=500):
+    """
+    Invia alert Slack se una campagna con spesa significativa
+    e' sotto soglia ROAS da almeno 4 ore consecutive
+    """
+    critical = campaigns_df[
+        (campaigns_df['roas'] < threshold) &
+        (campaigns_df['spend_today'] > min_spend) &
+        (campaigns_df['hours_below_threshold'] >= 4)
+    ]
+    if not critical.empty:
+        msg = f":rotating_light: *ROAS Alert* — {len(critical)} campagna/e sotto {threshold}x\n"
+        for _, row in critical.iterrows():
+            msg += f"• {row['campaign_name']}: ROAS {row['roas']:.1f}x, spend €{row['spend_today']:,.0f}\n"
+        send_slack(msg, channel='#marketing-alerts')
+```
+
+Il sistema ha rilevato un problema analogo durante il Black Friday 2024 alle 11:00. Il Marketing Manager ha corretto l'allocazione budget entro 15 minuti. Saving stimato: €8.000-15.000.
+
+## Domande per l'Analisi del Caso
+
+1. Il data analyst ha deciso di ridurre le 34 metriche richieste a 14. Come gestiresti un stakeholder che insiste per includere una metrica che ritieni irrilevante?
+
+2. Il Marketing Manager non ha adottato la dashboard e il problema e' stato risolto con un report Slack invece di riprogettare la dashboard. Quando e' giusto adattarsi all'utente e quando e' giusto rieducare l'utente?
+
+3. La CFO guarda la dashboard solo il lunedì. E' un fallimento di adozione o un utilizzo legittimo? Come cambieresti il design per il suo use case?
+
+4. Il progetto ha eliminato 6 ore/settimana di lavoro manuale. Come presenteresti il ROI di questo progetto al board per giustificare il costo dell'infrastruttura?
+
 ## Lezioni Apprese
 
 **1. Le metriche si definiscono prima della tecnologia.** La settimana passata nei workshop con gli stakeholder era più preziosa delle 7 settimane di implementazione tecnica. Senza quella, avremmo costruito le dashboard sbagliate più velocemente.
@@ -369,3 +445,6 @@ Il Marketing Manager ha iniziato ad usare il report Slack ogni lunedì. L'adozio
 - Definizioni metriche condivise e pochi KPI ben scelti valgono piu' di dashboard sovraccariche.
 - L'adozione dipende molto dalla UX e dal contesto d'uso, non solo dall'accuratezza dei dati.
 - La priorita' iniziale dovrebbe sempre andare ai report piu' dolorosi e piu' centrali per il business.
+- Il go-live e' l'inizio, non la fine: le iterazioni post-lancio sono quelle che portano il vero valore.
+- Gli alert in tempo reale su anomalie critiche valgono quanto (o piu' di) una dashboard completa: agiscono quando conta, non quando qualcuno apre la pagina.
+- Adattare il formato al flusso di lavoro dell'utente (Slack, email, dashboard) vale piu' di una dashboard perfetta che nessuno usa.
