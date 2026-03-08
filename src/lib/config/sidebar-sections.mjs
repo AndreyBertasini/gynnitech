@@ -51,12 +51,12 @@ const staticSidebarSections = [
   {
     label: 'Metriche e Dashboard',
     items: [
-      { label: 'Metriche Fondamentali', link: '/course/metriche-dashboard/metriche-fondamentali/' },
-      { label: 'Data Visualization', link: '/course/metriche-dashboard/data-visualization/' },
-      { label: 'Dashboard Strategiche', link: '/course/metriche-dashboard/dashboard-strategiche/' },
-      { label: 'SQL per Analisti', link: '/course/metriche-dashboard/sql-per-analisti/' },
-      { label: 'Python Data Analysis', link: '/course/metriche-dashboard/python-data-analysis/' },
-      { label: 'ETL & Data Pipeline', link: '/course/metriche-dashboard/etl-data-pipeline/' },
+      { label: 'Metriche Fondamentali', link: '/course/metriche-fondamenti/metriche-fondamentali/' },
+      { label: 'Data Visualization', link: '/course/dashboard-visualizzazione/data-visualization/' },
+      { label: 'Dashboard Strategiche', link: '/course/dashboard-visualizzazione/dashboard-strategiche/' },
+      { label: 'SQL per Analisti', link: '/course/dashboard-visualizzazione/sql-per-analisti/' },
+      { label: 'Python Data Analysis', link: '/course/dashboard-visualizzazione/python-data-analysis/' },
+      { label: 'ETL & Data Pipeline', link: '/course/dashboard-visualizzazione/etl-data-pipeline/' },
     ],
   },
   {
@@ -95,7 +95,7 @@ const staticSidebarSections = [
   },
   {
     label: 'Data-Driven Management',
-    items: [{ label: 'Framework JTBD', link: '/course/management/jtbd/' }],
+    items: [{ label: 'Framework JTBD', link: '/course/data-collection/jtbd/' }],
   },
 ];
 

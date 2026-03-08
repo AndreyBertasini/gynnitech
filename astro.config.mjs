@@ -88,7 +88,7 @@ export default defineConfig({
     social: [
       {
         label: 'GitHub',
-        href: 'https://github.com/openai',
+        href: 'https://github.com/AndreyBertasini/gynnitech',
         icon: 'github',
       },
     ],

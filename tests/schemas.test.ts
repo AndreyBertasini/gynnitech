@@ -114,6 +114,39 @@ describe("Content Schemas", () => {
             }
         });
 
+        test("validates corso item with extended learning metadata", () => {
+            const valid = {
+                title: "Lesson 1",
+                description: "Intro",
+                module: "Modulo 1",
+                category: "Fondamenti",
+                prerequisites: ["data-collection/introduction"],
+                duration: "35 min",
+                difficulty: "intermediate",
+                learningObjectives: [
+                    "Capire i concetti base",
+                    "Applicare il metodo su un caso reale",
+                ],
+            };
+            const result = corsoSchema.safeParse(valid);
+            expect(result.success).toBe(true);
+            if (result.success) {
+                expect(result.data.prerequisites?.[0]).toBe("data-collection/introduction");
+                expect(result.data.difficulty).toBe("intermediate");
+                expect(result.data.learningObjectives?.length).toBe(2);
+            }
+        });
+
+        test("invalidates unsupported difficulty values", () => {
+            const invalid = {
+                title: "Lesson 1",
+                description: "Intro",
+                difficulty: "expert",
+            };
+            const result = corsoSchema.safeParse(invalid);
+            expect(result.success).toBe(false);
+        });
+
         test("invalidates missing fields", () => {
              const invalid = {
                 title: "Lesson 1"

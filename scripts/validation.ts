@@ -14,6 +14,8 @@ const MIN_CORSO_H2_HEADINGS = 3;
 const MIN_CORSO_INTRO_CHARACTERS = 120;
 const SUMMARY_SECTION_REGEX = /(^##\s+(?:\d+\.\s*)?(Riepilogo|Riepilogo operativo|Conclusioni|Sintesi)\b)/mi;
 const EXAMPLE_SIGNAL_REGEX = /```|\|---\||\bEsempio\b|\bCaso pratico\b|\bTemplate\b/mi;
+const DURATION_FORMAT_REGEX = /^\d{1,3}\s*(min|minuti|h|ore)$/i;
+const ALLOWED_DIFFICULTY_VALUES = new Set(["beginner", "intermediate", "advanced", "base", "intermedio", "avanzato"]);
 
 /**
  * Validates that a relative path resolves to a location within the base directory.
@@ -85,6 +87,8 @@ async function validateCollection(collection: "blog" | "corso"): Promise<Validat
         warnings: [],
     };
     const slugToFile = new Map<string, string>();
+    const pendingPrerequisiteChecks: Array<{ file: string; prerequisite: string }> = [];
+    const orderTracker = new Map<string, Map<number, string[]>>();
 
     for (const file of files) {
         const raw = await fs.readFile(file, "utf-8");
@@ -118,6 +122,7 @@ async function validateCollection(collection: "blog" | "corso"): Promise<Validat
 
         const requiresOrder = path.dirname(relativePath) !== ".";
         const rawOrder = data.order;
+        const moduleFolder = path.dirname(relativePath).split(path.sep)[0];
 
         if (requiresOrder && rawOrder === undefined) {
             result.errors.push(buildMessage(file, "order", "missing required field"));
@@ -125,6 +130,106 @@ async function validateCollection(collection: "blog" | "corso"): Promise<Validat
 
         if (rawOrder !== undefined && (typeof rawOrder !== "number" || !Number.isInteger(rawOrder))) {
             result.errors.push(buildMessage(file, "order", `order must be an integer number (received: ${JSON.stringify(rawOrder)})`));
+        }
+
+        if (requiresOrder && typeof rawOrder === "number" && Number.isInteger(rawOrder)) {
+            const moduleOrders = orderTracker.get(moduleFolder) ?? new Map<number, string[]>();
+            const sameOrder = moduleOrders.get(rawOrder) ?? [];
+            sameOrder.push(file);
+            moduleOrders.set(rawOrder, sameOrder);
+            orderTracker.set(moduleFolder, moduleOrders);
+        }
+
+        if (requiresOrder) {
+            const rawModule = data.module;
+            if (rawModule === undefined || rawModule === null || String(rawModule).trim() === "") {
+                result.errors.push(buildMessage(file, "module", "missing required field"));
+            }
+        }
+
+        if (requiresOrder && (data.category === undefined || data.category === null || String(data.category).trim() === "")) {
+            pushEditorialIssue(
+                result,
+                file,
+                "editorial",
+                "missing category in frontmatter; add one to improve grouping and navigation",
+            );
+        }
+
+        const rawPrerequisites = data.prerequisites;
+        if (requiresOrder && rawPrerequisites === undefined) {
+            result.errors.push(buildMessage(file, "prerequisites", "missing required field"));
+        } else if (rawPrerequisites !== undefined) {
+            if (!Array.isArray(rawPrerequisites)) {
+                result.errors.push(buildMessage(file, "prerequisites", "prerequisites must be an array of lesson slugs"));
+            } else {
+                for (const prerequisite of rawPrerequisites) {
+                    if (typeof prerequisite !== "string" || prerequisite.trim() === "") {
+                        result.errors.push(
+                            buildMessage(file, "prerequisites", `invalid prerequisite entry ${JSON.stringify(prerequisite)}`),
+                        );
+                        continue;
+                    }
+
+                    pendingPrerequisiteChecks.push({
+                        file,
+                        prerequisite: prerequisite.trim(),
+                    });
+                }
+            }
+        }
+
+        const rawDuration = data.duration;
+        if (requiresOrder && rawDuration === undefined) {
+            result.errors.push(buildMessage(file, "duration", "missing required field"));
+        } else if (rawDuration !== undefined && (typeof rawDuration !== "string" || !DURATION_FORMAT_REGEX.test(rawDuration.trim()))) {
+            pushEditorialIssue(
+                result,
+                file,
+                "editorial",
+                `duration should follow a readable format like "35 min" or "2 h" (received: ${JSON.stringify(rawDuration)})`,
+            );
+        }
+
+        const rawDifficulty = data.difficulty;
+        if (requiresOrder && rawDifficulty === undefined) {
+            result.errors.push(buildMessage(file, "difficulty", "missing required field"));
+        } else if (
+            rawDifficulty !== undefined
+            && (typeof rawDifficulty !== "string" || !ALLOWED_DIFFICULTY_VALUES.has(rawDifficulty.trim().toLowerCase()))
+        ) {
+            result.errors.push(
+                buildMessage(
+                    file,
+                    "difficulty",
+                    `difficulty must be one of: ${Array.from(ALLOWED_DIFFICULTY_VALUES).join(", ")}`,
+                ),
+            );
+        }
+
+        const rawObjectives = data.learningObjectives;
+        if (requiresOrder && rawObjectives === undefined) {
+            result.errors.push(buildMessage(file, "learningObjectives", "missing required field"));
+        } else if (rawObjectives !== undefined) {
+            if (!Array.isArray(rawObjectives)) {
+                result.errors.push(buildMessage(file, "learningObjectives", "learningObjectives must be an array of strings"));
+            } else {
+                const invalidObjective = rawObjectives.find((objective) => typeof objective !== "string" || objective.trim() === "");
+                if (invalidObjective !== undefined) {
+                    result.errors.push(
+                        buildMessage(file, "learningObjectives", `invalid learning objective ${JSON.stringify(invalidObjective)}`),
+                    );
+                }
+
+                if (rawObjectives.length > 0 && rawObjectives.length < 2) {
+                    pushEditorialIssue(
+                        result,
+                        file,
+                        "editorial",
+                        "learningObjectives should contain at least 2 items for clearer outcomes",
+                    );
+                }
+            }
         }
 
         if (!requiresOrder) {
@@ -183,6 +288,35 @@ async function validateCollection(collection: "blog" | "corso"): Promise<Validat
                 "editorial",
                 "missing concrete example signals (code block, table, 'Esempio', 'Caso pratico' or 'Template')",
             );
+        }
+    }
+
+    if (collection === "corso") {
+        for (const check of pendingPrerequisiteChecks) {
+            if (!slugToFile.has(check.prerequisite)) {
+                result.errors.push(
+                    buildMessage(
+                        check.file,
+                        "prerequisites",
+                        `unknown prerequisite slug "${check.prerequisite}"`,
+                    ),
+                );
+            }
+        }
+
+        for (const [moduleFolder, moduleOrders] of orderTracker.entries()) {
+            for (const [order, filesForOrder] of moduleOrders.entries()) {
+                if (filesForOrder.length > 1) {
+                    const relativeFiles = filesForOrder.map((targetFile) => path.relative(process.cwd(), targetFile));
+                    result.errors.push(
+                        buildMessage(
+                            filesForOrder[0],
+                            "order",
+                            `duplicate order ${order} in module "${moduleFolder}": ${relativeFiles.join(", ")}`,
+                        ),
+                    );
+                }
+            }
         }
     }
 

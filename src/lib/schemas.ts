@@ -12,8 +12,13 @@ export const blogSchema = z.object({
 export const corsoSchema = z.object({
     title: z.string(),
     description: z.string(),
+    module: z.string().optional(),
     order: z.number().optional(),
     category: z.string().optional(),
+    prerequisites: z.array(z.string()).optional(),
+    duration: z.string().optional(),
+    difficulty: z.enum(['beginner', 'intermediate', 'advanced', 'base', 'intermedio', 'avanzato']).optional(),
+    learningObjectives: z.array(z.string()).optional(),
 });
 
 export const productsSchema = z.object({

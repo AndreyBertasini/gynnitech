@@ -1,4 +1,7 @@
 ---
+import fs from 'node:fs/promises';
+import path from 'node:path';
+import matter from 'gray-matter';
 import Layout from '../../../layouts/Layout.astro';
 import { Navbar } from '../../../components/Navbar';
 import Footer from '../../../components/Footer.astro';
@@ -9,58 +12,118 @@ import { LessonCard } from '../../../components/ui/LessonCard';
 
 export async function getStaticPaths() {
   const allLessons = await getCollection('corso');
+  const COURSE_CONTENT_ROOT = path.join(process.cwd(), 'src/content/corso');
 
-  // Group lessons by module ID prefix for O(N) efficiency
-  // Optimization: This avoids repeated filtering for each module page
-  const lessonsByModule = new Map();
+  const fallbackDifficulty = (moduleIndex: number): string => {
+    if (moduleIndex < 5) return 'Base';
+    if (moduleIndex < 10) return 'Intermedio';
+    return 'Avanzato';
+  };
+
+  const normalizeDifficulty = (rawValue: unknown, fallback: string): string => {
+    if (typeof rawValue !== 'string' || rawValue.trim() === '') {
+      return fallback;
+    }
+
+    const value = rawValue.trim().toLowerCase();
+    if (value === 'beginner' || value === 'base') return 'Base';
+    if (value === 'intermediate' || value === 'intermedio') return 'Intermedio';
+    if (value === 'advanced' || value === 'avanzato') return 'Avanzato';
+    return fallback;
+  };
+
+  const resolveCategory = (rawCategory: unknown, lessonId: string): string => {
+    if (typeof rawCategory === 'string' && rawCategory.trim() !== '') {
+      return rawCategory.trim();
+    }
+
+    const slug = lessonId.split('/')[1]?.replace(/\.[^/.]+$/, '') || '';
+    if (slug === 'cheat-sheet') return 'Cheat Sheet';
+    if (slug === 'caso-studio') return 'Caso Studio';
+    return 'Lezioni';
+  };
+
+  const countPrerequisites = (rawPrerequisites: unknown): number => {
+    if (!Array.isArray(rawPrerequisites)) return 0;
+    return rawPrerequisites.filter((item) => typeof item === 'string' && item.trim() !== '').length;
+  };
+
+  const estimateDurationLabel = async (lessonId: string, explicitDuration: unknown): Promise<string | undefined> => {
+    if (typeof explicitDuration === 'string' && explicitDuration.trim() !== '') {
+      return explicitDuration.trim();
+    }
+
+    try {
+      const lessonPath = path.join(COURSE_CONTENT_ROOT, lessonId);
+      const raw = await fs.readFile(lessonPath, 'utf-8');
+      const { content } = matter(raw);
+      const words = content.trim().split(/\s+/).filter(Boolean).length;
+      const minutes = Math.max(8, Math.round(words / 180));
+      return `${minutes} min`;
+    } catch {
+      return undefined;
+    }
+  };
+
+  const lessonsByModule = new Map<string, CollectionEntry<'corso'>[]>();
   for (const lesson of allLessons) {
     const moduleId = lesson.id.split('/')[0];
     if (!lessonsByModule.has(moduleId)) {
       lessonsByModule.set(moduleId, []);
     }
-    lessonsByModule.get(moduleId).push(lesson);
+    lessonsByModule.get(moduleId)?.push(lesson);
   }
 
-  return COURSE_MODULES.map(module => {
-    // Get lessons for this module
-    const moduleLessonsRaw = lessonsByModule.get(module.id) || [];
+  return Promise.all(
+    COURSE_MODULES.map(async (module, moduleIndex) => {
+      const moduleLessonsRaw = lessonsByModule.get(module.id) || [];
+      moduleLessonsRaw.sort((a, b) => (a.data.order || 99) - (b.data.order || 99));
 
-    // Sort
-    moduleLessonsRaw.sort((a: CollectionEntry<'corso'>, b: CollectionEntry<'corso'>) => (a.data.order || 99) - (b.data.order || 99));
+      const moduleLessons = await Promise.all(
+        moduleLessonsRaw.map(async (lesson) => {
+          const lessonData = lesson.data as Record<string, unknown>;
+          const difficultyFallback = fallbackDifficulty(moduleIndex);
 
-    // Map to lightweight structure to save memory and avoid passing unused body content
-    const moduleLessons = moduleLessonsRaw.map((lesson: CollectionEntry<'corso'>) => ({
-      id: lesson.id,
-      data: {
-        title: lesson.data.title,
-        description: lesson.data.description,
-        category: (lesson.data as any).category,
-        order: lesson.data.order,
-      }
-    }));
+          return {
+            id: lesson.id,
+            data: {
+              title: lesson.data.title,
+              description: lesson.data.description,
+              category: resolveCategory(lessonData.category, lesson.id),
+              order: lesson.data.order,
+              duration: await estimateDurationLabel(lesson.id, lessonData.duration),
+              difficulty: normalizeDifficulty(lessonData.difficulty, difficultyFallback),
+              prerequisitesCount: countPrerequisites(lessonData.prerequisites),
+            },
+          };
+        }),
+      );
 
-    return {
-      params: { module: module.id },
-      props: { moduleData: module, moduleLessons },
-    };
-  });
+      return {
+        params: { module: module.id },
+        props: { moduleData: module, moduleLessons },
+      };
+    }),
+  );
 }
 
 const { moduleData, moduleLessons } = Astro.props;
 
-// Group lessons by category
 interface LessonInfo {
   id: string;
   data: {
     title: string;
     description: string;
-    category?: string;
+    category: string;
     order?: number;
+    duration?: string;
+    difficulty: string;
+    prerequisitesCount: number;
   }
 }
 
 const lessonsByCategory = moduleLessons.reduce((acc: Record<string, LessonInfo[]>, lesson: LessonInfo) => {
-  const category = lesson.data.category || 'Concetti Fondamentali';
+  const category = lesson.data.category;
   if (!acc[category]) acc[category] = [];
   acc[category].push(lesson);
   return acc;
@@ -77,12 +140,11 @@ const categories = Object.keys(lessonsByCategory);
     <div class={`absolute top-0 right-0 w-[800px] h-[800px] bg-gradient-to-br ${moduleData.color} opacity-[0.03] blur-[150px] pointer-events-none rounded-full translate-x-1/3 -translate-y-1/3`}></div>
 
     <div class="container mx-auto px-6 relative z-10">
-      
       {/* Breadcrumb */}
       <div class="mb-12">
         <a href="/course" class="inline-flex items-center gap-2 text-slate-500 hover:text-white transition-colors text-sm group">
           <div class="p-1 rounded-md bg-white/5 border border-white/10 group-hover:border-white/20 transition-colors">
-             <ArrowLeft className="w-3 h-3" />
+            <ArrowLeft className="w-3 h-3" />
           </div>
           Torna ai Corsi
         </a>
@@ -93,11 +155,11 @@ const categories = Object.keys(lessonsByCategory);
         <span class={`inline-block px-4 py-1.5 rounded-full text-xs font-mono font-bold tracking-widest mb-6 border border-white/10 bg-white/5 text-slate-300`}>
           MODULO {COURSE_MODULES.indexOf(moduleData) + 1}
         </span>
-        
+
         <h1 class="text-4xl md:text-6xl font-bold text-white mb-8 leading-tight">
           {moduleData.title}
         </h1>
-        
+
         <p class="text-xl text-slate-400 leading-relaxed max-w-2xl mx-auto">
           {moduleData.description}
         </p>
@@ -105,40 +167,39 @@ const categories = Object.keys(lessonsByCategory);
 
       {/* Lessons Grouped by Category */}
       <div class="max-w-6xl mx-auto space-y-20">
-        
         {categories.length > 0 ? (
-            categories.map(category => (
-                <section class="animate-fade-in-up">
-                    <div class="flex items-center gap-4 mb-8">
-                        <div class="h-px flex-grow bg-gradient-to-r from-transparent via-white/10 to-transparent"></div>
-                        <h2 class="text-2xl font-bold text-white flex items-center gap-3 px-4 py-1 rounded-full border border-white/5 bg-white/[0.02]">
-                            <Layers className="w-5 h-5 text-neon-mint" />
-                            {category}
-                        </h2>
-                        <div class="h-px flex-grow bg-gradient-to-r from-transparent via-white/10 to-transparent"></div>
-                    </div>
+          categories.map((category) => (
+            <section class="animate-fade-in-up">
+              <div class="flex items-center gap-4 mb-8">
+                <div class="h-px flex-grow bg-gradient-to-r from-transparent via-white/10 to-transparent"></div>
+                <h2 class="text-2xl font-bold text-white flex items-center gap-3 px-4 py-1 rounded-full border border-white/5 bg-white/[0.02]">
+                  <Layers className="w-5 h-5 text-neon-mint" />
+                  {category}
+                </h2>
+                <div class="h-px flex-grow bg-gradient-to-r from-transparent via-white/10 to-transparent"></div>
+              </div>
 
-                    <div class="grid md:grid-cols-2 lg:grid-cols-3 gap-6">
-                        {lessonsByCategory[category].map((lesson: LessonInfo, index: number) => (
-                            <LessonCard 
-                                title={lesson.data.title}
-                                description={lesson.data.description}
-                                duration="10 min"
-                                index={index}
-                                href={`/course/${lesson.id.replace(/\.[^/.]+$/, "")}/`}
-                            />
-                        ))}
-                    </div>
-                </section>
-            ))
+              <div class="grid md:grid-cols-2 lg:grid-cols-3 gap-6">
+                {lessonsByCategory[category].map((lesson: LessonInfo, index: number) => (
+                  <LessonCard
+                    title={lesson.data.title}
+                    description={lesson.data.description}
+                    duration={lesson.data.duration}
+                    difficulty={lesson.data.difficulty}
+                    prerequisitesCount={lesson.data.prerequisitesCount}
+                    index={index}
+                    href={`/course/${lesson.id.replace(/\.[^/.]+$/, '')}/`}
+                  />
+                ))}
+              </div>
+            </section>
+          ))
         ) : (
-            <div class="p-20 text-center border border-dashed border-white/10 rounded-2xl bg-white/[0.02]">
-                <p class="text-slate-500">Nessuna lezione disponibile al momento.</p>
-            </div>
+          <div class="p-20 text-center border border-dashed border-white/10 rounded-2xl bg-white/[0.02]">
+            <p class="text-slate-500">Nessuna lezione disponibile al momento.</p>
+          </div>
         )}
-
       </div>
-
     </div>
   </main>
 

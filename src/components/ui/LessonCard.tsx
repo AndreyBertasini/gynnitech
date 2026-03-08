@@ -5,11 +5,13 @@ interface LessonCardProps {
   title: string;
   description: string;
   duration?: string;
+  difficulty?: string;
+  prerequisitesCount?: number;
   index: number;
   href: string;
 }
 
-export const LessonCard = ({ title, description, duration, index, href }: LessonCardProps) => {
+export const LessonCard = ({ title, description, duration, difficulty, prerequisitesCount, index, href }: LessonCardProps) => {
   return (
     <a
       href={href}
@@ -23,11 +25,18 @@ export const LessonCard = ({ title, description, duration, index, href }: Lesson
         <span className="flex items-center justify-center w-8 h-8 rounded-lg bg-white/5 border border-white/10 text-xs font-orbitron text-slate-400 group-hover:text-neon-blue group-hover:border-neon-blue/30 transition-colors shadow-inner">
           {index + 1}
         </span>
-        {duration && (
-          <span className="flex items-center gap-1.5 text-xs text-slate-500 bg-white/5 px-2 py-1 rounded-md font-mono border border-transparent group-hover:border-white/10 transition-colors">
-            <Clock className="w-3 h-3" /> {duration}
-          </span>
-        )}
+        <div className="flex items-center gap-2">
+          {difficulty && (
+            <span className="text-[11px] text-slate-300 bg-white/5 px-2 py-1 rounded-md border border-white/10 font-medium">
+              {difficulty}
+            </span>
+          )}
+          {duration && (
+            <span className="flex items-center gap-1.5 text-xs text-slate-500 bg-white/5 px-2 py-1 rounded-md font-mono border border-transparent group-hover:border-white/10 transition-colors">
+              <Clock className="w-3 h-3" /> {duration}
+            </span>
+          )}
+        </div>
       </div>
 
       <h3 className="text-xl font-bold text-white mb-3 leading-snug group-hover:text-neon-blue transition-colors font-audiowide tracking-wide">
@@ -37,6 +46,12 @@ export const LessonCard = ({ title, description, duration, index, href }: Lesson
       <p className="text-sm text-slate-400 mb-6 flex-grow leading-relaxed font-sans">
         {description}
       </p>
+
+      {typeof prerequisitesCount === 'number' && prerequisitesCount > 0 && (
+        <p className="text-xs text-slate-500 mb-4 font-mono">
+          Prerequisiti: {prerequisitesCount}
+        </p>
+      )}
 
       <div className="mt-auto flex items-center gap-2 text-sm font-medium text-white/50 group-hover:text-white transition-colors">
         <span className="group-hover:underline decoration-neon-blue/50 underline-offset-4 font-orbitron">Vai alla lezione</span>
