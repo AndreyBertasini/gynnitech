@@ -13,6 +13,8 @@ Questo caso studio mostra come i concetti del modulo diventano un sistema operat
 
 L'obiettivo e' vedere come churn prediction, segmentazione e playbook di intervento funzionano quando devono produrre risultati per un team commerciale e customer success, non solo per un notebook.
 
+Il progetto copre l'intero ciclo di vita di un sistema di data science in produzione: analisi esplorativa, clustering per segmentazione, addestramento del modello con XGBoost, integrazione nel CRM tramite API, playbook operativi differenziati per segmento, e infine monitoraggio del drift. Ogni fase ha prodotto decisioni concrete — alcune giuste, alcune sbagliate — che vengono documentate per permettere allo studente di imparare dai due tipi di risultato.
+
 ## La Situazione: Crescita senza Profitto
 
 HRFlow (nome fittizio) è un SaaS B2B italiano nel mercato HR tech con €6.2M di ARR e 1.840 clienti attivi a luglio 2023. In apparenza una storia di successo: +40% YoY di crescita per 3 anni consecutivi.
@@ -30,9 +32,9 @@ Il problema: il churn stava mangiando la crescita. Ogni mese, il team commercial
 | CAC | €3.100 | — |
 | LTV/CAC | 2.6x | >3x |
 
-Il board aveva dato 6 mesi per portare il churn mensile sotto al 2% e NRR sopra al 100%.
+Il board aveva dato 6 mesi per portare il churn mensile sotto al 2% e NRR sopra al 100%. In caso contrario, il prossimo round di funding avrebbe potuto essere rinegoziato al ribasso.
 
-Il Customer Success team di 3 persone gestiva 1.840 clienti "a pelle" — intervenivano quando vedevano un cliente lamentarsi su Intercom o quando arrivava una richiesta di cancellazione. Era già troppo tardi.
+Il Customer Success team di 3 persone gestiva 1.840 clienti "a pelle" — intervenivano quando vedevano un cliente lamentarsi su Intercom o quando arrivava una richiesta di cancellazione. Era già troppo tardi. Una richiesta di cancellazione ha un tasso di salvataggio del 12-18%; un outreach proattivo 60 giorni prima ha un tasso di salvataggio del 55-70%. La matematica era chiara: bisognava anticipare, non reagire.
 
 ## L'Analisi Preliminare: Capire Chi Churna e Perché
 
@@ -93,7 +95,7 @@ comparison = pd.DataFrame({
 | Seat utilization | 31% | 74% | -58% |
 | Days since last login | 22 giorni | 3 giorni | +633% |
 
-La scoperta più importante: il 68% degli account che avrebbero cancellato nei successivi 90 giorni non accedeva al prodotto da almeno 14 giorni. Il segnale era chiarissimo — il problema era che nessuno lo guardava sistematicamente.
+La scoperta più importante: il 68% degli account che avrebbero cancellato nei successivi 90 giorni non accedeva al prodotto da almeno 14 giorni. Il segnale era chiarissimo — il problema era che nessuno lo guardava sistematicamente. Questo è un pattern comune: le aziende hanno i dati per prevenire il churn, ma non hanno i processi per trasformarli in azioni.
 
 ### Clustering: Capire i Segmenti
 
@@ -133,7 +135,7 @@ km = KMeans(n_clusters=4, random_state=42, n_init=10)
 df['segment'] = km.fit_predict(X_scaled)
 ```
 
-**I 4 Segmenti Identificati:**
+**I 4 Segmenti Identificati** (K=4 scelto con silhouette score 0.312, il migliore tra K=2 e K=8):
 
 | Segmento | Nome | Caratteristiche | Churn Rate | % Clienti |
 |---------|------|----------------|-----------|----------|
@@ -142,7 +144,7 @@ df['segment'] = km.fit_predict(X_scaled)
 | 2 | At-Risk Passive | Login mensile, meno del 30% feature, NPS inferiore a 5 | 52% ann. | 22% |
 | 3 | Stuck Adopters | Login frequente, meno del 20% feature, alto supporto | 35% ann. | 13% |
 
-La scoperta: i "Stuck Adopters" (segmento 3) erano clienti che provavano ad usare il prodotto ma non riuscivano. Non erano disinteressati — erano frustrati. L'intervento giusto per loro non era un'email di retention, ma assistenza tecnica proattiva.
+La scoperta: i "Stuck Adopters" (segmento 3) erano clienti che provavano ad usare il prodotto ma non riuscivano. Non erano disinteressati — erano frustrati. L'intervento giusto per loro non era un'email di retention, ma assistenza tecnica proattiva. Trattarli con un messaggio generico di re-engagement avrebbe avuto un effetto nullo o negativo.
 
 ## Il Modello di Churn Prediction
 
@@ -334,12 +336,122 @@ Il CS team ha definito 3 playbook basati sul segmento e sul risk factor principa
 I primi 3 risultati del Playbook A erano falsi positivi: clienti che avevano smesso di usare il prodotto perché erano insoddisfatti di una funzionalità specifica, non perché volessero cancellare. Le chiamate del CSM hanno rivelato un bug critico nel modulo di reportistica che non era stato segnalato via ticket. Senza l'outreach proattivo, quei 3 clienti avrebbero semplicemente non rinnovato. Questo è il valore principale della proattività: senti feedback che altrimenti non arriverà mai.
 </Aside>
 
+## Monitoraggio del Modello nel Tempo
+
+Un rischio concreto con i modelli di churn è il **data drift**: il comportamento dei clienti cambia, ma il modello continua a fare previsioni basate su pattern del passato. HRFlow ha implementato un sistema di monitoraggio settimanale.
+
+### Metriche di Salute del Modello
+
+```python
+# model_health_monitor.py — Eseguito ogni lunedì mattina
+
+import pandas as pd
+from scipy import stats
+
+def check_feature_drift(current_week_df, baseline_df, features, threshold=0.15):
+    """
+    Controlla se le distribuzioni delle feature sono cambiate rispetto alla baseline.
+    Usa il test di Kolmogorov-Smirnov per variabili continue.
+    """
+    drift_report = {}
+
+    for feature in features:
+        if current_week_df[feature].dtype in ['float64', 'int64']:
+            ks_stat, p_value = stats.ks_2samp(
+                baseline_df[feature].dropna(),
+                current_week_df[feature].dropna()
+            )
+            drift_detected = ks_stat > threshold
+            drift_report[feature] = {
+                'ks_statistic': round(ks_stat, 3),
+                'p_value': round(p_value, 4),
+                'drift_detected': drift_detected
+            }
+
+    return drift_report
+
+# Baseline = primo mese di produzione
+baseline = pd.read_parquet('model_baseline_aug2023.parquet')
+current = get_current_week_features()
+
+drift = check_feature_drift(current, baseline, features)
+drifted_features = [f for f, d in drift.items() if d['drift_detected']]
+
+if drifted_features:
+    send_slack_alert(
+        channel='#data-science-monitoring',
+        message=f"⚠️ Drift rilevato in {len(drifted_features)} feature: {drifted_features}"
+    )
+```
+
+**Cosa ha trovato il monitoring:**
+Dopo 3 mesi, la feature `days_since_last_login` aveva una distribuzione significativamente diversa dalla baseline: i clienti accedevano più frequentemente, grazie a un nuovo modulo mobile rilasciato in ottobre. Il modello stava sottostimando il rischio di alcuni account perché confrontava i login con pattern pre-mobile.
+
+Soluzione: re-training del modello ogni 60 giorni su una finestra scorrevole degli ultimi 6 mesi di dati.
+
+### Confronto Settimanale Previsioni vs Realtà
+
+```sql
+-- Verifica calibrazione modello: le previsioni corrispondono ai churn reali?
+-- Eseguito ogni settimana su account per cui era stata fatta una previsione 90 giorni fa
+
+WITH predictions_90d_ago AS (
+  SELECT
+    account_id,
+    churn_score,
+    CASE
+      WHEN churn_score >= 0.65 THEN 'high'
+      WHEN churn_score >= 0.45 THEN 'medium'
+      ELSE 'low'
+    END AS risk_bucket
+  FROM account_churn_scores_history
+  WHERE prediction_date = CURRENT_DATE - INTERVAL 90 DAY
+),
+actual_outcomes AS (
+  SELECT account_id, 1 AS actually_churned
+  FROM churned_accounts
+  WHERE churn_date BETWEEN (CURRENT_DATE - INTERVAL 90 DAY) AND CURRENT_DATE
+)
+SELECT
+  p.risk_bucket,
+  COUNT(p.account_id)                                           AS predicted,
+  COUNT(a.account_id)                                           AS churned,
+  ROUND(COUNT(a.account_id) * 100.0 / COUNT(p.account_id), 1)  AS churn_rate_actual
+FROM predictions_90d_ago p
+LEFT JOIN actual_outcomes a USING (account_id)
+GROUP BY p.risk_bucket
+ORDER BY FIELD(risk_bucket, 'high', 'medium', 'low');
+```
+
+**Output tipico (ben calibrato):**
+
+| Bucket rischio | Account | Churnati | Churn rate reale |
+|---|---|---|---|
+| high | 89 | 54 | 60.7% |
+| medium | 187 | 38 | 20.3% |
+| low | 1.564 | 47 | 3.0% |
+
+Se il churn rate nel bucket "high" scende sotto il 40%, il modello sta perdendo potere discriminativo e va re-trainato.
+
+## Domande per l'Analisi
+
+1. Il modello usa `scale_pos_weight` per gestire lo sbilanciamento delle classi (72% non churna, 28% churna). Un'alternativa è usare SMOTE per oversampling della classe minoritaria. Quali sono i pro e contro di ciascun approccio? In quale scenario preferiresti SMOTE a `scale_pos_weight`?
+
+2. Il Playbook C (Renewal Risk) offre uno sconto del 10% ai clienti che rinnovano anticipatamente. Questo crea un incentivo perverso: i clienti imparano che aspettando il rinnovo ottengono uno sconto. Come misuresti questo effetto nei dati? Come ridisegneresti il playbook per eliminare il problema?
+
+3. Il monitoring identifica drift nella feature `days_since_last_login` dopo il rilascio dell'app mobile. Invece di re-trainare subito il modello, proponi una soluzione alternativa che permetta di aggiustare le previsioni senza ri-addestramento completo. (Suggerimento: considera la calibrazione delle probabilità.)
+
+4. L'analisi mostra che i "Stuck Adopters" (segmento 3) churnano al 35% annuo nonostante accedano frequentemente. Il Playbook B (training) funziona per loro ma richiede tempo del CS team. Proponi un approccio in-app (senza intervento umano) per ridurre il churn in questo segmento.
+
 ## Riepilogo Operativo
 
 - Un modello utile vale poco senza processi, owner e integrazione nei flussi del team.
 - La spiegabilita' e il timing dell'intervento contano quanto l'accuratezza statistica.
 - Churn, NRR e playbook di recupero vanno letti insieme, non in dashboard separate.
 - Il vero output del progetto non e' il modello, ma un sistema decisionale che continua a funzionare nel tempo.
+- Il monitoring del modello non e' un'aggiunta opzionale: senza di esso, il sistema degrada silenziosamente mentre il business cambia. Pianifica re-training regolare (ogni 60-90 giorni) come parte dell'architettura dal giorno uno.
+- La calibrazione delle probabilita' e' piu' importante della soglia di classificazione. Un modello che dice "70% di rischio churn" deve corrispondere a un churn rate reale vicino al 70% per quel bucket — altrimenti i playbook vengono attivati nelle proporzioni sbagliate.
+- Churn prediction e segmentazione sono due analisi complementari: la prima dice chi intervenire, la seconda dice come intervenire. Usarle separate produce risultati mediocri; usarle insieme produce il sistema operativo della retention.
 
 ## Lezioni Apprese
 
@@ -352,3 +464,7 @@ I primi 3 risultati del Playbook A erano falsi positivi: clienti che avevano sme
 **4. Il timing dell'intervento è critico.** L'analisi di cohort sui clienti salvati ha mostrato che l'outreach a 30-45 giorni prima del rinnovo aveva un 71% di success rate. A 15 giorni: 38%. Dopo la data di rinnovo: 12%. Intervieni presto.
 
 **5. I falsi positivi sono preziosi.** Ogni outreach a un cliente che non avrebbe cancellato è un'opportunità per scoprire feedback che altrimenti non avresti mai ricevuto. Non ottimizzare troppo per la precisione a discapito del recall.
+
+**6. NRR è la metrica nord del progetto, non l'AUC-ROC.** Il modello ha AUC-ROC 0.847, che è un buon risultato statistico. Ma il board misurava il successo in NRR: dal 88% al 102%. La collaborazione con il CS team per tradurre le previsioni in azioni concrete è stata più determinante dell'accuratezza del modello stesso. Un modello mediocre con ottimo processo di intervento batte un modello eccellente mai utilizzato.
+
+**7. Il segmento "Stuck Adopters" richiede un intervento diverso dagli altri.** Chi non usa il prodotto per disinteresse e chi non lo usa perché è bloccato hanno lo stesso segnale comportamentale ma cause radicalmente diverse. Il clustering ha separato questi due gruppi — senza di esso, il CS team avrebbe applicato lo stesso playbook a entrambi, con risultati deludenti per metà dei clienti. La segmentazione non è un esercizio accademico: è la base per un intervento contestuale.

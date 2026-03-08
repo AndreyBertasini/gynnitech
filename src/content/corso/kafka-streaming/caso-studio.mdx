@@ -13,6 +13,8 @@ Questo caso studio mostra cosa succede quando un'architettura batch smette di es
 
 Seguiremo una migrazione reale nella sua logica completa: problema iniziale, scelte tecniche, incidenti evitati male e apprendimenti che restano utili oltre il singolo stack.
 
+Il caso copre il ciclo completo: dall'analisi dei requisiti reali (volume, latenza, retention), al design dei topic e degli schema Avro, all'implementazione del producer Python e del consumer ClickHouse, fino alla strategia di migrazione in parallelo che ha permesso di validare il nuovo sistema senza interrompere il business. I numeri sono concreti: €40.000 di perdite per frode prima del progetto, 87% di rilevamento in tempo dopo; latenza da 24 ore a 5 secondi; costo infrastruttura dimezzato da €850 a €490/mese.
+
 ## Il Problema: Un Marketplace che Non Vedeva il Futuro
 
 SportBet Italia (nome fittizio) è una piattaforma di scommesse live con 180.000 utenti attivi mensili e €15M di volume mensile gestito. Nel 2023, il loro stack era semplice: MySQL come database transazionale, un job Airflow ogni notte che esportava i dati su BigQuery, Looker per le dashboard.
@@ -28,7 +30,7 @@ Il problema: le quote delle scommesse live cambiano ogni 30 secondi. Il comporta
 | Report di performance delle campagne paid con 24h di ritardo | Budget sprecato su campagne non performanti per 24h |
 | Nessuna visibilità sul comportamento degli utenti durante eventi live | Impossibile personalizzare l'esperienza in real-time |
 
-Il team tecnico era composto da 4 persone: 2 backend engineers, 1 data engineer, 1 analyst. Budget per il progetto: €25.000 in 8 settimane.
+Il team tecnico era composto da 4 persone: 2 backend engineers, 1 data engineer, 1 analyst. Budget per il progetto: €25.000 in 8 settimane (€15.000 di costi interni di sviluppo, €10.000 per Confluent e ClickHouse durante il periodo di setup e validazione parallela). Il ROI atteso era di recuperare i €40.000 di perdite frode nel primo semestre — obiettivo raggiunto in 3 mesi.
 
 ## Analisi Tecnica: Cosa Serviva Davvero
 
@@ -54,6 +56,16 @@ Prima di scegliere la tecnologia, il team ha analizzato i requisiti reali:
 - ClickHouse Cloud Dev: €250/mese
 - S3: €20/mese
 - Totale: €450/mese (vs €2.800/mese di BigQuery enterprise)
+
+Il risparmio di €2.350/mese rispetto a BigQuery Enterprise non era il motivo principale della migrazione — era un beneficio collaterale. Il motivo principale era la latenza: BigQuery con streaming insert costava più di €2.800/mese e garantiva comunque solo latenze di 1-3 minuti, non secondi. Confluent + ClickHouse garantisce latenze di 3-5 secondi a un terzo del costo.
+
+**Scala massima stimata (Champions League peak):**
+- 50.000 eventi/ora = 833 eventi/secondo
+- A 800 byte per messaggio: 667 KB/s
+- Confluent Basic gestisce fino a 250 MB/s: il carico picco è l'0.3% della capacità
+- Il sistema ha margine per 300x di crescita prima di dover fare upgrade al piano
+
+Questa analisi di headroom è stata determinante nella scelta di Confluent Basic invece di un cluster self-managed: l'overhead operativo di gestire Kafka in-house non era giustificato per un carico così contenuto.
 
 ## Architettura Implementata
 
@@ -105,7 +117,9 @@ user.sessions.v1  → eventi di sessione (login, logout, page_view, bet_view)
 payments.v1       → eventi di pagamento (deposit, withdrawal, settlement)
 ```
 
-La versione nel nome del topic (`v1`) permette di introdurre `v2` con schema incompatibile senza interrompere i consumer esistenti.
+La versione nel nome del topic (`v1`) permette di introdurre `v2` con schema incompatibile senza interrompere i consumer esistenti. Questa convenzione sembra ridondante quando c'è solo una versione — ma diventa fondamentale al primo breaking change, come il team ha scoperto a settimana 5.
+
+La regola del team: un topic è un contratto pubblico. Una volta che un consumer lo legge in produzione, lo schema non può cambiare in modo incompatibile. L'unica via d'uscita è un nuovo topic con versione incrementata.
 
 ## Implementazione Dettagliata
 
@@ -131,7 +145,7 @@ La versione nel nome del topic (`v1`) permette di introdurre `v2` con schema inc
 }
 ```
 
-Il campo `metadata` (map opzionale) permette di aggiungere campi contestuali senza evolvere lo schema principale. Questo ha risolto il problema delle "feature emergenti" — durante l'implementazione il team ha capito che alcune scommesse avevano attributi specifici per sport che non erano stati previsti.
+Il campo `metadata` (map opzionale) permette di aggiungere campi contestuali senza evolvere lo schema principale. Questo ha risolto il problema delle "feature emergenti" — durante l'implementazione il team ha capito che alcune scommesse avevano attributi specifici per sport che non erano stati previsti. Per esempio, le scommesse sul calcio hanno `home_team` e `away_team`, quelle sul tennis hanno `set_number` e `game_score`. Invece di creare un tipo per sport, il team ha usato `metadata` per questi campi opzionali, mantenendo uno schema unico per tutti gli sport.
 
 ### Producer Python (Backend API)
 
@@ -274,17 +288,65 @@ groups:
           summary: "Utente {{ $labels.user_id }} con volume anomalo"
 ```
 
+## La Strategia di Migrazione: Senza Fermare il Prodotto
+
+La domanda più difficile non era "come costruiamo Kafka" ma "come passiamo a Kafka senza fermare il prodotto per una settimana". SportBet non poteva avere downtime: le scommesse live non si interrompono.
+
+Il team ha adottato una strategia in tre fasi:
+
+**Fase 1 — Dual Write (settimane 1-3):**
+Il backend scriveva contemporaneamente su MySQL (sistema legacy) e su Kafka. I consumer Kafka erano in shadow mode: leggevano, parsavano, ma non scrivevano su ClickHouse in produzione. Questo ha permesso di validare che nessun messaggio fosse perso o malformato prima di affidarsi a Kafka come fonte primaria.
+
+```python
+# dual_write.py — Periodo di transizione
+async def handle_bet_placed(bet: Bet):
+    # Legacy: scrivi sempre su MySQL (rollback facile)
+    await mysql.insert('bets', bet.to_dict())
+
+    # Nuovo: scrivi anche su Kafka (shadow mode)
+    try:
+        await kafka_producer.publish_bet_event(bet)
+        metrics.increment('kafka.shadow_write.success')
+    except Exception as e:
+        # Non blocca: il fallimento Kafka non rompe la scommessa
+        logger.warning(f"Shadow write failed: {e}")
+        metrics.increment('kafka.shadow_write.error')
+```
+
+**Fase 2 — Cutover progressivo (settimana 4):**
+Le dashboard di ClickHouse sono state messe online in parallelo a quelle di BigQuery. Per due settimane, i report venivano confrontati automaticamente ogni mattina:
+
+```python
+# validation_job.py — Comparazione batch vs streaming
+def compare_daily_metrics(date: str):
+    bigquery_total = get_bigquery_bets(date)
+    clickhouse_total = get_clickhouse_bets(date)
+
+    delta_pct = abs(bigquery_total - clickhouse_total) / bigquery_total * 100
+    if delta_pct > 0.5:  # Soglia: 0.5% di differenza accettabile
+        alert_slack(f"Discrepanza {delta_pct:.2f}% per {date}: "
+                    f"BQ={bigquery_total}, CH={clickhouse_total}")
+```
+
+Il delta è rimasto costantemente sotto lo 0.2% — confermando che Kafka non perdeva messaggi.
+
+**Fase 3 — BigQuery deprecato (settimana 8):**
+BigQuery è stato dismesso. Il dual write è stato rimosso. Kafka è la fonte primaria. MySQL rimane per le transazioni, ma i dati analitici fluiscono esclusivamente da Kafka → ClickHouse.
+
+Il punto chiave: la migrazione ha durato 8 settimane non perché Kafka sia difficile da configurare (4 giorni), ma perché il periodo di validazione in parallelo era necessario per la fiducia del team nei nuovi dati.
+
 ## Il Momento Critico: Lo Schema Breaking Change
 
 A settimana 5, il team di prodotto ha richiesto l'aggiunta del campo `liability_amount` (potenziale perdita per la piattaforma) come campo obbligatorio nello schema. Il problema: non era stato catturato per i messaggi storici.
 
 **Soluzione applicata:**
-1. Schema `v1` rimane immutabile
-2. Nuovo schema `bet_events_enriched` su topic `bet.events.v2` con `liability_amount` calcolato in real-time
+1. Schema `v1` rimane immutabile — nessun consumer esistente viene toccato
+2. Nuovo schema `bet_events_enriched` su topic `bet.events.v2` con `liability_amount` calcolato in real-time da un Kafka Streams job intermedio
 3. ClickHouse consumer separato per `v2`, i modelli BI puntano a `bet_events_v2`
-4. `v1` rimane per archivio e replay
+4. `v1` rimane per archivio, replay, e i consumer che non necessitano di `liability_amount`
+5. Il Kafka Streams job che calcola `liability_amount` legge da `v1` e scrive su `v2` — separazione netta di responsabilità
 
-Questa decisione ha aggiunto una settimana al progetto ma ha evitato un breaking change che avrebbe interrotto tutti i consumer esistenti.
+Questa decisione ha aggiunto una settimana al progetto ma ha evitato un breaking change che avrebbe interrotto tutti i consumer esistenti. La regola d'oro applicata: non si rompe mai un topic esistente. Si crea uno nuovo.
 
 ## Risultati dopo 3 Mesi
 
@@ -300,6 +362,10 @@ Questa decisione ha aggiunto una settimana al progetto ma ha evitato un breaking
 
 Il risparmio sui costi è stato inaspettato: eliminando BigQuery Enterprise (€2.100/mese) e sostituendolo con ClickHouse Cloud (€250/mese) + Confluent Basic (€180/mese), il costo totale è dimezzato nonostante la maggiore potenza.
 
+**L'impatto più significativo non è stato tecnico:** il team di rischio ha potuto, per la prima volta, reagire a comportamenti anomali mentre l'utente era ancora attivo. Nei 3 mesi successivi alla go-live, 4 su 5 incidenti di comportamento sospetto sono stati identificati e bloccati prima della liquidazione della scommessa. Prima, li scoprivano il giorno dopo.
+
+Il **tempo medio di reazione** alle campagne paid è sceso da 24 ore a 15 minuti. Con €200.000/mese di budget ads, anche una riduzione del 5% nello spreco (budget su campagne non performanti) vale €10.000/mese — 22x il costo di Confluent + ClickHouse.
+
 ## Lezioni Apprese
 
 **1. Inizia con pochi topic, ben progettati.**
@@ -312,18 +378,35 @@ Nella settimana 1, senza Schema Registry, un bug del producer aveva inviato JSON
 `bet.events.v1` sembra ridondante quando c'è solo una versione. Diventa ovvio perché serve quando arriva il breaking change a settimana 5.
 
 **4. Il consumer lag è la metrica più importante.**
-Non la latenza del producer, non il throughput. Il consumer lag dice se il sistema stia tenendo il passo. Alert a >5.000 messaggi di lag, critical a >50.000.
+Non la latenza del producer, non il throughput. Il consumer lag dice se il sistema stia tenendo il passo. Alert a >5.000 messaggi di lag, critical a >50.000. Con un throughput di 15.000 eventi/ora, >5.000 messaggi di lag significa >20 minuti di ritardo — abbastanza per perdere il valore dell'antifrode in real-time.
 
 **5. La Dead Letter Queue salva i dati.**
 Settimana 6: un bug nel consumer ClickHouse faceva crashare il parsing di certi eventi con odds=0. Senza DLQ, quegli eventi sarebbero stati persi. Con DLQ, sono stati recuperati e riprocessati dopo il fix.
+
+**6. Il dual write è costoso ma insostituibile durante la migrazione.**
+Scrivere contemporaneamente su MySQL e Kafka per 4 settimane ha aggiunto complessità al backend e un rischio teorico di inconsistenza. Ma ha permesso di validare Kafka con dati reali senza mettere il business a rischio. Non c'è modo di essere sicuri che Kafka non perda messaggi senza confrontarlo con una fonte esterna per settimane.
+
+**7. Il periodo di validazione in parallelo vale più della velocità di migrazione.**
+Il team poteva tecnicamente switchare a Kafka in 2 settimane. Ha scelto 8 settimane per il periodo di validazione. Questa scelta — considerata "lenta" dal management — ha evitato un incidente che si sarebbe scoperto solo settimane dopo in produzione, quando la fiducia nella nuova architettura sarebbe stata molto più difficile da ricostruire.
 
 <Aside type="tip">
 Il vero valore dello streaming non è la velocità — è la capacità di reagire. Un team che può vedere e reagire a un problema in 60 secondi ha un vantaggio competitivo strutturale rispetto a un team che lo scopre il giorno dopo.
 </Aside>
 
+## Domande per l'Analisi
+
+1. Il producer usa `key=str(bet['user_id'])` per garantire l'ordinamento degli eventi per utente all'interno della stessa partizione. Cosa succede se un utente piazza 100 scommesse in un secondo? Come il partitioning per user_id impatta la distribuzione del carico tra le 6 partizioni? In quale scenario il partitioning per user_id diventa un problema?
+
+2. Il sistema rileva anomalie basandosi su volume di scommesse per utente negli ultimi 5 minuti. Un scommettitore professionale legittimo potrebbe avere gli stessi pattern di un bot fraudolento. Come ridurresti i falsi positivi senza ridurre la sensibilità del sistema verso le frodi reali? Quali feature aggiuntive raccoglieresti?
+
+3. Lo schema breaking change a settimana 5 ha richiesto di introdurre `bet.events.v2`. In produzione questo significa che i consumer devono gestire due versioni dello schema in parallelo. Progetta una strategia di deprecazione di `v1` che minimizzi il rischio operativo. Quando e come "spegneresti" definitivamente `v1`?
+
+4. Il consumer lag è monitorato con alert a >5.000 e critical a >50.000 messaggi. Con un throughput di 15.000 eventi/ora in media, questi threshold corrispondono rispettivamente a 20 minuti e 3,3 ore di ritardo. Sono le soglie giuste per SportBet? Come le calibreresti in funzione dei requisiti di latenza per ogni caso d'uso (antifrode, marketing, dashboard operativa)?
+
 ## Riepilogo Operativo
 
-- La migrazione a Kafka ha avuto senso perche' ha ridotto latenza decisionale, non solo latenze tecniche.
-- Topic versionati, lag monitorato e DLQ hanno protetto il sistema molto piu' di qualunque ottimizzazione prematura.
-- Un caso streaming riesce quando business, architettura e operazioni restano allineati lungo tutta la migrazione.
-- Il vantaggio reale del real-time emerge solo se il team sa reagire ai segnali mentre stanno ancora cambiando il contesto.
+- La migrazione a Kafka ha avuto senso perche' ha ridotto latenza decisionale, non solo latenze tecniche. La latenza tecnologica da 24h a 5 secondi vale poco se il team operativo non ha processi per reagire al segnale.
+- Topic versionati, lag monitorato e DLQ hanno protetto il sistema molto piu' di qualunque ottimizzazione prematura. La robustezza si costruisce nei dettagli di configurazione, non nella scelta del vendor.
+- Un caso streaming riesce quando business, architettura e operazioni restano allineati lungo tutta la migrazione. Il rilevamento frodi al 87% è il risultato di alert calibrati sui processi operativi reali, non solo della tecnologia.
+- Il vantaggio reale del real-time emerge solo se il team sa reagire ai segnali mentre stanno ancora cambiando il contesto. Senza playbook operativi per gli alert, la latenza da 24h a 5 secondi è un miglioramento tecnico senza impatto business.
+- La migrazione in parallelo (dual write + validazione) e' il pattern piu' sicuro per sistemi critici. Il costo e' la durata maggiore del progetto; il beneficio e' la certezza che il nuovo sistema sia affidabile prima di essere l'unico sistema.

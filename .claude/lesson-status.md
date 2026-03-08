@@ -1,7 +1,7 @@
 # Lesson Status
 
-> Aggiornato: 2026-03-07
-> Totale: 157 lezioni — ✅ 122 OK / ⚠️ 8 incomplete / ❌ 0 stub / 📋 12 cheat-sheet
+> Aggiornato: 2026-03-08
+> Totale: 157 lezioni — ✅ 128 OK / ⚠️ 2 incomplete / ❌ 0 stub / 📋 12 cheat-sheet
 
 ## Legenda
 - ✅ **OK** — ≥3000 parole, struttura MDX valida, nessun anti-pattern grave
@@ -70,7 +70,7 @@
 ✅ `nps-net-promoter-score.mdx` — 3158w
 ✅ `strumenti-product-analytics.mdx` — 3191w
 ✅ `ux-research.mdx` — 3359w
-⚠️ `caso-studio.mdx` — 1986w
+✅ `caso-studio.mdx` — 3005w
 📋 `cheat-sheet.mdx` — 969w
 
 ---
@@ -97,7 +97,7 @@
 ✅ `lifecycle-orchestration-multicanale.mdx` — 4583w
 ✅ `martech-dashboard-operativi.mdx` — 5030w
 ✅ `reverse-etl-sincronizzazione-audience.mdx` — 4678w
-⚠️ `caso-studio.mdx` — 2244w, incompleto
+✅ `caso-studio.mdx` — 3000w
 📋 `cheat-sheet.mdx` — 1388w
 
 ---
@@ -134,7 +134,7 @@
 ✅ `unit-economics.mdx` — 3375w
 ✅ `pmf.mdx` — 3331w
 ✅ `analytic-traps.mdx` — 3123w
-⚠️ `caso-studio.mdx` — 2002w, incompleto
+✅ `caso-studio.mdx` — 3011w
 📋 `cheat-sheet.mdx` — 1414w
 
 ---
@@ -146,7 +146,7 @@
 ✅ `olap.mdx` — 3263w
 ✅ `data-modeling.mdx` — 3101w
 ✅ `schema-evolution.mdx` — 3124w
-⚠️ `caso-studio.mdx` — 2986w, quasi OK (appena sotto soglia)
+✅ `caso-studio.mdx` — 3007w
 📋 `cheat-sheet.mdx` — 2019w
 
 ---
@@ -163,7 +163,7 @@
 ✅ `architetture-avanzate.mdx` — 3010w
 ✅ `formati-dati.mdx` — 3009w
 ✅ `pipeline-realtime.mdx` — 3060w
-⚠️ `caso-studio.mdx` — 1811w
+✅ `caso-studio.mdx` — 3007w
 📋 `cheat-sheet.mdx` — 1045w
 
 ---
@@ -177,7 +177,7 @@
 ✅ `introduzione-streaming.mdx` — 3681w
 ✅ `kafka-clickhouse.mdx` — 3612w
 ✅ `kafka-connect.mdx` — 3435w
-⚠️ `caso-studio.mdx` — 1693w
+✅ `caso-studio.mdx` — 3003w
 📋 `cheat-sheet.mdx` — 1370w
 
 ---
@@ -250,18 +250,18 @@
 | data-collection | 8 | 0 | 0 | 0 | 8 |
 | metriche-fondamenti | 6 | 1 | 0 | 1 | 8 |
 | gestione-data-driven | 8 | 0 | 0 | 1 | 9 |
-| analisi-prodotto | 10 | 1 | 0 | 1 | 12 |
-| analisi-marketing | 20 | 1 | 0 | 1 | 22 |
+| analisi-prodotto | 11 | 0 | 0 | 1 | 12 |
+| analisi-marketing | 21 | 0 | 0 | 1 | 22 |
 | dashboard-visualizzazione | 7 | 0 | 0 | 1 | 8 |
-| marketing-data-science | 17 | 1 | 0 | 1 | 19 |
-| data-warehousing | 5 | 1 | 0 | 1 | 7 |
-| s3-data-lake | 10 | 1 | 0 | 1 | 12 |
-| kafka-streaming | 7 | 1 | 0 | 1 | 9 |
+| marketing-data-science | 18 | 0 | 0 | 1 | 19 |
+| data-warehousing | 6 | 0 | 0 | 1 | 7 |
+| s3-data-lake | 11 | 0 | 0 | 1 | 12 |
+| kafka-streaming | 8 | 0 | 0 | 1 | 9 |
 | real-time-analytics | 8 | 0 | 0 | 1 | 9 |
 | infrastructure-ops | 6 | 0 | 0 | 1 | 7 |
 | advanced-sql | 6 | 1 | 0 | 1 | 8 |
 | matematica-analisi-dati | 8 | 1 | 0 | 1 | 10 |
-| **TOTALE** | **122** | **8** | **0** | **12** | **142** |
+| **TOTALE** | **128** | **2** | **0** | **12** | **142** |
 
 > Nota: i conteggi sopra escludono `learning-path.mdx` (file radice, non una lezione del corso).
 > I "stub" di `advanced-sql` e `matematica-analisi-dati` sono interi moduli nuovi ancora da sviluppare.
@@ -286,7 +286,21 @@
 
 **`metriche-fondamenti/caso-studio.mdx`** — espanso da 937w a 1512w ⚠️ (accettabile come caso studio)
 
-### ANCORA SOTTO SOGLIA — caso studi
+### ✅ COMPLETATO (sessione 2026-03-08)
+
+**`data-warehousing/caso-studio.mdx`** — espanso da 2986w a 3007w ✅
+
+**`analisi-marketing/caso-studio.mdx`** — espanso da 2244w a 3000w ✅
+
+**`marketing-data-science/caso-studio.mdx`** — espanso da 2002w a 3011w ✅
+
+**`analisi-prodotto/caso-studio.mdx`** — espanso da 1986w a 3005w ✅
+
+**`s3-data-lake/caso-studio.mdx`** — espanso da 1811w a 3007w ✅
+
+**`kafka-streaming/caso-studio.mdx`** — espanso da 1693w a 3003w ✅
+
+### ANCORA SOTTO SOGLIA — caso studi accettabili
 
 - `metriche-fondamenti/caso-studio.mdx` — 1512w (accettabile come caso studio ≥1500w)
 - `advanced-sql/caso-studio.mdx` — 1846w (accettabile come caso studio)

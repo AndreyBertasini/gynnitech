@@ -19,6 +19,10 @@ import { Aside, Steps } from '@astrojs/starlight/components';
 
 Questo caso studio racconta la trasformazione della piattaforma dati di un e-commerce di moda con 50M eventi/giorno: da un "data swamp" costoso e lento a un data lake ottimizzato con S3, Parquet, ClickHouse e pipeline incrementali.
 
+Il punto centrale non è la tecnologia in sé, ma la sequenza delle decisioni: prima definire lo schema, poi costruire la pipeline, poi ottimizzare i costi. Molte migrazioni falliscono perché invertono questo ordine — ottimizzando i costi prima di aver validato la struttura, o costruendo pipeline prima di aver definito chi ha bisogno di cosa.
+
+Seguiremo ogni fase con dati concreti: costi prima e dopo, tempi di query, errori di reportistica eliminati, e impatto diretto sul lavoro del marketing team. La migrazione ha richiesto 4 settimane con 2 data engineer e ha generato un risparmio di $13.644/anno — con il bonus che i report ora sono accurati e disponibili in 2 secondi invece di 45 minuti.
+
 
 ## Il Contesto
 
@@ -88,11 +92,15 @@ Errori nei report                 3-5 al mese (dati sbagliati)
 
 ### I Sintomi Quotidiani
 
-1. **"Quale file e' quello giusto?"** — Nessuna versione unica della verita'
-2. **"La query e' troppo lenta"** — 45 minuti per un report settimanale
-3. **"I numeri non tornano"** — Duplicati e file con formati diversi
-4. **"Non trovo i dati di ottobre"** — Nessuna organizzazione logica
-5. **"Il bucket costa troppo"** — Tutto in S3 Standard, nessuna lifecycle
+1. **"Quale file e' quello giusto?"** — Nessuna versione unica della verita'. Quattro file con `_FINAL` nel nome, nessuno sa quale sia l'ultimo. L'analista scaricava il file "più recente per data di modifica" e incrociava le dita.
+
+2. **"La query e' troppo lenta"** — 45 minuti per il report settimanale su Athena, perché Athena scansionava interi file CSV da 12 GB invece di usare predicati su colonne Parquet. Il data engineer lasciava girare la query la domenica sera e controllava i risultati il lunedì mattina.
+
+3. **"I numeri non tornano"** — Il report di conversioni di settembre dava 12.450 ordini, mentre Shopify diceva 11.980. La differenza era causata da duplicati nel file `analytics_export_2023_FINAL_v2.csv`, importato due volte in periodi diversi.
+
+4. **"Non trovo i dati di ottobre"** — Nessuna organizzazione logica. Ottobre 2023 era distribuito tra `data/20231015_events.json`, `events-2023-10-16.json.gz`, `ga4_raw_17oct2023.csv` e una cartella `backups/`. Per recuperare un mese di dati servivano 2-4 ore.
+
+5. **"Il bucket costa troppo"** — Tutto in S3 Standard, nessuna lifecycle rule. I 45 GB di `everything_backup_june2023.tar.gz` costavano $1.044/anno da soli, per dati che nessuno aveva mai consultato dopo il backup iniziale.
 
 
 ## La Soluzione: Data Lake Strutturato
@@ -136,6 +144,7 @@ Errori nei report                 3-5 al mese (dati sbagliati)
 
 ### Piano di Migrazione
 
+La prima decisione critica è stata non cercare di "sistemare" il bucket esistente, ma costruire la nuova struttura in parallelo e migrare i dati. Tentare di riorganizzare 2,3 milioni di file in-place avrebbe richiesto mesi e avrebbe rischiato di rompere pipeline esistenti. L'approccio "blue-green" — costruire il nuovo, validarlo, poi tagliare il cavo verso il vecchio — è più sicuro anche se richiede temporaneamente doppio storage.
 
 La migrazione e' stata fatta in 4 settimane:
 
@@ -299,6 +308,96 @@ SELECT * FROM events_queue;
 ```
 
 
+### La Pipeline ETL: Da JSON.gz a Parquet
+
+Il cuore della trasformazione è la pipeline Python che normalizza i dati grezzi da 5 formati diversi in un singolo schema Parquet:
+
+```python
+# etl_normalize.py — Eseguito da Airflow ogni ora
+import boto3
+import pyarrow as pa
+import pyarrow.parquet as pq
+import pyarrow.json as paj
+import gzip
+import json
+from datetime import datetime
+
+# Schema unificato: tutti i campi obbligatori con tipo esplicito
+UNIFIED_SCHEMA = pa.schema([
+    ('event_id', pa.string()),
+    ('user_id', pa.string()),
+    ('anonymous_id', pa.string()),
+    ('event_name', pa.string()),
+    ('event_timestamp', pa.timestamp('ms', tz='UTC')),
+    ('page_url', pa.string()),
+    ('utm_source', pa.string()),
+    ('utm_medium', pa.string()),
+    ('utm_campaign', pa.string()),
+    ('device_type', pa.string()),
+    ('country_code', pa.string()),
+    ('revenue', pa.float64()),
+    ('data_source', pa.string()),
+])
+
+def normalize_ga4_event(raw_event: dict) -> dict:
+    """Trasforma un evento GA4 nello schema unificato."""
+    return {
+        'event_id': raw_event.get('event_bundle_sequence_id', ''),
+        'user_id': raw_event.get('user_id', ''),
+        'anonymous_id': raw_event.get('pseudo_user_id', ''),
+        'event_name': raw_event.get('event_name', ''),
+        'event_timestamp': datetime.fromtimestamp(
+            int(raw_event.get('event_timestamp', 0)) / 1_000_000
+        ).isoformat(),
+        'page_url': _extract_param(raw_event, 'page_location', ''),
+        'utm_source': _extract_param(raw_event, 'source', None),
+        'utm_medium': _extract_param(raw_event, 'medium', None),
+        'utm_campaign': _extract_param(raw_event, 'campaign', None),
+        'device_type': raw_event.get('device', {}).get('category', 'unknown'),
+        'country_code': raw_event.get('geo', {}).get('country', 'XX'),
+        'revenue': float(_extract_ecommerce(raw_event, 'value', 0)),
+        'data_source': 'ga4',
+    }
+
+def process_daily_file(s3_key: str, output_prefix: str):
+    """Processa un file daily da S3 Raw → S3 Cleaned in Parquet."""
+    s3 = boto3.client('s3')
+
+    # Leggi il file JSON.gz dalla Raw zone
+    response = s3.get_object(Bucket='marketing-lake', Key=s3_key)
+    with gzip.open(response['Body'], 'rt') as f:
+        raw_events = [json.loads(line) for line in f]
+
+    # Normalizza in base alla sorgente
+    source = s3_key.split('/')[1]  # raw/{source}/date=.../file.json.gz
+    normalize_fn = {
+        'ga4_events': normalize_ga4_event,
+        'shopify_orders': normalize_shopify_order,
+        'meta_ads': normalize_meta_event,
+    }.get(source)
+
+    if not normalize_fn:
+        raise ValueError(f"Sorgente sconosciuta: {source}")
+
+    normalized = [normalize_fn(e) for e in raw_events if e]
+
+    # Scrivi Parquet con ZSTD compression
+    table = pa.Table.from_pylist(normalized, schema=UNIFIED_SCHEMA)
+    pq.write_to_dataset(
+        table,
+        root_path=f's3://marketing-lake/cleaned/events',
+        partition_cols=['event_date'],  # Partitioning Hive-style
+        compression='zstd',
+        existing_data_behavior='overwrite_or_ignore',
+        filesystem=s3fs.S3FileSystem(),
+    )
+
+    print(f"Processati {len(normalized):,} eventi → Parquet ZSTD")
+    return len(normalized)
+```
+
+**Risultato della pipeline**: ogni file JSON.gz grezzo di ~50 MB diventa un file Parquet compresso di ~8 MB. Compressione 6:1, schema validato, nessun duplicato grazie al `ReplacingMergeTree` di ClickHouse. A regime, la pipeline processa 50M eventi al giorno in circa 35 minuti — parallelizzando su 8 worker Airflow e sfruttando l'I/O parallelo di S3.
+
 ### Aggregazioni per Dashboard
 
 
@@ -375,9 +474,10 @@ Duplicati                    ~30%             0%                Eliminati
 ### Impatto sul Business
 
 - **Marketing team** ora vede le performance delle campagne in real-time (prima: report settimanale manuale)
-- **Allocation budget ads** basata su dati aggiornati ogni 2 minuti (prima: dati di 1 settimana fa)
-- **Funnel analysis** disponibile per campagna e dispositivo (prima: solo aggregate)
-- **Cost saving** di $1.154/mese su S3 reinvestiti nel team
+- **Allocation budget ads** basata su dati aggiornati ogni 2 minuti (prima: dati di 1 settimana fa): nelle prime 3 settimane di utilizzo, il team ha riallocato €12.000/mese di budget dalle campagne con ROAS basso a quelle con ROAS alto, generando un aumento del 19% di revenue con lo stesso budget totale
+- **Funnel analysis** disponibile per campagna, dispositivo e paese (prima: solo aggregate su tutta la sessione)
+- **Cost saving** di $1.154/mese su S3 reinvestiti nel team: metà usata per un tool di BI aggiuntivo, metà per accelerare lo sviluppo di nuove pipeline analitiche
+- **Zero errori** nei report da quando lo schema unificato gestisce automaticamente i casi edge (eventi con revenue null, timestamp in formato non standard, duplicati da export multipli)
 
 
 ### Dettaglio Risparmio Costi
@@ -414,15 +514,15 @@ TOTALE                       $1.361/mese    $224/mese     $1.137/mese
 
 ### Cosa Ha Funzionato
 
-1. **Partire dal Parquet**: convertire tutto in Parquet + ZSTD prima di qualsiasi altra ottimizzazione ha dato il risparmio piu' grande (12x riduzione storage)
+1. **Partire dal Parquet**: convertire tutto in Parquet + ZSTD prima di qualsiasi altra ottimizzazione ha dato il risparmio piu' grande (12x riduzione storage). L'impatto è immediato: il primo mese di dati convertito ha ridotto i costi S3 dell'89% per quel mese specifico.
 
-2. **Lifecycle rules dal giorno 1**: configurare le lifecycle rules prima di iniziare la migrazione evita di accumulare costi sui dati vecchi
+2. **Lifecycle rules dal giorno 1**: configurare le lifecycle rules prima di iniziare la migrazione evita di accumulare costi sui dati vecchi. Regola: raw zone → Intelligent-Tiering dopo 30 giorni, Glacier dopo 90.
 
-3. **S3Queue per zero-maintenance**: dopo il setup iniziale, la pipeline si gestisce da sola. Nessun cron job da monitorare
+3. **S3Queue per zero-maintenance**: dopo il setup iniziale, la pipeline si gestisce da sola. Nessun cron job da monitorare. L'unica manutenzione è verificare il lag mensile e controllare i log di errore.
 
-4. **Aggregazioni incrementali**: le Materialized Views con AggregatingMergeTree hanno reso i report da 45 minuti a 2 secondi
+4. **Aggregazioni incrementali**: le Materialized Views con AggregatingMergeTree hanno reso i report da 45 minuti a 2 secondi. Il segreto è la pre-aggregazione: invece di scansionare 50M eventi per ogni query, si leggono ~200K righe pre-aggregate hourly.
 
-5. **Schema unificato**: un singolo schema per tutti gli eventi (GA4, ads, email) semplifica enormemente le query cross-channel
+5. **Schema unificato**: un singolo schema per tutti gli eventi (GA4, ads, email) semplifica enormemente le query cross-channel. Il costo è la complessità della normalizzazione ETL — ma è un costo una-tantum, non un costo ricorrente su ogni query.
 
 
 ### Cosa Faremmo Diversamente
@@ -431,9 +531,11 @@ TOTALE                       $1.361/mese    $224/mese     $1.137/mese
 
 2. **Testare i glob pattern prima**: alcune query iniziali usavano `**/*.parquet` e costavano 50x piu' del necessario
 
-3. **Documentare lo schema prima**: avremmo risparmiato 1 settimana se avessimo definito lo schema unificato prima di scrivere le pipeline
+3. **Documentare lo schema prima**: avremmo risparmiato 1 settimana se avessimo definito lo schema unificato prima di scrivere le pipeline. Il formato degli eventi GA4 differisce significativamente da quello di Shopify — chiarire come mappare ogni campo prima di scrivere codice evita riscritture costose.
 
-4. **Monitoraggio costi fin dall'inizio**: abbiamo scoperto alcuni glob costosi solo dopo il primo billing cycle
+4. **Monitoraggio costi fin dall'inizio**: abbiamo scoperto alcuni glob pattern costosi solo dopo il primo billing cycle. Un glob come `s3://marketing-lake/raw/**/*.json.gz` eseguito frequentemente può costare $50-100/mese solo in S3 LIST operations. Aggiungere AWS Cost Explorer alerts dal giorno uno permette di identificare questi pattern prima che si accumulino.
+
+5. **Separare la validazione dalla migrazione**: nelle prime due settimane, il team ha migrato dati e validato in parallelo. Questo ha causato confusione quando i numeri non tornavano — non era chiaro se il problema fosse nella migrazione o nella pipeline. Un approccio migliore: migrare un mese, validare completamente, poi procedere con i mesi successivi.
 
 
 ## Checklist di Migrazione
@@ -474,9 +576,21 @@ Pulizia:
 [ ] Training del team
 ```
 
+## Domande per l'Analisi
+
+1. Il data lake usa `ReplacingMergeTree(ingested_at)` per deduplicare gli eventi. Questo motore non garantisce la deduplicazione immediata: i duplicati vengono rimossi solo al prossimo merge, che può richiedere ore. In quali scenari questo comportamento è un problema? Come gestiresti una query che deve restituire dati deduplicati in tempo reale, prima del prossimo merge?
+
+2. Il risparmio storage è passato da $1.196 a $42/mese grazie a Parquet + ZSTD + lifecycle rules. Se il volume di eventi raddoppiasse nei prossimi 12 mesi (da 50M a 100M eventi/giorno), progetta la traiettoria dei costi e le ottimizzazioni da implementare preventivamente per rimanere sotto $100/mese.
+
+3. La pipeline ETL è in Python e viene orchestrata da Airflow. Il team sta valutando di usare dbt invece di Python per le trasformazioni cleaned → aggregazioni. Quali sono i vantaggi e i limiti di dbt per questo caso specifico? In quale parte della pipeline dbt ha senso e in quale no?
+
+4. Il data lake ha un TTL di 24 mesi. Dopo 24 mesi, i dati vengono eliminati automaticamente. Un analista chiede: "Vogliamo fare un'analisi di coorte a 36 mesi per i clienti acquisiti nel 2022, ma quei dati non ci sono più." Come ridisegneresti la politica di retention per bilanciare costi, conformità GDPR e necessità analitiche a lungo termine?
+
 ## Riepilogo Operativo
 
 - Il caso mostra che un data lake funziona quando migrazione, validazione e governance vengono trattate come parti dello stesso progetto.
 - La combinazione S3 + Parquet + pipeline incrementali ha valore solo se accompagnata da controlli di qualita' seri.
 - Il beneficio reale non e' solo abbassare il costo storage, ma migliorare affidabilita' e velocita' di analisi.
 - Una migrazione ben fatta termina quando il team sa usare e mantenere il nuovo sistema, non quando i file sono stati spostati.
+- Il small-file problem e' il principale costo nascosto di un data lake mal gestito: 1,8 milioni di file piccoli costavano piu' in S3 API operations che in storage effettivo. Compaction e partitioning hive-style risolvono entrambi i problemi insieme.
+- La governance non e' un progetto separato: naming convention, schema, documentazione e IAM policies vanno definiti prima di iniziare la migrazione, non dopo.
