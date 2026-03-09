@@ -1,0 +1,270 @@
+---
+title: "ROW_NUMBER, RANK e deduplicazione per gruppo"
+description: >-
+  Le window functions piu' usate per top N, bottom N, classifiche con pareggi
+  e deduplica dei record piu' recenti.
+module: "Modulo 14: Advanced SQL"
+order: 3
+category: Window Functions
+difficulty: advanced
+duration: 20 min
+prerequisites:
+  - advanced-sql/window-functions-avanzate
+learningObjectives:
+  - Usare ROW_NUMBER per top e bottom N per gruppo.
+  - Scegliere tra ROW_NUMBER, RANK e DENSE_RANK in base ai pareggi.
+  - Deduplicare record storici mantenendo la riga corretta.
+---
+
+import { Aside } from '@astrojs/starlight/components'
+
+Molti problemi operativi che sembrano richiedere subquery complesse sono in realta' problemi di ranking. "Qual e' il prodotto peggiore?", "Quali sono i 3 merchant top per categoria?", "Qual e' l'ultimo stato valido per ciascun cliente?" sono tutte domande che si risolvono bene con una numerazione interna al gruppo.
+
+## `ROW_NUMBER()` e' il coltellino svizzero della deduplica
+
+`ROW_NUMBER()` assegna una numerazione progressiva dentro ogni partizione.
+
+```sql
+ROW_NUMBER() OVER (
+    PARTITION BY ...
+    ORDER BY ...
+)
+```
+
+La funzione non sa cosa sia "migliore" o "peggiore". Lo decide l'`ORDER BY` che scrivi.
+
+## Top 3 prodotti per categoria
+
+Supponiamo di avere revenue aggregata per prodotto.
+
+```sql
+WITH product_revenue AS (
+    SELECT
+        category,
+        product_id,
+        sum(net_revenue) AS total_revenue
+    FROM order_items
+    GROUP BY category, product_id
+),
+ranked AS (
+    SELECT
+        category,
+        product_id,
+        total_revenue,
+        row_number() OVER (
+            PARTITION BY category
+            ORDER BY total_revenue DESC, product_id
+        ) AS rn
+    FROM product_revenue
+)
+SELECT
+    category,
+    product_id,
+    total_revenue,
+    rn
+FROM ranked
+WHERE rn <= 3
+ORDER BY category, rn;
+```
+
+Per ogni categoria ottieni esattamente tre righe, senza dover usare `LIMIT` globale.
+
+La chiave tecnica e' questa:
+
+- il `GROUP BY` costruisce la granularita' giusta
+- `ROW_NUMBER()` ordina le righe dentro ogni categoria
+- il filtro finale prende solo i primi N
+
+## Bottom 1 per trovare il vero collo di bottiglia
+
+Il materiale sorgente includeva un esercizio sul prodotto piu' debole. Il pattern corretto e' questo: ordina in senso crescente e prendi la prima riga per gruppo, o dell'intero risultato se non hai gruppi.
+
+```sql
+WITH sku_orders AS (
+    SELECT
+        oi.product_id,
+        count(DISTINCT oi.order_id) AS orders_count
+    FROM order_items oi
+    INNER JOIN orders o
+        ON o.order_id = oi.order_id
+    WHERE o.status = 'completed'
+    GROUP BY oi.product_id
+),
+ranked AS (
+    SELECT
+        product_id,
+        orders_count,
+        row_number() OVER (
+            ORDER BY orders_count ASC, product_id
+        ) AS rn
+    FROM sku_orders
+)
+SELECT
+    product_id,
+    orders_count
+FROM ranked
+WHERE rn = 1;
+```
+
+`LIMIT 1` ti darebbe anche una risposta, ma non ti insegnerebbe nulla sul ranking e non si estenderebbe bene a un caso "per categoria" o "per paese".
+
+## Deduplicare una tabella storica CRM
+
+Uno dei casi piu' frequenti in analytics e' la deduplica di eventi o snapshot.
+
+Immagina una tabella con storicizzazione dello stato cliente:
+
+```sql
+crm_status_history(
+    email           varchar,
+    lifecycle_stage varchar,
+    updated_at      timestamp,
+    source_system   varchar
+)
+```
+
+Vuoi tenere solo il record piu' recente per email.
+
+```sql
+WITH ranked_status AS (
+    SELECT
+        email,
+        lifecycle_stage,
+        updated_at,
+        source_system,
+        row_number() OVER (
+            PARTITION BY email
+            ORDER BY updated_at DESC, source_system
+        ) AS rn
+    FROM crm_status_history
+)
+SELECT
+    email,
+    lifecycle_stage,
+    updated_at,
+    source_system
+FROM ranked_status
+WHERE rn = 1;
+```
+
+Questo pattern e' molto piu' robusto di un `MAX(updated_at)` seguito da una join, perche' ti permette di gestire facilmente i pareggi e di definire un ordinamento secondario.
+
+<Aside type="caution" title="Ordine deterministico">
+Se due righe hanno lo stesso `updated_at` e non specifichi un tie-breaker, il database puo' scegliere una riga diversa a ogni esecuzione. Aggiungi sempre una seconda colonna in `ORDER BY`.
+</Aside>
+
+## `ROW_NUMBER`, `RANK` e `DENSE_RANK`: quando cambia davvero il risultato
+
+Le tre funzioni sembrano simili, ma comunicano cose diverse.
+
+| Funzione | Pareggi | Buchi nella classifica | Caso d'uso tipico |
+|---|---|---|---|
+| `ROW_NUMBER()` | No | No | deduplica, top N esatto |
+| `RANK()` | Si | Si | classifiche competitive |
+| `DENSE_RANK()` | Si | No | livelli o tier |
+
+Esempio:
+
+```sql
+WITH category_margin AS (
+    SELECT
+        category,
+        product_id,
+        sum(margin) AS total_margin
+    FROM order_items
+    GROUP BY category, product_id
+)
+SELECT
+    category,
+    product_id,
+    total_margin,
+    row_number() OVER (
+        PARTITION BY category
+        ORDER BY total_margin DESC
+    ) AS row_num,
+    rank() OVER (
+        PARTITION BY category
+        ORDER BY total_margin DESC
+    ) AS rank_with_gaps,
+    dense_rank() OVER (
+        PARTITION BY category
+        ORDER BY total_margin DESC
+    ) AS rank_without_gaps
+FROM category_margin
+ORDER BY category, total_margin DESC;
+```
+
+Se due prodotti hanno lo stesso margine:
+
+- `ROW_NUMBER()` forza comunque un ordine 1, 2
+- `RANK()` produce 1, 1, 3
+- `DENSE_RANK()` produce 1, 1, 2
+
+## Pattern pratico: top seller per mese e canale
+
+Spesso ti serve un ranking dentro due dimensioni contemporaneamente.
+
+```sql
+WITH monthly_sku AS (
+    SELECT
+        DATE_TRUNC('month', o.order_time) AS month,
+        o.channel,
+        oi.product_id,
+        sum(oi.net_revenue) AS revenue
+    FROM orders o
+    INNER JOIN order_items oi
+        ON oi.order_id = o.order_id
+    WHERE o.status = 'completed'
+    GROUP BY DATE_TRUNC('month', o.order_time), o.channel, oi.product_id
+),
+ranked AS (
+    SELECT
+        month,
+        channel,
+        product_id,
+        revenue,
+        row_number() OVER (
+            PARTITION BY month, channel
+            ORDER BY revenue DESC, product_id
+        ) AS rn
+    FROM monthly_sku
+)
+SELECT
+    month,
+    channel,
+    product_id,
+    revenue
+FROM ranked
+WHERE rn = 1
+ORDER BY month, channel;
+```
+
+Questo e' il tipo di query che alimenta una dashboard "best seller del mese per canale" senza necessitare di una subquery per ogni canale.
+
+## Errori tipici nel ranking
+
+### Usare `LIMIT` invece del ranking per gruppo
+
+`LIMIT 10` prende le prime 10 righe dell'intero risultato, non le prime 10 di ogni segmento.
+
+### Ordinare dopo la finestra ma non dentro la finestra
+
+L'`ORDER BY` finale ordina l'output. L'`ORDER BY` dentro `OVER (...)` definisce la classifica. Sono due cose diverse.
+
+### Saltare il CTE intermedio
+
+Molti database non permettono di filtrare direttamente su una window function nella stessa `SELECT`. Il CTE `ranked AS (...)` rende la query leggibile e portabile.
+
+## Cosa ti serve davvero ricordare
+
+Quando il problema e' "scegli la prima, la migliore o la peggiore riga dentro ogni gruppo", il pattern quasi sempre e':
+
+1. aggrega alla granularita' corretta
+2. applica `ROW_NUMBER()` con l'ordinamento giusto
+3. filtra su `rn = 1` o `rn <= N`
+
+Nella prossima lezione useremo la stessa logica di partizione e ordinamento, ma invece di classificare le righe andremo a leggere **la riga precedente e quella successiva**.
+
+## Riepilogo
+
+`ROW_NUMBER()` e' la funzione piu' pratica per top N, bottom N e deduplica. `RANK()` e `DENSE_RANK()` entrano in gioco quando i pareggi hanno significato business. La scelta tra le tre non e' stilistica: cambia il significato della classifica.

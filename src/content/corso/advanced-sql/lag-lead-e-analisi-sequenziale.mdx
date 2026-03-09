@@ -1,0 +1,284 @@
+---
+title: "LAG, LEAD e analisi sequenziale tra eventi"
+description: >-
+  Come leggere la riga precedente o successiva per confronti temporali, gap tra
+  eventi, upgrade, downgrade e cicli di riacquisto.
+module: "Modulo 14: Advanced SQL"
+order: 4
+category: Window Functions
+difficulty: advanced
+duration: 22 min
+prerequisites:
+  - advanced-sql/ranking-e-deduplicazione
+learningObjectives:
+  - Usare LAG e LEAD per confrontare righe contigue nella stessa sequenza.
+  - Calcolare delta, gap temporali e transizioni di stato.
+  - Capire quando la sequenza va definita per cliente, per account o per canale.
+---
+
+import { Aside } from '@astrojs/starlight/components'
+
+Il ranking risponde a domande statiche. `LAG()` e `LEAD()` rispondono invece a domande dinamiche: cosa e' successo prima? cosa succede dopo? di quanto e' cambiato il valore? quanto tempo passa tra due eventi?
+
+Per leggere bene un business nel tempo, questa famiglia di funzioni e' spesso piu' utile di una semplice tabella aggregata.
+
+## La logica di base
+
+`LAG()` guarda indietro nella sequenza. `LEAD()` guarda avanti.
+
+```sql
+LAG(colonna, offset, default) OVER (
+    PARTITION BY ...
+    ORDER BY ...
+)
+
+LEAD(colonna, offset, default) OVER (
+    PARTITION BY ...
+    ORDER BY ...
+)
+```
+
+Se non specifichi `offset`, il database usa `1`.
+
+## Confronto mese su mese del MRR per account
+
+Partiamo da una tabella mensile gia' aggregata.
+
+```sql
+WITH monthly_mrr AS (
+    SELECT
+        customer_id,
+        DATE_TRUNC('month', event_time) AS month,
+        max(mrr) AS month_end_mrr
+    FROM subscription_events
+    GROUP BY customer_id, DATE_TRUNC('month', event_time)
+)
+SELECT
+    customer_id,
+    month,
+    month_end_mrr,
+    lag(month_end_mrr) OVER (
+        PARTITION BY customer_id
+        ORDER BY month
+    ) AS prev_month_mrr,
+    month_end_mrr
+      - lag(month_end_mrr) OVER (
+            PARTITION BY customer_id
+            ORDER BY month
+        ) AS delta_mrr
+FROM monthly_mrr
+ORDER BY customer_id, month;
+```
+
+Il risultato ti permette di leggere subito:
+
+- espansioni (`delta_mrr > 0`)
+- contrazioni (`delta_mrr < 0`)
+- mesi stabili (`delta_mrr = 0`)
+
+<Aside type="tip" title="Nota ClickHouse">
+In ClickHouse troverai spesso `lagInFrame()` e `leadInFrame()` al posto di `LAG()` e `LEAD()`. Il concetto resta lo stesso: parti sempre da partizione e ordinamento.
+</Aside>
+
+## Individuare upgrade e downgrade di piano
+
+Quando la tabella registra eventi di subscription, puoi leggere la transizione tra stati consecutivi.
+
+```sql
+SELECT
+    customer_id,
+    event_time,
+    plan_name,
+    mrr,
+    lag(plan_name) OVER (
+        PARTITION BY customer_id
+        ORDER BY event_time
+    ) AS prev_plan,
+    lag(mrr) OVER (
+        PARTITION BY customer_id
+        ORDER BY event_time
+    ) AS prev_mrr,
+    CASE
+        WHEN lag(mrr) OVER (
+                 PARTITION BY customer_id
+                 ORDER BY event_time
+             ) IS NULL THEN 'first_seen'
+        WHEN mrr > lag(mrr) OVER (
+                     PARTITION BY customer_id
+                     ORDER BY event_time
+                 ) THEN 'upgrade'
+        WHEN mrr < lag(mrr) OVER (
+                     PARTITION BY customer_id
+                     ORDER BY event_time
+                 ) THEN 'downgrade'
+        ELSE 'stable'
+    END AS mrr_transition
+FROM subscription_events
+ORDER BY customer_id, event_time;
+```
+
+Questa struttura e' perfetta per:
+
+- monitorare espansione e contraction revenue
+- capire se un nuovo pricing produce piu' downgrade
+- alimentare una vista CRM con "ultimo cambiamento piano"
+
+## Guardare avanti: il prossimo evento utile
+
+`LEAD()` e' particolarmente utile quando vuoi capire quale sia l'evento successivo a quello corrente.
+
+```sql
+SELECT
+    customer_id,
+    event_time,
+    event_type,
+    lead(event_time) OVER (
+        PARTITION BY customer_id
+        ORDER BY event_time
+    ) AS next_event_time,
+    lead(event_type) OVER (
+        PARTITION BY customer_id
+        ORDER BY event_time
+    ) AS next_event_type
+FROM subscription_events
+ORDER BY customer_id, event_time;
+```
+
+Con questa query puoi verificare, per esempio, se dopo un `trial_started` arriva un `subscription_created`, un `cancel_requested` oppure nessun evento.
+
+## Gap tra ordini: quanto tempo passa tra un acquisto e l'altro
+
+Uno dei pattern piu' classici e' il tempo tra due ordini consecutivi dello stesso cliente.
+
+```sql
+WITH customer_orders AS (
+    SELECT
+        customer_id,
+        order_id,
+        CAST(order_time AS date) AS order_day,
+        amount
+    FROM orders
+    WHERE status = 'completed'
+)
+SELECT
+    customer_id,
+    order_id,
+    order_day,
+    amount,
+    lag(order_day) OVER (
+        PARTITION BY customer_id
+        ORDER BY order_day, order_id
+    ) AS prev_order_day,
+    lead(order_day) OVER (
+        PARTITION BY customer_id
+        ORDER BY order_day, order_id
+    ) AS next_order_day
+FROM customer_orders
+ORDER BY customer_id, order_day, order_id;
+```
+
+Da qui puoi costruire:
+
+- tempo al riacquisto
+- giorni al prossimo ordine
+- clienti a rischio churn
+- clienti con frequenza anomala
+
+Il punto importante non e' la formula esatta del `DATEDIFF`, che cambia da database a database. Il punto importante e' che la sequenza corretta e' gia' stata ricostruita.
+
+## Quando la sequenza e' sbagliata, il risultato mente
+
+Le funzioni sequenziali sono molto sensibili alla definizione di `ORDER BY`.
+
+Se un cliente puo' avere piu' eventi nello stesso secondo, usare solo `ORDER BY event_time` puo' non bastare. In quel caso serve un tie-breaker:
+
+```sql
+SELECT
+    customer_id,
+    event_time,
+    event_type,
+    lag(event_type) OVER (
+        PARTITION BY customer_id
+        ORDER BY event_time, event_type
+    ) AS prev_event_type
+FROM subscription_events;
+```
+
+Idealmente il tie-breaker dovrebbe essere un id evento monotono, non una colonna testuale.
+
+## Sequenze per utente o per entita'?
+
+Questa e' una decisione di business, non solo tecnica.
+
+- `PARTITION BY customer_id`: leggi il comportamento del cliente nel tempo
+- `PARTITION BY channel`: leggi l'evoluzione di una metrica per canale
+- `PARTITION BY subscription_id`: leggi il ciclo di vita di un singolo contratto
+
+Se fai la partizione sbagliata, la funzione continua a funzionare ma risponde a una domanda diversa da quella che pensavi.
+
+## Pattern compatto per delta percentuale
+
+Un output molto utile per dashboard e alerting e' la variazione percentuale rispetto alla riga precedente.
+
+```sql
+WITH daily_channel AS (
+    SELECT
+        CAST(order_time AS date) AS day,
+        channel,
+        sum(amount) AS revenue
+    FROM orders
+    WHERE status = 'completed'
+    GROUP BY CAST(order_time AS date), channel
+)
+SELECT
+    day,
+    channel,
+    revenue,
+    lag(revenue) OVER (
+        PARTITION BY channel
+        ORDER BY day
+    ) AS prev_day_revenue,
+    round(
+        (
+            revenue
+            - lag(revenue) OVER (
+                PARTITION BY channel
+                ORDER BY day
+              )
+        )
+        / nullif(
+            lag(revenue) OVER (
+                PARTITION BY channel
+                ORDER BY day
+            ),
+            0
+        ),
+        4
+    ) AS day_over_day_growth
+FROM daily_channel
+ORDER BY channel, day;
+```
+
+Qui il pattern e' identico al caso MRR. Cambia solo la granularita' della tabella sorgente.
+
+## Errori da evitare
+
+### Usare `LAG` su dati non ordinati
+
+La funzione legge la riga precedente nella sequenza che hai definito, non la riga "precedente nel tempo" in senso astratto.
+
+### Saltare la pre-aggregazione
+
+Se vuoi un confronto mese su mese, crea prima la tabella mensile. Fare `LAG()` direttamente sui dati raw spesso produce risultati inutili o troppo rumorosi.
+
+### Riutilizzare male le funzioni nella stessa `SELECT`
+
+Se la query cresce troppo, sposta `LAG()` o `LEAD()` in un CTE e poi usa le colonne derivate per i calcoli successivi. La lettura migliora subito.
+
+## Cosa ci serve per la prossima lezione
+
+Fin qui hai imparato a confrontare una riga con quelle vicine. Nella prossima lezione allarghiamo la prospettiva e useremo `SUM`, `COUNT`, `AVG`, `MIN` e `MAX` come window functions per costruire benchmark, cumulative e medie mobili.
+
+## Riepilogo
+
+`LAG()` e `LEAD()` trasformano una tabella ordinata in una sequenza leggibile. Il risultato dipende quasi interamente da come definisci partizione e ordinamento. Se la sequenza e' corretta, puoi leggere delta, transizioni e gap temporali con molta meno complessita' rispetto a self-join o subquery annidate.
