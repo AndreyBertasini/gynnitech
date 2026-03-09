@@ -2,6 +2,9 @@ export interface CourseModule {
   id: string;
   title: string;
   description: string;
+  seoTitle?: string;
+  seoDescription?: string;
+  seoKeywords?: string[];
   icon: string;
   color: string;
 }
@@ -117,6 +120,9 @@ export const COURSE_MODULES: CourseModule[] = [
     id: 'analytics-engineering',
     title: 'Analytics Engineering',
     description: 'dbt, modeling layer, quality, semantic metrics e deploy per trasformare dati martech in modelli affidabili.',
+    seoTitle: 'Analytics Engineering con dbt per MarTech | GinnyTech',
+    seoDescription: 'Modulo di Analytics Engineering con dbt: staging, marts, test, semantic layer e deploy per trasformare dati MarTech in modelli affidabili.',
+    seoKeywords: ['analytics engineering', 'dbt', 'martech', 'semantic layer', 'data modeling', 'data quality'],
     icon: 'GitMerge',
     color: 'from-emerald-500 to-blue-500'
   }

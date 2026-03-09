@@ -1,6 +1,6 @@
 export const SITE_URL = 'https://ginnytech.it';
 export const SITE_NAME = 'GinnyTech';
-export const SITE_DESCRIPTION = 'GinnyTech è una piattaforma di formazione gratuita per imparare a costruire infrastrutture dati reali. Tutorial pratici su SQL, Python, Kafka e Data Science.';
+export const SITE_DESCRIPTION = "GinnyTech e' una piattaforma gratuita per imparare MarTech, data engineering e analytics con esempi pratici su SQL, Python, Kafka e ClickHouse.";
 export const SITE_AUTHOR = 'Andrii Dyshkantiuk';
 export const LINKEDIN_URL = 'https://www.linkedin.com/in/andrii-dyshkantiuk/';
 export const GITHUB_PROFILE_URL = 'https://github.com/AndreyBertasini';
