@@ -1,0 +1,287 @@
+---
+title: "SUM, COUNT, AVG, MIN e MAX su finestra"
+description: >-
+  Come trasformare le funzioni aggregate classiche in metriche contestuali,
+  progressive e pronte per dashboard operative.
+module: "Modulo 14: Advanced SQL"
+order: 5
+category: Window Functions
+difficulty: advanced
+duration: 23 min
+prerequisites:
+  - advanced-sql/lag-lead-e-analisi-sequenziale
+learningObjectives:
+  - Usare le aggregate come window functions senza perdere il dettaglio.
+  - Costruire running total, moving average e benchmark di gruppo.
+  - Risolvere problemi di business come payback day e soglie cumulative.
+---
+
+import { Aside } from '@astrojs/starlight/components'
+
+Le funzioni aggregate classiche non cambiano natura quando entrano in una finestra. Cambia il tipo di risposta che riesci a ottenere. Invece di restituire una riga per gruppo, restituiscono una metrica contestuale accanto a ogni riga del gruppo.
+
+## Da aggregato a metrica contestuale
+
+Partiamo da un benchmark semplice: vuoi vedere ogni ordine insieme al minimo, massimo, media e numero di ordini del suo paese.
+
+```sql
+SELECT
+    order_id,
+    country,
+    amount,
+    min(amount) OVER (
+        PARTITION BY country
+    ) AS min_order_country,
+    max(amount) OVER (
+        PARTITION BY country
+    ) AS max_order_country,
+    avg(amount) OVER (
+        PARTITION BY country
+    ) AS avg_order_country,
+    count(*) OVER (
+        PARTITION BY country
+    ) AS orders_in_country
+FROM orders
+WHERE status = 'completed'
+ORDER BY country, order_id;
+```
+
+Con un solo risultato puoi rispondere a domande come:
+
+- questo ordine e' sopra o sotto la media del paese?
+- quanto dista dal massimo del suo mercato?
+- quante osservazioni ci sono dietro questo benchmark?
+
+## Benchmark per segmento piu' fine
+
+Lo stesso schema si estende a gruppi piu' ricchi.
+
+```sql
+SELECT
+    order_id,
+    country,
+    channel,
+    amount,
+    avg(amount) OVER (
+        PARTITION BY country, channel
+    ) AS avg_order_segment,
+    amount
+      / nullif(
+            avg(amount) OVER (
+                PARTITION BY country, channel
+            ),
+            0
+        ) AS order_vs_segment_avg
+FROM orders
+WHERE status = 'completed'
+ORDER BY country, channel, order_id;
+```
+
+Questo e' il tipo di query che ti fa capire se un canale performa bene in assoluto ma male nel suo contesto locale, o viceversa.
+
+## Running total: la cumulata corretta
+
+Una delle applicazioni piu' utili di `SUM() OVER (...)` e' la cumulata.
+
+```sql
+WITH daily_revenue AS (
+    SELECT
+        CAST(order_time AS date) AS day,
+        sum(amount) AS revenue
+    FROM orders
+    WHERE status = 'completed'
+      AND order_time >= DATE '2025-01-01'
+      AND order_time < DATE '2025-02-01'
+    GROUP BY CAST(order_time AS date)
+)
+SELECT
+    day,
+    revenue,
+    sum(revenue) OVER (
+        ORDER BY day
+        ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+    ) AS cumulative_revenue
+FROM daily_revenue
+ORDER BY day;
+```
+
+La formula e' semplice, ma ci sono due dettagli importanti:
+
+- devi avere prima una tabella al livello `giorno`
+- il frame `UNBOUNDED PRECEDING ... CURRENT ROW` va esplicitato per rendere il comportamento leggibile
+
+## Moving average: lisciare il rumore senza perdere il trend
+
+La media mobile e' lo strumento piu' usato per rendere leggibili serie temporali rumorose.
+
+```sql
+WITH daily_orders AS (
+    SELECT
+        CAST(order_time AS date) AS day,
+        count(*) AS orders_count
+    FROM orders
+    WHERE status = 'completed'
+      AND order_time >= DATE '2025-01-01'
+      AND order_time < DATE '2025-02-01'
+    GROUP BY CAST(order_time AS date)
+)
+SELECT
+    day,
+    orders_count,
+    avg(orders_count) OVER (
+        ORDER BY day
+        ROWS BETWEEN 6 PRECEDING AND CURRENT ROW
+    ) AS orders_ma_7d
+FROM daily_orders
+ORDER BY day;
+```
+
+Con questa query ogni riga vede se stessa piu' le sei righe precedenti. Se il tuo dataset ha buchi temporali, pero', la media mobile non rappresenta davvero 7 giorni di calendario. Ecco perche' nel modulo esiste poi una lezione dedicata alla date spine.
+
+## `COUNT()` come funzione progressiva
+
+`COUNT()` su finestra non serve solo a contare quante righe ci sono in un gruppo. Serve anche a contare quante righe hai visto fino a un punto della sequenza.
+
+```sql
+WITH daily_customers AS (
+    SELECT
+        CAST(order_time AS date) AS day,
+        customer_id
+    FROM orders
+    WHERE status = 'completed'
+)
+SELECT
+    day,
+    customer_id,
+    count(*) OVER (
+        PARTITION BY day
+        ORDER BY customer_id
+        ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+    ) AS progressive_customer_count_for_day
+FROM daily_customers
+ORDER BY day, customer_id;
+```
+
+Non e' il pattern piu' comune per dashboard executive, ma e' utile quando vuoi leggere l'avanzamento interno di un batch, di una lista o di una sequenza di record.
+
+## Caso operativo: quando copri il costo fisso del mese
+
+Questo e' uno degli usi piu' didattici delle cumulative: trovare il primo giorno del mese in cui i ricavi cumulati superano un costo fisso.
+
+Immagina un business DTC che spende `120000` euro al mese in logistica e customer care.
+
+```sql
+WITH daily_margin AS (
+    SELECT
+        DATE_TRUNC('month', order_time) AS month,
+        CAST(order_time AS date) AS day,
+        sum(amount) AS daily_revenue
+    FROM orders
+    WHERE status = 'completed'
+    GROUP BY DATE_TRUNC('month', order_time), CAST(order_time AS date)
+),
+with_running AS (
+    SELECT
+        month,
+        day,
+        daily_revenue,
+        sum(daily_revenue) OVER (
+            PARTITION BY month
+            ORDER BY day
+            ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+        ) AS cumulative_revenue
+    FROM daily_margin
+),
+reached_cost AS (
+    SELECT
+        month,
+        day,
+        cumulative_revenue,
+        row_number() OVER (
+            PARTITION BY month
+            ORDER BY day
+        ) AS rn
+    FROM with_running
+    WHERE cumulative_revenue >= 120000
+)
+SELECT
+    month,
+    day AS payback_day
+FROM reached_cost
+WHERE rn = 1
+ORDER BY month;
+```
+
+La logica e' identica all'esercizio di riferimento sul superamento di una soglia cumulata, ma qui l'abbiamo portata dentro un caso aziendale realistico e riusabile.
+
+<Aside type="tip" title="Due passaggi, non uno">
+Prima costruisci la cumulata. Solo dopo filtri sulle righe che superano la soglia. Cercare di fare tutto in una sola SELECT rende la query piu' opaca e piu' fragile.
+</Aside>
+
+## Quando conviene pre-aggregare
+
+Le aggregate su finestra funzionano meglio quando parti gia' dalla granularita' che ti serve davvero.
+
+Meglio:
+
+```sql
+WITH monthly_channel AS (
+    SELECT
+        DATE_TRUNC('month', order_time) AS month,
+        channel,
+        sum(amount) AS revenue
+    FROM orders
+    WHERE status = 'completed'
+    GROUP BY DATE_TRUNC('month', order_time), channel
+)
+SELECT
+    month,
+    channel,
+    revenue,
+    sum(revenue) OVER (
+        PARTITION BY channel
+        ORDER BY month
+        ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+    ) AS channel_running_revenue
+FROM monthly_channel;
+```
+
+Peggio:
+
+```sql
+SELECT
+    order_id,
+    channel,
+    order_time,
+    sum(amount) OVER (
+        PARTITION BY channel
+        ORDER BY order_time
+        ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+    ) AS raw_running_revenue
+FROM orders
+WHERE status = 'completed';
+```
+
+La seconda query non e' sempre sbagliata, ma spesso risponde a una domanda troppo fine rispetto a quella che il business si aspetta.
+
+## Errori frequenti
+
+### Fare cumulative su dati con granularita' sporca
+
+Se hai piu' righe per giorno e vuoi una cumulata giornaliera, aggrega prima per giorno.
+
+### Dimenticare che `AVG()` su finestra usa le righe disponibili
+
+Una moving average a 7 righe sulle prime tre date del mese usera' solo 1, poi 2, poi 3 righe. Non e' un bug, e' il comportamento corretto.
+
+### Leggere il benchmark senza guardare la dimensione del gruppo
+
+Una media calcolata su 3 righe e una media calcolata su 3000 righe non hanno lo stesso peso decisionale.
+
+## Ponte verso la prossima lezione
+
+Ora hai tutto cio' che serve per capire il tema piu' insidioso delle window functions: **il frame**. Nella prossima lezione lo useremo per leggere primo e ultimo valore, distinguere `ROWS` da `RANGE` e costruire segmentazioni con `NTILE()`.
+
+## Riepilogo
+
+Le aggregate su finestra permettono di costruire benchmark, cumulative e medie mobili senza perdere la riga originale. Il principio corretto e' quasi sempre questo: scegli la granularita' giusta, aggrega se serve, poi applica la finestra. Molti errori di performance e di interpretazione nascono quando questo ordine viene invertito.

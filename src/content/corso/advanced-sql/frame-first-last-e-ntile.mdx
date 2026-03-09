@@ -1,0 +1,264 @@
+---
+title: "FIRST_VALUE, LAST_VALUE, NTILE e frame di finestra"
+description: >-
+  Il passaggio da query quasi giuste a query corrette: frame esplicito,
+  differenza tra ROWS e RANGE, estremi e segmentazione in quantili.
+module: "Modulo 14: Advanced SQL"
+order: 6
+category: Window Functions
+difficulty: advanced
+duration: 24 min
+prerequisites:
+  - advanced-sql/aggregazioni-su-finestra
+learningObjectives:
+  - Capire perche' il frame cambia radicalmente il risultato di alcune funzioni.
+  - Usare FIRST_VALUE e LAST_VALUE senza errori silenziosi.
+  - Segmentare clienti o prodotti in bucket con NTILE.
+---
+
+import { Aside } from '@astrojs/starlight/components'
+
+Molte query con window functions sembrano corrette finche' non guardi il frame. Il rischio piu' pericoloso non e' l'errore di sintassi: e' il risultato plausibile ma sbagliato. Questo succede soprattutto con `LAST_VALUE()` e con tutte le analisi che dipendono da `ROWS` o `RANGE`.
+
+## Il frame e' il vero perimetro della funzione
+
+Quando scrivi:
+
+```sql
+... OVER (
+    PARTITION BY ...
+    ORDER BY ...
+)
+```
+
+stai gia' chiedendo al database di applicare un frame implicito. Il problema e' che quel frame non sempre coincide con la tua intenzione analitica.
+
+Per funzioni come `SUM()` o `AVG()` il frame implicito a volte produce un risultato accettabile. Per `LAST_VALUE()`, spesso no.
+
+## `FIRST_VALUE()` e `LAST_VALUE()`: il caso classico di errore silenzioso
+
+Immagina di voler vedere il primo e l'ultimo ricavo giornaliero di ogni campagna in un periodo.
+
+```sql
+WITH campaign_day AS (
+    SELECT
+        channel AS campaign_name,
+        CAST(order_time AS date) AS day,
+        sum(amount) AS revenue
+    FROM orders
+    WHERE status = 'completed'
+    GROUP BY channel, CAST(order_time AS date)
+)
+SELECT
+    campaign_name,
+    day,
+    revenue,
+    first_value(revenue) OVER (
+        PARTITION BY campaign_name
+        ORDER BY day
+        ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING
+    ) AS first_day_revenue,
+    last_value(revenue) OVER (
+        PARTITION BY campaign_name
+        ORDER BY day
+        ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING
+    ) AS last_day_revenue
+FROM campaign_day
+ORDER BY campaign_name, day;
+```
+
+Il frame esplicito e' la parte decisiva.
+
+Se ometti `ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING`, molti database interpretano `LAST_VALUE()` come "ultimo valore visibile fino alla riga corrente", non come "ultimo valore dell'intera partizione".
+
+<Aside type="caution" title="Regola di igiene SQL">
+Quando usi `FIRST_VALUE()` o `LAST_VALUE()`, specifica sempre il frame in modo esplicito. Eviti il tipo di bug piu' costoso: quello che non genera errori ma altera il significato del dato.
+</Aside>
+
+## `ROWS` e `RANGE` non sono sinonimi
+
+Questa distinzione conta soprattutto quando la colonna di ordinamento ha duplicati.
+
+Prendiamo una tabella giornaliera in cui, per errore di modellazione o per join, esistono due righe con la stessa data.
+
+```sql
+sum(revenue) OVER (
+    ORDER BY day
+    ROWS BETWEEN CURRENT ROW AND CURRENT ROW
+)
+```
+
+Questa variante considera solo la riga fisica corrente.
+
+```sql
+sum(revenue) OVER (
+    ORDER BY day
+    RANGE BETWEEN CURRENT ROW AND CURRENT ROW
+)
+```
+
+Questa variante considera tutte le righe che hanno lo stesso valore di `day`.
+
+In pratica:
+
+- `ROWS` ragiona in termini di righe fisiche
+- `RANGE` ragiona in termini di valori dell'ordinamento
+
+Se vuoi una moving window deterministica su serie temporali gia' aggregate, `ROWS` e' quasi sempre la scelta piu' leggibile.
+
+## Quando `RANGE` ha senso
+
+`RANGE` e' utile quando vuoi includere tutti i record con lo stesso valore di ordinamento, per esempio:
+
+- tutte le vendite dello stesso giorno
+- tutti i clienti con lo stesso punteggio
+- tutti i prodotti con lo stesso prezzo
+
+Ma proprio per questo puo' sorprendere chi si aspetta che ogni finestra conti "una riga alla volta".
+
+## `NTILE()` per quartili, decili e segmentazione
+
+`NTILE(n)` divide il risultato ordinato in `n` bucket di dimensione il piu' possibile uniforme.
+
+Un caso utile: segmentare i clienti in quartili di marginalita'.
+
+```sql
+WITH customer_margin AS (
+    SELECT
+        o.customer_id,
+        sum(oi.margin) AS total_margin,
+        sum(oi.net_revenue) AS total_revenue
+    FROM order_items oi
+    INNER JOIN orders o
+        ON o.order_id = oi.order_id
+    WHERE o.status = 'completed'
+    GROUP BY o.customer_id
+),
+bucketed AS (
+    SELECT
+        customer_id,
+        total_margin,
+        total_revenue,
+        ntile(4) OVER (
+            ORDER BY total_margin DESC, customer_id
+        ) AS margin_quartile
+    FROM customer_margin
+)
+SELECT
+    margin_quartile,
+    count(*) AS customers,
+    min(total_margin) AS min_margin,
+    max(total_margin) AS max_margin,
+    avg(total_revenue) AS avg_revenue
+FROM bucketed
+GROUP BY margin_quartile
+ORDER BY margin_quartile;
+```
+
+Questa query non dice solo "chi vale di piu'". Dice anche **come e' distribuito il valore** lungo la base clienti.
+
+## Pattern utile: top e bottom dentro ogni bucket
+
+Una volta creati i bucket, puoi riapplicare un ranking interno.
+
+```sql
+WITH customer_margin AS (
+    SELECT
+        o.customer_id,
+        sum(oi.margin) AS total_margin
+    FROM order_items oi
+    INNER JOIN orders o
+        ON o.order_id = oi.order_id
+    WHERE o.status = 'completed'
+    GROUP BY o.customer_id
+),
+bucketed AS (
+    SELECT
+        customer_id,
+        total_margin,
+        ntile(4) OVER (
+            ORDER BY total_margin DESC, customer_id
+        ) AS margin_quartile
+    FROM customer_margin
+),
+ranked AS (
+    SELECT
+        margin_quartile,
+        customer_id,
+        total_margin,
+        row_number() OVER (
+            PARTITION BY margin_quartile
+            ORDER BY total_margin DESC, customer_id
+        ) AS rn_top,
+        row_number() OVER (
+            PARTITION BY margin_quartile
+            ORDER BY total_margin ASC, customer_id
+        ) AS rn_bottom
+    FROM bucketed
+)
+SELECT
+    margin_quartile,
+    customer_id,
+    total_margin,
+    rn_top,
+    rn_bottom
+FROM ranked
+WHERE rn_top = 1 OR rn_bottom = 1
+ORDER BY margin_quartile, total_margin DESC;
+```
+
+Questo e' il modo corretto per raccontare un quartile: non solo la sua soglia, ma anche quali entita' lo delimitano davvero.
+
+## E se il database non supporta `NTILE()`?
+
+Alcuni engine o versioni non lo supportano pienamente. In quel caso puoi simulare i bucket con `ROW_NUMBER()` e `COUNT(*) OVER ()`.
+
+```sql
+WITH customer_margin AS (
+    SELECT
+        o.customer_id,
+        sum(oi.margin) AS total_margin
+    FROM order_items oi
+    INNER JOIN orders o
+        ON o.order_id = oi.order_id
+    WHERE o.status = 'completed'
+    GROUP BY o.customer_id
+),
+ranked AS (
+    SELECT
+        customer_id,
+        total_margin,
+        row_number() OVER (ORDER BY total_margin DESC, customer_id) AS rn,
+        count(*) OVER () AS total_rows
+    FROM customer_margin
+)
+SELECT
+    customer_id,
+    total_margin,
+    floor((rn - 1) * 4.0 / total_rows) + 1 AS margin_quartile
+FROM ranked;
+```
+
+Non e' elegante come `NTILE(4)`, ma il principio statistico e' lo stesso.
+
+## Tre domande per scegliere bene il frame
+
+Quando sei in dubbio, chiediti:
+
+1. la funzione deve vedere tutta la partizione o solo una porzione?
+2. la finestra deve contare righe o valori equivalenti?
+3. sto leggendo un estremo finale o un progressivo fino alla riga corrente?
+
+Se sai rispondere bene a queste tre domande, hai gia' risolto l'80% dei problemi con i frame.
+
+## Cosa devi portarti nel lavoro reale
+
+- `FIRST_VALUE()` e `LAST_VALUE()` richiedono quasi sempre frame esplicito
+- `ROWS` e `RANGE` cambiano davvero il perimetro della finestra
+- `NTILE()` non e' solo una curiosita': e' un ottimo strumento di segmentazione operativa
+
+Nella prossima lezione chiudiamo la mini-serie con esercizi guidati costruiti su esempi originali, ispirati al materiale sorgente ma gia' riallineati al contesto del corso GinnyTech.
+
+## Riepilogo
+
+Il frame e' il confine reale della finestra. Se non lo controlli, il database decidera' per te. Questo pesa soprattutto con `LAST_VALUE()` e con tutte le analisi che distinguono tra righe fisiche (`ROWS`) e valori equivalenti (`RANGE`). `NTILE()` aggiunge poi una dimensione strategica: la segmentazione distribuzionale.

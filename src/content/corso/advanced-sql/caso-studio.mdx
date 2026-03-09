@@ -1,384 +1,379 @@
 ---
-title: Caso Studio - Advanced SQL per E-commerce e SaaS
+title: Caso Studio - Window Functions per un Retailer Omnicanale
 description: >-
-  Un caso end-to-end che combina date spine, retention, funnel, KPI table e
-  segmentazione per arrivare a decisioni operative.
+  Un caso end-to-end centrato sulle window functions: ranking, benchmark,
+  delta temporali, cumulative e quartili per arrivare a decisioni operative.
 module: 'Modulo 14: Advanced SQL'
-order: 8
+order: 14
 category: Sintesi Operativa
 difficulty: advanced
-duration: 10 min
+duration: 14 min
 prerequisites:
   - advanced-sql/cheat-sheet
 learningObjectives:
-  - >-
-    Comprendere i concetti chiave di "Caso Studio - Advanced SQL per E-commerce
-    e SaaS".
-  - Applicare la lezione in un caso pratico nel contesto advanced sql.
-  - Valutare i risultati con metriche operative e criteri decisionali chiari.
+  - Vedere come piu' window functions convivono nello stesso caso business.
+  - Collegare output SQL a decisioni su assortimento, canali e retention.
+  - Capire la sequenza corretta di costruzione di una mini-analisi executive.
 ---
 
 import { Aside } from '@astrojs/starlight/components'
 
-Un ecommerce con componente SaaS B2B nota un problema ambiguo: il traffico sembra stabile, la revenue totale non crolla, ma il team commerciale segnala che la qualita' dei nuovi clienti e' peggiorata. Il board vuole una risposta in 48 ore, non una collezione di query scollegate.
+Un retailer omnicanale vende online e in negozio, con tre canali digitali principali: `paid-search`, `email` e `organic`. Il management vede una revenue mensile stabile, ma il margine operativo scende da tre mesi. La domanda non e' "quale query usiamo?", ma: **dove si sta deteriorando l'economia del business e cosa va corretto per primo?**
 
-Questo e' esattamente il tipo di situazione in cui il SQL avanzato fa la differenza. Non si tratta di trovare la query perfetta: si tratta di costruire una catena di analisi in cui ogni risultato riduce l'ambiguita' della domanda successiva. Il valore non e' tecnico. E' che alla fine hai una narrativa che il board puo' usare per prendere una decisione, non una slide con numeri isolati.
+Per rispondere in modo serio usiamo una catena corta di analisi tutta centrata sulle window functions.
 
-## Obiettivo del caso
+## Domande a cui dobbiamo rispondere
 
-Costruire una lettura end-to-end che risponda a quattro domande:
+1. quali prodotti stanno perdendo peso nel mix?
+2. quali canali stanno rallentando rispetto al mese precedente?
+3. in che punto del mese viene coperto il costo fisso?
+4. quali clienti reggono davvero il margine?
 
-1. il trend revenue e' davvero stabile o maschera buchi temporali?
-2. le nuove coorti stanno trattenendo meno valore?
-3. dove si rompe il funnel?
-4. quali clienti o prodotti meritano attenzione immediata?
-
-```mermaid
-graph LR
-    A["Serie temporale"] --> B["Cohort retention"]
-    B --> C["Funnel e drop-off"]
-    C --> D["KPI table executive"]
-    D --> E["Pareto e segmenti"]
-    E --> F["Narrativa decisionale"]
-    style A fill:#1a3a5c,color:#ffffff
-    style B fill:#1a5c3a,color:#ffffff
-    style C fill:#7a5c00,color:#ffffff
-    style D fill:#1a5c3a,color:#ffffff
-    style E fill:#2d5016,color:#ffffff
-    style F fill:#2d5016,color:#ffffff
-```
-
-## Dataset condiviso
+## Dataset del caso
 
 ```sql
-users(user_id, signup_at, country, acquisition_channel, plan)
-events(user_id, event_time, event_name, session_id, page, product_id)
-orders(order_id, user_id, order_time, amount, country, channel, status)
-order_items(order_id, product_id, category, quantity, net_revenue, margin)
+orders(
+    order_id        bigint,
+    customer_id     bigint,
+    order_time      timestamp,
+    channel         varchar,
+    country         varchar,
+    status          varchar,
+    amount          numeric(12, 2)
+)
+
+order_items(
+    order_id        bigint,
+    product_id      bigint,
+    category        varchar,
+    quantity        integer,
+    net_revenue     numeric(12, 2),
+    margin          numeric(12, 2)
+)
 ```
 
-## Step 1: rendere affidabile la serie temporale
+## Step 1: ranking dei prodotti che stanno davvero pesando sul business
 
-Prima di tutto costruiamo una serie revenue continua.
-
-```sql
-WITH
-    toDate('2025-01-01') AS start_date,
-    toDate('2025-03-31') AS end_date,
-    date_spine AS (
-        SELECT start_date + number AS day
-        FROM numbers(dateDiff('day', start_date, end_date) + 1)
-    ),
-    daily_orders AS (
-        SELECT
-            toDate(order_time) AS day,
-            sum(amount) AS revenue
-        FROM orders
-        WHERE status = 'completed'
-          AND order_time >= toDateTime(start_date)
-          AND order_time < toDateTime(end_date + 1)
-        GROUP BY day
-    ),
-    daily_series AS (
-        SELECT
-            d.day,
-            coalesce(o.revenue, 0) AS revenue
-        FROM date_spine d
-        LEFT JOIN daily_orders o USING (day)
-    )
-SELECT
-    day,
-    revenue,
-    avg(revenue) OVER (
-        ORDER BY day
-        ROWS BETWEEN 6 PRECEDING AND CURRENT ROW
-    ) AS revenue_ma_7d
-FROM daily_series
-ORDER BY day;
-```
-
-Primo insight atteso: il trend sembra stabile solo perche' i giorni a zero erano nascosti. Dopo la date spine emerge un pattern di buchi operativi nei weekend.
-
-Questo primo passaggio e' importante anche politicamente: dimostra subito che il team non sta "facendo analisi creativa", ma sta correggendo una base dati che altrimenti porterebbe a conclusioni sbagliate.
-
-## Step 2: verificare se il problema e' di retention
-
-Ora guardiamo la qualita' delle coorti, non solo il volume totale.
+La prima cosa da fare non e' guardare la media. E' vedere come si distribuisce il margine per categoria.
 
 ```sql
-WITH
-    signup_cohort AS (
-        SELECT
-            user_id,
-            toStartOfMonth(signup_at) AS cohort_month,
-            acquisition_channel
-        FROM users
-    ),
-    monthly_revenue AS (
-        SELECT
-            user_id,
-            toStartOfMonth(order_time) AS revenue_month,
-            sum(amount) AS revenue
-        FROM orders
-        WHERE status = 'completed'
-        GROUP BY user_id, revenue_month
-    ),
-    cohort_revenue AS (
-        SELECT
-            c.cohort_month,
-            c.acquisition_channel,
-            dateDiff('month', c.cohort_month, r.revenue_month) AS month_number,
-            sum(r.revenue) AS cohort_revenue
-        FROM signup_cohort c
-        INNER JOIN monthly_revenue r USING (user_id)
-        WHERE r.revenue_month >= c.cohort_month
-        GROUP BY c.cohort_month, c.acquisition_channel, month_number
-    )
-SELECT
-    cohort_month,
-    acquisition_channel,
-    month_number,
-    cohort_revenue
-FROM cohort_revenue
-ORDER BY cohort_month, acquisition_channel, month_number;
-```
-
-Secondo insight atteso: le coorti piu' recenti da canale paid portano volume, ma revenue retention peggiore rispetto a referral e organic.
-
-Qui la decisione implicita cambia: il problema non e' "generare piu' lead", ma "migliorare la qualita' dei lead acquisiti".
-
-## Step 3: localizzare il drop-off nel funnel
-
-```sql
-WITH funnel_flags AS (
+WITH product_margin AS (
     SELECT
-        user_id,
-        max(if(event_name = 'landing', 1, 0)) AS s1_landing,
-        max(if(event_name = 'product_view', 1, 0)) AS s2_product_view,
-        max(if(event_name = 'add_to_cart', 1, 0)) AS s3_add_to_cart,
-        max(if(event_name = 'checkout_start', 1, 0)) AS s4_checkout_start,
-        max(if(event_name = 'purchase', 1, 0)) AS s5_purchase
-    FROM events
-    WHERE event_time >= toDateTime('2025-03-01 00:00:00')
-      AND event_time < toDateTime('2025-04-01 00:00:00')
-    GROUP BY user_id
+        oi.category,
+        oi.product_id,
+        sum(oi.margin) AS total_margin
+    FROM order_items oi
+    INNER JOIN orders o
+        ON o.order_id = oi.order_id
+    WHERE o.status = 'completed'
+      AND o.order_time >= DATE '2025-01-01'
+    GROUP BY oi.category, oi.product_id
+),
+ranked AS (
+    SELECT
+        category,
+        product_id,
+        total_margin,
+        row_number() OVER (
+            PARTITION BY category
+            ORDER BY total_margin ASC, product_id
+        ) AS weakest_rank,
+        row_number() OVER (
+            PARTITION BY category
+            ORDER BY total_margin DESC, product_id
+        ) AS strongest_rank
+    FROM product_margin
 )
 SELECT
-    sum(s1_landing) AS landing_users,
-    sum(s2_product_view) AS product_users,
-    sum(s3_add_to_cart) AS cart_users,
-    sum(s4_checkout_start) AS checkout_users,
-    sum(s5_purchase) AS purchase_users,
-    round(sum(s5_purchase) / nullIf(sum(s1_landing), 0), 4) AS overall_cvr
-FROM funnel_flags;
+    category,
+    product_id,
+    total_margin,
+    weakest_rank,
+    strongest_rank
+FROM ranked
+WHERE weakest_rank <= 3 OR strongest_rank <= 3
+ORDER BY category, total_margin DESC;
 ```
 
-Poi andiamo sul punto di abbandono.
+Insight atteso:
+
+- pochi SKU ad alto volume ma basso margine stanno comprimendo la redditivita'
+- il problema non e' distribuito uniformemente sul catalogo
+
+Qui il ranking serve per fare shortlist. Il management non ha bisogno di vedere 500 SKU: ha bisogno di vedere i 3 peggiori e i 3 migliori per categoria.
+
+### Output executive esempio: shortlist SKU
+
+| Categoria | SKU critico | Margine totale | Posizione |
+|---|---|---:|---|
+| Home | 1184 | 3.420 | weakest #1 |
+| Home | 1051 | 4.015 | weakest #2 |
+| Beauty | 772 | 2.980 | weakest #1 |
+| Beauty | 811 | 28.640 | strongest #1 |
+
+Una tabella cosi' e' immediatamente azionabile per merchandising e pricing.
+
+## Step 2: benchmark del canale contro se stesso
+
+La revenue assoluta da sola non basta. Serve il delta rispetto alla storia recente del canale.
 
 ```sql
-WITH session_outcomes AS (
+WITH monthly_channel AS (
     SELECT
-        session_id,
-        argMax(event_name, event_time) AS last_event,
-        argMax(page, event_time) AS last_page,
-        max(if(event_name = 'purchase', 1, 0)) AS has_purchase
-    FROM events
-    WHERE event_time >= toDateTime('2025-03-01 00:00:00')
-      AND event_time < toDateTime('2025-04-01 00:00:00')
-    GROUP BY session_id
-)
-SELECT
-    last_event,
-    last_page,
-    count() AS abandoned_sessions
-FROM session_outcomes
-WHERE has_purchase = 0
-GROUP BY last_event, last_page
-ORDER BY abandoned_sessions DESC
-LIMIT 10;
-```
-
-Terzo insight atteso: il problema principale non e' l'entry nel funnel, ma il passaggio `checkout_start -> purchase`, concentrato su poche pagine finali.
-
-Quando un problema e' cosi' concentrato, il team puo' intervenire con una priorita' chiara: checkout UX, errori di pagamento o frizione finale, non top-of-funnel.
-
-## Step 4: costruire una KPI table executive
-
-Il board non vuole cinque query separate. Vuole una tabella che unisca volume, efficienza e trend.
-
-```sql
-WITH monthly_summary AS (
-    SELECT
-        toStartOfMonth(order_time) AS month,
-        country,
+        DATE_TRUNC('month', order_time) AS month,
         channel,
-        sum(amount) AS revenue,
-        count() AS orders_count,
-        countDistinct(user_id) AS customers
+        sum(amount) AS revenue
     FROM orders
     WHERE status = 'completed'
-      AND order_time >= toDateTime('2025-01-01 00:00:00')
-    GROUP BY month, country, channel
+      AND order_time >= DATE '2024-10-01'
+    GROUP BY DATE_TRUNC('month', order_time), channel
 )
 SELECT
     month,
-    country,
     channel,
     revenue,
-    orders_count,
-    customers,
-    round(revenue / nullIf(orders_count, 0), 2) AS avg_order_value,
-    round(revenue / nullIf(customers, 0), 2) AS revenue_per_customer
-FROM monthly_summary
-ORDER BY month DESC, revenue DESC;
+    lag(revenue) OVER (
+        PARTITION BY channel
+        ORDER BY month
+    ) AS prev_month_revenue,
+    round(
+        (
+            revenue
+            - lag(revenue) OVER (
+                PARTITION BY channel
+                ORDER BY month
+            )
+        )
+        / nullif(
+            lag(revenue) OVER (
+                PARTITION BY channel
+                ORDER BY month
+            ),
+            0
+        ),
+        4
+    ) AS mom_growth_pct
+FROM monthly_channel
+ORDER BY channel, month;
 ```
 
-Questa e' la tabella che sintetizza il business layer.
+Insight atteso:
 
-## Esempio di executive summary in tabella
+- `paid-search` tiene il volume ma rallenta mese su mese
+- `email` cresce meno in revenue ma con maggiore stabilita'
 
-Se dovessi consegnare una pagina sola al board, la struttura minima dovrebbe essere questa:
+La finestra qui non serve per "abbellire" la query. Serve per confrontare ogni mese con il precedente dentro la stessa storia del canale.
 
-| Blocco | Cosa mostra | Perche' serve |
-|---|---|---|
-| Trend | revenue continua + MA7 | evita falsi segnali da giorni mancanti |
-| Coorti | revenue retention per canale | distingue volume da qualita' |
-| Funnel | step e drop-off finale | localizza l'attrito |
-| KPI | paese, canale, AOV, revenue/customer | traduce l'analisi in management reporting |
-| Pareto | top clienti e quota cumulata | misura il rischio di concentrazione |
+### Output executive esempio: performance canali
 
-## Step 5: shortlist di anomalie e segmenti
+| Mese | Canale | Revenue | Revenue mese precedente | MoM |
+|---|---|---:|---:|---:|
+| 2025-01 | paid-search | 412000 | 398000 | 3.5% |
+| 2025-02 | paid-search | 401500 | 412000 | -2.5% |
+| 2025-03 | paid-search | 386900 | 401500 | -3.6% |
+| 2025-03 | email | 142300 | 139100 | 2.3% |
 
-Per passare da reporting a decisione, aggiungiamo una vista Pareto clienti.
+Per il board questa tabella vale piu' di un grafico isolato: mostra direzione, ampiezza del cambiamento e canale da approfondire.
+
+## Step 3: il giorno del mese in cui il business copre i costi fissi
+
+Il CFO non ragiona solo in percentuali. Vuole sapere quando il mese va in pareggio operativo.
+
+Assumiamo un costo fisso mensile di `180000`.
 
 ```sql
-WITH customer_revenue AS (
+WITH daily_revenue AS (
     SELECT
-        user_id,
-        sum(amount) AS total_revenue
+        DATE_TRUNC('month', order_time) AS month,
+        CAST(order_time AS date) AS day,
+        sum(amount) AS revenue
     FROM orders
     WHERE status = 'completed'
-    GROUP BY user_id
+    GROUP BY DATE_TRUNC('month', order_time), CAST(order_time AS date)
 ),
-ordered AS (
+with_running AS (
     SELECT
-        user_id,
-        total_revenue,
-        sum(total_revenue) OVER (
-            ORDER BY total_revenue DESC
+        month,
+        day,
+        revenue,
+        sum(revenue) OVER (
+            PARTITION BY month
+            ORDER BY day
             ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
-        ) AS cumulative_revenue,
-        sum(total_revenue) OVER () AS grand_total
-    FROM customer_revenue
+        ) AS cumulative_revenue
+    FROM daily_revenue
+),
+crossed AS (
+    SELECT
+        month,
+        day,
+        row_number() OVER (
+            PARTITION BY month
+            ORDER BY day
+        ) AS rn
+    FROM with_running
+    WHERE cumulative_revenue >= 180000
 )
 SELECT
-    user_id,
-    total_revenue,
-    round(cumulative_revenue / nullIf(grand_total, 0), 4) AS cumulative_share
-FROM ordered
-WHERE cumulative_revenue / nullIf(grand_total, 0) <= 0.8
-ORDER BY total_revenue DESC;
+    month,
+    day AS break_even_day
+FROM crossed
+WHERE rn = 1
+ORDER BY month;
 ```
 
-Quarto insight atteso: una quota piccola di clienti regge gran parte della revenue. Se la loro retention peggiora, il rischio economico e' molto piu' alto di quanto sembri dalla media.
+Insight atteso:
 
-## Come trasformare i risultati in priorita'
+- il break-even day si sta spostando piu' avanti nel mese
+- la stabilita' della revenue totale nasconde un peggioramento del ritmo di incasso
+
+### Output executive esempio: ritmo di monetizzazione
+
+| Mese | Break-even day | Giorni vs mese precedente |
+|---|---|---:|
+| 2025-01 | 2025-01-18 | - |
+| 2025-02 | 2025-02-20 | +2 |
+| 2025-03 | 2025-03-23 | +3 |
+
+Quando il pareggio operativo slitta avanti di settimana in settimana, il management vede subito che il problema non e' solo di volume, ma di velocita' con cui il mese si costruisce.
+
+## Step 4: quartili clienti per capire chi regge il margine
+
+Ora passiamo dal lato prodotto al lato cliente.
+
+```sql
+WITH customer_margin AS (
+    SELECT
+        o.customer_id,
+        sum(oi.margin) AS total_margin,
+        sum(oi.net_revenue) AS total_revenue
+    FROM orders o
+    INNER JOIN order_items oi
+        ON oi.order_id = o.order_id
+    WHERE o.status = 'completed'
+      AND o.order_time >= DATE '2025-01-01'
+    GROUP BY o.customer_id
+),
+bucketed AS (
+    SELECT
+        customer_id,
+        total_margin,
+        total_revenue,
+        ntile(4) OVER (
+            ORDER BY total_margin DESC, customer_id
+        ) AS margin_quartile
+    FROM customer_margin
+)
+SELECT
+    margin_quartile,
+    count(*) AS customers,
+    round(avg(total_margin), 2) AS avg_margin,
+    round(avg(total_revenue), 2) AS avg_revenue,
+    round(sum(total_margin), 2) AS margin_sum
+FROM bucketed
+GROUP BY margin_quartile
+ORDER BY margin_quartile;
+```
+
+Insight atteso:
+
+- il primo quartile concentra una quota sproporzionata del margine
+- l'erosione di pochi clienti ad alto valore avrebbe un impatto molto piu' forte di quanto suggerisca la media
+
+### Output executive esempio: concentrazione del margine
+
+| Quartile | Clienti | Margine medio | Margine totale |
+|---|---:|---:|---:|
+| Q1 | 1.250 | 482 | 602500 |
+| Q2 | 1.250 | 176 | 220000 |
+| Q3 | 1.250 | 74 | 92500 |
+| Q4 | 1.250 | 18 | 22500 |
+
+Questa tabella rende evidente il rischio di concentrazione molto meglio di una media complessiva clienti.
+
+## Step 5: una KPI table che il management possa leggere
+
+A questo punto conviene riunire il quadro in una tabella mensile per canale.
+
+```sql
+WITH monthly_channel AS (
+    SELECT
+        DATE_TRUNC('month', order_time) AS month,
+        channel,
+        count(*) AS orders_count,
+        count(DISTINCT customer_id) AS unique_customers,
+        sum(amount) AS revenue
+    FROM orders
+    WHERE status = 'completed'
+      AND order_time >= DATE '2025-01-01'
+    GROUP BY DATE_TRUNC('month', order_time), channel
+)
+SELECT
+    month,
+    channel,
+    orders_count,
+    unique_customers,
+    revenue,
+    round(revenue / nullif(orders_count, 0), 2) AS aov,
+    round(revenue / sum(revenue) OVER (PARTITION BY month), 4) AS monthly_share,
+    rank() OVER (
+        PARTITION BY month
+        ORDER BY revenue DESC
+    ) AS rank_in_month
+FROM monthly_channel
+ORDER BY month, rank_in_month;
+```
+
+Questa tabella mette insieme quattro elementi chiave:
+
+- volume
+- valore medio
+- quota sul mese
+- posizione competitiva del canale
+
+### Scorecard finale per il board
+
+| Tema | Segnale | Evidenza tabellare | Decisione |
+|---|---|---|---|
+| Assortimento | margine compresso | SKU deboli concentrati in poche categorie | revisione pricing e promo |
+| Canali | paid in rallentamento | 2 mesi consecutivi di MoM negativo | riallocazione budget |
+| Finanza operativa | break-even piu' tardivo | slittamento da giorno 18 a giorno 23 | monitoraggio cash pace |
+| Clienti | margine concentrato | Q1 clienti regge gran parte del margine | piano retention high value |
+
+<Aside type="tip" title="Perche' questa tabella funziona">
+Non obbliga il board a ricostruire i rapporti tra tabelle separate. Ogni riga contiene gia' contesto, confronto e priorita'.
+</Aside>
+
+## Come leggere il caso nel suo insieme
 
 ```mermaid
 graph TD
-    A["Volume paid alto"] --> B["Retention peggiore"]
-    B --> C["Checkout drop-off alto"]
-    C --> D["Rischio economico concentrato su pochi clienti"]
-    D --> E["Priorita' 1: fix checkout"]
-    D --> F["Priorita' 2: rivedere acquisition paid"]
-    D --> G["Priorita' 3: proteggere clienti high value"]
+    A["Margine in calo"] --> B["Ranking SKU"]
+    A --> C["Delta canali MoM"]
+    A --> D["Break-even day"]
+    A --> E["Quartili clienti"]
+    B --> F["Assortimento da correggere"]
+    C --> G["Canali da riallocare"]
+    D --> H["Ritmo di monetizzazione in peggioramento"]
+    E --> I["Clienti high value da proteggere"]
     style A fill:#1a3a5c,color:#ffffff
     style B fill:#7a5c00,color:#ffffff
-    style C fill:#8b1a1a,color:#ffffff
+    style C fill:#7a5c00,color:#ffffff
     style D fill:#7a5c00,color:#ffffff
-    style E fill:#2d5016,color:#ffffff
+    style E fill:#7a5c00,color:#ffffff
     style F fill:#2d5016,color:#ffffff
     style G fill:#2d5016,color:#ffffff
+    style H fill:#8b1a1a,color:#ffffff
+    style I fill:#2d5016,color:#ffffff
 ```
 
-## Sintesi decisionale finale
+## Decisioni che emergono dal caso
 
-Da queste analisi il management puo' arrivare a una narrativa chiara:
+- ridurre esposizione sugli SKU a basso margine ma alto peso commerciale
+- rivedere l'allocazione di budget su `paid-search`
+- monitorare ogni mese lo spostamento del break-even day
+- creare una retention list per i clienti del primo quartile
 
-- la revenue totale non segnala subito il problema perche' il volume paid compensa temporaneamente
-- le coorti recenti hanno retention peggiore, soprattutto nei canali a pagamento
-- il funnel perde conversione soprattutto in checkout
-- il business dipende troppo da un segmento ristretto di clienti high value
+## Riepilogo
 
-## Come presentare i risultati
-
-L'analisi e' pronta. Il rischio a questo punto non e' tecnico: e' che il board non capisca cosa deve fare. Una query complessa non parla da sola.
-
-La struttura narrativa che funziona meglio con l'executive:
-
-**1. Il problema originale**: "il team commerciale segnalava peggioramento della qualita' dei nuovi clienti."
-
-**2. La verifica del dato**: "la serie temporale mostrava giorni a zero nascosti dalla media mobile. Il trend stabile era un artefatto."
-
-**3. La causa strutturale**: "le coorti acquired da paid negli ultimi due mesi hanno revenue retention 23% inferiore rispetto a organic e referral."
-
-**4. Il punto di frizione operativo**: "il 67% del drop-off nel funnel e' concentrato nel passaggio `checkout_start` → `purchase`, su tre pagine specifiche."
-
-**5. Il rischio economico**: "l'80% della revenue dipende dal 12% dei clienti. Se questi deteriorano, l'impatto e' sproporzionato rispetto ai volumi."
-
-**6. Le priorita'**: checkout UX come urgenza immediata, revisione della qualita' dei canali paid come priorita' strategica, piano di retention per i clienti high value.
-
-Questa struttura non richiede che il board capisca le query. Richiede che capisca la logica causale: ogni punto porta al successivo.
-
-### Quanto tempo ci vuole?
-
-Con dataset preparati e comprensione del dominio, le query di questo caso richiedono 2-4 ore. La preparazione della narrativa puo' richiedere altrettanto. Non e' una debolezza del SQL: e' la natura dell'analisi investigativa. Il valore non e' nella velocita' di esecuzione delle query, ma nella capacita' di costruire una catena causale che regge a domande di follow-up.
-
----
-
-## Output finale da consegnare
-
-Il deliverable corretto non e' "la query piu' bella". E' un pacchetto di tabelle interpretabili:
-
-- tabella serie temporale continua con media mobile
-- tabella cohort revenue retention (per canale e per mese)
-- tabella funnel e drop-off (con percentuali di conversione passo-passo)
-- tabella KPI executive per paese e canale (con variazioni MoM)
-- shortlist top clienti o segmenti a rischio (con soglie Pareto)
-
-Il formato migliore per ogni tabella dipende dal pubblico:
-
-| Audience | Formato preferito |
-|---|---|
-| Board / CEO | slide con una metrica chiave + trend |
-| CMO / Growth | tabella pivot con canali e coorti |
-| Product | funnel con percentuali di step |
-| Engineering | SQL esportabile e riproducibile |
-| Analytics | tabella completa con tutti i breakdown |
-
-Non preparare un'unica tabella per tutti. Prepara la stessa analisi in formati diversi.
-
-<Aside type="caution">
-Il valore del caso studio non sta nel numero di query. Sta nel fatto che ogni query riduce l'ambiguita' della decisione successiva.
-</Aside>
-
-## Riepilogo operativo
-
-- Parti dalla qualita' del dato temporale: senza date spine, le serie storiche mentono per omissione.
-- Controlla se il problema e' di volume o di qualita' delle coorti: spesso i due si confondono.
-- Localizza il drop-off nel funnel prima di proporre soluzioni.
-- La KPI table executive sintetizza il business layer in modo navigabile da audience non tecniche.
-- Il Pareto clienti trasforma l'analisi in gestione del rischio economico.
-- Chiudi sempre con una narrativa causale: perche' questo numero e' diverso da quello, e cosa fare.
-
-## Mini esercizio
-
-Replica il caso su un perimetro piu' piccolo:
-
-1. un solo paese
-2. due canali acquisition (organic vs paid)
-3. un funnel a 4 step (landing → product → cart → purchase)
-4. tre coorti mensili consecutive
-5. una shortlist Pareto clienti con soglia 80%
-
-Poi scrivi in cinque frasi la narrativa decisionale che presenteresti al board: problema, causa, punto di frizione, rischio economico, priorita'.
+Questo caso mostra perche' le window functions contano davvero: non sono solo tecniche di query, ma meccanismi per costruire **confronto, priorita' e contesto**. Ranking, lag, cumulata e quartili non rispondono a quattro domande scollegate. Insieme costruiscono una lettura manageriale che porta a decisioni molto piu' difendibili.
