@@ -1,0 +1,127 @@
+---
+title: "Materialization, incremental e snapshot per eventi e stato cliente"
+description: >-
+  Quando usare `view`, `table`, `incremental` e `snapshot` in dbt per modelli
+  martech ad alto volume e per storicizzare lo stato clienti.
+module: "Modulo 16: Analytics Engineering"
+order: 6
+category: Modellazione Martech
+difficulty: advanced
+duration: 24 min
+prerequisites:
+  - analytics-engineering/marts-martech-funnel-retention-e-attribution
+learningObjectives:
+  - Scegliere la materialization giusta per ogni tipo di modello.
+  - Costruire modelli incrementali sostenibili su eventi e costi.
+  - Usare snapshot per mantenere storicita' sullo stato cliente.
+---
+
+import { Aside } from '@astrojs/starlight/components'
+
+Una delle domande piu' importanti in dbt non e' "quale SQL scrivo?", ma "come deve essere costruito questo modello nel warehouse?". La risposta dipende da volume, frequenza, latenza accettabile e bisogno di storicita'.
+
+## Le quattro scelte piu' comuni
+
+| Materialization | Quando usarla | Rischio tipico |
+|---|---|---|
+| `view` | staging e modelli leggeri | calcoli ripetuti a ogni query |
+| `table` | marts stabili e costosi da ricomputare | rebuild totale piu' pesante |
+| `incremental` | grandi volumi append/update | logica di finestra incompleta |
+| `snapshot` | storicizzare stato dimensionale | crescita incontrollata se usato male |
+
+## Esempio incrementale
+
+```sql
+{{
+  config(
+    materialized='incremental',
+    unique_key='session_id'
+  )
+}}
+
+with source as (
+    select * from {{ source('raw_marketing', 'ga4_sessions') }}
+    {% if is_incremental() %}
+      where loaded_at > (select max(loaded_at) from {{ this }})
+    {% endif %}
+)
+select
+    cast(session_id as varchar) as session_id,
+    cast(user_pseudo_id as varchar) as anonymous_user_id,
+    cast(session_start_at as timestamp) as session_started_at,
+    lower(source) as session_source,
+    lower(medium) as session_medium,
+    loaded_at
+from source
+```
+
+## Il problema reale degli incrementali
+
+Esempi di problemi tipici:
+
+- eventi arrivano in ritardo
+- la piattaforma corregge righe del passato
+- il modello dipende da finestre temporali
+- la chiave non e' davvero univoca
+
+Per questo spesso serve una finestra di sicurezza:
+
+```sql
+{% if is_incremental() %}
+  where loaded_at >= (
+      select max(loaded_at) - interval '2 day'
+      from {{ this }}
+  )
+{% endif %}
+```
+
+## Incremental su modelli con finestre
+
+Se costruisci un modello di attribution o sessionizzazione, prendere solo i record nuovi puo' essere insufficiente. Ti serve ricalcolare una finestra recente.
+
+```sql
+{% if is_incremental() %}
+  where session_started_at >= (
+      select max(session_started_at) - interval '7 day'
+      from {{ this }}
+  )
+{% endif %}
+```
+
+## Snapshot per lo stato cliente
+
+```sql
+{% snapshot snap_customer_lifecycle %}
+
+{{
+  config(
+    target_schema='snapshot',
+    unique_key='customer_id',
+    strategy='check',
+    check_cols=['lifecycle_stage', 'plan_name', 'account_tier']
+  )
+}}
+
+select
+    customer_id,
+    lifecycle_stage,
+    plan_name,
+    account_tier,
+    updated_at
+from {{ ref('stg_customer_state') }}
+
+{% endsnapshot %}
+```
+
+Questo ti permette di rispondere a domande come:
+
+- quale piano aveva il cliente quando ha convertito?
+- in che fase CRM era il lead prima della chiusura?
+
+<Aside type="tip" title="Regola di sicurezza">
+Se un modello incrementale usa join temporali, finestre o deduplica tardiva, non filtrare solo "dal massimo timestamp in poi". Ricalcola sempre una finestra recente esplicita.
+</Aside>
+
+## Riepilogo
+
+La materialization e' una decisione architetturale, non un dettaglio tecnico. In martech devi bilanciare costo, freschezza e storicita'. `view`, `table`, `incremental` e `snapshot` esistono per problemi diversi: scegliere bene evita sia sprechi sia errori invisibili al business.

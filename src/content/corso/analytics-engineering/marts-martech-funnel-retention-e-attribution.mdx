@@ -1,0 +1,179 @@
+---
+title: "Marts MarTech per funnel, retention e attribution"
+description: >-
+  Come passare da modelli puliti a tavole decisionali: fatti, dimensioni e mart
+  per paid media, ecommerce, retention e performance di canale.
+module: "Modulo 16: Analytics Engineering"
+order: 5
+category: Modellazione Martech
+difficulty: advanced
+duration: 24 min
+prerequisites:
+  - analytics-engineering/staging-e-standardizzazione-dei-dati-martech
+  - advanced-sql/window-functions-avanzate
+learningObjectives:
+  - Progettare dimensioni, fatti e mart leggibili dal business.
+  - Separare granularita' tecnica e granularita' decisionale.
+  - Modellare funnel e attribution senza creare tabelle monolitiche.
+---
+
+import { Aside, Steps } from '@astrojs/starlight/components'
+
+Lo staging pulisce. I marts decidono. E' qui che scegli quali granularita' servono davvero al business e come rendere interrogabili funnel, canali, retention e marginalita'.
+
+## Tre livelli che conviene distinguere
+
+Un pattern sano:
+
+- `dim_*` per entita' descrittive
+- `fct_*` per eventi o transazioni a granularita' stabile
+- `mart_*` per tavole gia' orientate a una domanda decisionale
+
+Esempio concreto:
+
+```text
+dim_campaign
+dim_customer
+fct_orders
+fct_sessions
+fct_subscription_events
+mart_channel_efficiency_daily
+mart_retention_cohort_monthly
+mart_campaign_funnel_daily
+```
+
+## Esempio: `fct_orders`
+
+```sql
+with orders as (
+    select * from {{ ref('stg_shopify_orders') }}
+),
+sessions as (
+    select * from {{ ref('int_session_order_attribution') }}
+)
+select
+    o.order_id,
+    o.customer_id,
+    o.order_date_local as order_date,
+    o.net_revenue,
+    o.refund_amount,
+    s.session_id as attributed_session_id,
+    s.channel_group as attributed_channel_group,
+    s.campaign_id as attributed_campaign_id
+from orders o
+left join sessions s
+    on o.order_id = s.order_id
+```
+
+## Esempio: `mart_channel_efficiency_daily`
+
+```sql
+with spend as (
+    select
+        report_date,
+        channel_group,
+        sum(spend) as ad_spend
+    from {{ ref('fct_ad_spend_daily') }}
+    group by 1, 2
+),
+orders as (
+    select
+        order_date,
+        attributed_channel_group as channel_group,
+        count(*) as orders,
+        sum(net_revenue) as net_revenue
+    from {{ ref('fct_orders') }}
+    group by 1, 2
+)
+select
+    coalesce(s.report_date, o.order_date) as report_date,
+    coalesce(s.channel_group, o.channel_group) as channel_group,
+    coalesce(s.ad_spend, 0) as ad_spend,
+    coalesce(o.orders, 0) as orders,
+    coalesce(o.net_revenue, 0) as net_revenue,
+    case when coalesce(s.ad_spend, 0) > 0 then o.net_revenue / s.ad_spend end as roas
+from spend s
+full outer join orders o
+    on s.report_date = o.order_date
+   and s.channel_group = o.channel_group
+```
+
+## Funnel: non per forza una sola tabella gigante
+
+Esempio di mart funnel:
+
+```sql
+with sessions as (
+    select
+        cast(session_started_at as date) as report_date,
+        channel_group,
+        count(distinct session_id) as sessions
+    from {{ ref('fct_sessions') }}
+    group by 1, 2
+),
+leads as (
+    select
+        cast(lead_created_at as date) as report_date,
+        first_touch_channel_group as channel_group,
+        count(distinct lead_id) as leads
+    from {{ ref('fct_leads') }}
+    group by 1, 2
+),
+orders as (
+    select
+        order_date as report_date,
+        attributed_channel_group as channel_group,
+        count(*) as orders
+    from {{ ref('fct_orders') }}
+    group by 1, 2
+)
+select
+    coalesce(s.report_date, l.report_date, o.report_date) as report_date,
+    coalesce(s.channel_group, l.channel_group, o.channel_group) as channel_group,
+    coalesce(s.sessions, 0) as sessions,
+    coalesce(l.leads, 0) as leads,
+    coalesce(o.orders, 0) as orders
+from sessions s
+full outer join leads l
+    on s.report_date = l.report_date and s.channel_group = l.channel_group
+full outer join orders o
+    on coalesce(s.report_date, l.report_date) = o.report_date
+   and coalesce(s.channel_group, l.channel_group) = o.channel_group
+```
+
+## Retention: meglio un mart dedicato che logica sparsa in BI
+
+```sql
+with customer_orders as (
+    select
+        customer_id,
+        order_date,
+        date_trunc('month', order_date) as order_month,
+        min(date_trunc('month', order_date)) over (
+            partition by customer_id
+        ) as cohort_month
+    from {{ ref('fct_orders') }}
+),
+cohort_activity as (
+    select distinct
+        customer_id,
+        cohort_month,
+        order_month
+    from customer_orders
+)
+select
+    cohort_month,
+    order_month,
+    date_diff('month', cohort_month, order_month) as months_since_cohort,
+    count(distinct customer_id) as active_customers
+from cohort_activity
+group by 1, 2, 3
+```
+
+<Aside type="tip" title="Domanda utile">
+Quando progetti un mart, chiediti sempre: quale decisione deve abilitare? Se non riesci a rispondere in una frase, il mart e' probabilmente troppo vago.
+</Aside>
+
+## Riepilogo
+
+Un buon modulo analytics engineering non si ferma allo staging. Costruisce fatti, dimensioni e marts con una granularita' dichiarata e un uso preciso. In martech questo significa trasformare paid media, web, CRM ed ecommerce in tavole affidabili per funnel, retention, attribution e marginalita'.

@@ -112,5 +112,12 @@ export const COURSE_MODULES: CourseModule[] = [
     description: 'Algebra lineare, calcolo, probabilita\' e inferenza applicate a analytics, ML e sperimentazione.',
     icon: 'BrainCircuit',
     color: 'from-sky-400 to-indigo-500'
+  },
+  {
+    id: 'analytics-engineering',
+    title: 'Analytics Engineering',
+    description: 'dbt, modeling layer, quality, semantic metrics e deploy per trasformare dati martech in modelli affidabili.',
+    icon: 'GitMerge',
+    color: 'from-emerald-500 to-blue-500'
   }
 ];

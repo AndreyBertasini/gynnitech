@@ -78,6 +78,15 @@ const staticSidebarSections = [
     ],
   },
   {
+    label: 'Analytics Engineering',
+    items: [
+      { label: 'dbt e ruolo dell\'Analytics Engineer', link: '/course/analytics-engineering/dbt-e-ruolo-dell-analytics-engineer/' },
+      { label: 'Staging dati MarTech', link: '/course/analytics-engineering/staging-e-standardizzazione-dei-dati-martech/' },
+      { label: 'Test e contratti dati', link: '/course/analytics-engineering/test-data-quality-e-contratti-dati/' },
+      { label: 'Deploy dbt', link: '/course/analytics-engineering/deploy-orchestrazione-e-ci-cd-dbt/' },
+    ],
+  },
+  {
     label: 'Real-Time Analytics & Streaming',
     items: [
       { label: 'Streaming Ingestion', link: '/course/real-time-analytics/streaming/' },

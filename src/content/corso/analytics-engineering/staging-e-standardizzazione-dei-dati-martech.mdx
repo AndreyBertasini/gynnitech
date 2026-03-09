@@ -1,0 +1,142 @@
+---
+title: "Staging e standardizzazione dei dati MarTech"
+description: >-
+  Come progettare modelli `stg_*` che puliscono naming, timestamp, currency,
+  mapping campagne e campi sporchi prima di entrare nei marts.
+module: "Modulo 16: Analytics Engineering"
+order: 4
+category: Modellazione Martech
+difficulty: advanced
+duration: 22 min
+prerequisites:
+  - analytics-engineering/progetto-dbt-fonti-e-ambienti-martech
+  - data-collection/integrations
+learningObjectives:
+  - Capire il ruolo esatto dello staging layer in dbt.
+  - Standardizzare sorgenti martech eterogenee senza anticipare business logic.
+  - Ridurre debito tecnico e ambiguita' nei modelli downstream.
+---
+
+import { Aside } from '@astrojs/starlight/components'
+
+Lo staging non e' il posto dove "fare tutta la trasformazione". E' il posto dove rendere i dati **puliti, leggibili e confrontabili**. Se lo staging diventa un mart travestito, il progetto si opacizza. Se invece resta troppo raw, tutta la complessita' esplode nei layer successivi.
+
+## Cosa deve fare un modello di staging
+
+In un contesto martech un buon `stg_*` di solito fa queste cose:
+
+- rinomina colonne con uno standard coerente
+- applica cast espliciti
+- normalizza timezone e date
+- pulisce valori sentinella o stringhe vuote
+- genera flag elementari
+- conserva una granularita' vicina alla sorgente
+
+## Esempio: staging per Meta Ads
+
+```sql
+with source as (
+    select * from {{ source('raw_marketing', 'meta_ads_daily') }}
+),
+renamed as (
+    select
+        cast(date as date) as report_date,
+        cast(campaign_id as varchar) as campaign_id,
+        cast(adset_id as varchar) as adset_id,
+        lower(trim(campaign_name)) as campaign_name_raw,
+        cast(spend as numeric(12, 2)) as spend,
+        cast(clicks as integer) as clicks,
+        cast(impressions as integer) as impressions,
+        cast(loaded_at as timestamp) as loaded_at
+    from source
+)
+select
+    report_date,
+    campaign_id,
+    adset_id,
+    campaign_name_raw,
+    spend,
+    clicks,
+    impressions,
+    case when impressions > 0 then clicks * 1.0 / impressions end as ctr,
+    loaded_at
+from renamed
+```
+
+## Esempio: staging per sessioni web
+
+```sql
+with source as (
+    select * from {{ source('raw_marketing', 'ga4_sessions') }}
+)
+select
+    cast(session_id as varchar) as session_id,
+    cast(user_pseudo_id as varchar) as anonymous_user_id,
+    cast(session_start_at as timestamp) as session_started_at,
+    lower(nullif(source, '')) as session_source,
+    lower(nullif(medium, '')) as session_medium,
+    lower(nullif(campaign, '')) as session_campaign,
+    coalesce(nullif(landing_page, ''), '/unknown') as landing_page,
+    case
+        when lower(medium) in ('cpc', 'paid_social', 'display') then true
+        else false
+    end as is_paid_session
+from source
+```
+
+## Standardizzazione campagne con seed di mapping
+
+```text
+seeds/campaign_mapping.csv
+
+campaign_name_raw,channel_group,country,target_funnel
+it_bf24_retargeting,paid_social,it,retention
+bf24-ret,paid_social,it,retention
+black friday retargeting,paid_social,it,retention
+```
+
+Poi:
+
+```sql
+with ads as (
+    select * from {{ ref('stg_meta_ads_daily') }}
+),
+mapping as (
+    select * from {{ ref('campaign_mapping') }}
+)
+select
+    ads.*,
+    map.channel_group,
+    map.country,
+    map.target_funnel
+from ads
+left join mapping map
+    on ads.campaign_name_raw = map.campaign_name_raw
+```
+
+## Timezone e calendario
+
+Se:
+
+- Meta Ads chiude il giorno in UTC
+- Shopify salva in UTC
+- GA4 viene letto in property timezone
+- il management legge tutto in Europa/Rome
+
+allora devi fissare una regola presto, non nel dashboard finale.
+
+```sql
+select
+    order_id,
+    order_created_at at time zone 'Europe/Rome' as order_created_at_local,
+    cast(order_created_at at time zone 'Europe/Rome' as date) as order_date_local
+from {{ source('raw_commerce', 'shopify_orders') }}
+```
+
+<Aside type="tip" title="Test mentale">
+Se un collega non tecnico apre un modello di staging, dovrebbe poter dire: "capisco che qui stanno pulendo e standardizzando". Se invece vede KPI finali, il layer e' sbagliato.
+</Aside>
+
+## Riepilogo
+
+Lo staging layer esiste per togliere entropia al dato. In martech vuol dire soprattutto rendere confrontabili piattaforme diverse, gestire naming e timestamp, e preparare il terreno per marts e metriche senza anticipare decisioni di business troppo presto.

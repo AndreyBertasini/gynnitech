@@ -1,0 +1,182 @@
+---
+title: "Seed, macro e package riusabili"
+description: >-
+  Come evitare SQL duplicato con seed di mapping, macro Jinja e package dbt nei
+  casi piu' frequenti di analytics engineering martech.
+module: "Modulo 16: Analytics Engineering"
+order: 8
+category: Automazione e Riuso
+difficulty: advanced
+duration: 20 min
+prerequisites:
+  - analytics-engineering/test-data-quality-e-contratti-dati
+learningObjectives:
+  - Usare seeds per mapping e tabelle di supporto leggere.
+  - Scrivere macro semplici che migliorano coerenza e manutenzione.
+  - Capire quando ha senso usare package di terze parti.
+---
+
+import { Aside } from '@astrojs/starlight/components'
+
+Quando un progetto dbt cresce, il problema non e' solo il numero di modelli. Il problema e' la duplicazione di logica: stessi mapping campagne, stesse formule di divisione protetta, stesse chiavi surrogate costruite in modi diversi.
+
+In un contesto martech questo succede molto presto. Meta, Google Ads, CRM, ecommerce e analytics web usano tassonomie diverse. Se non governi il riuso, ogni analyst finisce per costruire una propria variante di classificazione canale, funnel stage o naming campagna.
+
+## Seeds: piccoli dataset governati dal repo
+
+Esempi martech tipici:
+
+- mapping `campaign_name_raw -> channel_group`
+- lista country e valute
+- priorita' canali
+- mapping `utm_medium -> paid / owned / earned`
+
+```csv
+campaign_name_raw,channel_group,funnel_stage
+it_bf24_retargeting,paid_social,retention
+bf24-brand-search,paid_search,acquisition
+newsletter_welcome,email,activation
+```
+
+Poi:
+
+```sql
+select *
+from {{ ref('campaign_mapping') }}
+```
+
+I seed sono utili quando la tabella:
+
+- e' piccola e leggibile
+- cambia raramente
+- deve stare sotto versionamento
+- rappresenta una regola di business, non un feed operativo
+
+Per esempio un mapping `utm_medium -> channel_group` non ha bisogno di vivere in un sistema esterno complesso. Tenerlo nel repository rende chiaro quando cambia la tassonomia marketing e consente review via pull request.
+
+## Quando usare un seed e quando no
+
+Usa un seed se stai gestendo:
+
+- tassonomie canale
+- mapping lingua, paese o business unit
+- classificazioni statiche per priorita' campagne
+
+Non usare un seed se stai tentando di salvare:
+
+- dati di evento ad alto volume
+- estrazioni che cambiano ogni ora
+- tabelle che il business aggiorna fuori dal flusso Git
+
+In quei casi e' meglio promuovere la fonte a vera `source()` oppure costruire un processo di ingestione dedicato.
+
+## Macro: riuso controllato
+
+### Esempio: divisione sicura
+
+```sql
+{% macro safe_divide(numerator, denominator) %}
+    case
+        when {{ denominator }} = 0 then null
+        else {{ numerator }} * 1.0 / {{ denominator }}
+    end
+{% endmacro %}
+```
+
+Uso:
+
+```sql
+select
+    channel_group,
+    {{ safe_divide('net_revenue', 'ad_spend') }} as roas
+from {{ ref('mart_channel_efficiency_daily') }}
+```
+
+### Esempio: standardizzare channel group
+
+```sql
+{% macro channel_group_from_medium(medium_column) %}
+    case
+        when lower({{ medium_column }}) in ('cpc', 'paid_search') then 'paid_search'
+        when lower({{ medium_column }}) in ('paid_social', 'social_paid') then 'paid_social'
+        when lower({{ medium_column }}) = 'email' then 'email'
+        when lower({{ medium_column }}) = 'organic' then 'organic'
+        else 'other'
+    end
+{% endmacro %}
+```
+
+Questa macro evita che lo stesso `case when` venga duplicato in dieci modelli. Il punto non e' scrivere meno SQL per sport: il punto e' mantenere una tassonomia coerente quando cambiano le regole di classificazione del traffico.
+
+### Esempio: normalizzare campaign name
+
+```sql
+{% macro normalize_campaign_name(campaign_column) %}
+    lower(
+        regexp_replace(
+            trim({{ campaign_column }}),
+            '[^a-zA-Z0-9_]+',
+            '_'
+        )
+    )
+{% endmacro %}
+```
+
+Uso:
+
+```sql
+select
+    {{ normalize_campaign_name('campaign_name') }} as campaign_name_normalized,
+    spend
+from {{ source('ads', 'meta_campaigns_daily') }}
+```
+
+Questa macro e' utile quando Meta, Google Ads e CRM usano convenzioni di naming diverse ma il reporting richiede una chiave unificata.
+
+## Package
+
+```yml
+packages:
+  - package: dbt-labs/dbt_utils
+    version: [">=1.1.0", "<2.0.0"]
+```
+
+Con `dbt_utils` puoi usare macro pratiche come `generate_surrogate_key`.
+
+```sql
+select
+    {{ dbt_utils.generate_surrogate_key(['customer_id', 'order_date']) }} as order_day_sk,
+    customer_id,
+    order_date
+from {{ ref('fct_orders') }}
+```
+
+Accanto a `dbt_utils`, molti team valutano package per audit, quality o observability. La regola corretta pero' e' semplice: introduci un package quando risolve un problema ricorrente meglio di quanto faresti tu in modo leggibile, non perche' "sembra enterprise".
+
+## Pattern di riuso che funzionano davvero
+
+Un progetto dbt martech tende a scalare bene quando:
+
+- i seed descrivono tassonomie business versionate
+- le macro sono piccole, leggibili e con naming esplicito
+- i package sono pochi e giustificati
+- la logica critica resta comunque visibile nei modelli
+
+Se una macro trasforma una query in qualcosa di opaco, il costo di manutenzione supera il vantaggio. La leggibilita' del modello finale resta una priorita'.
+
+## Mini-checklist per code review
+
+Quando apri una pull request chiediti:
+
+- questa logica e' gia' presente altrove nel progetto?
+- il mapping e' una regola business stabile da mettere in un seed?
+- la macro migliora coerenza o nasconde troppo?
+- il package introdotto riduce davvero lavoro e rischio?
+
+<Aside type="tip" title="Regola pratica">
+Usa macro per evitare duplicazione, non per mostrare bravura con Jinja. Se la macro rende il modello meno leggibile, probabilmente non sta aiutando.
+</Aside>
+
+## Riepilogo
+
+Seeds, macro e package rendono un progetto dbt piu' stabile solo se usati con disciplina. In analytics engineering martech sono utilissimi per mapping, formule ripetute, naming normalizzato e utility condivise, ma vanno mantenuti semplici, trasparenti e chiaramente motivati.
