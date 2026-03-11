@@ -125,5 +125,15 @@ export const COURSE_MODULES: CourseModule[] = [
     seoKeywords: ['analytics engineering', 'dbt', 'martech', 'semantic layer', 'data modeling', 'data quality'],
     icon: 'GitMerge',
     color: 'from-emerald-500 to-blue-500'
+  },
+  {
+    id: 'significativita-statistica',
+    title: 'Significativita\' Statistica & A/B Testing',
+    description: 'Ipotesi, AA/AB test, p-value, power analysis, MDE e prevenzione del peeking per prendere decisioni affidabili con gli esperimenti.',
+    seoTitle: 'Significativita\' Statistica e A/B Testing | GinnyTech',
+    seoDescription: 'Modulo su significativita\' statistica e A/B testing: ipotesi, randomizzazione, p-value, sample size, potenza statistica e governance degli esperimenti.',
+    seoKeywords: ['significativita statistica', 'a/b testing', 'p-value', 'sample size', 'power analysis', 'esperimenti'],
+    icon: 'FlaskConical',
+    color: 'from-fuchsia-500 to-rose-400'
   }
 ];
