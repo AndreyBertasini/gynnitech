@@ -1,6 +1,5 @@
 // @ts-check
 import { defineConfig } from 'astro/config';
-import partytown from '@astrojs/partytown';
 import tailwindcss from '@tailwindcss/vite';
 import starlight from '@astrojs/starlight';
 import react from '@astrojs/react';
@@ -59,7 +58,7 @@ export default defineConfig({
     remarkPlugins: [remarkMath],
     rehypePlugins: [[rehypeKatex, { strict: 'ignore' }]],
   },
-  integrations: [partytown({ config: { forward: ["dataLayer.push"] } }), react(), mermaid({
+  integrations: [react(), mermaid({
     theme: 'dark',
   }), sitemap(), starlight({
     title: 'GinnyTech',

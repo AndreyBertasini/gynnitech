@@ -49,6 +49,15 @@ const staticSidebarSections = [
     ],
   },
   {
+    label: 'Direzioni in Analitica',
+    items: [
+      { label: 'Classificazione Direzioni', link: '/course/direzioni-analitica/classificazione-delle-direzioni-in-analitica/' },
+      { label: 'Strumenti per Analisti', link: '/course/direzioni-analitica/strumenti-pratici-per-analisti-moderni/' },
+      { label: 'Product Analytics', link: '/course/direzioni-analitica/introduzione-alla-product-analytics/' },
+      { label: 'Unit Economics', link: '/course/direzioni-analitica/unit-economics-cac-ltv-e-marginalita/' },
+    ],
+  },
+  {
     label: 'Metriche e Dashboard',
     items: [
       { label: 'Metriche Fondamentali', link: '/course/metriche-fondamenti/metriche-fondamentali/' },

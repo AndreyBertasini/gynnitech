@@ -135,5 +135,15 @@ export const COURSE_MODULES: CourseModule[] = [
     seoKeywords: ['significativita statistica', 'a/b testing', 'p-value', 'sample size', 'power analysis', 'esperimenti'],
     icon: 'FlaskConical',
     color: 'from-fuchsia-500 to-rose-400'
+  },
+  {
+    id: 'direzioni-analitica',
+    title: 'Direzioni in Analitica: Marketing, Prodotto e Finanza',
+    description: 'Percorso pratico per orientarsi tra marketing analytics, product analytics e financial analytics con KPI, strumenti e decisioni operative.',
+    seoTitle: 'Direzioni in Analitica: Marketing, Prodotto e Finanza | GinnyTech',
+    seoDescription: 'Modulo completo su direzioni in analitica: classificazione, strumenti, marketing analytics, product analytics, unit economics, KPI finanziari e controllo di gestione.',
+    seoKeywords: ['direzioni analitica', 'marketing analytics', 'product analytics', 'financial analytics', 'unit economics', 'kpi'],
+    icon: 'BarChart',
+    color: 'from-violet-500 to-sky-400'
   }
 ];

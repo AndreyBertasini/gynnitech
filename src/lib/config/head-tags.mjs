@@ -29,19 +29,22 @@ const starlightHeadTags = [
   {
     tag: 'script',
     attrs: {
-      type: 'text/partytown',
       async: true,
       src: 'https://www.googletagmanager.com/gtag/js?id=G-NXL5WZC0SR',
     },
   },
   {
     tag: 'script',
-    attrs: {
-      type: 'text/partytown',
-    },
     content: `
       window.dataLayer = window.dataLayer || [];
       function gtag(){dataLayer.push(arguments);}
+      window.gtag = gtag;
+      gtag('consent', 'default', {
+        ad_storage: 'denied',
+        ad_user_data: 'denied',
+        ad_personalization: 'denied',
+        analytics_storage: 'denied'
+      });
       gtag('js', new Date());
       gtag('config', 'G-NXL5WZC0SR');
     `,
