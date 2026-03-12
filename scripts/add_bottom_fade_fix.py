@@ -63,7 +63,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--coverage",
         type=float,
-        default=0.15,
+        default=0.20,
         help="Bottom coverage ratio for the fade. Default: 0.15 (15%%)",
     )
     parser.add_argument(

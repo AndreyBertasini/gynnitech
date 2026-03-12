@@ -1,6 +1,15 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { Search, X, Loader2, FileText, BookOpen } from 'lucide-react';
 
+import {
+  MIN_SEARCH_QUERY_LENGTH,
+  PAGEFIND_RANKING,
+  SEARCH_CANDIDATE_LIMIT,
+  rankSearchResults,
+  type RankedSearchResult,
+  type SearchResultCandidate,
+} from './search-utils';
+
 declare global {
   interface Window {
     pagefind: any;
@@ -10,35 +19,52 @@ declare global {
 export const SearchWidget = ({ mobile = false }: { mobile?: boolean }) => {
   const [isOpen, setIsOpen] = useState(false);
   const [query, setQuery] = useState('');
-  const [results, setResults] = useState<any[]>([]);
+  const [results, setResults] = useState<RankedSearchResult[]>([]);
   const [isLoading, setIsLoading] = useState(false);
   const [isScriptLoaded, setIsScriptLoaded] = useState(false);
   const [isVisible, setIsVisible] = useState(false);
+  const [isInitializingSearch, setIsInitializingSearch] = useState(false);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
   const modalRef = useRef<HTMLDivElement>(null);
   const isLoadingScript = useRef(false);
+  const activeSearchId = useRef(0);
 
   const loadPagefind = async () => {
     if (import.meta.env.DEV) {
+      setIsInitializingSearch(false);
+      setLoadError('La ricerca e disponibile solo nella build preview o production.');
       return;
     }
     if (window.pagefind) {
       setIsScriptLoaded(true);
+      setIsInitializingSearch(false);
+      setLoadError(null);
       return;
     }
     if (isLoadingScript.current) return;
 
     isLoadingScript.current = true;
+    setIsInitializingSearch(true);
     try {
       const pagefindUrl = "/pagefind/pagefind.js?url";
       // @ts-ignore
       const pagefind = await import(/* @vite-ignore */ pagefindUrl);
+      await pagefind.options({
+        excerptLength: 22,
+        ranking: PAGEFIND_RANKING,
+      });
       await pagefind.init();
       window.pagefind = pagefind;
       setIsScriptLoaded(true);
+      setLoadError(null);
     } catch (e) {
+      window.pagefind = undefined as any;
+      setIsScriptLoaded(false);
+      setLoadError('Ricerca temporaneamente non disponibile.');
       console.warn("Pagefind not loaded (likely in Dev mode or not built yet).", e);
     } finally {
+      setIsInitializingSearch(false);
       isLoadingScript.current = false;
     }
   };
@@ -90,24 +116,44 @@ export const SearchWidget = ({ mobile = false }: { mobile?: boolean }) => {
 
   useEffect(() => {
     const handleSearch = async () => {
-      if (!query.trim() || !window.pagefind) {
+      const trimmedQuery = query.trim();
+      if (!trimmedQuery || trimmedQuery.length < MIN_SEARCH_QUERY_LENGTH || !window.pagefind) {
         setResults([]);
+        setIsLoading(false);
         return;
       }
 
+      const searchId = ++activeSearchId.current;
       setIsLoading(true);
       try {
-        const search = await window.pagefind.search(query);
-        const data = await Promise.all(search.results.slice(0, 5).map((r: any) => r.data()));
-        setResults(data);
+        const search = await window.pagefind.search(trimmedQuery, {
+          ranking: PAGEFIND_RANKING,
+        });
+        const data = await Promise.all(
+          search.results.slice(0, SEARCH_CANDIDATE_LIMIT).map(async (result: any) => {
+            const payload = await result.data();
+            return {
+              ...payload,
+              score: result.score,
+            } satisfies SearchResultCandidate;
+          }),
+        );
+
+        if (searchId !== activeSearchId.current) return;
+
+        setResults(rankSearchResults(data, trimmedQuery));
       } catch (e) {
         console.error(e);
+        if (searchId !== activeSearchId.current) return;
+        setResults([]);
       } finally {
-        setIsLoading(false);
+        if (searchId === activeSearchId.current) {
+          setIsLoading(false);
+        }
       }
     };
 
-    const timeoutId = setTimeout(handleSearch, 300);
+    const timeoutId = setTimeout(handleSearch, 220);
     return () => clearTimeout(timeoutId);
   }, [query, isScriptLoaded]);
 
@@ -176,6 +222,7 @@ export const SearchWidget = ({ mobile = false }: { mobile?: boolean }) => {
                 value={query}
                 onChange={(e) => setQuery(e.target.value)}
                 placeholder="Cerca corsi, articoli, lezioni..."
+                autoComplete="off"
                 className="flex-1 bg-transparent border-none outline-none text-white placeholder:text-slate-500 text-lg"
               />
               <button
@@ -194,38 +241,51 @@ export const SearchWidget = ({ mobile = false }: { mobile?: boolean }) => {
                   <Loader2 className="w-6 h-6 animate-spin mr-2" />
                   Cercando...
                 </div>
+              ) : isInitializingSearch ? (
+                <div className="flex items-center justify-center py-12 text-slate-500">
+                  <Loader2 className="w-6 h-6 animate-spin mr-2" />
+                  Inizializzo la ricerca...
+                </div>
+              ) : loadError ? (
+                <div className="text-center py-12 text-slate-500">
+                  <p className="text-amber-500 mb-2">{loadError}</p>
+                  <p className="text-xs">Se il problema persiste, ricostruisci e ripubblica il sito.</p>
+                </div>
               ) : results.length > 0 ? (
                 <div className="space-y-1">
-                  {results.map((result, idx) => (
+                  {results.map((result) => (
                     <a
-                      key={idx}
+                      key={result.url}
                       href={result.url}
                       onClick={() => setIsOpen(false)}
                       className="block p-4 rounded-xl hover:bg-white/5 border border-transparent hover:border-white/5 transition-all group"
                     >
+                      <div className="mb-2 text-[11px] uppercase tracking-[0.18em] text-slate-500">
+                        {result.kind === 'blog' ? 'Articolo' : result.kind === 'course' ? 'Lezione' : 'Pagina'}
+                      </div>
                       <h4 className="text-white font-medium group-hover:text-neon-blue transition-colors mb-1 flex items-center gap-2">
                          {result.url.includes('/blog') ? <FileText className="w-4 h-4 opacity-50"/> : <BookOpen className="w-4 h-4 opacity-50"/>}
-                         <span dangerouslySetInnerHTML={{ __html: result.meta.title }} />
+                         <span dangerouslySetInnerHTML={{ __html: result.meta.title ?? result.plainTitle }} />
                       </h4>
                       <p
                         className="text-sm text-slate-400 line-clamp-2"
-                        dangerouslySetInnerHTML={{ __html: result.excerpt }}
+                        dangerouslySetInnerHTML={{ __html: result.displayExcerpt }}
                       />
                     </a>
                   ))}
                 </div>
-              ) : !isScriptLoaded ? (
+              ) : !isScriptLoaded && !loadError ? (
                 <div className="text-center py-12 text-slate-500">
                   <p className="text-amber-500 mb-2">Indice di ricerca non trovato.</p>
                   <p className="text-xs">Se sei in modalit&agrave; DEV, esegui la build.</p>
                 </div>
-              ) : query.length > 0 ? (
+              ) : query.trim().length >= MIN_SEARCH_QUERY_LENGTH ? (
                 <div className="text-center py-12 text-slate-500">
                   Nessun risultato trovato per "{query}"
                 </div>
               ) : (
                 <div className="text-center py-12 text-slate-500 text-sm">
-                  Digita per cercare tra corsi e articoli...
+                  Digita almeno {MIN_SEARCH_QUERY_LENGTH} caratteri per cercare tra corsi e articoli...
                 </div>
               )}
             </div>
