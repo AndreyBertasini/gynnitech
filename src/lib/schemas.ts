@@ -15,6 +15,8 @@ export const corsoSchema = z.object({
     module: z.string().optional(),
     order: z.number().optional(),
     category: z.string().optional(),
+    headerImage: z.string().optional(),
+    headerImageAlt: z.string().optional(),
     prerequisites: z.array(z.string()).optional(),
     duration: z.string().optional(),
     difficulty: z.enum(['beginner', 'intermediate', 'advanced', 'base', 'intermedio', 'avanzato']).optional(),

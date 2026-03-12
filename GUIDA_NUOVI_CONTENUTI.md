@@ -25,6 +25,45 @@ Scrivi qui il tuo contenuto in Markdown...
 
 > **Nota:** Il campo `description` è **obbligatorio**. Senza di esso, la build fallirà.
 
+### Se la lezione ha un header immagine
+
+Usa il template:
+
+- `templates/course-lesson-with-header-template.mdx`
+
+Consulta la guida operativa:
+
+- `GUIDA_TEMPLATE_LEZIONI_CON_IMMAGINI.md`
+
+Campi aggiuntivi consigliati nel frontmatter:
+
+```markdown
+headerImage: '/course-headers/nome-modulo-nome-lezione-ginnytech-ad.png'
+headerImageAlt: 'Titolo Lezione - immagine ufficiale della lezione su GinnyTech, creata da AD'
+```
+
+Se vuoi assegnare le immagini in modo automatico partendo da una inbox dedicata per le nuove immagini, usa:
+
+```bash
+python scripts/process_new_lesson_header_images.py
+python scripts/process_new_lesson_header_images.py --apply --build
+```
+
+Flusso consigliato:
+
+- metti solo le nuove immagini grezze in `images/inbox/`
+- il comando unico genera automaticamente i file `_fix`
+- assegna le immagini solo alle lezioni senza `headerImage`
+- aggiorna SEO e `headerImageAlt`
+- con `--build` verifica anche la build finale
+
+Se vuoi usare il flusso manuale avanzato, restano disponibili:
+
+```bash
+python scripts/assign_lesson_header_images.py
+python scripts/assign_lesson_header_images.py --apply
+```
+
 ## 2. Creare un Nuovo Modulo
 
 Se vuoi creare un'intera nuova sezione (es. `Business Intelligence`):
