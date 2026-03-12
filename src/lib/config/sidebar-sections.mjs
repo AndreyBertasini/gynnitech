@@ -4,7 +4,7 @@ const staticSidebarSections = [
     items: [
       { label: 'Home', link: '/' },
       { label: 'Corso Analisi Dati', link: '/course' },
-      { label: 'Blog', link: '/blog' },
+      { label: 'Articoli', link: '/blog' },
       { label: 'Consulenza', link: '/consulting' },
     ],
   },

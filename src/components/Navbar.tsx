@@ -30,7 +30,7 @@ export const Navbar = () => {
         <div className="hidden md:flex items-center gap-8">
           <a href="/" className="text-sm font-medium text-slate-300 hover:text-neon-blue transition-colors hover:drop-shadow-[0_0_8px_rgba(0,243,255,0.5)]">Home</a>
           <a href="/course" className="text-sm font-medium text-slate-300 hover:text-neon-blue transition-colors hover:drop-shadow-[0_0_8px_rgba(0,243,255,0.5)]">Corso Analisi Dati</a>
-          <a href="/blog" className="text-sm font-medium text-slate-300 hover:text-neon-blue transition-colors hover:drop-shadow-[0_0_8px_rgba(0,243,255,0.5)]">Blog</a>
+          <a href="/blog" className="text-sm font-medium text-slate-300 hover:text-neon-blue transition-colors hover:drop-shadow-[0_0_8px_rgba(0,243,255,0.5)]">Articoli</a>
           <a href="/perche-questo-corso" className="text-sm font-medium text-slate-300 hover:text-neon-blue transition-colors hover:drop-shadow-[0_0_8px_rgba(0,243,255,0.5)]">Informazioni</a>
           <SearchWidget />
         </div>
@@ -69,7 +69,7 @@ export const Navbar = () => {
           <SearchWidget mobile />
           <a href="/" className="text-slate-300 hover:text-white font-medium">Home</a>
           <a href="/course" className="text-slate-300 hover:text-white font-medium">Corso Analisi Dati</a>
-          <a href="/blog" className="text-slate-300 hover:text-white font-medium">Blog</a>
+          <a href="/blog" className="text-slate-300 hover:text-white font-medium">Articoli</a>
           <a href="/perche-questo-corso" className="text-slate-300 hover:text-white font-medium">Informazioni</a>
           <hr className="border-white/10 my-2" />
           <a href={LINKEDIN_URL} target="_blank" rel="noreferrer" className="text-slate-300 hover:text-white font-medium">Chi sono</a>

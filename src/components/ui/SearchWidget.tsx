@@ -225,7 +225,7 @@ export const SearchWidget = ({ mobile = false }: { mobile?: boolean }) => {
                 </div>
               ) : (
                 <div className="text-center py-12 text-slate-500 text-sm">
-                  Digita per cercare tra corsi e blog...
+                  Digita per cercare tra corsi e articoli...
                 </div>
               )}
             </div>
