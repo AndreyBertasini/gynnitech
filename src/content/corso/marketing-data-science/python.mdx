@@ -3,7 +3,7 @@ title: Python per il Marketing Analyst
 description: 'Python per il Marketing Analyst. Python come strumento operativo per l''analisi marketing: ETL da API advertising, analisi | GinnyTech, creata da AD'
 headerImage: '/course-headers/marketing-data-science-python-ginnytech-ad.png'
 headerImageAlt: 'Python per il Marketing Analyst - immagine ufficiale della lezione su GinnyTech, creata da AD'
-module: 'Modulo 5: Analytics & Data Science'
+module: "Modulo 8: Marketing Data Science"
 order: 11
 category: Tecnica
 difficulty: intermediate
@@ -779,24 +779,14 @@ def filtra_campagne_sopra_soglia(
 
 ### Struttura di un File Python per Analisi Marketing
 
-```
-progetto-analisi/
-├── .env                    # credenziali (NON in git)
-├── .gitignore              # include .env e data/
-├── requirements.txt        # pip freeze > requirements.txt
-├── config.py               # costanti e configurazione
-├── connectors/
-│   ├── meta_ads.py         # funzioni per Meta Ads API
-│   ├── google_ads.py       # funzioni per Google Ads API
-│   └── database.py         # connessione al DB
-├── transforms/
-│   ├── cohort.py           # analisi di coorte
-│   └── ab_test.py          # statistical testing
-├── reports/
-│   └── daily_report.py     # report automatici
-└── notebooks/
-    └── analisi_q1_2024.ipynb  # analisi esplorative
-```
+Una struttura minima e pulita e' questa:
+
+- `.env` e `.gitignore` per credenziali e file locali
+- `requirements.txt` e `config.py` per dipendenze e configurazione
+- cartella `connectors/` per API e database
+- cartella `transforms/` per analisi coorte, test e trasformazioni
+- cartella `reports/` per gli script schedulati
+- cartella `notebooks/` solo per esplorazione, non per pipeline operative
 
 <Aside type="tip">
 Separa sempre la **configurazione** dal **codice**. Le credenziali e i parametri variabili (account ID, soglie, URL) vanno in `.env` o `config.py`, mai hardcoded nelle funzioni. Questo permette di riutilizzare lo stesso codice per account e ambienti diversi senza modificarlo.
@@ -834,203 +824,36 @@ Non tutto richiede Python. Un framework chiaro ti evita di over-engineerare anal
 
 **Regola generale:** se fai la stessa cosa più di tre volte, automatizzala con Python. Se è un'analisi una-tantum che finisce in una presentazione, Excel o un notebook Jupyter vanno benissimo.
 
-## Progetto Pratico: Pipeline Completa Meta Ads → Database → Slack
+## Progetto Pratico: Pipeline Completa Meta Ads ? Database ? Slack
 
-Questo progetto integra tutto ciò che abbiamo visto: estrazione da API, trasformazione, caricamento in database, report automatico. È il tipo di sistema che un team marketing di medie dimensioni usa realmente in produzione.
+Questo progetto integra tutto cio' che hai visto: estrazione da API, trasformazione, caricamento in database e report automatico. In produzione conviene ragionare per blocchi, non per mega-script.
+
+I quattro blocchi minimi sono:
+
+1. **Estrazione** da Meta Ads API con paginazione e rate limit.
+2. **Trasformazione** in DataFrame con metriche come `ctr`, `cpc`, `cpa` e `roas`.
+3. **Caricamento idempotente** nel database: ricalcoli il giorno target e poi fai append.
+4. **Report** su Slack con top campagne, KPI del giorno e alert sulle soglie.
+
+Uno scheletro pulito e' questo:
 
 ```python
-"""
-pipeline_meta_ads.py
-
-Pipeline completa: Meta Ads API → PostgreSQL → Report Slack
-Schedulata ogni giorno alle 7:30 per avere il report alle 8:00
-
-Requisiti:
-- pip install requests pandas sqlalchemy psycopg2 schedule
-- File .env con META_ACCESS_TOKEN, META_ACCOUNT_ID, DATABASE_URL, SLACK_WEBHOOK_URL
-"""
-
-import os
-import requests
-import pandas as pd
-import schedule
-import time
-from sqlalchemy import create_engine
-from datetime import date, timedelta
-from dotenv import load_dotenv
-
-# Carica le variabili d'ambiente dal file .env
-load_dotenv()
-
-# ─── CONFIGURAZIONE ────────────────────────────────────────────────────────────
-
-META_TOKEN = os.environ['META_ACCESS_TOKEN']
-META_ACCOUNT = os.environ['META_ACCOUNT_ID']
-DATABASE_URL = os.environ['DATABASE_URL']
-SLACK_WEBHOOK = os.environ['SLACK_WEBHOOK_URL']
-
-# Soglie di alert configurabili senza toccare il codice
-CPA_TARGET = {
-    'meta': 35.0,
-    'google': 28.0,
-    'tiktok': 42.0
-}
-
-# ─── ESTRAZIONE ────────────────────────────────────────────────────────────────
-
-def estrai_meta_ads(data: str) -> pd.DataFrame:
-    url = f"https://graph.facebook.com/v19.0/act_{META_ACCOUNT}/insights"
-    params = {
-        'access_token': META_TOKEN,
-        'fields': 'campaign_name,impressions,clicks,spend,actions',
-        'time_range': f'{{"since":"{data}","until":"{data}"}}',
-        'level': 'campaign',
-        'limit': 500
-    }
-
-    resp = requests.get(url, params=params)
-    resp.raise_for_status()
-    dati = resp.json().get('data', [])
-
-    if not dati:
-        return pd.DataFrame()
-
-    df = pd.DataFrame(dati)
-
-    for col in ['impressions', 'clicks', 'spend']:
-        df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
-
-    def estrai_acquisti(actions):
-        if not isinstance(actions, list):
-            return 0
-        return sum(
-            float(a.get('value', 0))
-            for a in actions
-            if a.get('action_type') == 'purchase'
-        )
-
-    df['conversioni'] = df.get('actions', pd.Series(dtype=object)).apply(estrai_acquisti)
-    df['canale'] = 'meta'
-    df['data'] = data
-
-    return df[['data', 'canale', 'campaign_name', 'impressions', 'clicks', 'spend', 'conversioni']]
-
-
-# ─── TRASFORMAZIONE ────────────────────────────────────────────────────────────
-
-def trasforma(df: pd.DataFrame) -> pd.DataFrame:
-    """Calcola le metriche derivate e aggiunge metadati."""
-    df = df.copy()
-
-    df['ctr'] = (df['clicks'] / df['impressions'].replace(0, float('nan')) * 100).round(3)
-    df['cpc'] = (df['spend'] / df['clicks'].replace(0, float('nan'))).round(2)
-    df['cpa'] = (df['spend'] / df['conversioni'].replace(0, float('nan'))).round(2)
-    df['roas'] = (
-        # Placeholder: idealmente join con revenue da ordini
-        # Per ora usiamo revenue stimata come conversioni * AOV medio
-        df['conversioni'] * 85.0 / df['spend'].replace(0, float('nan'))
-    ).round(2)
-    df['pipeline_run_at'] = pd.Timestamp.now()
-
-    return df
-
-
-# ─── CARICAMENTO ───────────────────────────────────────────────────────────────
-
-def carica_nel_database(df: pd.DataFrame, tabella: str = 'campagne_giornaliere'):
-    """
-    Carica i dati nel database.
-    if_exists='append' aggiunge le righe senza cancellare quelle esistenti.
-    """
-    engine = create_engine(DATABASE_URL)
-
-    # Rimuovi i dati della stessa data prima di ricaricarli (idempotenza)
-    # Così la pipeline è sicura da rieseguire senza duplicare dati
-    data = df['data'].iloc[0]
-    with engine.connect() as conn:
-        conn.execute(
-            f"DELETE FROM {tabella} WHERE data = '{data}' AND canale = 'meta'"
-        )
-        conn.commit()
-
-    df.to_sql(tabella, engine, if_exists='append', index=False)
-    print(f"Caricati {len(df)} record per {data}")
-
-
-# ─── REPORT ────────────────────────────────────────────────────────────────────
-
-def invia_report_slack(df: pd.DataFrame):
-    spesa = df['spend'].sum()
-    conv = df['conversioni'].sum()
-    cpa = spesa / conv if conv > 0 else 0
-
-    # Verifica se il CPA supera la soglia
-    cpa_meta_target = CPA_TARGET.get('meta', 99999)
-    status = "ALERT: CPA sopra target" if cpa > cpa_meta_target else "OK"
-    icona = "🔴" if cpa > cpa_meta_target else "🟢"
-
-    ieri = (date.today() - timedelta(days=1)).strftime('%d/%m/%Y')
-
-    messaggio = (
-        f"*{icona} Report Meta Ads — {ieri}*\n"
-        f"Spesa: *€{spesa:,.0f}* | Conversioni: *{conv:.0f}* | CPA: *€{cpa:.2f}*\n"
-        f"Target CPA: €{cpa_meta_target:.2f} → Status: *{status}*\n"
-        f"\n*Top 5 campagne per spesa:*\n"
-    )
-
-    top5 = df.nlargest(5, 'spend')
-    for _, row in top5.iterrows():
-        messaggio += (
-            f"• {row['campaign_name'][:40]}: "
-            f"€{row['spend']:.0f} spesa, {row['conversioni']:.0f} conv, "
-            f"CPA €{row['cpa']:.2f}\n"
-        )
-
-    requests.post(SLACK_WEBHOOK, json={"text": messaggio})
-
-
-# ─── PIPELINE PRINCIPALE ───────────────────────────────────────────────────────
-
 def esegui_pipeline():
-    """Orchestratore: chiama estrai → trasforma → carica → report."""
-    ieri = (date.today() - timedelta(days=1)).isoformat()
-    print(f"Avvio pipeline per {ieri}...")
+    data_target = ieri()
+    df_raw = estrai_meta_ads(data_target)
+    if df_raw.empty:
+        return
 
-    try:
-        df_raw = estrai_meta_ads(ieri)
-
-        if df_raw.empty:
-            print("Nessun dato da Meta Ads. Esco.")
-            return
-
-        df_clean = trasforma(df_raw)
-        carica_nel_database(df_clean)
-        invia_report_slack(df_clean)
-
-        print("Pipeline completata con successo.")
-
-    except Exception as e:
-        # In produzione, invia anche gli errori su Slack
-        errore = f"ERRORE pipeline Meta Ads: {str(e)}"
-        print(errore)
-        requests.post(SLACK_WEBHOOK, json={"text": f"🚨 {errore}"})
-        raise
-
-
-# ─── SCHEDULER ─────────────────────────────────────────────────────────────────
-
-if __name__ == "__main__":
-    print("Pipeline scheduler avviato. Esecuzione ogni giorno alle 07:30.")
-    schedule.every().day.at("07:30").do(esegui_pipeline)
-
-    while True:
-        schedule.run_pending()
-        time.sleep(30)
+    df_clean = trasforma(df_raw)
+    carica_nel_database(df_clean)
+    invia_report_slack(df_clean)
 ```
 
-<Aside type="tip">
-Prima di mettere in produzione questa pipeline, testala sempre con `esegui_pipeline()` chiamata manualmente. Aggiungi anche un parametro `--dry-run` che stampa i dati invece di caricarli nel database — così puoi verificare la qualità dei dati senza effetti collaterali.
-</Aside>
+In produzione aggiungi tre protezioni:
+
+- credenziali in `.env` o secret manager, mai nel file
+- scheduler esterno (`cron`, Task Scheduler, Cloud Scheduler, EventBridge)
+- alert sugli errori e modalita' `dry-run` per testare senza scrivere dati
 
 ## Conclusioni e Prossimi Passi
 

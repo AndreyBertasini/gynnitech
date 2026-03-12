@@ -3,7 +3,7 @@ title: 'ClickHouse: Ottimizzazione e Best Practices di Produzione'
 description: 'ClickHouse: Ottimizzazione e Best Practices di Produzione. Come ottimizzare schema, query e architettura ClickHouse per | GinnyTech, creata da AD'
 headerImage: '/course-headers/real-time-analytics-clickhouse-ottimizzazione-ginnytech-ad.png'
 headerImageAlt: 'ClickHouse: Ottimizzazione e Best Practices di Produzione - immagine ufficiale della lezione su GinnyTech, creata da AD'
-module: 'Modulo 4: Real-Time Streaming'
+module: "Modulo 12: Real-Time Analytics & ClickHouse"
 order: 3
 category: ClickHouse
 difficulty: advanced
@@ -22,13 +22,11 @@ learningObjectives:
 
 import { Aside, Steps, Tabs, TabItem } from '@astrojs/starlight/components'
 
-Cloudflare analizza 13 milioni di query HTTP al secondo con ClickHouse. Contentsquare processa 50 miliardi di eventi al giorno su una singola piattaforma. Criteo, la più grande piattaforma di retargeting europeo, serve 5 miliardi di annunci al giorno usando ClickHouse come backend analytics primario. Non sono numeri di benchmark su hardware dedicato: sono sistemi di produzione che reggono traffico reale.
+ClickHouse scala davvero solo quando schema, ordinamento, partizionamento e query pattern sono allineati. La differenza tra una tabella progettata bene e una progettata male non e' marginale: puo' cambiare le performance di ordini di grandezza.
 
-Quello che accomuna questi deployment non è solo la scelta del database. È il fatto che questi team hanno imparato — spesso a caro prezzo — quali scelte di schema e configurazione fanno la differenza tra un sistema che scala e uno che collassa sotto il proprio peso. Uno schema ClickHouse mal progettato può essere letteralmente più lento di PostgreSQL per i tuoi workload. Uno schema ben progettato può essere 100x più veloce.
+Questa lezione si concentra quindi sulle decisioni che costano di piu' in produzione: tipi di dato, `ORDER BY`, partizioni, codec, engine e monitoraggio operativo.
 
-Questa lezione è una guida pratica alle decisioni che contano: quali tipi di dato scegliere e perché, come costruire la chiave di ordinamento giusta, come il partitioning influenza sia le performance che la gestione dei dati, quali compression codecs usare per quale tipo di colonna, come leggere il profiler interno di ClickHouse, e come strutturare le Materialized Views per pre-aggregazione. Alla fine troverai una checklist di produzione da applicare prima del deploy.
-
-## Schema Design: le Decisioni che Costano di Più
+## Schema Design: le Decisioni che Costano di Pi?ù
 
 Il 70% delle performance di una tabella ClickHouse dipende da decisioni prese al momento del `CREATE TABLE`. Modificare lo schema in produzione su una tabella di decine di miliardi di righe è costoso: alcuni cambiamenti richiedono la riscrittura completa dei dati. Conviene fare le scelte giuste dall'inizio.
 
@@ -76,11 +74,11 @@ ORDER BY (event_type, user_id, timestamp);
 </TabItem>
 </Tabs>
 
-Il risparmio non è solo di spazio. Ogni tipo di dato sbagliato ha un costo a runtime: `String` dove dovrebbe esserci `LowCardinality` significa GROUP BY più lenti (confronto di stringhe invece di interi), WHERE più lenti, e nessun beneficio di dizionario nella compressione. `String` dove dovrebbe esserci `DateTime` significa un parser di date eseguito per ogni riga scansionata, ogni volta.
+Il risparmio non è solo di spazio: tipi sbagliati rallentano GROUP BY, filtri e parsing a ogni query.
 
 ### LowCardinality: il Modificatore più Importante
 
-`LowCardinality(T)` è la singola modifica con il maggiore impatto su un schema esistente, applicabile a qualsiasi colonna con meno di 10.000 valori distinti. Internamente, ClickHouse mantiene un dizionario (un mapping da intero al valore) e memorizza solo l'indice intero per ogni riga. Il risultato:
+`LowCardinality(T)` è spesso la modifica con più impatto per colonne con meno di 10.000 valori distinti. ClickHouse mantiene un dizionario e memorizza solo l'indice per riga. Il risultato:
 
 - Compressione 5-10x rispetto alla stringa raw (per colonne a bassa cardinalità)
 - GROUP BY su colonne `LowCardinality` usa confronto intero invece di confronto stringa: 3-5x più veloce
@@ -106,18 +104,9 @@ user_agent      String,                   -- migliaia di varianti uniche
 Se una colonna ha meno di 10.000 valori distinti, quasi certamente beneficia di `LowCardinality`. Puoi verificarlo con `SELECT uniq(colonna) FROM tabella`. Sopra 100.000 valori distinti, `LowCardinality` aggiunge overhead invece di ridurlo: il dizionario diventa troppo grande e perde i benefici di cache.
 </Aside>
 
-La lezione successiva approfondisce le Materialized Views in dettaglio: il pattern multi-livello per dashboard real-time, il ciclo raw -> hourly -> daily, il benchmark delle performance, e le limitazioni delle MV con strategie per aggirarle.
-
-## Riepilogo Operativo
-
-- Compressione, partizionamento e `ORDER BY` sono decisioni strutturali con effetti di lungo periodo.
-- Le ottimizzazioni vanno misurate una per una, perche' ogni miglioramento introduce trade-off diversi.
-- Query pattern e modalita' di inserimento contano quanto i codec o i tipi di dato scelti.
-- Senza monitoraggio continuo, anche uno schema inizialmente buono degrada con la crescita del carico.
-
 ### Nullable: il Costo Nascosto
 
-`Nullable(T)` è tecnicamente corretto ma costoso in ClickHouse. La documentazione ufficiale lo dice esplicitamente: evitare `Nullable` dove possibile. Il motivo: internamente `Nullable` aggiunge un array di bit separato per tracciare quali valori sono NULL, raddoppia il numero di file per colonna su disco, e aumenta il costo di quasi ogni operazione di aggregazione.
+`Nullable(T)` è corretto ma costoso: aggiunge una struttura separata per i NULL, aumenta i file su disco e appesantisce molte aggregazioni.
 
 La soluzione preferita è usare valori sentinella:
 
@@ -138,13 +127,7 @@ Queste tre decisioni determinano quali query saranno veloci (microsecondi) e qua
 
 ### ORDER BY: come Funziona e come Sceglierlo
 
-L'`ORDER BY` definisce l'ordinamento fisico dei dati su disco. Quando ClickHouse riceve una query con filtri, usa l'indice sparse per saltare direttamente ai granuli che contengono i dati rilevanti. Se la colonna filtrata è la prima (o una delle prime) nell'`ORDER BY`, lo skip è efficiente. Se la colonna non è nell'`ORDER BY`, ClickHouse deve scansionare tutta la colonna.
-
-La regola di selezione dell'`ORDER BY`:
-
-1. **Prima posizione**: la colonna che compare più frequentemente nei WHERE, specialmente con alta selettività (filtra via molte righe). Di solito è una dimensione come `tenant_id`, `user_id`, o `event_type`.
-2. **Seconda e terza posizione**: colonne usate in GROUP BY o per range query (date, timestamp).
-3. **Cardinalità crescente da sinistra a destra**: metti le colonne a bassa cardinalità prima (tenant, tipo) e quelle ad alta cardinalità dopo (user_id, timestamp). Questo massimizza il pruning dell'indice.
+L'`ORDER BY` definisce l'ordinamento fisico dei dati e quindi quanto bene ClickHouse puo' saltare i granuli non rilevanti. In pratica: metti prima le colonne usate piu' spesso nei filtri, poi quelle utili per range e grouping, mantenendo la cardinalita' in crescita da sinistra a destra.
 
 ```sql
 -- Scenario: dashboard marketing che filtra sempre per campaign_id e date
@@ -189,11 +172,9 @@ ORDER BY (tenant_id, user_id, started_at);
 
 ### Partitioning: Chirurgia sui Dati
 
-Il partitioning in ClickHouse ha uno scopo primario: **permettere di eliminare o interrogare subset di dati senza toccare il resto**. Non è un meccanismo di accelerazione delle query come in altri database — l'ordinamento nei parts fa già quel lavoro. Il partitioning serve per:
+Il partitioning serve soprattutto a gestire lifecycle, pruning e tiered storage. Non e' la leva principale di performance come in altri database: per quello conta di piu' l'ordinamento nei parts.
 
-1. **Data lifecycle**: `DROP PARTITION '202401'` elimina un mese di dati in millisecondi, senza scrivere nulla. Con TTL senza partitioning, ClickHouse deve marcare e poi eliminare righe individualmente.
-2. **Partition pruning**: query con filtri sulla chiave di partizione saltano completamente le partizioni non rilevanti, prima ancora di leggere l'indice.
-3. **Tiered storage**: spostare partizioni vecchie su storage più economico (S3, HDD).
+La regola pratica e' semplice: mensile quasi sempre, giornaliero solo con volumi altissimi e necessita' operative reali, orario quasi mai.
 
 ```sql
 -- Partitioning mensile: il più comune e generalmente corretto
@@ -234,9 +215,9 @@ ClickHouse consiglia di mantenere il numero di parts attivi sotto 10.000 per tab
 
 ## Compression Codecs: Scegliere il Codec Giusto
 
-ClickHouse applica compression per colonna. Il default LZ4 è un buon bilanciamento tra velocità di compressione/decompressione e ratio. Ma ci sono casi dove codec specializzati migliorano significativamente sia il ratio che la velocità di query.
-
 ### I Codec Disponibili
+
+Il default LZ4 e' un buon punto di partenza, ma su timestamp e stringhe grandi i codec giusti cambiano molto spazio e costi di scansione.
 
 ```sql
 -- Sintassi: dopo il tipo di dato, aggiunta CODEC(codec_name)
@@ -292,11 +273,11 @@ Usa `Delta(8), ZSTD(1)` per tutte le colonne DateTime e DateTime64 — il rispar
 
 ## MergeTree Engines: Scegliere il Motore Giusto
 
-La famiglia MergeTree offre engine specializzati per casi d'uso diversi. Scegliere l'engine sbagliato significa implementare workaround complessi che il database farebbe nativamente.
+La famiglia MergeTree offre engine specializzati per casi d'uso diversi.
 
 ### MergeTree Base: Append-Only Immutable
 
-Per dati che non cambiano mai dopo l'inserimento. La scelta più comune per log, eventi, metriche storiche.
+La scelta più comune per log, eventi e metriche storiche immutabili.
 
 ```sql
 CREATE TABLE access_logs (
@@ -315,7 +296,7 @@ TTL log_time + INTERVAL 90 DAY DELETE;
 
 ### ReplacingMergeTree: Upsert e Deduplicazione
 
-Quando i dati possono essere aggiornati, `ReplacingMergeTree` gestisce il conflitto di duplicati tenendo l'ultima versione (o la versione con il valore più alto di una colonna specificata).
+Quando i dati possono essere aggiornati, `ReplacingMergeTree` tiene l'ultima versione del record durante i merge.
 
 ```sql
 CREATE TABLE user_profiles (
@@ -330,7 +311,7 @@ ORDER BY user_id;
 -- Il merge tiene la riga con updated_at maggiore per ogni user_id
 ```
 
-Il limite critico: la deduplicazione avviene **durante il merge**, che è asincrono. Immediatamente dopo un INSERT potresti vedere duplicati. Per query corrette:
+Il limite critico è che la deduplicazione avviene durante il merge, quindi subito dopo un INSERT potresti ancora vedere duplicati. Per query corrette:
 
 ```sql
 -- Clausola FINAL: forza la deduplicazione sincrona
@@ -430,14 +411,11 @@ ORDER BY hour DESC;
 
 ## Ottimizzazione Query: PREWHERE, EXPLAIN e Anti-Pattern
 
-Un buon schema è necessario ma non sufficiente. Ci sono pattern di query che degradano le performance anche su tabelle ben progettate.
+Anche con uno schema corretto, alcune query restano costose se non sfruttano bene le primitive native.
 
 ### PREWHERE: Filtro Prima del Caricamento Dati
 
-`PREWHERE` è una clausola ClickHouse-specifica che esegue il filtro prima di caricare le altre colonne in memoria. La differenza rispetto a `WHERE`:
-
-- `WHERE`: ClickHouse carica tutti i dati del granule in memoria, poi applica il filtro
-- `PREWHERE`: ClickHouse legge solo la colonna del filtro, identifica le righe che passano, poi carica le altre colonne solo per quelle righe
+`PREWHERE` legge prima la colonna usata per filtrare e carica le altre solo per le righe che passano il filtro. Su tabelle molto larghe la differenza puo' essere significativa.
 
 ```sql
 -- Scenario: tabella con 50 colonne, 1B righe, filtriamo su is_bot
@@ -464,7 +442,7 @@ GROUP BY campaign_id;
 
 ### EXPLAIN: Leggere il Query Plan
 
-`EXPLAIN` è il tuo strumento principale per diagnosticare query lente. ClickHouse offre livelli diversi di dettaglio:
+`EXPLAIN` e' lo strumento principale per capire se la query sta leggendo le partizioni giuste, usando parallelismo e sfruttando davvero l'indice.
 
 ```sql
 -- Livello 1: piano logico
@@ -483,7 +461,7 @@ EXPLAIN SELECT count() FROM events WHERE event_date = '2026-01-15'
 SETTINGS send_logs_level = 'debug';
 ```
 
-Quello che cerchi nell'output di EXPLAIN:
+Quello che cerchi nell'output di EXPLAIN e' semplice: poche partizioni lette, poche righe scansionate e assenza di scan completi non necessari.
 
 ```sql
 -- Buon segnale: poche partizioni lette
@@ -681,7 +659,7 @@ ALTER TABLE raw_events MOVE PARTITION '202401' TO TABLE raw_events_archive;
 
 ## Monitoraggio: Le Tabelle di Sistema Essenziali
 
-ClickHouse espone metriche operative dettagliate attraverso tabelle nel database `system`. Queste sono le più utili per diagnosticare problemi di produzione.
+Le tabelle del database `system` sono la base del monitoraggio operativo.
 
 ### system.query_log: Analisi Performance Query
 
@@ -779,6 +757,13 @@ WHERE metric IN (
 ORDER BY metric;
 ```
 
+## Riepilogo Operativo
+
+- In ClickHouse le decisioni piu' costose si prendono sullo schema: tipi, `ORDER BY`, partizioni e codec.
+- Le query veloci nascono da filtri coerenti con indice e partizioni, non da ottimizzazioni casuali a valle.
+- MergeTree, ReplacingMergeTree e AggregatingMergeTree vanno scelti in base al pattern reale di scrittura e lettura.
+- Monitoraggio di `query_log`, `parts` e `merges` e' parte del design operativo, non una fase successiva.
+
 ## Checklist Ottimizzazione per la Produzione
 
 Prima di mettere in produzione una tabella ClickHouse, verifica ogni punto:
@@ -819,4 +804,3 @@ Prima di mettere in produzione una tabella ClickHouse, verifica ogni punto:
 Ogni ottimizzazione ha un trade-off. `Delta + ZSTD` su timestamp riduce lo spazio ma aumenta il tempo di decompressione (minimo, ma presente). `LowCardinality` migliora GROUP BY ma aggiunge overhead per colonne ad alta cardinalità. Prima di applicare qualsiasi codec o tipo, misura con `SELECT formatReadableSize(sum(bytes_on_disk)) FROM system.parts WHERE table = 'tua_tabella' AND active` e confronta dopo. ClickHouse stesso suggerisce i codec ottimali per ogni colonna tramite `OPTIMIZE TABLE ... DEDUPLICATE`.
 </Aside>
 
-La lezione successiva approfondisce le Materialized Views in dettaglio: il pattern multi-livello per dashboard real-time, il ciclo raw → hourly → daily, il benchmark delle performance, e le limitazioni delle MV con strategie per aggirarle.
