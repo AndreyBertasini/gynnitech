@@ -58,6 +58,15 @@ const staticSidebarSections = [
     ],
   },
   {
+    label: "Filosofia dell'Analisi Dati",
+    items: [
+      { label: 'Storia Filosofica', link: '/course/filosofia-analisi-dati/perche-l-analisi-dati-ha-una-storia-filosofica/' },
+      { label: 'Aristotele e le Cause', link: '/course/filosofia-analisi-dati/aristotele-e-le-quattro-cause/' },
+      { label: "Causa ed Effetto", link: '/course/filosofia-analisi-dati/causalita-causa-ed-effetto-nell-analisi-dei-dati/' },
+      { label: 'Regressioni e Inferenza', link: '/course/filosofia-analisi-dati/causalita-regressioni-e-inferenza-statistica/' },
+    ],
+  },
+  {
     label: 'Metriche e Dashboard',
     items: [
       { label: 'Metriche Fondamentali', link: '/course/metriche-fondamenti/metriche-fondamentali/' },
