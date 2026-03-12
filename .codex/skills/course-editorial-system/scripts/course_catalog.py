@@ -24,6 +24,7 @@ CANONICAL_MODULES = {
     "analytics-engineering": "Modulo 16: Analytics Engineering",
     "significativita-statistica": "Modulo 17: Significativita' Statistica & A/B Testing",
     "direzioni-analitica": "Modulo 18: Direzioni in Analitica",
+    "filosofia-analisi-dati": "Modulo 19: Filosofia dell'Analisi Dati & Causalita'",
 }
 
 THEORETICAL_CATEGORIES = {
@@ -49,13 +50,17 @@ CONCEPTUAL_FOLDERS = {
     "dashboard-visualizzazione",
     "marketing-data-science",
     "direzioni-analitica",
+    "filosofia-analisi-dati",
 }
 
 
 def clean_scalar(value: str | None) -> str:
     if not value:
         return ""
-    return value.strip().strip("'\"")
+    value = value.strip()
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+        return value[1:-1].strip()
+    return value
 
 
 def split_frontmatter(text: str) -> tuple[str, str]:
@@ -147,10 +152,12 @@ def audit(repo_root: Path) -> int:
     concept_map_text = concept_map.read_text(encoding="utf8")
 
     overview_issues = []
-    if str(expected_module_count) not in learning_path_text or str(expected_lesson_count) not in learning_path_text:
+    if f"{expected_module_count} moduli" not in learning_path_text or f"{expected_lesson_count} lezioni" not in learning_path_text:
         overview_issues.append("learning-path.mdx does not reflect current module/lesson counts")
-    if "17 Moduli" in concept_map_text or "17 moduli" in concept_map_text:
-        overview_issues.append("mappe-concettuali.mdx still references 17 modules")
+    if f"{expected_module_count} moduli" not in concept_map_text:
+        overview_issues.append("mappe-concettuali.mdx does not reflect the current module count")
+    if f"{expected_lesson_count} lezioni" not in concept_map_text:
+        overview_issues.append("mappe-concettuali.mdx does not reflect the current lesson count")
 
     print(f"Lessons: {expected_lesson_count}")
     print(f"Canonical modules: {expected_module_count}")

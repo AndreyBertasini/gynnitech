@@ -23,6 +23,7 @@ const canonicalModules: Record<string, string> = {
     "analytics-engineering": "Modulo 16: Analytics Engineering",
     "significativita-statistica": "Modulo 17: Significativita' Statistica & A/B Testing",
     "direzioni-analitica": "Modulo 18: Direzioni in Analitica",
+    "filosofia-analisi-dati": "Modulo 19: Filosofia dell'Analisi Dati & Causalita'",
 };
 
 function walkMdxFiles(dirPath: string): string[] {
@@ -53,7 +54,14 @@ function splitFrontmatter(raw: string): { frontmatter: string; body: string } {
 
 function extractField(frontmatter: string, field: string): string {
     const match = frontmatter.match(new RegExp(`^${field}:\\s*(.+)$`, "m"));
-    return match ? match[1].trim().replace(/^['"]|['"]$/g, "") : "";
+    if (!match) return "";
+
+    const value = match[1].trim();
+    if (value.length >= 2 && (value.startsWith('"') && value.endsWith('"') || value.startsWith("'") && value.endsWith("'"))) {
+        return value.slice(1, -1).trim();
+    }
+
+    return value;
 }
 
 function hasListField(frontmatter: string, field: string): boolean {
@@ -102,9 +110,12 @@ describe("Course catalog governance", () => {
 
     test("concept map should reflect the current module taxonomy", () => {
         const conceptMap = readFileSync(path.join(courseRoot, "panoramica", "mappe-concettuali.mdx"), "utf8");
+        const moduleCount = Object.keys(canonicalModules).length;
+        const lessonCount = lessonFiles.length;
 
-        expect(conceptMap).toContain("18 moduli");
-        expect(conceptMap.toLowerCase()).not.toContain("17 moduli");
+        expect(conceptMap).toContain(`${moduleCount} moduli`);
+        expect(conceptMap).toContain(`${lessonCount} lezioni`);
         expect(conceptMap).toContain("Direzioni in Analitica");
+        expect(conceptMap).toContain("Filosofia dell'Analisi Dati");
     });
 });

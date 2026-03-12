@@ -24,6 +24,7 @@ Use the folder under `src/content/corso` as the canonical module id. The `module
 | `analytics-engineering` | `Modulo 16: Analytics Engineering` |
 | `significativita-statistica` | `Modulo 17: Significativita' Statistica & A/B Testing` |
 | `direzioni-analitica` | `Modulo 18: Direzioni in Analitica` |
+| `filosofia-analisi-dati` | `Modulo 19: Filosofia dell'Analisi Dati & Causalita'` |
 
 ## Lesson Archetypes
 
