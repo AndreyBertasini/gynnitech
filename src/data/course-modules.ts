@@ -14,7 +14,7 @@ export const COURSE_MODULES: CourseModule[] = [
   {
     id: 'panoramica',
     title: 'Panoramica del Corso',
-    description: 'Visione d\'insieme, mappe concettuali e struttura del percorso formativo.',
+    description: 'Orientamento, metodo di studio, memoria, pratica guidata e mappa del percorso completo.',
     icon: 'Map',
     color: 'from-blue-500 to-indigo-500'
   },
