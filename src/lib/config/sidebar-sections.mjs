@@ -58,7 +58,7 @@ const staticSidebarSections = [
     ],
   },
   {
-    label: "Filosofia dell'Analisi Dati",
+    label: "Fondamenti filosofici dell'analisi dei dati",
     items: [
       { label: 'Storia Filosofica', link: '/course/filosofia-analisi-dati/perche-l-analisi-dati-ha-una-storia-filosofica/' },
       { label: 'Aristotele e le Cause', link: '/course/filosofia-analisi-dati/aristotele-e-le-quattro-cause/' },

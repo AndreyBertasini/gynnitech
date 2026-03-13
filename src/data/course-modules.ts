@@ -148,11 +148,11 @@ export const COURSE_MODULES: CourseModule[] = [
   },
   {
     id: 'filosofia-analisi-dati',
-    title: "Filosofia dell'Analisi Dati & Causalita'",
+    title: "Fondamenti filosofici dell'analisi dei dati",
     description: "Origini storiche, causalita', regressioni, previsione e filosofia della scienza applicate a marketing, analytics e decision making.",
-    seoTitle: "Filosofia dell'Analisi Dati e Causalita' | GinnyTech",
-    seoDescription: "Modulo su filosofia dell'analisi dati e causalita': radici storiche, Aristotele, Hume, Kant, regressioni, inferenza, previsione e applicazioni a marketing analytics e A/B testing.",
-    seoKeywords: ['filosofia analisi dati', 'causalita', 'regressione', 'inferenza', 'marketing analytics', 'filosofia della scienza'],
+    seoTitle: "Fondamenti filosofici dell'analisi dei dati | GinnyTech",
+    seoDescription: "Modulo sui fondamenti filosofici dell'analisi dei dati: radici storiche, Aristotele, Hume, Kant, regressioni, inferenza, previsione e applicazioni a marketing analytics e A/B testing.",
+    seoKeywords: ['fondamenti filosofici analisi dati', 'causalita', 'regressione', 'inferenza', 'marketing analytics', 'filosofia della scienza'],
     icon: 'BrainCircuit',
     color: 'from-cyan-500 to-indigo-500'
   }

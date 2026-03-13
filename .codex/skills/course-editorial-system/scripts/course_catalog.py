@@ -24,7 +24,7 @@ CANONICAL_MODULES = {
     "analytics-engineering": "Modulo 16: Analytics Engineering",
     "significativita-statistica": "Modulo 17: Significativita' Statistica & A/B Testing",
     "direzioni-analitica": "Modulo 18: Direzioni in Analitica",
-    "filosofia-analisi-dati": "Modulo 19: Filosofia dell'Analisi Dati & Causalita'",
+    "filosofia-analisi-dati": "Modulo 19: Fondamenti filosofici dell'analisi dei dati",
 }
 
 THEORETICAL_CATEGORIES = {

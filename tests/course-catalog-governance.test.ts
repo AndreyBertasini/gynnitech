@@ -23,7 +23,7 @@ const canonicalModules: Record<string, string> = {
     "analytics-engineering": "Modulo 16: Analytics Engineering",
     "significativita-statistica": "Modulo 17: Significativita' Statistica & A/B Testing",
     "direzioni-analitica": "Modulo 18: Direzioni in Analitica",
-    "filosofia-analisi-dati": "Modulo 19: Filosofia dell'Analisi Dati & Causalita'",
+    "filosofia-analisi-dati": "Modulo 19: Fondamenti filosofici dell'analisi dei dati",
 };
 
 function walkMdxFiles(dirPath: string): string[] {
@@ -116,6 +116,6 @@ describe("Course catalog governance", () => {
         expect(conceptMap).toContain(`${moduleCount} moduli`);
         expect(conceptMap).toContain(`${lessonCount} lezioni`);
         expect(conceptMap).toContain("Direzioni in Analitica");
-        expect(conceptMap).toContain("Filosofia dell'Analisi Dati");
+        expect(conceptMap).toContain("Fondamenti filosofici dell'analisi dei dati");
     });
 });
