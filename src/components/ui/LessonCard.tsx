@@ -43,7 +43,15 @@ export const LessonCard = ({ title, description, duration, difficulty, prerequis
         {title}
       </h3>
 
-      <p className="text-sm text-slate-400 mb-6 flex-grow leading-relaxed font-sans">
+      <p
+        className="text-sm text-slate-400 mb-6 flex-grow leading-relaxed font-sans"
+        style={{
+          display: '-webkit-box',
+          WebkitBoxOrient: 'vertical',
+          WebkitLineClamp: 4,
+          overflow: 'hidden',
+        }}
+      >
         {description}
       </p>
 

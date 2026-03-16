@@ -38,7 +38,15 @@ export const CourseCard = ({ id, title, description, icon: Icon, color, lessonCo
             {title}
           </h3>
 
-          <p className="mb-8 flex-grow text-sm leading-relaxed text-slate-300 font-sans">
+          <p
+            className="mb-8 flex-grow text-sm leading-relaxed text-slate-300 font-sans"
+            style={{
+              display: '-webkit-box',
+              WebkitBoxOrient: 'vertical',
+              WebkitLineClamp: 4,
+              overflow: 'hidden',
+            }}
+          >
             {description}
           </p>
 
