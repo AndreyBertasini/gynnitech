@@ -25,118 +25,118 @@ type LessonEditorialProfile = {
 
 const MODULE_EDITORIAL_PROFILES: Record<string, ModuleEditorialProfile> = {
   panoramica: {
-    promise: "costruisce orientamento, metodo di studio e ritmo prima di entrare nella parte tecnica del percorso",
-    studyTip: "Studialo lentamente e usalo come manuale di metodo: qui decidi come prendere appunti, come esercitarti e come evitare di consumare lezioni senza trasformarle in competenza.",
-    workUse: "Ti serve piu' di quanto sembri, perche' molte persone falliscono non per mancanza di intelligenza ma per assenza di struttura nello studio e nella pratica.",
-    bridge: "E' la base che rende piu' forti tutti i moduli successivi, dalla raccolta dati fino alla causalita' e agli A/B test.",
+    promise: "Ti fa costruire orientamento, metodo e ritmo di studio, cosi' entri nei moduli tecnici con una base mentale ordinata e gia' pronta all'uso.",
+    studyTip: "Leggilo come una guida operativa: prendi appunti, imposta routine brevi, trasforma ogni lezione in pratica e torna qui quando perdi direzione.",
+    workUse: "Serve a evitare il problema piu' comune nei corsi lunghi: consumare contenuti senza memoria, senza applicazione e senza continuita' nel lavoro.",
+    bridge: "Prepara tutti i moduli successivi, perche' tracking, metriche, regressioni e A/B test rendono molto di piu' quando studi con struttura.",
   },
   'data-collection': {
-    promise: "ti insegna a progettare il dato prima ancora di analizzarlo, con eventi, identita', naming, privacy e controlli di qualita'",
-    studyTip: "Tieni accanto un tracking plan o uno schema eventi: ogni lezione rende molto di piu' se la traduci subito in nomi, proprieta', regole e checklist di QA.",
-    workUse: "Serve quando il team vuole fidarsi di funnel, dashboard e attribution senza scoprire troppo tardi che la base dati e' incoerente.",
-    bridge: "Senza una raccolta dati affidabile, i moduli su metriche, marketing analytics e sperimentazione restano fragili anche se sembrano sofisticati.",
+    promise: "Ti fa costruire una base dati affidabile: eventi, identita', naming, privacy e controlli diventano decisioni progettate, non correzioni dell'ultimo minuto.",
+    studyTip: "Studialo con un tracking plan aperto e riscrivi subito eventi, proprieta' e regole di QA, cosi' ogni lezione si fissa meglio.",
+    workUse: "Serve quando funnel, dashboard e attribution sembrano chiari ma poggiano su tracciamenti incoerenti, buchi di raccolta o definizioni diverse.",
+    bridge: "Rafforza metriche, marketing analytics e sperimentazione, perche' nessuna analisi resta solida se la raccolta dei dati nasce male.",
   },
   'metriche-fondamenti': {
-    promise: "ti allena a distinguere numeri utili da numeri ornamentali, segnali da rumore e misure da vere domande di business",
-    studyTip: "Non limitarti a memorizzare definizioni: per ogni metrica chiediti sempre che decisione dovrebbe cambiare, da cosa dipende e quando puo' ingannare.",
-    workUse: "Ti aiuta a leggere KPI, dashboard e report con piu' rigore, evitando interpretazioni troppo veloci o metriche scelte solo per abitudine.",
-    bridge: "E' il ponte naturale tra tracking e analisi: qui impari il linguaggio con cui tutto il resto del corso viene pensato e giudicato.",
+    promise: "Ti fa costruire un linguaggio analitico piu' rigoroso: distingui KPI, driver, segnali e rumore prima di leggere dashboard o report.",
+    studyTip: "Per ogni metrica chiediti cosa misura, quale decisione cambia e in quali casi puo' sembrare utile pur raccontando male il business.",
+    workUse: "Serve a evitare vanity metrics, interpretazioni impulsive e report pieni di numeri che non aiutano davvero a scegliere priorita' e azioni.",
+    bridge: "Si collega a tracking, dashboard, marketing e prodotto, perche' tutto il corso diventa piu' chiaro quando sai nominare bene cio' che misuri.",
   },
   'gestione-data-driven': {
-    promise: "porta i dati dentro processi decisionali, ricerca utenti, prioritizzazione e cultura organizzativa",
-    studyTip: "Leggilo con un quaderno di domande manageriali, non solo analitiche: chi decide, con quali evidenze, con quali tempi e con quali bias organizzativi.",
-    workUse: "Serve a trasformare il dato in pratica di team, evitando che analytics resti confinata in dashboard che nessuno usa davvero per decidere.",
-    bridge: "Prepara bene i moduli su prodotto, marketing e sperimentazione, perche' ogni tecnica vale di piu' quando entra in un processo decisionale chiaro.",
+    promise: "Ti fa costruire processi decisionali piu' maturi, dove dati, ricerca, priorita' e responsabilita' entrano nel lavoro quotidiano dei team.",
+    studyTip: "Studialo pensando a riunioni vere: chi decide, con quali evidenze, con quali tempi e con quali errori organizzativi da evitare.",
+    workUse: "Serve quando analytics rischia di restare reporting passivo invece di guidare roadmap, budget, coordinamento e discussioni tra persone diverse.",
+    bridge: "Prepara prodotto, marketing e sperimentazione, perche' le tecniche migliori valgono poco se non entrano in un processo decisionale stabile.",
   },
   'analisi-prodotto': {
-    promise: "ti porta dentro il comportamento reale degli utenti, dall'attivazione alla retention, dalla ricerca UX alla validazione di prodotto",
-    studyTip: "Studialo sempre collegando ogni concetto a un prodotto concreto: onboarding, aha moment, churn e PMF diventano chiari quando li vedi su percorsi reali.",
-    workUse: "E' il modulo che rende piu' robusto il lavoro su crescita, priorita' di roadmap, UX e decisioni su cio' che un prodotto deve cambiare davvero.",
-    bridge: "Ti prepara ai moduli su marketing analytics, data science e A/B testing, dove il comportamento utente va misurato, spiegato e testato con piu' precisione.",
+    promise: "Ti fa costruire una lettura piu' precisa del comportamento utente, dall'attivazione alla retention, dalla UX alla crescita di prodotto.",
+    studyTip: "Studialo sempre su un prodotto concreto, cosi' onboarding, churn, aha moment e priorita' di roadmap smettono di restare concetti astratti.",
+    workUse: "Serve quando devi capire perche' gli utenti non attivano valore, dove abbandonano e quali cambiamenti meritano davvero attenzione.",
+    bridge: "Prepara marketing analytics, data science e A/B test, perche' il comportamento osservato qui verra' poi misurato, previsto e testato.",
   },
   'analisi-marketing': {
-    promise: "ti insegna a leggere canali, funnel, CRM, attribuzione e unit economics senza fermarti ai numeri di piattaforma",
-    studyTip: "Ogni lezione va tradotta in una domanda di budget, un problema di misurazione o una decisione di canale: e' li' che il modulo diventa davvero utile.",
-    workUse: "Serve per capire che cosa genera crescita reale, quali canali sembrano funzionare ma confondono il merito e dove il marketing spreca denaro per cattiva lettura dei dati.",
-    bridge: "Si collega direttamente ai moduli su dashboard, marketing data science e sperimentazione, dove il marketing smette di essere reporting e diventa analisi strutturata.",
+    promise: "Ti fa costruire una lettura piu' seria di canali, funnel, CRM, attribuzione e unit economics oltre i numeri delle piattaforme.",
+    studyTip: "Studialo traducendo ogni lezione in una decisione di budget, un dubbio di misurazione o un problema di canale da risolvere.",
+    workUse: "Serve quando il marketing sembra crescere nei report ma non sai ancora quali attivita' generano margine reale e quali no.",
+    bridge: "Si collega a dashboard, data science e sperimentazione, perche' il marketing diventa maturo solo quando viene letto come sistema misurabile.",
   },
   'dashboard-visualizzazione': {
-    promise: "ti insegna a trasformare dati grezzi in viste leggibili, dashboard utili e narrazioni che aiutano a decidere",
-    studyTip: "Non chiederti solo se un grafico e' bello: chiediti quale decisione sostiene, che confronto rende visibile e quale errore di lettura potrebbe evitare.",
-    workUse: "Ti serve quando devi presentare dati a manager, founder o team operativi senza ridurre tutto a una parete di numeri senza gerarchia.",
-    bridge: "Rafforza tutto cio' che fai nei moduli su metriche, marketing e product analytics, perche' analizzare bene serve anche a comunicare bene.",
+    promise: "Ti fa costruire dashboard, grafici e storie analitiche che aiutano a decidere, non solo a esporre numeri in ordine.",
+    studyTip: "Per ogni visual chiediti quale confronto rende leggibile, quale azione sostiene e quale errore di interpretazione dovrebbe prevenire.",
+    workUse: "Serve quando devi presentare dati a team e manager senza produrre report belli ma opachi, lunghi o difficili da usare.",
+    bridge: "Rafforza metriche, marketing e prodotto, perche' una buona analisi vale di piu' quando viene comunicata con gerarchia e chiarezza.",
   },
   'marketing-data-science': {
-    promise: "porta modelli, segmentazione, attribuzione, forecasting e sperimentazione dentro i problemi reali della crescita",
-    studyTip: "Studialo sempre chiedendoti quale domanda stai facendo al modello: descrivere, prevedere o stimare un effetto non sono la stessa cosa.",
-    workUse: "Serve a costruire un marketing piu' maturo, capace di usare regressioni, cluster e modelli predittivi senza scambiarli automaticamente per causalita'.",
-    bridge: "Questo modulo dialoga naturalmente con matematica, filosofia della causalita' e A/B testing, dove i limiti interpretativi diventano ancora piu' importanti.",
+    promise: "Ti fa costruire un uso piu' maturo di modelli, segmentazione, forecast e attribuzione dentro i problemi reali della crescita.",
+    studyTip: "Studialo distinguendo sempre tra descrivere, prevedere e stimare un effetto, per non chiedere a un modello piu' di quanto possa dire.",
+    workUse: "Serve quando vuoi usare regressioni, cluster e previsioni senza confondere performance apparente, correlazione e causalita' nel marketing.",
+    bridge: "Si collega a matematica, filosofia della causalita' e A/B test, dove i limiti interpretativi diventano ancora piu' importanti.",
   },
   'data-warehousing': {
-    promise: "ti fa capire come si organizza un sistema analitico serio, dal modello dati ai motori che rendono sostenibili query e metriche",
-    studyTip: "Leggilo come un modulo di architettura del ragionamento, non solo dell'infrastruttura: ogni scelta di schema modifica anche cio' che potrai misurare bene dopo.",
-    workUse: "E' essenziale quando i dati iniziano a crescere e bisogna evitare tabelle ingestibili, report incoerenti e costi tecnici nascosti.",
-    bridge: "Prepara data lake, analytics engineering e realtime, perche' prima di accelerare serve capire su quale base strutturale stai costruendo.",
+    promise: "Ti fa costruire una base architetturale piu' solida, in cui schema, motori e modellazione sostengono analisi leggibili e scalabili.",
+    studyTip: "Studialo come architettura del ragionamento: ogni scelta di schema decide anche che cosa potrai misurare bene domani.",
+    workUse: "Serve quando i dati crescono e devi evitare query fragili, report incoerenti, costi nascosti e modelli impossibili da mantenere.",
+    bridge: "Prepara data lake, analytics engineering e realtime, perche' prima di accelerare devi capire la struttura che stai costruendo.",
   },
   's3-data-lake': {
-    promise: "ti insegna a pensare lo storage analitico come sistema leggibile, economico e governabile nel tempo",
-    studyTip: "Segui ogni lezione con un occhio a formati, partizionamento e access pattern: il data lake si capisce davvero solo quando immagini come verra' letto e mantenuto.",
-    workUse: "Serve a evitare architetture che sembrano economiche all'inizio ma diventano caotiche, lente o costose appena aumentano team, fonti e volumi.",
-    bridge: "E' il passaggio naturale verso analytics engineering, ClickHouse e pipeline piu' avanzate, dove lo storage smette di essere un dettaglio e diventa leva.",
+    promise: "Ti fa costruire data lake piu' leggibili e sostenibili, dove storage, formati e partizioni restano governabili anche quando i volumi aumentano.",
+    studyTip: "Studialo pensando a come i dati verranno letti, aggiornati e documentati, non solo a dove verranno salvati.",
+    workUse: "Serve quando un data lake sembra economico all'inizio ma rischia di diventare presto caotico, lento o difficile da governare.",
+    bridge: "Prepara analytics engineering, ClickHouse e pipeline piu' avanzate, perche' lo storage smette presto di essere un dettaglio tecnico.",
   },
   'kafka-streaming': {
-    promise: "ti porta dentro la logica dell'event streaming, dove affidabilita', ordine, idempotenza e schema contano quanto il throughput",
-    studyTip: "Studialo immaginando il percorso di un evento dal producer al consumer: se vedi il flusso, capisci meglio anche errori, latenze e duplicazioni.",
-    workUse: "Ti serve quando il dato non puo' piu' essere pensato come file o batch isolato, ma come flusso continuo che alimenta sistemi e decisioni in tempo quasi reale.",
-    bridge: "Prepara il terreno per realtime analytics e infrastruttura operativa, dove la qualita' del flusso decide la qualita' delle analisi.",
+    promise: "Ti fa costruire una mentalita' da flusso: eventi, ordine, idempotenza e schema diventano parti della qualita' del dato.",
+    studyTip: "Studialo seguendo il viaggio dell'evento dal producer al consumer, cosi' errori, latenze e duplicazioni diventano molto piu' concreti.",
+    workUse: "Serve quando il dato non e' piu' batch isolato ma flusso continuo che alimenta prodotti, sistemi e decisioni quasi in tempo reale.",
+    bridge: "Prepara realtime analytics e ops, perche' la qualita' del flusso decide presto anche la qualita' delle analisi.",
   },
   'real-time-analytics': {
-    promise: "ti insegna a leggere e costruire analytics in tempo reale con motori e pattern pensati per latenze basse e query pesanti",
-    studyTip: "Non studiarlo come una corsa alla velocita': il punto e' capire quando il realtime ha senso, come si mantiene e quali compromessi introduce.",
-    workUse: "E' utile in casi come monitoraggio operativo, adtech, eventi live, fraud detection e dashboard che devono reagire senza aspettare il batch del giorno dopo.",
-    bridge: "Si collega a streaming, data warehousing e ops, perche' il realtime funziona solo quando ingestione, modellazione e affidabilita' si tengono insieme.",
+    promise: "Ti fa costruire analytics a bassa latenza con motori e pattern pensati per query veloci, eventi continui e decisioni operative.",
+    studyTip: "Studialo senza mitizzare il realtime: chiediti quando serve davvero, quali costi introduce e come si mantiene nel tempo.",
+    workUse: "Serve in casi come monitoring, adtech, eventi live e alerting, dove aspettare il batch del giorno dopo e' troppo tardi.",
+    bridge: "Si collega a streaming, warehouse e ops, perche' il realtime funziona solo quando ingestione, modellazione e affidabilita' si sostengono.",
   },
   'infrastructure-ops': {
-    promise: "porta disciplina ingegneristica nel lavoro dati, con deploy, monitoraggio, costi, automazione e documentazione",
-    studyTip: "Leggilo con mentalita' operativa: ogni lezione va vista come riduzione di rischio, regressione o dipendenza da procedure manuali fragili.",
-    workUse: "Serve quando il team dati smette di essere artigianale e ha bisogno di continuita', osservabilita' e responsabilita' tecnica condivisa.",
-    bridge: "Rende piu' sostenibili analytics engineering, realtime e data science, perche' senza ops mature anche i sistemi brillanti si rompono male.",
+    promise: "Ti fa costruire disciplina operativa nel lavoro dati, con deploy, monitoraggio, automazione, documentazione e controllo dei costi.",
+    studyTip: "Studialo come riduzione di rischio: ogni lezione dovrebbe togliere dipendenze manuali, regressioni silenziose o manutenzione confusa.",
+    workUse: "Serve quando il team dati cresce e non puo' piu' affidarsi a procedure artigianali, memoria individuale e controlli sporadici.",
+    bridge: "Rende piu' sostenibili analytics engineering, realtime e data science, perche' i sistemi forti hanno bisogno anche di gestione forte.",
   },
   'advanced-sql': {
-    promise: "ti fa usare SQL come vero strumento analitico avanzato, non come semplice linguaggio di estrazione",
-    studyTip: "Studialo con query aperte e dati in testa: ogni pattern va capito per logica, non solo copiato, soprattutto quando lavora su retention, funnel o sequenze.",
-    workUse: "E' il modulo che rende piu' forte quasi ogni ruolo analitico, perche' molte domande complesse sul business si chiariscono prima in SQL che in un dashboard builder.",
-    bridge: "Si collega direttamente a product analytics, marketing analytics e analytics engineering, dove SQL resta uno dei linguaggi piu' produttivi e piu' sottovalutati.",
+    promise: "Ti fa costruire un uso piu' maturo di SQL, capace di leggere sequenze, retention, funnel e metriche con molta piu' precisione.",
+    studyTip: "Studialo con query aperte e varianti pratiche, cosi' ogni pattern diventa logica applicabile e non frammento copiato.",
+    workUse: "Serve quasi in ogni ruolo analitico, perche' molte domande difficili su business, utenti e performance si chiariscono prima in SQL.",
+    bridge: "Si collega a product analytics, marketing analytics e analytics engineering, dove SQL resta uno strumento centrale e spesso sottovalutato.",
   },
   'matematica-analisi-dati': {
-    promise: "costruisce la base matematica che rende piu' comprensibili modelli, regressioni, probabilita' e inferenza",
-    studyTip: "Affrontalo con calma e torna sui passaggi: qui non serve correre, serve capire che cosa rappresenta ogni oggetto matematico nei problemi reali dei dati.",
-    workUse: "Ti aiuta a smettere di usare formule e modelli come scatole chiuse, migliorando il modo in cui interpreti previsione, similitudine, ottimizzazione e test.",
-    bridge: "E' una base potente per marketing data science, A/B testing e filosofia della causalita', dove il rigore matematico incontra quello interpretativo.",
+    promise: "Ti fa costruire la base matematica che rende piu' leggibili modelli, regressioni, probabilita', inferenza e machine learning applicato.",
+    studyTip: "Studialo con calma e torna sui passaggi, perche' qui conta capire cosa rappresenta ogni oggetto matematico nei problemi reali.",
+    workUse: "Serve a non usare formule e modelli come scatole chiuse, migliorando il modo in cui interpreti previsione, similitudine e test.",
+    bridge: "Prepara data science, A/B testing e causalita', dove rigore matematico e rigore interpretativo devono lavorare insieme.",
   },
   'analytics-engineering': {
-    promise: "ti insegna a trasformare dati grezzi in modelli affidabili, riusabili e governabili con dbt e pratiche moderne",
-    studyTip: "Studialo pensando a lineage, naming, test e responsabilita': il punto non e' solo far girare un model, ma renderlo affidabile per tutti gli altri.",
-    workUse: "Serve quando il team vuole smettere di riscrivere ogni volta le stesse metriche e costruire invece un patrimonio dati piu' stabile e condiviso.",
-    bridge: "Si appoggia bene a warehouse e data lake, e prepara sistemi analitici dove BI, marketing e data science lavorano su basi meno improvvisate.",
+    promise: "Ti fa costruire modelli dati affidabili, riusabili e governabili, cosi' il lavoro analitico smette di dipendere da soluzioni improvvisate.",
+    studyTip: "Studialo pensando a naming, lineage, test e contratti, non solo all'esecuzione del model o al risultato della query.",
+    workUse: "Serve quando il team vuole smettere di riscrivere metriche e tabelle in modi diversi e costruire basi condivise.",
+    bridge: "Si appoggia a warehouse e data lake, e prepara sistemi dove BI, marketing e data science lavorano su modelli stabili.",
   },
   'significativita-statistica': {
-    promise: "ti porta nel cuore della sperimentazione: ipotesi, randomizzazione, potenza, p-value, errori e governance delle decisioni",
-    studyTip: "Studialo sempre distinguendo tre momenti: formulare la domanda, disegnare il test, interpretare il risultato. Molti errori nascono dal confonderli.",
-    workUse: "E' indispensabile per A/B test, product changes, landing page, lifecycle e qualsiasi situazione in cui vuoi stimare un effetto senza raccontarti storie.",
-    bridge: "Dialoga con marketing data science, matematica e filosofia della causalita', perche' qui probabilita', inferenza e decisione si incontrano davvero.",
+    promise: "Ti fa costruire un modo piu' rigoroso di progettare esperimenti, leggere risultati e decidere quando un effetto merita fiducia.",
+    studyTip: "Studialo separando sempre domanda, disegno e interpretazione, perche' molti errori nascono dal confondere questi tre momenti.",
+    workUse: "Serve per A/B test, cambi di prodotto, landing page e lifecycle, quando vuoi stimare un effetto senza auto-ingannarti.",
+    bridge: "Si collega a matematica, marketing data science e causalita', dove probabilita', inferenza e decisione si incontrano davvero.",
   },
   'direzioni-analitica': {
-    promise: "ti orienta tra le grandi famiglie del lavoro analitico: marketing, prodotto e finanza",
-    studyTip: "Usalo per confrontare logiche, KPI, strumenti e responsabilita': il suo valore cresce se lo leggi come mappa di ruolo e non come lista di buzzword.",
-    workUse: "Serve a capire dove vuoi andare professionalmente e come cambia il ragionamento analitico quando cambia la funzione aziendale.",
-    bridge: "Aiuta a ricomporre il corso come sistema unico, mostrando come le stesse competenze cambiano forma tra acquisizione, retention, margini e controllo.",
+    promise: "Ti fa costruire una mappa chiara delle grandi direzioni analitiche, tra marketing, prodotto, finanza e responsabilita' differenti.",
+    studyTip: "Studialo confrontando KPI, strumenti e domande tipiche, cosi' ogni area emerge come modo di pensare, non solo come etichetta.",
+    workUse: "Serve a capire dove vuoi crescere professionalmente e come cambiano priorita', metriche e linguaggio quando cambia la funzione.",
+    bridge: "Ricompone il corso come sistema unico, mostrando come le stesse competenze cambiano forma tra acquisizione, retention e marginalita'.",
   },
   'filosofia-analisi-dati': {
-    promise: "porta dentro l'analisi dati le grandi domande su causa, spiegazione, probabilita' e validita' della conoscenza",
-    studyTip: "Leggilo senza fretta e con margini pieni di domande: qui il punto non e' accumulare citazioni, ma rendere piu' rigoroso il modo in cui interpreti dati e modelli.",
-    workUse: "Serve a chi non vuole confondere correlazione con causalita', modello con realta', previsione con spiegazione o statistica con verita'.",
-    bridge: "Rafforza regressioni, forecasting, attribuzione e A/B testing, perche' rende piu' solido il modo in cui trasformi numeri in conclusioni.",
+    promise: "Ti fa costruire un pensiero piu' rigoroso su causa, spiegazione, probabilita' e validita' delle conclusioni tratte dai dati.",
+    studyTip: "Studialo lentamente e con domande a margine, perche' qui il valore sta nel rendere piu' solido il tuo modo di interpretare.",
+    workUse: "Serve quando non vuoi confondere correlazione con causalita', modello con realta' o previsione con vera spiegazione.",
+    bridge: "Rafforza regressioni, forecasting, attribution e A/B test, perche' rende piu' solido il passaggio dai numeri alle conclusioni.",
   },
 };
 
@@ -209,45 +209,39 @@ export function getModuleEditorialProfile(moduleId: string): ModuleEditorialProf
 export function getLessonEditorialProfile(args: LessonEditorialArgs): LessonEditorialProfile {
   const kind = classifyLesson(args.category, args.title);
   const moduleProfile = getModuleEditorialProfile(args.moduleId);
-  const prerequisitesCount = args.prerequisitesCount ?? 0;
-  const paceHint = args.difficultyLabel === 'Avanzato'
-    ? " Procedi con lentezza: qui conta capire il perche' dei passaggi piu' della velocita' con cui li attraversi."
-    : prerequisitesCount > 0
-      ? " Tieni vicini i prerequisiti: questa pagina rende molto di piu' se richiami i concetti che la precedono."
-      : " Puoi usarla anche come ottimo punto di ingresso, pur tornando poi sulle lezioni collegate.";
 
   if (kind === 'cheat') {
     return {
       label: 'Ripasso rapido',
-      whyItMatters: `Questa pagina condensa il cuore operativo del modulo ${args.moduleTitle}. Non va letta come capitolo lineare, ma come strumento per trattenere regole, formule, scorciatoie e criteri di scelta senza perdere il filo del percorso.`,
-      howToStudy: `Usala dopo aver studiato le lezioni principali, non al posto loro. Evidenzia 5 righe chiave, marca cio' che dimentichi piu' spesso e torna qui prima di esercitarti o di lavorare su un caso reale.${paceHint}`,
-      suggestedOutput: 'Trasformala in una checklist personale o in un foglio di richiamo rapido da tenere accanto quando lavori.',
+      whyItMatters: `Questa pagina concentra il nucleo operativo del modulo ${args.moduleTitle}. Serve a riprendere formule, criteri e passaggi chiave senza perdere il filo del percorso.`,
+      howToStudy: "Usala dopo le lezioni principali, non al loro posto. Evidenzia cio' che dimentichi piu' spesso e torna qui prima di esercizi, ripasso o lavoro reale.",
+      suggestedOutput: 'Trasformala in una checklist personale o in un foglio di richiamo rapido da tenere vicino mentre lavori.',
     };
   }
 
   if (kind === 'case') {
     return {
       label: 'Caso completo',
-      whyItMatters: `Qui il punto non e' accumulare definizioni, ma vedere come dati, vincoli, ipotesi e decisioni si tengono insieme. E' in lezioni come questa che ${moduleProfile.promise}.`,
-      howToStudy: `Segui il caso come se fossi dentro il team: contesto, problema, scelta, trade-off, risultato. Fermati nei punti in cui avresti deciso diversamente e chiediti quali numeri o quali limiti ti farebbero cambiare idea.${paceHint}`,
-      suggestedOutput: 'Scrivi che decisione avresti preso tu, quali KPI avresti difeso e dove avresti chiesto dati aggiuntivi prima di concludere.',
+      whyItMatters: `Qui non accumuli definizioni: vedi come dati, vincoli, ipotesi e decisioni si tengono insieme. E' in lezioni cosi' che ${moduleProfile.promise.toLowerCase()}`,
+      howToStudy: "Segui il caso come se fossi nel team: contesto, scelta, trade-off, risultato. Fermati nei punti dubbi e chiediti cosa ti farebbe decidere diversamente.",
+      suggestedOutput: 'Scrivi quale decisione avresti preso tu, quali KPI avresti difeso e quali dati avresti chiesto prima di chiudere.',
     };
   }
 
   if (kind === 'technical') {
     return {
       label: 'Lettura operativa',
-      whyItMatters: `Questa e' una lezione operativa: porta il modulo ${args.moduleTitle} dal livello dei concetti a quello di query, modelli, pipeline, strumenti o implementazioni che devono reggere davvero nel lavoro.`,
-      howToStudy: `Leggila con editor, notebook o foglio di lavoro aperto. Rifai almeno un esempio, cambia una variabile e osserva dove il ragionamento resta solido e dove invece si rompe.${paceHint}`,
-      suggestedOutput: 'Ricostruisci un esempio minimo e poi adattalo a un dataset, un funnel o una pipeline che conosci davvero.',
+      whyItMatters: `Questa e' una lezione operativa: porta ${args.moduleTitle} dal piano dei concetti a quello di query, modelli, strumenti o pipeline che devono reggere davvero.`,
+      howToStudy: "Aprila con editor, notebook o foglio di lavoro. Rifai almeno un esempio, cambia una variabile e osserva dove il ragionamento resta solido.",
+      suggestedOutput: 'Ricostruisci un esempio minimo e adattalo subito a un dataset, un funnel o una pipeline che conosci davvero.',
     };
   }
 
   return {
     label: 'Lettura concettuale',
-    whyItMatters: `Questa lezione rafforza il modo in cui interpreti dati, metriche e decisioni prima ancora di toccare uno strumento. E' una parte importante del corso, perche' ${moduleProfile.workUse.toLowerCase()}`,
-    howToStudy: `Studiala con domande a margine: qual e' l'idea centrale, quale errore evita, quale esempio la chiarisce, quale scelta concreta puo' migliorare. L'obiettivo non e' "finirla", ma uscirne con un criterio piu' netto.${paceHint}`,
-    suggestedOutput: "Riformula il concetto principale con parole tue e collegalo a un report, un funnel, una campagna o una decisione che hai gia' visto nel lavoro.",
+    whyItMatters: `Questa lezione rafforza il modo in cui interpreti dati, metriche e decisioni prima ancora di aprire uno strumento. ${moduleProfile.workUse}`,
+    howToStudy: "Leggila con domande a margine: qual e' l'idea centrale, quale errore evita, quale esempio la chiarisce e quale decisione concreta puo' migliorare.",
+    suggestedOutput: "Riformula il concetto principale con parole tue e collegalo a un report, un funnel, una campagna o una decisione gia' vista.",
   };
 }
 
@@ -257,21 +251,5 @@ export function getModulePageEditorial(args: {
   firstLessonTitle?: string;
   nextModuleTitle?: string;
 }): ModuleEditorialProfile {
-  const profile = getModuleEditorialProfile(args.module.id);
-  const pacingHint = args.lessonCount >= 10
-    ? ' Affrontalo a blocchi da 2-3 lezioni, con una pausa per appunti e applicazione prima di andare avanti.'
-    : ' Puoi seguirlo in modo abbastanza lineare, ma conviene comunque fermarti a sintetizzare i passaggi chiave.';
-  const firstLessonHint = args.firstLessonTitle
-    ? ` Se vuoi partire bene, apri prima "${args.firstLessonTitle}".`
-    : '';
-  const bridgeHint = args.nextModuleTitle
-    ? ` Dopo questo modulo il passaggio naturale e' ${args.nextModuleTitle}.`
-    : '';
-
-  return {
-    promise: profile.promise,
-    studyTip: `${profile.studyTip}${pacingHint}${firstLessonHint}`,
-    workUse: profile.workUse,
-    bridge: `${profile.bridge}${bridgeHint}`,
-  };
+  return getModuleEditorialProfile(args.module.id);
 }
