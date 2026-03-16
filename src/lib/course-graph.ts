@@ -15,9 +15,15 @@ export interface CourseGraphSourceEntry {
 
 export interface CourseGraphStage {
   id: string;
+  index: number;
   title: string;
   description: string;
   moduleIds: string[];
+  moduleCount: number;
+  lessonCount: number;
+  internalLinkCount: number;
+  crossStageIncomingCount: number;
+  crossStageOutgoingCount: number;
 }
 
 export interface CourseGraphLesson {
@@ -60,11 +66,18 @@ export interface CourseGraphModuleEdge {
   count: number;
 }
 
+export interface CourseGraphStageEdge {
+  source: string;
+  target: string;
+  count: number;
+}
+
 export interface CourseGraphData {
   stages: CourseGraphStage[];
   modules: CourseGraphModule[];
   lessons: CourseGraphLesson[];
   moduleEdges: CourseGraphModuleEdge[];
+  stageEdges: CourseGraphStageEdge[];
   stats: {
     totalModules: number;
     totalLessons: number;
@@ -74,44 +87,51 @@ export interface CourseGraphData {
   };
 }
 
-const COURSE_STAGES: CourseGraphStage[] = [
+interface CourseGraphStageTemplate {
+  id: string;
+  title: string;
+  description: string;
+  maxIndex: number;
+}
+
+const COURSE_STAGE_TEMPLATES: CourseGraphStageTemplate[] = [
   {
     id: 'foundation',
     title: 'Fondazione',
     description: 'Orientamento, tracking, metriche e cultura del dato.',
-    moduleIds: ['panoramica', 'data-collection', 'metriche-fondamenti', 'gestione-data-driven'],
+    maxIndex: 3,
   },
   {
     id: 'application',
     title: 'Applicazione Business',
     description: 'Prodotto, marketing, dashboard e primi modelli decisionali.',
-    moduleIds: ['analisi-prodotto', 'analisi-marketing', 'dashboard-visualizzazione', 'marketing-data-science'],
+    maxIndex: 7,
   },
   {
     id: 'stack',
     title: 'Infrastruttura e Stack',
     description: 'Warehouse, lake, streaming, realtime e disciplina operativa.',
-    moduleIds: ['data-warehousing', 's3-data-lake', 'kafka-streaming', 'real-time-analytics', 'infrastructure-ops'],
+    maxIndex: 12,
   },
   {
     id: 'rigor',
     title: 'Rigore Quantitativo',
     description: 'SQL, matematica, analytics engineering e sperimentazione.',
-    moduleIds: ['advanced-sql', 'matematica-analisi-dati', 'analytics-engineering', 'significativita-statistica'],
+    maxIndex: 16,
   },
   {
     id: 'direction',
     title: 'Direzione e Profondita',
     description: 'Ruoli analitici, causalita e lettura critica dei dati.',
-    moduleIds: ['direzioni-analitica', 'filosofia-analisi-dati'],
+    maxIndex: Number.POSITIVE_INFINITY,
   },
 ];
 
-const stageByModuleId = new Map(
-  COURSE_STAGES.flatMap((stage) => stage.moduleIds.map((moduleId) => [moduleId, stage] as const)),
-);
-
 const normalizeEntryId = (id: string): string => id.replace(/\.[^/.]+$/, '');
+
+const getStageTemplateForIndex = (index: number): CourseGraphStageTemplate => {
+  return COURSE_STAGE_TEMPLATES.find((stage) => index <= stage.maxIndex) || COURSE_STAGE_TEMPLATES[COURSE_STAGE_TEMPLATES.length - 1];
+};
 
 const sortLessons = (a: CourseGraphSourceEntry, b: CourseGraphSourceEntry): number => {
   const orderA = a.data.order ?? Number.MAX_SAFE_INTEGER;
@@ -222,7 +242,7 @@ export function buildCourseGraph(entries: CourseGraphSourceEntry[]): CourseGraph
     .sort((a, b) => b.count - a.count || a.source.localeCompare(b.source, 'it') || a.target.localeCompare(b.target, 'it'));
 
   const modules: CourseGraphModule[] = COURSE_MODULES.map((module, index) => {
-    const stage = stageByModuleId.get(module.id);
+    const stage = getStageTemplateForIndex(index);
     const moduleLessons = lessonsByModule.get(module.id) || [];
     const crossModuleIncomingCount = moduleEdges
       .filter((edge) => edge.target === module.id)
@@ -238,8 +258,8 @@ export function buildCourseGraph(entries: CourseGraphSourceEntry[]): CourseGraph
       title: module.title,
       description: module.description,
       color: module.color,
-      stageId: stage?.id ?? 'other',
-      stageTitle: stage?.title ?? 'Altro',
+      stageId: stage.id,
+      stageTitle: stage.title,
       lessonCount: moduleLessons.length,
       internalLinkCount,
       crossModuleIncomingCount,
@@ -248,11 +268,54 @@ export function buildCourseGraph(entries: CourseGraphSourceEntry[]): CourseGraph
     };
   });
 
+  const moduleById = new Map(modules.map((module) => [module.id, module]));
+  const stageEdgeCounts = new Map<string, number>();
+
+  for (const edge of moduleEdges) {
+    const sourceStageId = moduleById.get(edge.source)?.stageId;
+    const targetStageId = moduleById.get(edge.target)?.stageId;
+
+    if (!sourceStageId || !targetStageId || sourceStageId === targetStageId) {
+      continue;
+    }
+
+    const key = `${sourceStageId}->${targetStageId}`;
+    stageEdgeCounts.set(key, (stageEdgeCounts.get(key) || 0) + edge.count);
+  }
+
+  const stageEdges: CourseGraphStageEdge[] = Array.from(stageEdgeCounts.entries())
+    .map(([key, count]) => {
+      const [source, target] = key.split('->');
+      return { source, target, count };
+    })
+    .sort((a, b) => a.source.localeCompare(b.source, 'it') || a.target.localeCompare(b.target, 'it'));
+
+  const stages: CourseGraphStage[] = COURSE_STAGE_TEMPLATES.map((stage, index) => {
+    const stageModules = modules.filter((module) => module.stageId === stage.id);
+    return {
+      id: stage.id,
+      index,
+      title: stage.title,
+      description: stage.description,
+      moduleIds: stageModules.map((module) => module.id),
+      moduleCount: stageModules.length,
+      lessonCount: stageModules.reduce((sum, module) => sum + module.lessonCount, 0),
+      internalLinkCount: stageModules.reduce((sum, module) => sum + module.internalLinkCount, 0),
+      crossStageIncomingCount: stageEdges
+        .filter((edge) => edge.target === stage.id)
+        .reduce((sum, edge) => sum + edge.count, 0),
+      crossStageOutgoingCount: stageEdges
+        .filter((edge) => edge.source === stage.id)
+        .reduce((sum, edge) => sum + edge.count, 0),
+    };
+  }).filter((stage) => stage.moduleCount > 0);
+
   return {
-    stages: COURSE_STAGES,
+    stages,
     modules,
     lessons,
     moduleEdges,
+    stageEdges,
     stats: {
       totalModules: modules.length,
       totalLessons: lessons.length,
