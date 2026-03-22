@@ -7,7 +7,7 @@ module: "Modulo 14: Advanced SQL"
 order: 3
 category: Window Functions
 difficulty: advanced
-duration: 20 min
+duration: 8 min
 prerequisites:
   - advanced-sql/window-functions-avanzate
 learningObjectives:
@@ -255,6 +255,115 @@ L'`ORDER BY` finale ordina l'output. L'`ORDER BY` dentro `OVER (...)` definisce 
 
 Molti database non permettono di filtrare direttamente su una window function nella stessa `SELECT`. Il CTE `ranked AS (...)` rende la query leggibile e portabile.
 
+## Ranking per due dimensioni contemporaneamente
+
+A volte devi classificare non solo dentro un gruppo ma dentro due gerarchie.
+
+Immagina un e-commerce dove vuoi il top seller di ogni categoria e il top seller di ogni paese, ma anche il top seller di ogni (categoria, paese) combinazione.
+
+```sql
+WITH sku_by_segment AS (
+    SELECT
+        oi.category,
+        o.country,
+        oi.product_id,
+        sum(oi.net_revenue) AS revenue
+    FROM order_items oi
+    INNER JOIN orders o
+        ON oi.order_id = o.order_id
+    WHERE o.status = 'completed'
+    GROUP BY oi.category, o.country, oi.product_id
+),
+ranked_two_levels AS (
+    SELECT
+        category,
+        country,
+        product_id,
+        revenue,
+        -- Ranking per categoria, indipendente dal paese
+        row_number() OVER (
+            PARTITION BY category
+            ORDER BY revenue DESC, product_id
+        ) AS rank_in_category,
+        -- Ranking per paese, indipendente dalla categoria
+        row_number() OVER (
+            PARTITION BY country
+            ORDER BY revenue DESC, product_id
+        ) AS rank_in_country,
+        -- Ranking per combinazione (categoria, paese)
+        row_number() OVER (
+            PARTITION BY category, country
+            ORDER BY revenue DESC, product_id
+        ) AS rank_in_segment
+    FROM sku_by_segment
+)
+SELECT
+    category,
+    country,
+    product_id,
+    revenue,
+    rank_in_category,
+    rank_in_country,
+    rank_in_segment
+FROM ranked_two_levels
+WHERE rank_in_category <= 3
+   OR rank_in_country <= 2
+   OR rank_in_segment = 1
+ORDER BY category, country, revenue DESC;
+```
+
+Con una sola query puoi rispondere a tre domande di ranking contemporaneamente. Questo pattern e' molto utile quando la tua dashboard ha filtri a cascata e vuoi pre-calcolare i ranking a piu' livelli di granularita'.
+
+## Deduplica con priorità deterministica
+
+Quando la tabella sorgente ha duplicati e vuoi tenere solo il record "piu' importante", il tie-breaker nel `ORDER BY` e' fondamentale.
+
+```sql
+WITH product_with_priority AS (
+    SELECT
+        product_id,
+        name,
+        category,
+        created_at,
+        updated_at,
+        is_active,
+        -- Assegna una priorita' alla fonte
+        CASE
+            WHEN source_system = 'erp_master' THEN 1
+            WHEN source_system = 'marketplace_api' THEN 2
+            ELSE 3
+        END AS system_priority
+    FROM product_catalog
+),
+deduplicated AS (
+    SELECT
+        product_id,
+        name,
+        category,
+        updated_at,
+        is_active,
+        row_number() OVER (
+            PARTITION BY product_id
+            ORDER BY
+                is_active DESC,  -- Preferisci i record attivi
+                system_priority,  -- Poi usa la priorita' della fonte
+                updated_at DESC,  -- Poi il piu' recente
+                product_id  -- Infine un tie-breaker stabile
+        ) AS rn
+    FROM product_with_priority
+)
+SELECT
+    product_id,
+    name,
+    category,
+    updated_at,
+    is_active
+FROM deduplicated
+WHERE rn = 1;
+```
+
+L'idea e' di codificare la logica di priorita' in modo esplicito. Non "prendi il primo che trovi", ma "prendi il record che rispetta questa gerarchia di importanza".
+
 ## Cosa ti serve davvero ricordare
 
 Quando il problema e' "scegli la prima, la migliore o la peggiore riga dentro ogni gruppo", il pattern quasi sempre e':
@@ -267,4 +376,4 @@ Nella prossima lezione useremo la stessa logica di partizione e ordinamento, ma 
 
 ## Riepilogo
 
-`ROW_NUMBER()` e' la funzione piu' pratica per top N, bottom N e deduplica. `RANK()` e `DENSE_RANK()` entrano in gioco quando i pareggi hanno significato business. La scelta tra le tre non e' stilistica: cambia il significato della classifica.
+`ROW_NUMBER()` e' la funzione piu' pratica per top N, bottom N e deduplica. `RANK()` e `DENSE_RANK()` entrano in gioco quando i pareggi hanno significato business. La scelta tra le tre non e' stilistica: cambia il significato della classifica. Il valore pratico emerge quando combini il ranking con gerarchia di priorita' explicit nel `ORDER BY`, rendendo la deduplica deterministica e documentata.

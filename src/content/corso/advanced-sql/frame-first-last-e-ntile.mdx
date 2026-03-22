@@ -7,7 +7,7 @@ module: "Modulo 14: Advanced SQL"
 order: 6
 category: Window Functions
 difficulty: advanced
-duration: 24 min
+duration: 9 min
 prerequisites:
   - advanced-sql/aggregazioni-su-finestra
 learningObjectives:
@@ -251,14 +251,147 @@ Quando sei in dubbio, chiediti:
 
 Se sai rispondere bene a queste tre domande, hai gia' risolto l'80% dei problemi con i frame.
 
+## L'errore piu' frequente: LAST_VALUE senza frame
+
+Questo bug e' insidioso perche' la query non genera errori, ma il risultato e' silenziosamente sbagliato.
+
+```sql
+-- SBAGLIATO: il frame implicito e' UNBOUNDED PRECEDING AND CURRENT ROW
+-- per LAST_VALUE questo significa "ultimo valore fino alla riga corrente"
+-- quindi per la prima riga e' la riga stessa, per la seconda e' il massimo della seconda, ecc.
+WITH daily_sales AS (
+    SELECT
+        CAST(order_time AS date) AS day,
+        sum(amount) AS revenue
+    FROM orders
+    WHERE status = 'completed'
+    GROUP BY CAST(order_time AS date)
+)
+SELECT
+    day,
+    revenue,
+    last_value(revenue) OVER (
+        ORDER BY day
+    ) AS wrong_last_value
+FROM daily_sales;
+```
+
+Cada giorno mostra come l'"ultimo" valore il valore del giorno stesso, non il valore dell'ultimo giorno del dataset.
+
+```sql
+-- GIUSTO: specifica il frame per vedere davvero l'ultimo
+SELECT
+    day,
+    revenue,
+    last_value(revenue) OVER (
+        ORDER BY day
+        ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING
+    ) AS correct_last_value
+FROM daily_sales;
+```
+
+Ora ogni riga vede il valore dell'ultimo giorno dell'intero periodo. Se il tuo report dice "quanto distava il primo giorno dall'ultimo?", il frame sbagliato darebbe sempre risposta "0 euro".
+
+## NTILE in azione: segmentazione per pricing
+
+Un caso concreto di NTILE e' dividere il catalogo in tier di prezzo basati su margine.
+
+```sql
+WITH product_economics AS (
+    SELECT
+        product_id,
+        product_name,
+        avg(price) AS avg_price,
+        avg(cost) AS avg_cost,
+        avg(price - cost) AS avg_margin,
+        count(DISTINCT order_id) AS orders_count
+    FROM order_items oi
+    INNER JOIN orders o ON oi.order_id = o.order_id
+    WHERE o.status = 'completed'
+    GROUP BY product_id, product_name
+),
+with_tier AS (
+    SELECT
+        product_id,
+        product_name,
+        avg_price,
+        avg_margin,
+        orders_count,
+        ntile(5) OVER (
+            ORDER BY avg_margin DESC, product_id
+        ) AS margin_tier
+    FROM product_economics
+)
+SELECT
+    margin_tier,
+    count(*) AS product_count,
+    min(avg_margin) AS min_margin,
+    max(avg_margin) AS max_margin,
+    avg(avg_price) AS avg_price_in_tier,
+    sum(orders_count) AS total_orders_in_tier
+FROM with_tier
+GROUP BY margin_tier
+ORDER BY margin_tier;
+```
+
+Questo ti dice non solo "quali sono i 5 prodotti piu' redditizi", ma "come i prodotti si distribuiscono per margine, in tier omogenei".
+
+## ROWS vs RANGE: un caso di studio
+
+Supponiamo di avere dei dati giornalieri dove per errore ci sono due righe con la stessa data.
+
+```sql
+-- Dati di input
+day       | revenue
+2025-01-01| 1000
+2025-01-01| 500      -- duplicato (errore di ingestion)
+2025-01-02| 1500
+2025-01-03| 2000
+
+-- Con ROWS BETWEEN CURRENT ROW AND CURRENT ROW
+SELECT
+    day,
+    revenue,
+    sum(revenue) OVER (
+        ORDER BY day
+        ROWS BETWEEN CURRENT ROW AND CURRENT ROW
+    ) AS sum_rows
+FROM daily_sales;
+
+-- Risultato:
+-- 2025-01-01 | 1000 | 1000  (solo la riga corrente)
+-- 2025-01-01 | 500  | 500   (solo la riga corrente, diversa dalla precedente)
+-- 2025-01-02 | 1500 | 1500
+-- 2025-01-03 | 2000 | 2000
+
+-- Con RANGE BETWEEN CURRENT ROW AND CURRENT ROW
+SELECT
+    day,
+    revenue,
+    sum(revenue) OVER (
+        ORDER BY day
+        RANGE BETWEEN CURRENT ROW AND CURRENT ROW
+    ) AS sum_range
+FROM daily_sales;
+
+-- Risultato:
+-- 2025-01-01 | 1000 | 1500  (somma di tutte le righe con giorno 2025-01-01)
+-- 2025-01-01 | 500  | 1500  (somma di tutte le righe con giorno 2025-01-01)
+-- 2025-01-02 | 1500 | 1500
+-- 2025-01-03 | 2000 | 2000
+```
+
+`ROWS` ignora il valore e conta le righe fisiche. `RANGE` ragiona per valore logico.
+
 ## Cosa devi portarti nel lavoro reale
 
 - `FIRST_VALUE()` e `LAST_VALUE()` richiedono quasi sempre frame esplicito
 - `ROWS` e `RANGE` cambiano davvero il perimetro della finestra
 - `NTILE()` non e' solo una curiosita': e' un ottimo strumento di segmentazione operativa
+- Il frame implicito e' il luogo dove vivono i bug silenziosi; specifica sempre
 
 Nella prossima lezione chiudiamo la mini-serie con esercizi guidati costruiti su esempi originali, ispirati al materiale sorgente ma gia' riallineati al contesto del corso GinnyTech.
 
 ## Riepilogo
 
-Il frame e' il confine reale della finestra. Se non lo controlli, il database decidera' per te. Questo pesa soprattutto con `LAST_VALUE()` e con tutte le analisi che distinguono tra righe fisiche (`ROWS`) e valori equivalenti (`RANGE`). `NTILE()` aggiunge poi una dimensione strategica: la segmentazione distribuzionale.
+Il frame e' il confine reale della finestra. Se non lo controlli, il database decidera' per te. Questo pesa soprattutto con `LAST_VALUE()` e con tutte le analisi che distinguono tra righe fisiche (`ROWS`) e valori equivalenti (`RANGE`). `NTILE()` aggiunge poi una dimensione strategica: la segmentazione distribuzionale. La pratica insegna che i frame espliciti, pur sembrando verbosi, sono l'investimento migliore per evitare bug costosi e difficili da diagnosticare.
