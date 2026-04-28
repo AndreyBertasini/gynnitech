@@ -29,7 +29,6 @@ export const Navbar = () => {
         {/* Desktop Menu */}
         <div className="hidden md:flex items-center gap-8">
           <a href="/" className="text-sm font-medium text-slate-300 hover:text-neon-blue transition-colors hover:drop-shadow-[0_0_8px_rgba(0,243,255,0.5)]">Home</a>
-          <a href="/course" className="text-sm font-medium text-slate-300 hover:text-neon-blue transition-colors hover:drop-shadow-[0_0_8px_rgba(0,243,255,0.5)]">Corso Analisi Dati</a>
           <a href="/blog" className="text-sm font-medium text-slate-300 hover:text-neon-blue transition-colors hover:drop-shadow-[0_0_8px_rgba(0,243,255,0.5)]">Articoli</a>
           <a href="/perche-questo-corso" className="text-sm font-medium text-slate-300 hover:text-neon-blue transition-colors hover:drop-shadow-[0_0_8px_rgba(0,243,255,0.5)]">Informazioni</a>
           <SearchWidget />
@@ -68,7 +67,6 @@ export const Navbar = () => {
         <div className="flex flex-col p-6 gap-4">
           <SearchWidget mobile />
           <a href="/" className="text-slate-300 hover:text-white font-medium">Home</a>
-          <a href="/course" className="text-slate-300 hover:text-white font-medium">Corso Analisi Dati</a>
           <a href="/blog" className="text-slate-300 hover:text-white font-medium">Articoli</a>
           <a href="/perche-questo-corso" className="text-slate-300 hover:text-white font-medium">Informazioni</a>
           <hr className="border-white/10 my-2" />
