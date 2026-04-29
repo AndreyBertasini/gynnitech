@@ -6,25 +6,25 @@ from pathlib import Path
 
 
 CANONICAL_MODULES = {
-    "panoramica": "Modulo 1: Panoramica del Corso",
-    "data-collection": "Modulo 2: Data Collection & Tracking",
-    "metriche-fondamenti": "Modulo 3: Metriche e Fondamenti Analitici",
-    "gestione-data-driven": "Modulo 4: Gestione Data-Driven",
-    "analisi-prodotto": "Modulo 5: Analisi di Prodotto",
-    "analisi-marketing": "Modulo 6: Analisi di Marketing",
-    "dashboard-visualizzazione": "Modulo 7: Dashboard & Data Visualization",
-    "marketing-data-science": "Modulo 8: Marketing Data Science",
-    "data-warehousing": "Modulo 9: Data Warehousing & Architecture",
-    "s3-data-lake": "Modulo 10: S3 & Data Lake Architecture",
-    "kafka-streaming": "Modulo 11: Kafka & Event Streaming",
-    "real-time-analytics": "Modulo 12: Real-Time Analytics & ClickHouse",
-    "infrastructure-ops": "Modulo 13: Infrastructure & Ops",
-    "advanced-sql": "Modulo 14: Advanced SQL",
-    "matematica-analisi-dati": "Modulo 15: Matematica per l'Analisi Dati",
-    "analytics-engineering": "Modulo 16: Analytics Engineering",
-    "significativita-statistica": "Modulo 17: Significativita' Statistica & A/B Testing",
-    "direzioni-analitica": "Modulo 18: Direzioni in Analitica",
-    "filosofia-analisi-dati": "Modulo 19: Fondamenti filosofici dell'analisi dei dati",
+    "panoramica": "Modulo 1: Panoramica del Corso e Metodo di Studio per Data Work",
+    "data-collection": "Modulo 2: Data Collection & Tracking Systems",
+    "metriche-fondamenti": "Modulo 3: Metriche, KPI Trees e Fondamenti Analitici",
+    "gestione-data-driven": "Modulo 4: Gestione Data-Driven e Operating System Decisionale",
+    "analisi-prodotto": "Modulo 5: Product Analytics e Growth Diagnostics",
+    "analisi-marketing": "Modulo 6: Marketing Analytics, Incrementality e Unit Economics",
+    "dashboard-visualizzazione": "Modulo 7: Dashboard, Visualization e Decision Interface",
+    "marketing-data-science": "Modulo 8: Marketing Data Science, Forecasting e Decision Models",
+    "data-warehousing": "Modulo 9: Data Warehousing & Analytical Architecture",
+    "s3-data-lake": "Modulo 10: S3, Data Lake e Lakehouse Architecture",
+    "kafka-streaming": "Modulo 11: Kafka & Event Streaming Engineering",
+    "real-time-analytics": "Modulo 12: Real-Time Analytics & ClickHouse Systems",
+    "infrastructure-ops": "Modulo 13: Infrastructure & Ops for Data Systems",
+    "advanced-sql": "Modulo 14: Advanced SQL for Analytical Systems",
+    "matematica-analisi-dati": "Modulo 15: Matematica per l Analisi Dati",
+    "analytics-engineering": "Modulo 16: Analytics Engineering con dbt e Semantic Layer",
+    "significativita-statistica": "Modulo 17: Significativita Statistica, A/B Testing e Experimentation Science",
+    "direzioni-analitica": "Modulo 18: Direzioni in Analitica: Marketing, Prodotto, Finanza",
+    "filosofia-analisi-dati": "Modulo 19: Fondamenti Filosofici dell Analisi dei Dati",
 }
 
 THEORETICAL_CATEGORIES = {
@@ -77,6 +77,10 @@ def extract_field(frontmatter: str, field: str) -> str:
     return clean_scalar(match.group(1)) if match else ""
 
 
+def has_order(frontmatter: str) -> bool:
+    return bool(re.search(r"(?m)^order:\s*\d+\s*$", frontmatter))
+
+
 def count_words(body: str) -> int:
     cleaned = re.sub(r"<[^>]+>", " ", body)
     cleaned = re.sub(r"[`*_>#|\[\](){}]", " ", cleaned)
@@ -101,6 +105,7 @@ def audit(repo_root: Path) -> int:
     learning_path = course_root / "learning-path.mdx"
     concept_map = course_root / "panoramica" / "mappe-concettuali.mdx"
     lesson_files = iter_lesson_files(course_root)
+    core_lesson_count = 0
 
     module_mismatches: list[str] = []
     missing_metadata: list[str] = []
@@ -116,6 +121,8 @@ def audit(repo_root: Path) -> int:
         category = extract_field(frontmatter, "category")
         duration = extract_field(frontmatter, "duration")
         difficulty = extract_field(frontmatter, "difficulty")
+        if has_order(frontmatter):
+            core_lesson_count += 1
         prerequisites_present = re.search(r"(?m)^prerequisites:\s*(?:\[\]|$)", frontmatter) or re.search(
             r"(?m)^prerequisites:\s*\n(?:\s*-\s*.+\n?)*", frontmatter
         )
@@ -147,7 +154,7 @@ def audit(repo_root: Path) -> int:
             )
 
     expected_module_count = len(CANONICAL_MODULES)
-    expected_lesson_count = len(lesson_files)
+    expected_lesson_count = core_lesson_count
     learning_path_text = learning_path.read_text(encoding="utf8")
     concept_map_text = concept_map.read_text(encoding="utf8")
 
@@ -159,7 +166,8 @@ def audit(repo_root: Path) -> int:
     if f"{expected_lesson_count} lezioni" not in concept_map_text:
         overview_issues.append("mappe-concettuali.mdx does not reflect the current lesson count")
 
-    print(f"Lessons: {expected_lesson_count}")
+    print(f"Core lessons: {expected_lesson_count}")
+    print(f"Supplemental resources: {len(lesson_files) - expected_lesson_count}")
     print(f"Canonical modules: {expected_module_count}")
 
     if module_mismatches:

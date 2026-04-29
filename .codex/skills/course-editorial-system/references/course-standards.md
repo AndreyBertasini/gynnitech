@@ -6,25 +6,25 @@ Use the folder under `src/content/corso` as the canonical module id. The `module
 
 | Folder | Canonical `module` value |
 |---|---|
-| `panoramica` | `Modulo 1: Panoramica del Corso` |
-| `data-collection` | `Modulo 2: Data Collection & Tracking` |
-| `metriche-fondamenti` | `Modulo 3: Metriche e Fondamenti Analitici` |
-| `gestione-data-driven` | `Modulo 4: Gestione Data-Driven` |
-| `analisi-prodotto` | `Modulo 5: Analisi di Prodotto` |
-| `analisi-marketing` | `Modulo 6: Analisi di Marketing` |
-| `dashboard-visualizzazione` | `Modulo 7: Dashboard & Data Visualization` |
-| `marketing-data-science` | `Modulo 8: Marketing Data Science` |
-| `data-warehousing` | `Modulo 9: Data Warehousing & Architecture` |
-| `s3-data-lake` | `Modulo 10: S3 & Data Lake Architecture` |
-| `kafka-streaming` | `Modulo 11: Kafka & Event Streaming` |
-| `real-time-analytics` | `Modulo 12: Real-Time Analytics & ClickHouse` |
-| `infrastructure-ops` | `Modulo 13: Infrastructure & Ops` |
-| `advanced-sql` | `Modulo 14: Advanced SQL` |
-| `matematica-analisi-dati` | `Modulo 15: Matematica per l'Analisi Dati` |
-| `analytics-engineering` | `Modulo 16: Analytics Engineering` |
-| `significativita-statistica` | `Modulo 17: Significativita' Statistica & A/B Testing` |
-| `direzioni-analitica` | `Modulo 18: Direzioni in Analitica` |
-| `filosofia-analisi-dati` | `Modulo 19: Fondamenti filosofici dell'analisi dei dati` |
+| `panoramica` | `Modulo 1: Panoramica del Corso e Metodo di Studio per Data Work` |
+| `data-collection` | `Modulo 2: Data Collection & Tracking Systems` |
+| `metriche-fondamenti` | `Modulo 3: Metriche, KPI Trees e Fondamenti Analitici` |
+| `gestione-data-driven` | `Modulo 4: Gestione Data-Driven e Operating System Decisionale` |
+| `analisi-prodotto` | `Modulo 5: Product Analytics e Growth Diagnostics` |
+| `analisi-marketing` | `Modulo 6: Marketing Analytics, Incrementality e Unit Economics` |
+| `dashboard-visualizzazione` | `Modulo 7: Dashboard, Visualization e Decision Interface` |
+| `marketing-data-science` | `Modulo 8: Marketing Data Science, Forecasting e Decision Models` |
+| `data-warehousing` | `Modulo 9: Data Warehousing & Analytical Architecture` |
+| `s3-data-lake` | `Modulo 10: S3, Data Lake e Lakehouse Architecture` |
+| `kafka-streaming` | `Modulo 11: Kafka & Event Streaming Engineering` |
+| `real-time-analytics` | `Modulo 12: Real-Time Analytics & ClickHouse Systems` |
+| `infrastructure-ops` | `Modulo 13: Infrastructure & Ops for Data Systems` |
+| `advanced-sql` | `Modulo 14: Advanced SQL for Analytical Systems` |
+| `matematica-analisi-dati` | `Modulo 15: Matematica per l Analisi Dati` |
+| `analytics-engineering` | `Modulo 16: Analytics Engineering con dbt e Semantic Layer` |
+| `significativita-statistica` | `Modulo 17: Significativita Statistica, A/B Testing e Experimentation Science` |
+| `direzioni-analitica` | `Modulo 18: Direzioni in Analitica: Marketing, Prodotto, Finanza` |
+| `filosofia-analisi-dati` | `Modulo 19: Fondamenti Filosofici dell Analisi dei Dati` |
 
 ## Lesson Archetypes
 

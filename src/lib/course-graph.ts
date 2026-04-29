@@ -1,4 +1,4 @@
-import { COURSE_MODULES } from '../data/course-modules';
+import { COURSE_MODULES, COURSE_PHASES, type CoursePhaseId } from '../data/course-modules';
 
 export interface CourseGraphSourceEntry {
   id: string;
@@ -87,51 +87,9 @@ export interface CourseGraphData {
   };
 }
 
-interface CourseGraphStageTemplate {
-  id: string;
-  title: string;
-  description: string;
-  maxIndex: number;
-}
-
-const COURSE_STAGE_TEMPLATES: CourseGraphStageTemplate[] = [
-  {
-    id: 'foundation',
-    title: 'Fondazione',
-    description: 'Orientamento, tracking, metriche e cultura del dato.',
-    maxIndex: 3,
-  },
-  {
-    id: 'application',
-    title: 'Applicazione Business',
-    description: 'Prodotto, marketing, dashboard e primi modelli decisionali.',
-    maxIndex: 7,
-  },
-  {
-    id: 'stack',
-    title: 'Infrastruttura e Stack',
-    description: 'Warehouse, lake, streaming, realtime e disciplina operativa.',
-    maxIndex: 12,
-  },
-  {
-    id: 'rigor',
-    title: 'Rigore Quantitativo',
-    description: 'SQL, matematica, analytics engineering e sperimentazione.',
-    maxIndex: 16,
-  },
-  {
-    id: 'direction',
-    title: 'Direzione e Profondita',
-    description: 'Ruoli analitici, causalita e lettura critica dei dati.',
-    maxIndex: Number.POSITIVE_INFINITY,
-  },
-];
-
 const normalizeEntryId = (id: string): string => id.replace(/\.[^/.]+$/, '');
 
-const getStageTemplateForIndex = (index: number): CourseGraphStageTemplate => {
-  return COURSE_STAGE_TEMPLATES.find((stage) => index <= stage.maxIndex) || COURSE_STAGE_TEMPLATES[COURSE_STAGE_TEMPLATES.length - 1];
-};
+const isCoreEntry = (entry: CourseGraphSourceEntry): boolean => typeof entry.data.order === 'number';
 
 const sortLessons = (a: CourseGraphSourceEntry, b: CourseGraphSourceEntry): number => {
   const orderA = a.data.order ?? Number.MAX_SAFE_INTEGER;
@@ -146,6 +104,7 @@ const sortLessons = (a: CourseGraphSourceEntry, b: CourseGraphSourceEntry): numb
 export function buildCourseGraph(entries: CourseGraphSourceEntry[]): CourseGraphData {
   const lessonEntries = entries
     .filter((entry) => normalizeEntryId(entry.id).includes('/'))
+    .filter(isCoreEntry)
     .sort(sortLessons);
 
   const lessonIdSet = new Set(lessonEntries.map((entry) => normalizeEntryId(entry.id)));
@@ -241,8 +200,10 @@ export function buildCourseGraph(entries: CourseGraphSourceEntry[]): CourseGraph
     })
     .sort((a, b) => b.count - a.count || a.source.localeCompare(b.source, 'it') || a.target.localeCompare(b.target, 'it'));
 
+  const phaseById = new Map(COURSE_PHASES.map((phase) => [phase.id, phase]));
+
   const modules: CourseGraphModule[] = COURSE_MODULES.map((module, index) => {
-    const stage = getStageTemplateForIndex(index);
+    const stage = phaseById.get(module.phase as CoursePhaseId) || COURSE_PHASES[COURSE_PHASES.length - 1];
     const moduleLessons = lessonsByModule.get(module.id) || [];
     const crossModuleIncomingCount = moduleEdges
       .filter((edge) => edge.target === module.id)
@@ -290,7 +251,7 @@ export function buildCourseGraph(entries: CourseGraphSourceEntry[]): CourseGraph
     })
     .sort((a, b) => a.source.localeCompare(b.source, 'it') || a.target.localeCompare(b.target, 'it'));
 
-  const stages: CourseGraphStage[] = COURSE_STAGE_TEMPLATES.map((stage, index) => {
+  const stages: CourseGraphStage[] = COURSE_PHASES.map((stage, index) => {
     const stageModules = modules.filter((module) => module.stageId === stage.id);
     return {
       id: stage.id,

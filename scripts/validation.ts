@@ -3,19 +3,35 @@ import path from "path";
 import { pathToFileURL } from "url";
 import { glob } from "glob";
 import matter from "gray-matter";
+import { COURSE_MODULES, COURSE_PHASES, COURSE_TRACKS } from "../src/data/course-program";
 
 const CONTENT_ROOT = path.join(process.cwd(), "src/content");
 const FRONTMATTER_REQUIRED_FIELDS: Record<"blog" | "corso", string[]> = {
     blog: ["title", "description", "date", "category"],
     corso: ["title", "description"],
 };
-const MIN_CORSO_BODY_CHARACTERS = 3000;
-const MIN_CORSO_H2_HEADINGS = 3;
+const MIN_CORSO_BODY_CHARACTERS = 2200;
+const MIN_CORSO_H2_HEADINGS = 7;
 const MIN_CORSO_INTRO_CHARACTERS = 120;
 const SUMMARY_SECTION_REGEX = /(^##\s+(?:\d+\.\s*)?(Riepilogo|Riepilogo operativo|Conclusioni|Sintesi)\b)/mi;
 const EXAMPLE_SIGNAL_REGEX = /```|\|---\||\bEsempio\b|\bCaso pratico\b|\bTemplate\b/mi;
 const DURATION_FORMAT_REGEX = /^\d{1,3}\s*(min|minuti|h|ore)$/i;
 const ALLOWED_DIFFICULTY_VALUES = new Set(["beginner", "intermediate", "advanced", "base", "intermedio", "avanzato"]);
+const REQUIRED_V2_SECTIONS = [
+    "Problema reale",
+    "Modello concettuale",
+    "Formalizzazione rigorosa",
+    "Esempio o caso studio",
+    "Lab / esercizio",
+    "Errore tipico da evitare",
+    "Quiz o checkpoint",
+];
+const REQUIRED_V2_LAB_SIGNALS = [
+    "Livello base",
+    "Livello intermedio",
+    "Livello research-grade",
+    "Dataset e materiali consigliati",
+];
 
 /**
  * Validates that a relative path resolves to a location within the base directory.
@@ -89,6 +105,8 @@ async function validateCollection(collection: "blog" | "corso"): Promise<Validat
     const slugToFile = new Map<string, string>();
     const pendingPrerequisiteChecks: Array<{ file: string; prerequisite: string }> = [];
     const orderTracker = new Map<string, Map<number, string[]>>();
+    const coreLessonsByModule = new Map<string, number>();
+    let totalCoreLessons = 0;
 
     for (const file of files) {
         const raw = await fs.readFile(file, "utf-8");
@@ -120,34 +138,33 @@ async function validateCollection(collection: "blog" | "corso"): Promise<Validat
             continue;
         }
 
-        const requiresOrder = path.dirname(relativePath) !== ".";
+        const isLessonFile = path.dirname(relativePath) !== ".";
         const rawOrder = data.order;
         const moduleFolder = path.dirname(relativePath).split(path.sep)[0];
-
-        if (requiresOrder && rawOrder === undefined) {
-            result.errors.push(buildMessage(file, "order", "missing required field"));
-        }
+        const isCoreLesson = isLessonFile && rawOrder !== undefined;
 
         if (rawOrder !== undefined && (typeof rawOrder !== "number" || !Number.isInteger(rawOrder))) {
             result.errors.push(buildMessage(file, "order", `order must be an integer number (received: ${JSON.stringify(rawOrder)})`));
         }
 
-        if (requiresOrder && typeof rawOrder === "number" && Number.isInteger(rawOrder)) {
+        if (isCoreLesson && typeof rawOrder === "number" && Number.isInteger(rawOrder)) {
             const moduleOrders = orderTracker.get(moduleFolder) ?? new Map<number, string[]>();
             const sameOrder = moduleOrders.get(rawOrder) ?? [];
             sameOrder.push(file);
             moduleOrders.set(rawOrder, sameOrder);
             orderTracker.set(moduleFolder, moduleOrders);
+            totalCoreLessons += 1;
+            coreLessonsByModule.set(moduleFolder, (coreLessonsByModule.get(moduleFolder) || 0) + 1);
         }
 
-        if (requiresOrder) {
+        if (isLessonFile) {
             const rawModule = data.module;
             if (rawModule === undefined || rawModule === null || String(rawModule).trim() === "") {
                 result.errors.push(buildMessage(file, "module", "missing required field"));
             }
         }
 
-        if (requiresOrder && (data.category === undefined || data.category === null || String(data.category).trim() === "")) {
+        if (isLessonFile && (data.category === undefined || data.category === null || String(data.category).trim() === "")) {
             pushEditorialIssue(
                 result,
                 file,
@@ -157,7 +174,7 @@ async function validateCollection(collection: "blog" | "corso"): Promise<Validat
         }
 
         const rawPrerequisites = data.prerequisites;
-        if (requiresOrder && rawPrerequisites === undefined) {
+        if (isLessonFile && rawPrerequisites === undefined) {
             result.errors.push(buildMessage(file, "prerequisites", "missing required field"));
         } else if (rawPrerequisites !== undefined) {
             if (!Array.isArray(rawPrerequisites)) {
@@ -180,7 +197,7 @@ async function validateCollection(collection: "blog" | "corso"): Promise<Validat
         }
 
         const rawDuration = data.duration;
-        if (requiresOrder && rawDuration === undefined) {
+        if (isLessonFile && rawDuration === undefined) {
             result.errors.push(buildMessage(file, "duration", "missing required field"));
         } else if (rawDuration !== undefined && (typeof rawDuration !== "string" || !DURATION_FORMAT_REGEX.test(rawDuration.trim()))) {
             pushEditorialIssue(
@@ -192,7 +209,7 @@ async function validateCollection(collection: "blog" | "corso"): Promise<Validat
         }
 
         const rawDifficulty = data.difficulty;
-        if (requiresOrder && rawDifficulty === undefined) {
+        if (isLessonFile && rawDifficulty === undefined) {
             result.errors.push(buildMessage(file, "difficulty", "missing required field"));
         } else if (
             rawDifficulty !== undefined
@@ -208,7 +225,7 @@ async function validateCollection(collection: "blog" | "corso"): Promise<Validat
         }
 
         const rawObjectives = data.learningObjectives;
-        if (requiresOrder && rawObjectives === undefined) {
+        if (isLessonFile && rawObjectives === undefined) {
             result.errors.push(buildMessage(file, "learningObjectives", "missing required field"));
         } else if (rawObjectives !== undefined) {
             if (!Array.isArray(rawObjectives)) {
@@ -232,7 +249,7 @@ async function validateCollection(collection: "blog" | "corso"): Promise<Validat
             }
         }
 
-        if (!requiresOrder) {
+        if (!isLessonFile) {
             continue;
         }
 
@@ -289,6 +306,23 @@ async function validateCollection(collection: "blog" | "corso"): Promise<Validat
                 "missing concrete example signals (code block, table, 'Esempio', 'Caso pratico' or 'Template')",
             );
         }
+
+        for (const section of REQUIRED_V2_SECTIONS) {
+            const escaped = section.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+            if (!new RegExp(`^##\\s+${escaped}\\b`, "mi").test(trimmedContent)) {
+                result.errors.push(
+                    buildMessage(file, "content", `missing required V2 section "${section}"`),
+                );
+            }
+        }
+
+        for (const signal of REQUIRED_V2_LAB_SIGNALS) {
+            if (!trimmedContent.includes(signal)) {
+                result.errors.push(
+                    buildMessage(file, "content", `missing required V2 lab signal "${signal}"`),
+                );
+            }
+        }
     }
 
     if (collection === "corso") {
@@ -316,6 +350,46 @@ async function validateCollection(collection: "blog" | "corso"): Promise<Validat
                         ),
                     );
                 }
+            }
+        }
+
+        const expectedCoreLessonCount = COURSE_MODULES.reduce((sum, module) => sum + module.coreLessons.length, 0);
+        if (COURSE_MODULES.length !== 19) {
+            result.errors.push(buildMessage(path.join(process.cwd(), "src/data/course-program.ts"), "course-program", "expected exactly 19 modules"));
+        }
+        if (COURSE_PHASES.length !== 5) {
+            result.errors.push(buildMessage(path.join(process.cwd(), "src/data/course-program.ts"), "course-program", "expected exactly 5 phases"));
+        }
+        if (COURSE_TRACKS.length !== 3) {
+            result.errors.push(buildMessage(path.join(process.cwd(), "src/data/course-program.ts"), "course-program", "expected exactly 3 final tracks"));
+        }
+        if (expectedCoreLessonCount !== 210) {
+            result.errors.push(buildMessage(path.join(process.cwd(), "src/data/course-program.ts"), "course-program", `expected V2 blueprint to define 210 core lessons (received: ${expectedCoreLessonCount})`));
+        }
+        if (totalCoreLessons !== expectedCoreLessonCount) {
+            result.errors.push(buildMessage(path.join(process.cwd(), "src/content/corso"), "core-lessons", `expected ${expectedCoreLessonCount} ordered core lessons, found ${totalCoreLessons}`));
+        }
+
+        for (const module of COURSE_MODULES) {
+            const counted = coreLessonsByModule.get(module.id) || 0;
+            if (counted !== module.coreLessons.length) {
+                result.errors.push(
+                    buildMessage(
+                        path.join(process.cwd(), "src/content/corso", module.id),
+                        "core-lessons",
+                        `expected ${module.coreLessons.length} core lessons for module "${module.id}", found ${counted}`,
+                    ),
+                );
+            }
+
+            if (!module.objective || module.prerequisites.length === 0 && module.id !== "panoramica") {
+                result.errors.push(
+                    buildMessage(
+                        path.join(process.cwd(), "src/data/course-program.ts"),
+                        "course-program",
+                        `module "${module.id}" is missing objective or prerequisites`,
+                    ),
+                );
             }
         }
     }

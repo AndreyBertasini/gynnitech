@@ -1,30 +1,13 @@
 import { readFileSync, readdirSync, statSync } from "node:fs";
 import path from "node:path";
 import { describe, expect, test } from "vitest";
+import { COURSE_MODULES } from "../src/data/course-program";
 
 const courseRoot = path.resolve("src/content/corso");
 
-const canonicalModules: Record<string, string> = {
-    panoramica: "Modulo 1: Panoramica del Corso",
-    "data-collection": "Modulo 2: Data Collection & Tracking",
-    "metriche-fondamenti": "Modulo 3: Metriche e Fondamenti Analitici",
-    "gestione-data-driven": "Modulo 4: Gestione Data-Driven",
-    "analisi-prodotto": "Modulo 5: Analisi di Prodotto",
-    "analisi-marketing": "Modulo 6: Analisi di Marketing",
-    "dashboard-visualizzazione": "Modulo 7: Dashboard & Data Visualization",
-    "marketing-data-science": "Modulo 8: Marketing Data Science",
-    "data-warehousing": "Modulo 9: Data Warehousing & Architecture",
-    "s3-data-lake": "Modulo 10: S3 & Data Lake Architecture",
-    "kafka-streaming": "Modulo 11: Kafka & Event Streaming",
-    "real-time-analytics": "Modulo 12: Real-Time Analytics & ClickHouse",
-    "infrastructure-ops": "Modulo 13: Infrastructure & Ops",
-    "advanced-sql": "Modulo 14: Advanced SQL",
-    "matematica-analisi-dati": "Modulo 15: Matematica per l'Analisi Dati",
-    "analytics-engineering": "Modulo 16: Analytics Engineering",
-    "significativita-statistica": "Modulo 17: Significativita' Statistica & A/B Testing",
-    "direzioni-analitica": "Modulo 18: Direzioni in Analitica",
-    "filosofia-analisi-dati": "Modulo 19: Fondamenti filosofici dell'analisi dei dati",
-};
+const canonicalModules: Record<string, string> = Object.fromEntries(
+    COURSE_MODULES.map((module, index) => [module.id, `Modulo ${index + 1}: ${module.title}`]),
+);
 
 function walkMdxFiles(dirPath: string): string[] {
     return readdirSync(dirPath).flatMap((entry) => {
@@ -71,8 +54,17 @@ function hasListField(frontmatter: string, field: string): boolean {
     );
 }
 
+function hasOrder(frontmatter: string): boolean {
+    return /^order:\s*\d+\s*$/m.test(frontmatter);
+}
+
 describe("Course catalog governance", () => {
     const lessonFiles = walkMdxFiles(courseRoot).filter((filePath) => path.dirname(filePath) !== courseRoot);
+    const coreLessonFiles = lessonFiles.filter((filePath) => {
+        const raw = readFileSync(filePath, "utf8");
+        const { frontmatter } = splitFrontmatter(raw);
+        return hasOrder(frontmatter);
+    });
 
     test.each(lessonFiles)("%s should use the canonical module label", (filePath) => {
         const folder = path.basename(path.dirname(filePath));
@@ -102,7 +94,7 @@ describe("Course catalog governance", () => {
     test("learning path should reflect current module and lesson counts", () => {
         const learningPath = readFileSync(path.join(courseRoot, "learning-path.mdx"), "utf8");
         const moduleCount = Object.keys(canonicalModules).length;
-        const lessonCount = lessonFiles.length;
+        const lessonCount = coreLessonFiles.length;
 
         expect(learningPath).toContain(`${moduleCount} moduli`);
         expect(learningPath).toContain(`${lessonCount} lezioni`);
@@ -111,11 +103,11 @@ describe("Course catalog governance", () => {
     test("concept map should reflect the current module taxonomy", () => {
         const conceptMap = readFileSync(path.join(courseRoot, "panoramica", "mappe-concettuali.mdx"), "utf8");
         const moduleCount = Object.keys(canonicalModules).length;
-        const lessonCount = lessonFiles.length;
+        const lessonCount = coreLessonFiles.length;
 
         expect(conceptMap).toContain(`${moduleCount} moduli`);
         expect(conceptMap).toContain(`${lessonCount} lezioni`);
         expect(conceptMap).toContain("Direzioni in Analitica");
-        expect(conceptMap).toContain("Fondamenti filosofici dell'analisi dei dati");
+        expect(conceptMap).toContain("Fondamenti Filosofici dell Analisi dei Dati");
     });
 });

@@ -9,9 +9,21 @@ interface LessonCardProps {
   prerequisitesCount?: number;
   index: number;
   href: string;
+  imageSrc?: string;
+  imageAlt?: string;
 }
 
-export const LessonCard = ({ title, description, duration, difficulty, prerequisitesCount, index, href }: LessonCardProps) => {
+export const LessonCard = ({
+  title,
+  description,
+  duration,
+  difficulty,
+  prerequisitesCount,
+  index,
+  href,
+  imageSrc,
+  imageAlt,
+}: LessonCardProps) => {
   return (
     <a
       href={href}
@@ -21,10 +33,28 @@ export const LessonCard = ({ title, description, duration, difficulty, prerequis
       {/* Top Decoration */}
       <div className="absolute top-0 left-0 w-full h-1 bg-gradient-to-r from-transparent via-white/10 to-transparent group-hover:via-neon-blue/80 transition-all duration-500" />
 
-      <div className="mb-4 flex items-center justify-between">
-        <span className="flex items-center justify-center w-8 h-8 rounded-lg bg-white/5 border border-white/10 text-xs font-orbitron text-slate-400 group-hover:text-neon-blue group-hover:border-neon-blue/30 transition-colors shadow-inner">
-          {index + 1}
-        </span>
+      {imageSrc && (
+        <div className="relative mb-5 overflow-hidden rounded-[1.25rem] border border-white/10 bg-white/[0.03]">
+          <img
+            src={imageSrc}
+            alt={imageAlt || title}
+            className="h-40 w-full object-cover transition-transform duration-500 group-hover:scale-[1.03]"
+            loading="lazy"
+            decoding="async"
+          />
+          <div className="absolute inset-0 bg-gradient-to-t from-[#0a0e14] via-[#0a0e14]/25 to-transparent" />
+          <span className="absolute left-4 top-4 flex items-center justify-center w-9 h-9 rounded-xl bg-black/40 border border-white/10 text-xs font-orbitron text-slate-100 shadow-[0_0_16px_rgba(0,0,0,0.35)] backdrop-blur-md transition-colors group-hover:text-neon-blue group-hover:border-neon-blue/30">
+            {index + 1}
+          </span>
+        </div>
+      )}
+
+      <div className={`mb-4 flex items-center ${imageSrc ? 'justify-end' : 'justify-between'}`}>
+        {!imageSrc && (
+          <span className="flex items-center justify-center w-8 h-8 rounded-lg bg-white/5 border border-white/10 text-xs font-orbitron text-slate-400 group-hover:text-neon-blue group-hover:border-neon-blue/30 transition-colors shadow-inner">
+            {index + 1}
+          </span>
+        )}
         <div className="flex items-center gap-2">
           {difficulty && (
             <span className="text-[11px] text-slate-300 bg-white/5 px-2 py-1 rounded-md border border-white/10 font-medium">
