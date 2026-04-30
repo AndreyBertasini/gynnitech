@@ -31,12 +31,12 @@ export const Navbar = () => {
           <a href="/" className="text-sm font-medium text-slate-300 hover:text-neon-blue transition-colors hover:drop-shadow-[0_0_8px_rgba(0,243,255,0.5)]">Home</a>
           <a href="/blog" className="text-sm font-medium text-slate-300 hover:text-neon-blue transition-colors hover:drop-shadow-[0_0_8px_rgba(0,243,255,0.5)]">Articoli</a>
           <a href="/perche-questo-corso" className="text-sm font-medium text-slate-300 hover:text-neon-blue transition-colors hover:drop-shadow-[0_0_8px_rgba(0,243,255,0.5)]">Informazioni</a>
+          <a href={LINKEDIN_URL} target="_blank" rel="noreferrer" className="text-sm font-medium text-slate-300 hover:text-neon-blue transition-colors hover:drop-shadow-[0_0_8px_rgba(0,243,255,0.5)]">Chi sono</a>
           <SearchWidget />
         </div>
 
         {/* CTA */}
         <div className="hidden md:flex items-center gap-4">
-          <a href={LINKEDIN_URL} target="_blank" rel="noreferrer" className="text-sm font-medium text-slate-300 hover:text-neon-pink transition-colors hover:drop-shadow-[0_0_8px_rgba(255,0,255,0.5)]">Chi sono</a>
           <a href={BOOKING_URL} target="_blank" rel="noreferrer" className="bg-acid-yellow/10 hover:bg-acid-yellow/20 text-acid-yellow border border-acid-yellow/50 hover:border-acid-yellow px-5 py-2 rounded-full text-sm font-semibold transition-[background-color,border-color,box-shadow] shadow-[0_0_15px_rgba(204,255,0,0.2)] hover:shadow-[0_0_25px_rgba(204,255,0,0.5)] backdrop-blur-sm">
             Prenota una call
           </a>
@@ -69,8 +69,8 @@ export const Navbar = () => {
           <a href="/" className="text-slate-300 hover:text-white font-medium">Home</a>
           <a href="/blog" className="text-slate-300 hover:text-white font-medium">Articoli</a>
           <a href="/perche-questo-corso" className="text-slate-300 hover:text-white font-medium">Informazioni</a>
-          <hr className="border-white/10 my-2" />
           <a href={LINKEDIN_URL} target="_blank" rel="noreferrer" className="text-slate-300 hover:text-white font-medium">Chi sono</a>
+          <hr className="border-white/10 my-2" />
           <a href={BOOKING_URL} target="_blank" rel="noreferrer" className="bg-acid-yellow/10 hover:bg-acid-yellow/20 text-acid-yellow border border-acid-yellow/50 hover:border-acid-yellow text-center py-3 rounded-lg font-semibold transition-[background-color,border-color,box-shadow] shadow-[0_0_15px_rgba(204,255,0,0.2)] hover:shadow-[0_0_25px_rgba(204,255,0,0.5)] backdrop-blur-sm">Prenota una call</a>
         </div>
       </div>
