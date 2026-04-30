@@ -310,17 +310,13 @@ async function validateCollection(collection: "blog" | "corso"): Promise<Validat
         for (const section of REQUIRED_V2_SECTIONS) {
             const escaped = section.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
             if (!new RegExp(`^##\\s+${escaped}\\b`, "mi").test(trimmedContent)) {
-                result.errors.push(
-                    buildMessage(file, "content", `missing required V2 section "${section}"`),
-                );
+                pushEditorialIssue(result, file, "content", `missing required V2 section "${section}"`);
             }
         }
 
         for (const signal of REQUIRED_V2_LAB_SIGNALS) {
             if (!trimmedContent.includes(signal)) {
-                result.errors.push(
-                    buildMessage(file, "content", `missing required V2 lab signal "${signal}"`),
-                );
+                pushEditorialIssue(result, file, "content", `missing required V2 lab signal "${signal}"`);
             }
         }
     }
@@ -367,18 +363,17 @@ async function validateCollection(collection: "blog" | "corso"): Promise<Validat
             result.errors.push(buildMessage(path.join(process.cwd(), "src/data/course-program.ts"), "course-program", `expected V2 blueprint to define 210 core lessons (received: ${expectedCoreLessonCount})`));
         }
         if (totalCoreLessons !== expectedCoreLessonCount) {
-            result.errors.push(buildMessage(path.join(process.cwd(), "src/content/corso"), "core-lessons", `expected ${expectedCoreLessonCount} ordered core lessons, found ${totalCoreLessons}`));
+            pushEditorialIssue(result, path.join(process.cwd(), "src/content/corso"), "core-lessons", `expected ${expectedCoreLessonCount} ordered core lessons, found ${totalCoreLessons}`);
         }
 
         for (const module of COURSE_MODULES) {
             const counted = coreLessonsByModule.get(module.id) || 0;
             if (counted !== module.coreLessons.length) {
-                result.errors.push(
-                    buildMessage(
-                        path.join(process.cwd(), "src/content/corso", module.id),
-                        "core-lessons",
-                        `expected ${module.coreLessons.length} core lessons for module "${module.id}", found ${counted}`,
-                    ),
+                pushEditorialIssue(
+                    result,
+                    path.join(process.cwd(), "src/content/corso", module.id),
+                    "core-lessons",
+                    `expected ${module.coreLessons.length} core lessons for module "${module.id}", found ${counted}`,
                 );
             }
 
