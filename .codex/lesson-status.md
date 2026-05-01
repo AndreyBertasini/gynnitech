@@ -17,9 +17,10 @@ Updated: 2026-05-01
 - Batch 3: riscritte 5 lezioni del modulo filosofia (`francis-bacon-induzione-e-idoli-della-mente`, `karl-popper-falsificabilita-e-sperimentazione`, `thomas-kuhn-paradigmi-e-data-culture`, `david-hume-esperienza-abitudine-mentale-e-scetticismo`, `immanuel-kant-causalita-come-categoria-dell-intelletto`) trasformando testi lunghi o generici in lezioni compatte, operative e collegate a decisioni analytics reali.
 - Batch 4: riscritte 5 lezioni core del modulo filosofia (`perche-l-analisi-dati-ha-una-storia-filosofica`, `causalita-causa-ed-effetto-nell-analisi-dei-dati`, `causalita-regressioni-e-inferenza-statistica`, `cause-multiple-condizioni-necessarie-e-sufficienti`, `determinismo-contingenza-probabilita-e-previsione`) rendendo specifici evidenza, causalita, modelli, misurazione e incertezza.
 - Batch 5: riscritte le ultime 5 lezioni/risorse del modulo filosofia (`aristotele-e-le-quattro-cause`, `filosofia-della-scienza-spiegazione-scientifica-e-responsabilita`, `simpson-paradox-e-confounding`, `dalla-causalita-classica-al-futuro-dell-analisi-dati`, `indice-filosofia-analisi-dati`) completando la rifinitura del modulo.
-- Richiesta corrente: sistemare le prossime 30 lezioni. Avanzamento: 15/30 completate in questa tranche.
+- Batch 6: riscritte 5 lezioni di gestione data-driven (`ciclo-deming-hadi`, `cultura-data-driven`, `decision-making-dati`, `framework-jtbd`, `interviste-profondita`) con focus su HADI, backlog ipotesi, decision memo, JTBD e ricerca qualitativa.
+- Richiesta corrente: sistemare le prossime 30 lezioni. Avanzamento: 20/30 completate in questa tranche.
 
 ## Da monitorare
 
 - Nessuna lezione supera la soglia editoriale di 4.500 parole dopo il batch 2.
-- Prossimo batch previsto: passare ai contenuti operativi piu lunghi, partendo da gestione data-driven e product analytics.
+- Prossimo batch previsto: riscrivere 5 lezioni centrali di product analytics.
