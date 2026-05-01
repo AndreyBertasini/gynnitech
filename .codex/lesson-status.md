@@ -16,9 +16,10 @@ Updated: 2026-05-01
 - Batch 2: riscritte e compattate 5 lezioni del modulo filosofia (`epistemologia-dei-dati`, `etica-algoritmi-e-responsabilita-analitica`, `judea-pearl-dag-e-rivoluzione-causale`, `caso-studio-pensiero-filosofico-e-business-decision`, `frequentismo-vs-bayesianismo`) con taglio piu operativo, casi business, tabelle decisionali e lab.
 - Batch 3: riscritte 5 lezioni del modulo filosofia (`francis-bacon-induzione-e-idoli-della-mente`, `karl-popper-falsificabilita-e-sperimentazione`, `thomas-kuhn-paradigmi-e-data-culture`, `david-hume-esperienza-abitudine-mentale-e-scetticismo`, `immanuel-kant-causalita-come-categoria-dell-intelletto`) trasformando testi lunghi o generici in lezioni compatte, operative e collegate a decisioni analytics reali.
 - Batch 4: riscritte 5 lezioni core del modulo filosofia (`perche-l-analisi-dati-ha-una-storia-filosofica`, `causalita-causa-ed-effetto-nell-analisi-dei-dati`, `causalita-regressioni-e-inferenza-statistica`, `cause-multiple-condizioni-necessarie-e-sufficienti`, `determinismo-contingenza-probabilita-e-previsione`) rendendo specifici evidenza, causalita, modelli, misurazione e incertezza.
-- Richiesta corrente: sistemare le prossime 30 lezioni. Avanzamento: 10/30 completate in questa tranche.
+- Batch 5: riscritte le ultime 5 lezioni/risorse del modulo filosofia (`aristotele-e-le-quattro-cause`, `filosofia-della-scienza-spiegazione-scientifica-e-responsabilita`, `simpson-paradox-e-confounding`, `dalla-causalita-classica-al-futuro-dell-analisi-dati`, `indice-filosofia-analisi-dati`) completando la rifinitura del modulo.
+- Richiesta corrente: sistemare le prossime 30 lezioni. Avanzamento: 15/30 completate in questa tranche.
 
 ## Da monitorare
 
 - Nessuna lezione supera la soglia editoriale di 4.500 parole dopo il batch 2.
-- Prossimo batch previsto: completare altre 5 lezioni del modulo filosofia prima di passare ai moduli operativi piu lunghi.
+- Prossimo batch previsto: passare ai contenuti operativi piu lunghi, partendo da gestione data-driven e product analytics.
