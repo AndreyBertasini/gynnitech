@@ -19,9 +19,10 @@ Updated: 2026-05-01
 - Batch 5: riscritte le ultime 5 lezioni/risorse del modulo filosofia (`aristotele-e-le-quattro-cause`, `filosofia-della-scienza-spiegazione-scientifica-e-responsabilita`, `simpson-paradox-e-confounding`, `dalla-causalita-classica-al-futuro-dell-analisi-dati`, `indice-filosofia-analisi-dati`) completando la rifinitura del modulo.
 - Batch 6: riscritte 5 lezioni di gestione data-driven (`ciclo-deming-hadi`, `cultura-data-driven`, `decision-making-dati`, `framework-jtbd`, `interviste-profondita`) con focus su HADI, backlog ipotesi, decision memo, JTBD e ricerca qualitativa.
 - Batch 7: riscritte 5 lezioni di product analytics (`product-market-fit`, `customer-development`, `ux-research`, `retention-framework`, `nps-net-promoter-score`) con casi, metriche, segmentazione e decisioni operative piu chiare.
-- Richiesta corrente: sistemare le prossime 30 lezioni. Avanzamento: 25/30 completate in questa tranche.
+- Batch 8: riscritte 5 lezioni miste ad alto impatto (`ricerca-quantitativa`, `ab-testing`, `p-value-errori-e-interpretazione-corretta`, `analytics-engineering/cheat-sheet`, `materialization-incremental-e-snapshot`) chiudendo la tranche con ricerca quantitativa, product value model, interpretazione statistica e dbt operativo.
+- Richiesta corrente: sistemare le prossime 30 lezioni. Avanzamento: 30/30 completate in questa tranche.
 
 ## Da monitorare
 
 - Nessuna lezione supera la soglia editoriale di 4.500 parole dopo il batch 2.
-- Prossimo batch previsto: chiudere la tranche 30/30 con lezioni ad alto impatto su statistica, ricerca quantitativa, A/B testing e analytics engineering.
+- Prossimo batch previsto: dopo merge della PR, continuare con altri contenuti lunghi rimasti nei moduli marketing, matematica, SQL e data engineering.

@@ -1,35 +1,64 @@
 ---
 title: "Materialization, incremental e snapshot per eventi e stato cliente"
-description: 'Materialization, incremental e snapshot per eventi e stato cliente. Quando usare `view`, `table`, `incremental` e `snapshot` | GinnyTech, creata da AD'
-headerImage: '/course-headers/analytics-engineering-materialization-incremental-e-snapshot-ginnytech-ad.png'
-headerImageAlt: 'Materialization, incremental e snapshot per eventi e stato cliente - immagine ufficiale della lezione su GinnyTech, creata da AD'
+description: "Quando usare view, table, incremental e snapshot in dbt per bilanciare costo, freschezza e storicita."
+headerImage: "/course-headers/analytics-engineering-materialization-incremental-e-snapshot-ginnytech-ad.png"
+headerImageAlt: "Materialization, incremental e snapshot per eventi e stato cliente - immagine ufficiale della lezione su GinnyTech, creata da AD"
 module: "Modulo 16: Analytics Engineering con dbt e Semantic Layer"
 order: 6
 category: Modellazione Martech
 difficulty: advanced
-duration: 8 min
+duration: 12 min
 prerequisites:
   - analytics-engineering/marts-martech-funnel-retention-e-attribution
 learningObjectives:
-  - Scegliere la materialization giusta per ogni tipo di modello.
-  - Costruire modelli incrementali sostenibili su eventi e costi.
-  - Usare snapshot per mantenere storicita' sullo stato cliente.
+  - Scegliere la materialization giusta per ogni modello dbt.
+  - Costruire incrementali sostenibili su eventi e costi.
+  - Usare snapshot per storicizzare stato cliente o account.
 ---
 
-import { Aside } from '@astrojs/starlight/components'
+In dbt non decidi solo che SQL scrivere. Decidi come quel modello vive nel warehouse: view, table, incremental o snapshot. La scelta influenza costo, performance, freschezza e affidabilita.
 
-Una delle domande piu' importanti in dbt non e' "quale SQL scrivo?", ma "come deve essere costruito questo modello nel warehouse?". La risposta dipende da volume, frequenza, latenza accettabile e bisogno di storicita'.
+Un modello piccolo e leggero puo restare view. Un mart letto da dieci dashboard ogni ora probabilmente deve essere table. Una tabella eventi con milioni di righe al giorno ha bisogno di incremental. Uno stato cliente che cambia nel tempo richiede snapshot.
 
-## Le quattro scelte piu' comuni
+Scegliere male non rompe subito il progetto. Lo rende costoso o fragile nel tempo.
 
-| Materialization | Quando usarla | Rischio tipico |
+## Problema reale
+
+Molti team usano materialization per abitudine: tutto view finche il warehouse diventa lento, oppure tutto table finche i rebuild costano troppo. Poi arrivano eventi in ritardo, correzioni storiche o cambi di stato cliente e i numeri non tornano.
+
+Il problema non e tecnico in senso stretto. E una decisione architetturale: quale compromesso accetti tra costo, freschezza, complessita e storia?
+
+## Modello concettuale
+
+Le quattro scelte principali.
+
+| Materialization | Quando usarla | Rischio |
 |---|---|---|
-| `view` | staging e modelli leggeri | calcoli ripetuti a ogni query |
-| `table` | marts stabili e costosi da ricomputare | rebuild totale piu' pesante |
-| `incremental` | grandi volumi append/update | logica di finestra incompleta |
-| `snapshot` | storicizzare stato dimensionale | crescita incontrollata se usato male |
+| `view` | Staging leggero e dati piccoli | Ricalcolo a ogni query |
+| `table` | Mart stabili e letti spesso | Rebuild pesante |
+| `incremental` | Eventi o costi a grandi volumi | Finestra di recupero sbagliata |
+| `snapshot` | Stato che cambia nel tempo | Crescita eccessiva o chiavi fragili |
 
-## Esempio incrementale
+La domanda guida e: questo modello deve essere fresco, economico, storico o veloce in lettura?
+
+## Formalizzazione rigorosa
+
+Prima di scegliere, compila questa matrice.
+
+| Campo | Domanda |
+|---|---|
+| Volume | Quante righe e quanto cresce? |
+| Frequenza | Quanto spesso arrivano nuovi dati? |
+| Lettura | Quante dashboard o modelli lo usano? |
+| Storia | Devo sapere com era lo stato nel passato? |
+| Late data | Arrivano eventi in ritardo o correzioni? |
+| Chiave | Esiste una chiave unica stabile? |
+
+Se non sai rispondere a late data e chiave, non sei pronto per un incremental affidabile.
+
+## Esempio o caso studio
+
+Un modello GA4 sessions cresce di milioni di righe e alimenta attribution.
 
 ```sql
 {{
@@ -39,56 +68,19 @@ Una delle domande piu' importanti in dbt non e' "quale SQL scrivo?", ma "come de
   )
 }}
 
-with source as (
-    select * from {{ source('raw_marketing', 'ga4_sessions') }}
-    {% if is_incremental() %}
-      where loaded_at > (select max(loaded_at) from {{ this }})
-    {% endif %}
+select *
+from {{ source('raw_marketing', 'ga4_sessions') }}
+{% if is_incremental() %}
+where session_started_at >= (
+  select max(session_started_at) - interval '7 day'
+  from {{ this }}
 )
-select
-    cast(session_id as varchar) as session_id,
-    cast(user_pseudo_id as varchar) as anonymous_user_id,
-    cast(session_start_at as timestamp) as session_started_at,
-    lower(source) as session_source,
-    lower(medium) as session_medium,
-    loaded_at
-from source
-```
-
-## Il problema reale degli incrementali
-
-Esempi di problemi tipici:
-
-- eventi arrivano in ritardo
-- la piattaforma corregge righe del passato
-- il modello dipende da finestre temporali
-- la chiave non e' davvero univoca
-
-Per questo spesso serve una finestra di sicurezza:
-
-```sql
-{% if is_incremental() %}
-  where loaded_at >= (
-      select max(loaded_at) - interval '2 day'
-      from {{ this }}
-  )
 {% endif %}
 ```
 
-## Incremental su modelli con finestre
+La finestra di 7 giorni protegge da eventi tardivi e ricalcoli di sessionizzazione. Filtrare solo dal massimo timestamp sarebbe piu economico, ma piu fragile.
 
-Se costruisci un modello di attribution o sessionizzazione, prendere solo i record nuovi puo' essere insufficiente. Ti serve ricalcolare una finestra recente.
-
-```sql
-{% if is_incremental() %}
-  where session_started_at >= (
-      select max(session_started_at) - interval '7 day'
-      from {{ this }}
-  )
-{% endif %}
-```
-
-## Snapshot per lo stato cliente
+Per lo stato cliente, invece, serve snapshot:
 
 ```sql
 {% snapshot snap_customer_lifecycle %}
@@ -98,162 +90,42 @@ Se costruisci un modello di attribution o sessionizzazione, prendere solo i reco
     target_schema='snapshot',
     unique_key='customer_id',
     strategy='check',
-    check_cols=['lifecycle_stage', 'plan_name', 'account_tier']
+    check_cols=['lifecycle_stage', 'plan_name']
   )
 }}
 
-select
-    customer_id,
-    lifecycle_stage,
-    plan_name,
-    account_tier,
-    updated_at
+select customer_id, lifecycle_stage, plan_name, updated_at
 from {{ ref('stg_customer_state') }}
 
 {% endsnapshot %}
 ```
 
-Questo ti permette di rispondere a domande come:
-
-- quale piano aveva il cliente quando ha convertito?
-- in che fase CRM era il lead prima della chiusura?
-
-<Aside type="tip" title="Regola di sicurezza">
-Se un modello incrementale usa join temporali, finestre o deduplica tardiva, non filtrare solo "dal massimo timestamp in poi". Ricalcola sempre una finestra recente esplicita.
-</Aside>
-
-## Il costo reale di una scelta sbagliata
-
-Immagina di avere un modello con 50 milioni di righe che viene letto da dieci dashboard ogni 15 minuti. Se quel modello e' una `view`, ogni query lo ricalcola da zero. Il costo computazionale e' enorme.
-
-Se invece scegli `table`, spendi risorse una sola volta al giorno per ricomputare, e ogni query legge il dato precalcolato. Molto piu' economico.
-
-Al contrario, se hai un modello leggero con 10.000 righe letto due volte al giorno, farlo `table` e' spreco. Una `view` e' sufficiente e piu' fresca.
-
-In martech questa decisione conta moltissimo perche' i volumi sono variabili: Meta cresce da 1M a 100M di righe in una stagione, quindi la scelta che funzionava a giugno non funziona a novembre.
-
-## Incremental: quando vale davvero la pena
-
-Gli incrementali hanno un costo. Non solo computazionale: anche di complessita'. Se tira fuori un incremental, assicurati che il problema sia abbastanza grande.
-
-Regola pratica:
-
-- tabella con &lt;100.000 righe? Probabilmente `table` basta.
-- tabella con 100K-10M righe caricata ogni giorno? `incremental` ha senso.
-- tabella con >10M righe caricata spesso? `incremental` diventa obbligatorio.
-
-Ma l'incremental non e' uno sconto automatico. Chiede:
-
-- una chiave unica stabile
-- una logica di finestra di recupero corretta
-- test che proteggono da riconciliazioni sbagliate
-
-Se uno di questi tre manca, la "ottimizzazione" diventa una bomba ad orologeria.
-
-## Snapshot: uso comune in martech
-
-Nei progetti martech gli snapshot sono spesso utili per questi casi:
-
-1. **Lifecycle stage in CRM**: quando cambia, voglio sapere quando era quale stage
-2. **Piano subscription**: quale piano aveva il cliente quando ha ordinato?
-3. **Tier di account**: per cohorting e analisi retention
-
-```sql
-{% snapshot snap_subscription_plan %}
-
-{{
-  config(
-    target_schema='snapshot',
-    unique_key='customer_id',
-    strategy='check',
-    check_cols=['plan_name', 'plan_price']
-  )
-}}
-
-select
-    customer_id,
-    plan_name,
-    plan_price,
-    updated_at
-from {{ ref('stg_subscription_current_state') }}
-
-{% endsnapshot %}
-```
-
-Lanciato ogni giorno, questo snapshot cattura ogni cambio di piano. Poi in un'analisi di retention puoi domandare "quali clienti che sono partiti da uno starter plan sono arrivati a pro?"
-
-## Problema reale
-
-Un mart dbt funziona oggi, ma domani cambia fonte, logica incrementale o stato storico e nessuno sa se il modello resta affidabile.
-
-La domanda pratica non e "so ripetere la teoria?", ma: **quale decisione migliora se applico bene questa lezione?** In analytics engineering, il rischio tipico e prendere un segnale parziale e trasformarlo in una scelta costosa: una feature lanciata troppo presto, un budget spostato senza causalita, un modello dati fragile o una raccomandazione piu elegante che utile.
-
-## Modello concettuale
-
-Usa questa griglia in tre passaggi: prima definisci il fenomeno, poi scegli l evidenza minima credibile, infine trasformi l evidenza in una decisione esplicita.
-
-| Livello | Domanda guida | Output atteso |
-|---|---|---|
-| Fenomeno | Che cosa sta davvero succedendo? | Perimetro, segmenti e assunzioni |
-| Evidenza | Quale dato cambierebbe la nostra opinione? | Metriche, osservazioni e guardrail |
-| Decisione | Che cosa faremo se il segnale regge? | Azione, owner, timing e criterio di stop |
-
-Questo modello evita due estremi: teoria senza applicazione e operativita senza ragionamento.
-
-## Formalizzazione rigorosa
-
-Formalizza la lezione come una catena decisionale:
-
-| Elemento | Definizione operativa | Controllo di qualita |
-|---|---|---|
-| Input | fonti raw, staging model, marts, test dbt, snapshot, lineage ed exposures | Fonte, periodo, granularita e completezza dichiarati |
-| Ipotesi | Relazione attesa tra comportamento, metrica e decisione | Assunzioni scritte prima dell analisi |
-| Metrica | freschezza, correttezza, costo, lineage, adoption e incidenti dati | Denominatore, segmento e finestra temporale espliciti |
-| Guardrail | Cosa non deve peggiorare mentre ottimizzi | Soglie condivise con analytics engineer, data platform, BI e stakeholder business |
-| Decisione | rendere i modelli dati affidabili, riusabili e governabili nel tempo | Owner, scadenza e criterio di revisione |
-
-Una lezione e formalizzata bene quando un altra persona puo ricostruire il ragionamento e contestare le assunzioni senza chiedere spiegazioni extra.
-
-## Esempio o caso studio
-
-Immagina una review settimanale in cui analytics engineer, data platform, BI e stakeholder business deve decidere su "Materialization, incremental e snapshot per eventi e stato cliente". Il dato iniziale mostra un segnale promettente, ma il team non si ferma al numero principale. Divide il problema per segmento, controlla i guardrail, cerca spiegazioni alternative e scrive una raccomandazione con tre parti: cosa sappiamo, cosa non sappiamo, cosa faremo adesso.
-
-| Osservazione | Interpretazione prudente | Azione |
-|---|---|---|
-| Segnale positivo sulla metrica primaria | Potrebbe essere effetto reale o composizione del campione | Controllare segmenti e baseline |
-| Guardrail stabile | Il miglioramento non sembra creare danni immediati | Procedere con rollout limitato |
-| Evidenza ancora incompleta | Serve una verifica prima di scalare | Definire un secondo ciclo di misura |
-
-Il valore del caso non sta nel trovare una risposta perfetta, ma nel rendere la decisione piu difendibile.
-
 ## Lab / esercizio
 
-Usa questo esercizio per trasformare la lezione in pratica verificabile.
+**Livello base**: scegli cinque modelli dbt e assegna materialization motivando volume, uso e freschezza.
 
-| Livello | Attivita | Output |
-|---|---|---|
-| Livello base | Riassumi il problema in cinque righe e scegli una metrica primaria con un guardrail. | Mini brief decisionale |
-| Livello intermedio | Applica il modello a un caso reale o simulato, includendo segmenti, baseline e rischi. | Tabella di analisi con raccomandazione |
-| Livello research-grade | Scrivi un memo che confronta due spiegazioni alternative e indica quale evidenza le distinguerebbe. | Decision memo revisionabile |
+**Livello intermedio**: identifica un modello incremental fragile e aggiungi finestra di recupero, unique key e test minimi.
 
-**Dataset e materiali consigliati:** esportazione eventi o metriche dal tuo prodotto, una dashboard gia usata dal team, note qualitative, risultati di un esperimento o un dataset pubblico coerente con il tema.
+**Livello research-grade**: progetta una strategia snapshot per lifecycle cliente, piano subscription o account tier, includendo crescita attesa e query downstream.
+
+**Dataset e materiali consigliati**: repository dbt, manifest, source freshness, tabelle eventi, stato CRM/subscription e costi warehouse.
 
 ## Errore tipico da evitare
 
-L errore piu comune e usare "Materialization, incremental e snapshot per eventi e stato cliente" come etichetta autorevole invece che come metodo. Succede quando il team cita il concetto per giustificare una scelta gia presa, oppure quando ottimizza una metrica locale senza chiedersi quale comportamento sta incentivando.
+L errore piu comune e scegliere incremental perche sembra piu avanzato. Un incremental senza chiave stabile, late-data strategy e test diventa una fonte di errori invisibili.
 
-Correzione pratica: prima di presentare la raccomandazione, scrivi una riga con la decisione proposta, una riga con l evidenza che la sostiene e una riga con la condizione che ti farebbe cambiare idea. Se manca una di queste tre righe, la lezione non e ancora stata applicata con rigore.
+Un secondo errore e usare snapshot per tutto. Lo snapshot serve per stati che cambiano e che vuoi interrogare nel passato, non per ogni tabella dimensionale.
 
 ## Quiz o checkpoint
 
-1. Quale decisione concreta dovrebbe migliorare applicando questa lezione?
-2. Quale metrica useresti come segnale primario e quale come guardrail?
-3. Quale spiegazione alternativa potrebbe rendere sbagliata la tua interpretazione?
-4. Che cosa dovrebbe succedere nei dati per farti cambiare raccomandazione?
-5. Quale output consegneresti a analytics engineer, data platform, BI e stakeholder business: dashboard, memo, esperimento, backlog o modello dati?
+1. Il modello privilegia freschezza, costo, lettura veloce o storia?
+2. Esistono eventi in ritardo o correzioni retroattive?
+3. La unique key e davvero stabile?
+4. Quale finestra di recupero protegge il modello?
+5. Quale test ti avvisa se l incremental sta sbagliando?
 
-Se non riesci a rispondere in modo specifico, torna al problema reale prima di continuare.
+## Riepilogo operativo
 
-## Riepilogo
+La materialization e una scelta di architettura dati.
 
-La materialization e' una decisione architetturale, non un dettaglio tecnico. In martech devi bilanciare costo, freschezza e storicita'. `view`, `table`, `incremental` e `snapshot` esistono per problemi diversi: scegliere bene evita sia sprechi sia errori invisibili al business. Se scegli un incremental solo perche' "sembra piu' avanzato", il progetto ne soffrira'.
+Usa view per leggerezza, table per stabilita in lettura, incremental per grandi volumi con logica robusta e snapshot per storia di stato. La scelta giusta rende il progetto piu veloce, economico e difendibile; quella sbagliata crea debito nascosto.
