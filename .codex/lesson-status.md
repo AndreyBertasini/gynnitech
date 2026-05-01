@@ -18,9 +18,10 @@ Updated: 2026-05-01
 - Batch 4: riscritte 5 lezioni core del modulo filosofia (`perche-l-analisi-dati-ha-una-storia-filosofica`, `causalita-causa-ed-effetto-nell-analisi-dei-dati`, `causalita-regressioni-e-inferenza-statistica`, `cause-multiple-condizioni-necessarie-e-sufficienti`, `determinismo-contingenza-probabilita-e-previsione`) rendendo specifici evidenza, causalita, modelli, misurazione e incertezza.
 - Batch 5: riscritte le ultime 5 lezioni/risorse del modulo filosofia (`aristotele-e-le-quattro-cause`, `filosofia-della-scienza-spiegazione-scientifica-e-responsabilita`, `simpson-paradox-e-confounding`, `dalla-causalita-classica-al-futuro-dell-analisi-dati`, `indice-filosofia-analisi-dati`) completando la rifinitura del modulo.
 - Batch 6: riscritte 5 lezioni di gestione data-driven (`ciclo-deming-hadi`, `cultura-data-driven`, `decision-making-dati`, `framework-jtbd`, `interviste-profondita`) con focus su HADI, backlog ipotesi, decision memo, JTBD e ricerca qualitativa.
-- Richiesta corrente: sistemare le prossime 30 lezioni. Avanzamento: 20/30 completate in questa tranche.
+- Batch 7: riscritte 5 lezioni di product analytics (`product-market-fit`, `customer-development`, `ux-research`, `retention-framework`, `nps-net-promoter-score`) con casi, metriche, segmentazione e decisioni operative piu chiare.
+- Richiesta corrente: sistemare le prossime 30 lezioni. Avanzamento: 25/30 completate in questa tranche.
 
 ## Da monitorare
 
 - Nessuna lezione supera la soglia editoriale di 4.500 parole dopo il batch 2.
-- Prossimo batch previsto: riscrivere 5 lezioni centrali di product analytics.
+- Prossimo batch previsto: chiudere la tranche 30/30 con lezioni ad alto impatto su statistica, ricerca quantitativa, A/B testing e analytics engineering.
