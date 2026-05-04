@@ -89,5 +89,32 @@ Project-specific Claude Code slash commands in `.claude/commands/`:
 | `/audit-corso` | Bulk audit all lessons, update `.claude/lesson-status.md` |
 | `/fix-mdx` | Fix common MDX issues (YAML quoting, broken `<Steps>`, unclosed tags) |
 | `/deploy-check` | Pre-deploy checklist (build, SEO, stub detection) |
+| `/naturalizza-lezione` | Rewrite a lesson in narrative prose, removing scholastic boxes |
+| `/ginnytech` | Multi-agent crew that critiques, rewrites, and validates a lesson |
 
 Lesson quality tracking: `.claude/lesson-status.md` (✅ OK / ⚠️ incomplete / ❌ stub).
+
+## Multi-agent crew (`.claude/agents/`)
+
+The `/ginnytech` orchestrator coordinates 6 specialized subagents in parallel:
+
+| Subagent | Role |
+|----------|------|
+| `lesson-critic-pedagogy` | Didactic quality (university-level lecture lens) |
+| `lesson-critic-voice` | Naturalness, prose rhythm, anti-AI-smell |
+| `lesson-critic-substance` | Factual accuracy, examples, technical depth, sources |
+| `lesson-rewriter` | Synthesizes critiques, rewrites the MDX, creates `.bak` |
+| `lesson-validator-structure` | Mechanical checks (`npm run validate:content`, MDX, word count) |
+| `lesson-validator-quality` | Confirms rewrite addresses must-fix without regressions |
+
+Shared report schema: `.claude/agents/_report-schema.md`. All subagents output JSON conforming to it.
+
+### Keyword trigger
+
+When the user starts a message with the literal word **`ginnytech`** (case-insensitive), interpret it as an invocation of `/ginnytech` and pass the remainder of the message as `$ARGUMENTS`. Examples:
+
+- `ginnytech metriche-fondamenti/north-star` → run `/ginnytech metriche-fondamenti/north-star`
+- `ginnytech` (alone) → run `/ginnytech` and let it ask which lesson
+- `ginnytech causal inference per marketing` → run `/ginnytech causal inference per marketing` (mode *new*)
+
+Confirm the interpretation in 1 line before launching the pipeline so the user can correct it.

@@ -1,7 +1,7 @@
 # Lesson Status
 
-> Aggiornato: 2026-04-28
-> Totale: 185 lezioni — ✅ 112 OK / ⚠️ 33 incomplete / ❌ 40 stub
+> Aggiornato: 2026-05-04
+> Totale: 185 lezioni — ✅ 113 OK / ⚠️ 32 incomplete / ❌ 40 stub
 
 ## Legenda
 - ✅ **OK** — ≥3000 parole, struttura MDX valida, nessun anti-pattern grave
@@ -91,7 +91,7 @@
 📋 `cheat-sheet.mdx` — 1355w
 ⚠️ `costruire-brand-forte.mdx` — 1608w, sotto soglia
 ✅ `crm-email-analytics.mdx` — 3885w
-⚠️ `customer-journey-mapping.mdx` — 1707w, sotto soglia
+✅ `customer-journey-mapping.mdx` — 2724w, riscritto dalla crew /ginnytech (2026-05-04)
 ⚠️ `efficacia-brand.mdx` — 1816w, sotto soglia
 ✅ `funnel-unit-economics.mdx` — 3198w
 ✅ `ga4-avanzato.mdx` — 3096w
@@ -380,4 +380,4 @@
 6. **`s3-data-lake`** — 5 file ⚠️ vicino soglia: `architetture-avanzate`, `caso-studio`, `formati-dati`, `s3-clickhouse` + `pipeline-realtime`
 7. **`filosofia-analisi-dati`** — 5 file ⚠️ da espandere: `cause-multiple`, `dalla-causalita-classica`, `frequentismo-vs-bayesianismo`, `thomas-kuhn`
 8. **`marketing-data-science`** — `pmf.mdx` (1571w), `strategy.mdx` (1657w), `unit-economics` (2303w), `user-centricity` (2322w)
-9. **`analisi-marketing`** — `costruire-brand-forte` (1608w), `customer-journey-mapping` (1707w), `efficacia-brand` (1816w)
+9. **`analisi-marketing`** — `costruire-brand-forte` (1608w), `customer-journey-mapping` (2724w ✅), `efficacia-brand` (1816w)
