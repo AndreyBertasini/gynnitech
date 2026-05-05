@@ -24,6 +24,7 @@ export const CookieBanner = () => {
 
         // Save choice
         localStorage.setItem('cookie-consent', 'granted');
+        window.dispatchEvent(new CustomEvent('ginnytech:analytics-consent-granted'));
         setShowBanner(false);
     };
 

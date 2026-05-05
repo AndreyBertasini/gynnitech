@@ -22,6 +22,7 @@ import spotlightjs from '@spotlightjs/astro';
 
 const hasSentryDsn = Boolean(process.env.PUBLIC_SENTRY_DSN || process.env.SENTRY_DSN);
 const hasSentryAuthToken = Boolean(process.env.SENTRY_AUTH_TOKEN);
+const enableSpotlight = process.env.ENABLE_SPOTLIGHT === '1' || process.env.PUBLIC_SPOTLIGHT === '1';
 
 const loadSidebar = () => {
   try {
@@ -40,8 +41,7 @@ export default defineConfig({
   output: 'static',
   site: 'https://ginnytech.it',
   devToolbar: {
-    enabled: true,
-    placement: 'bottom-left',
+    enabled: false,
   },
   redirects,
 
@@ -115,6 +115,6 @@ export default defineConfig({
         disable: !hasSentryAuthToken,
       },
     })] : []),
-    spotlightjs(),
+    ...(enableSpotlight ? [spotlightjs()] : []),
   ],
 });
