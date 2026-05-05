@@ -1,83 +1,122 @@
 ---
-title: 'Producer, consumer e consumer groups'
+title: "Producer, Consumer e Serializzazione"
 description: >-
-  Producer, consumer e consumer groups. Lezione core del modulo Kafka & Event
-  Streaming Engineering con problema reale, modello concettuale, formalizzazione
-  rigorosa, caso applicato, lab a 3 livelli e checkpoint finale.
-module: "Modulo 11: Kafka & Event Streaming Engineering"
+  Implementare producer e consumer Kafka robusti con pattern di serializzazione ottimale per analytics.
+module: "\"Modulo 11: Kafka e Stream Processing\""
 order: 3
-category: Decisione
-headerImage: /course-headers/kafka-streaming-kafka-producers-consumers-ginnytech-ad.png
+category: Tecnico
+headerImage: /course-headers/kafka-streaming-producers-consumers-ginnytech-ad.png
 headerImageAlt: >-
-  Producers, Consumers e Consumer Groups - immagine ufficiale della lezione su
-  GinnyTech, creata da AD
+  Producer e Consumer Kafka - immagine ufficiale della lezione su GinnyTech
 difficulty: advanced
-duration: 18 min
+duration: 22 min
 prerequisites:
   - kafka-streaming/kafka-fondamenti
 learningObjectives:
-  - >-
-    Identificare quale decisione "Producer, consumer e consumer groups" aiuta a
-    migliorare dentro Kafka & Event Streaming Engineering.
-  - >-
-    Esplicitare definizioni, assunzioni, guardrail e output operativi legati a
-    "Producer, consumer e consumer groups".
-  - >-
-    Tradurre la lezione in un output pratico usando esercizi, dataset, notebook
-    o query del modulo.
+  - Comprendere il problema analitico e il contesto decisionale
+  - Applicare esempi, metriche e controlli a casi reali
 ---
-# Kafka producers e consumers: affidabilita end-to-end
 
-Producer e consumer non sono pezzi separati: formano un contratto operativo su ordine, retry, idempotenza, lag e gestione degli errori. Questa lezione mostra come progettare il flusso end-to-end prima che i problemi emergano in produzione.
+# Producer, Consumer e Serializzazione
 
-## Problema reale
-Pipeline eventi falliscono non per assenza di dati, ma per gestione incompleta di retry, idempotenza e backpressure.
+Un producer Kafka che crasha in produzione perché il formato del messaggio è cambiato. Un consumer che si blocca perché il parsing JSON fallisce su un carattere speciale. Errori banali, conseguenze gravi. La robustezza di una pipeline Kafka dipende più dalla qualità di producer e consumer che dalla configurazione del cluster.
 
-## Modello concettuale
-Producer e consumer sono due estremi di un contratto: il producer garantisce qualita di pubblicazione, il consumer garantisce elaborazione sicura.
+## Producer: scrivere su Kafka correttamente
 
-## Formalizzazione rigorosa
-| Blocco | Controllo critico | Obiettivo |
-|---|---|---|
-| Producer | acks, retry, idempotence | evitare perdita/duplicati |
-| Broker | durability e replica | resilienza cluster |
-| Consumer | commit strategy e retry | coerenza elaborazione |
-| DLQ | gestione eventi problematici | continuita servizio |
+```python
+from confluent_kafka import Producer
+import json
 
-## Esempio o caso studio
-Sistema ordini: consumer crashava su payload malformati bloccando tutto il gruppo. Introducendo DLQ e retry policy il flusso torna stabile.
+conf = {'bootstrap.servers': 'localhost:9092',
+        'acks': 'all',                    # massima durabilità
+        'enable.idempotence': True,       # deduplica retry
+        'compression.type': 'snappy',     # compressione veloce
+        'linger.ms': 5}                   # batching per throughput
 
-## Lab / esercizio
-**Livello base**: configura policy base producer per workload affidabile.
+producer = Producer(conf)
 
-**Livello intermedio**: disegna consumer idempotente con commit esplicito.
+def delivery_callback(err, msg):
+    if err:
+        print(f'ERROR: {err}')
+    else:
+        print(f'OK: {msg.topic()} [{msg.partition()}] @ {msg.offset()}')
 
-**Livello research-grade**: valuta trade-off tra throughput e affidabilita su scenari di fault.
+producer.produce('user_events', key=str(user_id),
+                 value=json.dumps(event).encode('utf-8'),
+                 callback=delivery_callback)
+producer.flush()
+```
 
-**Dataset e materiali consigliati**: stream ordini, eventi pagamento, error payload.
+**Best practices:**
+- Usa `linger.ms` per accumulare batch (trade-off latenza vs throughput)
+- Compressione `snappy` o `zstd`: risparmi il 60-80% di banda quasi gratis
+- Callback async per non bloccare il producer
+- Key per garantire che eventi dello stesso utente vadano nella stessa partizione (ordine garantito)
 
-## Errore tipico da evitare
-Commit offset prima del completamento effettivo della logica di business.
+## Serializzazione: JSON vs Avro vs Protobuf
 
-## Quiz o checkpoint
-1. Quando usare idempotent producer?
-2. Quale strategia retry evita loop infiniti?
-3. Come separi errori transitori da permanenti?
+| Formato | Umanamente leggibile | Schema enforcement | Dimensione | Velocità |
+|---------|---------------------|-------------------|------------|----------|
+| **JSON** | ✅ | ❌ | Grande | Lenta |
+| **Avro** | ❌ | ✅ (Schema Registry) | Media | Media |
+| **Protobuf** | ❌ | ✅ (.proto files) | Piccola | Veloce |
 
-## Conclusioni
-Affidabilita Kafka richiede design esplicito del comportamento in errore, non solo configurazione default.
+Per analytics, **JSON** è il punto di partenza: semplice, debuggabile, supportato ovunque. Quando la scala cresce (>50K msg/s), passa a **Avro** con Schema Registry per garantire la compatibilità forward/backward degli schemi.
 
-## Applicazione operativa nel team
-Crea runbook producer/consumer con checklist su incident handling e replay.
+**Avro con Schema Registry:**
+```python
+from confluent_kafka.schema_registry.avro import AvroSerializer
+# Lo schema è registrato centralmente. Il producer serializza con schema_id.
+# Il consumer deserializza usando lo schema corretto anche se l'evento è vecchio.
+```
 
-## Approfondimento operativo: SLO, incident response e miglioramento continuo
-Per rendere sostenibile una piattaforma streaming, non basta che funzioni "oggi": deve restare affidabile sotto crescita di volume e cambiamenti applicativi. Definisci quindi SLO espliciti su latenza end-to-end, lag consumer, percentuale errori e tempo medio di recovery. Ogni SLO deve avere owner, soglia e playbook di intervento.
+## Consumer: leggere e resistere
 
-Quando avviene un incidente, separa diagnosi tecnica e impatto business: quali KPI sono degradati, quali processi sono bloccati, quali decisioni diventano non affidabili. Questa lettura evita di risolvere solo il sintomo infrastrutturale. Dopo il fix, esegui post-mortem breve con azioni preventive: test mancanti, alert migliorabili, limiti architetturali da rimuovere.
+```python
+from confluent_kafka import Consumer
 
-Checklist di maturita streaming:
-- SLO tracciati e condivisi con stakeholder non tecnici;
-- dashboard piattaforma con trend di lag, throughput, failure;
-- test di resilienza periodici su failure comuni;
-- runbook aggiornati per replay, rollback e recovery;
-- revisione mensile costi/performance per evitare over-engineering.
+conf = {'bootstrap.servers': 'localhost:9092',
+        'group.id': 'analytics_team',
+        'auto.offset.reset': 'earliest',
+        'enable.auto.commit': False}  # commit manuale per controllo
+
+consumer = Consumer(conf)
+consumer.subscribe(['user_events'])
+
+while True:
+    msg = consumer.poll(1.0)
+    if msg is None: continue
+    if msg.error(): continue
+    try:
+        process(json.loads(msg.value()))
+        consumer.commit(msg)  # commit solo dopo process OK
+    except Exception as e:
+        log_error(e)  # non commitare → riprocessa
+```
+
+Il **commit manuale** è cruciale: permette di non perdere messaggi in caso di crash durante il processing.
+
+---
+
+*Riferimenti:*
+- Confluent. (2024). "Kafka Clients Documentation." *docs.confluent.io.*
+- Kleppmann, M. (2017). *Designing Data-Intensive Applications.* O'Reilly. Capitolo 11.
+
+## Controllo di qualità
+
+Prima di usare producer, consumer e serializzazione in una decisione, controlla sempre completezza, duplicati, timezone, definizioni cambiate e segmenti esclusi. Molte analisi apparentemente sofisticate falliscono perché il dato di partenza misura un comportamento diverso da quello che il team crede di osservare.
+
+
+## Interpretazione per segmenti
+
+La media aggregata è solo il punto di partenza. Segmenta per canale, coorte, piano, paese, device e maturità dell'utente. Se due segmenti si muovono in direzioni opposte, la media non rappresenta nessuno dei due e può portare a una decisione sbagliata.
+
+
+## Decisione operativa
+
+Ogni analisi deve terminare con una scelta possibile: continuare, fermare, iterare, investire, rimuovere o approfondire. Se producer, consumer e serializzazione non cambia una decisione, probabilmente manca ancora il collegamento tra metrica e azione.
+
+
+## Metriche di verifica
+
+Dopo l'intervento, definisci una metrica primaria e due guardrail. La metrica primaria misura il miglioramento atteso; le guardrail impediscono di ottenere quel miglioramento distruggendo retention, fiducia, qualità del dato o sostenibilità operativa.

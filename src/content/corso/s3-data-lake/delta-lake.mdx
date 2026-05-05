@@ -1,0 +1,158 @@
+---
+title: "\"Delta Lake: ACID su data lake\""
+description: >-
+  Delta Lake: transazioni ACID, time travel e schema enforcement su S3.
+module: "\"Modulo 10: S3 Data Lake e Query Engines\""
+order: 11
+category: Tecnico
+difficulty: advanced
+duration: 22 min
+learningObjectives:
+  - Comprendere il problema analitico e il contesto decisionale
+  - Applicare esempi, metriche e controlli a casi reali
+prerequisites:
+  - s3-data-lake/backup-dr
+---
+
+# Delta Lake: ACID su data lake
+
+Delta Lake (creato da Databricks, open-source) è un table format che aggiunge transazioni ACID, versioning e schema enforcement su S3. È l'alternativa principale a Iceberg, particolarmente forte nell'ecosistema Spark/Databricks.
+
+## Delta vs Iceberg
+
+| | Delta Lake | Iceberg |
+|---|---|---|
+| **Creatore** | Databricks | Netflix → Apache |
+| **Ecosistema primario** | Spark, Databricks | Multi-engine (Trino, Presto, Flink, Spark) |
+| **Compaction** | OPTIMIZE command | Manuale o via tool esterni |
+| **Z-ordering** | Sì (multi-dimensionale) | No nativo |
+| **Change Data Feed** | Sì | Sì (via snapshot diffs) |
+
+Se sei in Databricks, Delta Lake è la scelta naturale. Se sei multi-cloud/multi-engine, Iceberg è più portabile.
+
+## Operazioni Delta Lake essenziali
+
+```python
+# Scrittura con merge (upsert)
+from delta.tables import DeltaTable
+delta_table = DeltaTable.forPath(spark, "s3://lake/orders")
+delta_table.alias("t").merge(
+    new_orders.alias("s"), "t.order_id = s.order_id"
+).whenMatchedUpdateAll().whenNotMatchedInsertAll().execute()
+
+# Time travel: leggi tabella com'era 7 giorni fa
+df = spark.read.format("delta").option("versionAsOf", 7).load("s3://lake/orders")
+
+# Compaction e Z-ordering
+spark.sql("OPTIMIZE orders ZORDER BY (customer_id, order_date)")
+```
+
+## Schema evolution in Delta Lake
+
+Delta Lake supporta schema evolution automatica (aggiungere colonne) e schema enforcement (bloccare scritture con colonne non previste). Puoi configurare il comportamento con `mergeSchema`.
+
+## Approfondimento operativo: leggere delta lake: acid su data lake come sistema
+
+In un progetto reale, delta lake: acid su data lake non vive mai isolato. È parte di un sistema più ampio fatto di decisioni, dati disponibili, vincoli tecnici, incentivi organizzativi e qualità dell'esecuzione. Il rischio dell'analista principiante è trattare il tema come una definizione: imparare il nome, ricordare due formule, applicare un template. Il lavoro professionale è diverso: bisogna capire quale problema risolve, quali assunzioni contiene e cosa succede quando quelle assunzioni non sono vere.
+
+Nel contesto di **s3 data lake**, la prima domanda da fare non è "quale metrica calcolo?" ma: quale decisione dovrà essere presa grazie a questa analisi? Una dashboard, una query o un modello statistico hanno valore solo se riducono incertezza decisionale. Se non cambiano una scelta, sono documentazione o teatro analitico.
+
+Un buon modo per impostare il lavoro è usare questa sequenza:
+
+1. definire il problema in linguaggio business;
+2. identificare l'unità di analisi corretta: utente, account, evento, sessione, ordine, campagna;
+3. controllare se i dati misurano davvero il fenomeno o solo una sua ombra;
+4. costruire una metrica interpretabile;
+5. segmentare per evitare che la media nasconda pattern opposti;
+6. trasformare il risultato in una raccomandazione verificabile.
+
+## Caso reale: Netflix e la disciplina delle metriche
+
+Netflix è un esempio utile perché ha costruito molte decisioni di prodotto intorno a segnali comportamentali osservabili: completamento degli episodi, tempo di ricerca prima della riproduzione, abbandono dopo pochi minuti, ritorno nella settimana successiva, efficacia delle raccomandazioni. Il punto non è che ogni azienda debba copiare Netflix. Il punto è metodologico: il dato non viene trattato come ornamento, ma come infrastruttura decisionale.
+
+Quando Netflix valuta una modifica all'esperienza — una nuova riga di raccomandazioni, una diversa immagine di copertina, un algoritmo di ranking — non misura solo il click immediato. Misura anche segnali di qualità: l'utente guarda davvero il contenuto? torna nei giorni successivi? riduce il tempo speso a cercare? aumenta la soddisfazione implicita? Questa disciplina impedisce di ottimizzare vanity metric che sembrano positive nel breve ma danneggiano valore nel lungo periodo.
+
+Lo stesso principio vale qui: delta lake: acid su data lake deve essere collegato a un outcome. Se il risultato non aiuta a scegliere tra due azioni alternative, l'analisi è incompleta.
+
+## Esempio SQL: costruire una vista di controllo
+
+Il pattern seguente è volutamente generico ma eseguibile nella maggior parte dei warehouse moderni. L'obiettivo è creare una base analitica con metrica, segmento e finestra temporale, così da poter confrontare periodi e gruppi senza riscrivere la logica ogni volta.
+
+```sql
+WITH base_events AS (
+  SELECT
+    user_id,
+    account_id,
+    event_type,
+    event_time,
+    DATE_TRUNC('week', event_time) AS week,
+    source,
+    device_type
+  FROM events
+  WHERE event_time >= CURRENT_DATE - INTERVAL '180 days'
+    AND user_id IS NOT NULL
+),
+weekly_user_metrics AS (
+  SELECT
+    week,
+    user_id,
+    COALESCE(source, 'unknown') AS source,
+    COALESCE(device_type, 'unknown') AS device_type,
+    COUNT(*) AS total_events,
+    COUNT(DISTINCT DATE(event_time)) AS active_days,
+    COUNT(DISTINCT event_type) AS event_diversity,
+    MAX(CASE WHEN event_type IN ('purchase', 'subscribe', 'activation') THEN 1 ELSE 0 END) AS reached_key_outcome
+  FROM base_events
+  GROUP BY week, user_id, source, device_type
+)
+SELECT
+  week,
+  source,
+  device_type,
+  COUNT(DISTINCT user_id) AS users,
+  ROUND(AVG(active_days), 2) AS avg_active_days,
+  ROUND(AVG(event_diversity), 2) AS avg_event_diversity,
+  ROUND(AVG(reached_key_outcome) * 100, 2) AS key_outcome_rate
+FROM weekly_user_metrics
+GROUP BY week, source, device_type
+ORDER BY week, source, device_type;
+```
+
+Questa query non pretende di essere la risposta finale. Serve a creare una superficie di osservazione: trend, segmenti, differenze tra canali, variazioni nel tempo. Da qui l'analista può formulare ipotesi più precise.
+
+## Esempio Python: controllare stabilità e anomalie
+
+Una metrica utile deve essere stabile abbastanza da orientare decisioni e sensibile abbastanza da segnalare cambiamenti reali. In Python possiamo controllare variazioni anomale settimana su settimana.
+
+```python
+import pandas as pd
+
+# df contiene: week, segment, users, key_outcome_rate
+# key_outcome_rate espresso in percentuale, es. 12.4
+
+df = df.sort_values(['segment', 'week']).copy()
+df['previous_rate'] = df.groupby('segment')['key_outcome_rate'].shift(1)
+df['wow_change_pp'] = df['key_outcome_rate'] - df['previous_rate']
+df['rolling_mean'] = df.groupby('segment')['key_outcome_rate'].transform(
+    lambda s: s.rolling(4, min_periods=2).mean()
+)
+df['rolling_std'] = df.groupby('segment')['key_outcome_rate'].transform(
+    lambda s: s.rolling(4, min_periods=2).std()
+)
+df['z_score'] = (df['key_outcome_rate'] - df['rolling_mean']) / df['rolling_std']
+
+anomalies = df[df['z_score'].abs() >= 2].sort_values('z_score')
+print(anomalies[['week', 'segment', 'key_outcome_rate', 'wow_change_pp', 'z_score']])
+```
+
+Il valore di questo controllo è pratico: evita di reagire a ogni oscillazione casuale, ma segnala quando una variazione merita investigazione. In un contesto aziendale, questo tipo di analisi può alimentare alert, review settimanali e retrospettive di prodotto.
+
+## Errori comuni da evitare
+
+Il primo errore è lavorare su dati aggregati troppo presto. Una media globale può nascondere due segmenti che si muovono in direzioni opposte. Il secondo errore è non controllare la qualità del dato: eventi duplicati, tracking incompleto, timezone incoerenti e cambi di definizione possono produrre conclusioni false. Il terzo errore è confondere correlazione e causalità: se gli utenti che usano una feature convertono di più, non significa automaticamente che la feature causi conversione. Potrebbero usarla perché sono già più motivati.
+
+Per ridurre questi rischi, ogni analisi dovrebbe includere almeno tre controlli: definizione esplicita della metrica, confronto per segmento e verifica contro un periodo precedente o gruppo di controllo.
+
+## Riepilogo
+
+Delta Lake: ACID su data lake va trattato come uno strumento decisionale, non come un argomento da manuale. Il valore nasce quando colleghi problema, dati, metrica, segmentazione e azione. Una buona analisi non termina con "il numero è salito" o "il numero è sceso". Termina con una frase operativa: quale decisione prendiamo, con quale livello di confidenza, e quale metrica useremo per sapere se avevamo ragione.

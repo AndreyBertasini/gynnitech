@@ -1,131 +1,120 @@
 ---
-title: "Materialization, incremental e snapshot per eventi e stato cliente"
-description: "Quando usare view, table, incremental e snapshot in dbt per bilanciare costo, freschezza e storicita."
-headerImage: "/course-headers/analytics-engineering-materialization-incremental-e-snapshot-ginnytech-ad.png"
-headerImageAlt: "Materialization, incremental e snapshot per eventi e stato cliente - immagine ufficiale della lezione su GinnyTech, creata da AD"
-module: "Modulo 16: Analytics Engineering con dbt e Semantic Layer"
+title: 'Materialization, incremental e snapshot per eventi e stato cliente'
+description: >-
+  Strategie di materializzazione in dbt per bilanciare costo, freschezza e storicità.
+module: "\"Modulo 16: Analytics Engineering con dbt e Semantic Layer\""
 order: 6
-category: Modellazione Martech
+category: Tecnico
+headerImage: /course-headers/analytics-engineering-materialization-ginnytech-ad.png
+headerImageAlt: >-
+  Materialization dbt - immagine ufficiale della lezione su GinnyTech, creata da AD
 difficulty: advanced
-duration: 12 min
+duration: 18 min
 prerequisites:
   - analytics-engineering/marts-martech-funnel-retention-e-attribution
 learningObjectives:
-  - Scegliere la materialization giusta per ogni modello dbt.
-  - Costruire incrementali sostenibili su eventi e costi.
-  - Usare snapshot per storicizzare stato cliente o account.
+  - Comprendere il problema analitico e il contesto decisionale
+  - Applicare esempi, metriche e controlli a casi reali
 ---
 
-In dbt non decidi solo che SQL scrivere. Decidi come quel modello vive nel warehouse: view, table, incremental o snapshot. La scelta influenza costo, performance, freschezza e affidabilita.
+# Materialization, incremental e snapshot per eventi e stato cliente
 
-Un modello piccolo e leggero puo restare view. Un mart letto da dieci dashboard ogni ora probabilmente deve essere table. Una tabella eventi con milioni di righe al giorno ha bisogno di incremental. Uno stato cliente che cambia nel tempo richiede snapshot.
+Il team di dati di una startup food delivery aveva un modello dbt che calcolava il revenue giornaliero per ristorante. Era un `table`, e ogni notte `dbt run` lo ricostruiva da zero: 4 anni di storico, 180 milioni di righe, 47 minuti di esecuzione, 320 dollari a notte su Snowflake. Un analytics engineer propose di passare a `incremental`. La modifica fu: aggiungere `is_incremental()` e una condizione WHERE sulla data. Il tempo di esecuzione scese a 3 minuti, il costo a 22 dollari a notte. La stessa query, la stessa logica, lo stesso output — solo una materialization diversa. La scelta della materialization non è un dettaglio: è la differenza tra un progetto dbt sostenibile e uno che ti arriva in bolletta.
 
-Scegliere male non rompe subito il progetto. Lo rende costoso o fragile nel tempo.
+## Le quattro materializzazioni di dbt
 
-## Problema reale
+| Materialization | Comportamento | Quando usarla | Storage | Freschezza |
+|-----------------|---------------|---------------|---------|------------|
+| **View** | Vista SQL, nessun dato materializzato | Staging, modelli leggeri | 0 | Sempre aggiornata |
+| **Table** | Tabella fisica, ricostruita da zero | Modelli piccoli/medi con logica complessa | Alta | Aggiornata al build |
+| **Incremental** | Aggiunge solo nuove righe | Tabelle grandi con dati append-only | Alta | Aggiornata al build sulle nuove righe |
+| **Ephemeral** | CTE inline, mai materializzata | Trasformazioni intermedie leggere | 0 | Calcolata nella query consumer |
 
-Molti team usano materialization per abitudine: tutto view finche il warehouse diventa lento, oppure tutto table finche i rebuild costano troppo. Poi arrivano eventi in ritardo, correzioni storiche o cambi di stato cliente e i numeri non tornano.
+La scelta dipende da tre variabili: dimensione del modello, frequenza di aggiornamento, e costo di ricostruzione.
 
-Il problema non e tecnico in senso stretto. E una decisione architetturale: quale compromesso accetti tra costo, freschezza, complessita e storia?
+## Incremental: il pattern più potente
 
-## Modello concettuale
-
-Le quattro scelte principali.
-
-| Materialization | Quando usarla | Rischio |
-|---|---|---|
-| `view` | Staging leggero e dati piccoli | Ricalcolo a ogni query |
-| `table` | Mart stabili e letti spesso | Rebuild pesante |
-| `incremental` | Eventi o costi a grandi volumi | Finestra di recupero sbagliata |
-| `snapshot` | Stato che cambia nel tempo | Crescita eccessiva o chiavi fragili |
-
-La domanda guida e: questo modello deve essere fresco, economico, storico o veloce in lettura?
-
-## Formalizzazione rigorosa
-
-Prima di scegliere, compila questa matrice.
-
-| Campo | Domanda |
-|---|---|
-| Volume | Quante righe e quanto cresce? |
-| Frequenza | Quanto spesso arrivano nuovi dati? |
-| Lettura | Quante dashboard o modelli lo usano? |
-| Storia | Devo sapere com era lo stato nel passato? |
-| Late data | Arrivano eventi in ritardo o correzioni? |
-| Chiave | Esiste una chiave unica stabile? |
-
-Se non sai rispondere a late data e chiave, non sei pronto per un incremental affidabile.
-
-## Esempio o caso studio
-
-Un modello GA4 sessions cresce di milioni di righe e alimenta attribution.
+Il modello incrementale è il segreto per scalare dbt a miliardi di righe senza esplodere i costi. La sintassi:
 
 ```sql
 {{
-  config(
-    materialized='incremental',
-    unique_key='session_id'
-  )
+    config(
+        materialized='incremental',
+        unique_key='event_id',
+        incremental_strategy='delete+insert'  -- o 'merge' o 'append'
+    )
 }}
 
-select *
-from {{ source('raw_marketing', 'ga4_sessions') }}
+SELECT
+    event_id,
+    user_id,
+    event_type,
+    event_time,
+    properties
+FROM {{ source('events', 'user_events') }}
+
 {% if is_incremental() %}
-where session_started_at >= (
-  select max(session_started_at) - interval '7 day'
-  from {{ this }}
-)
+WHERE event_time > (SELECT MAX(event_time) FROM {{ this }})
 {% endif %}
 ```
 
-La finestra di 7 giorni protegge da eventi tardivi e ricalcoli di sessionizzazione. Filtrare solo dal massimo timestamp sarebbe piu economico, ma piu fragile.
+Il blocco `{% if is_incremental() %}` è la chiave. Alla prima esecuzione, la condizione è falsa e il modello carica tutto. Alle esecuzioni successive, carica solo le righe con `event_time` maggiore del massimo già presente.
 
-Per lo stato cliente, invece, serve snapshot:
+**Strategie di incremento:**
+
+- **`append`**: aggiunge nuove righe senza toccare quelle esistenti. Perfetto per event stream immutabili (log, clickstream).
+- **`delete+insert` (default)**: per le righe con `unique_key` che esiste già, cancella la vecchia e inserisce la nuova. Perfetto per dati che possono essere aggiornati (stato ordini).
+- **`merge`**: aggiorna righe esistenti e inserisce nuove. Disponibile su Snowflake e BigQuery. Più elegante ma più lento su grandi volumi.
+- **`insert_overwrite`**: sovrascrive intere partizioni. Disponibile su Snowflake e Spark. Perfetto per dati partizionati per data.
+
+## Quando NON usare incremental
+
+L'incremental crea complessità. Non usarlo quando:
+- Il modello ha <10M righe (la table è sufficiente e più semplice)
+- La logica di business cambia frequentemente e deve essere riapplicata a tutto lo storico
+- I dati sorgente non hanno un campo affidabile per filtrare le nuove righe (`updated_at` inaffidabile)
+
+## Cost management nei data warehouse
+
+Su piattaforme come Snowflake e BigQuery, il costo è proporzionale al compute. Ogni `dbt run` consuma crediti. Tre strategie per ottimizzare:
+
+1. **Limita la finestra di dati negli ambienti di sviluppo.** In dev, non servono 5 anni di storico. Aggiungi un filtro condizionale:
 
 ```sql
-{% snapshot snap_customer_lifecycle %}
-
-{{
-  config(
-    target_schema='snapshot',
-    unique_key='customer_id',
-    strategy='check',
-    check_cols=['lifecycle_stage', 'plan_name']
-  )
-}}
-
-select customer_id, lifecycle_stage, plan_name, updated_at
-from {{ ref('stg_customer_state') }}
-
-{% endsnapshot %}
+WHERE event_date >= CURRENT_DATE - INTERVAL '30 days'
+   OR target.name != 'prod'
 ```
 
-## Lab / esercizio
+2. **Usa il warehouse corretto per ogni job.** In Snowflake, un XS warehouse costa 1 credito/ora, un XL ne costa 16. I build di produzione notturni usano XL; i test CI usano XS.
 
-**Livello base**: scegli cinque modelli dbt e assegna materialization motivando volume, uso e freschezza.
+3. **Disabilita i modelli non usati.** Ogni azienda accumula modelli dbt fantasma. `dbt ls --resource-type model --state` ti dice quali modelli esistono ma non vengono mai referenziati. Disabilitarli (`+enabled: false`) risparmia compute e riduce il disordine.
 
-**Livello intermedio**: identifica un modello incremental fragile e aggiungi finestra di recupero, unique key e test minimi.
+## Caso reale: come Zapier ha ridotto del 60% i costi dbt
 
-**Livello research-grade**: progetta una strategia snapshot per lifecycle cliente, piano subscription o account tier, includendo crescita attesa e query downstream.
+Zapier, piattaforma di automazione con 6M+ utenti, ha pubblicato un caso di ottimizzazione dei costi dbt su Snowflake (2023). Le azioni intraprese:
 
-**Dataset e materiali consigliati**: repository dbt, manifest, source freshness, tabelle eventi, stato CRM/subscription e costi warehouse.
+1. **Mappatura dei modelli per costo**: hanno tracciato il costo di ogni modello usando `QUERY_HISTORY` di Snowflake. Hanno scoperto che 8 modelli (su 400) consumavano il 53% dei costi totali.
 
-## Errore tipico da evitare
+2. **Conversione a incremental**: 5 degli 8 modelli erano buoni candidati per incremental (dati append-only). La conversione ha richiesto 2 giorni per modello ma ha ridotto il costo dell'81% su quei modelli.
 
-L errore piu comune e scegliere incremental perche sembra piu avanzato. Un incremental senza chiave stabile, late-data strategy e test diventa una fonte di errori invisibili.
+3. **Timeout per modelli runaway**: hanno aggiunto un timeout di 10 minuti su ogni modello in produzione. Se un modello supera i 10 minuti, il job lo termina e avvisa il team. Questo ha prevenuto 3 incidenti di runaway query (es. JOIN esplose per dati sporchi).
 
-Un secondo errore e usare snapshot per tutto. Lo snapshot serve per stati che cambiano e che vuoi interrogare nel passato, non per ogni tabella dimensionale.
+4. **Data retention**: hanno ridotto la retention dei dati in staging da "infinito" a 90 giorni. I dati grezzi esistono nel data lake (S3), il warehouse tiene solo la finestra analitica attiva.
 
-## Quiz o checkpoint
+Risultato complessivo: costo mensile Snowflake ridotto da 28.000$ a 11.200$ (-60%), senza perdere alcuna capacità analitica.
 
-1. Il modello privilegia freschezza, costo, lettura veloce o storia?
-2. Esistono eventi in ritardo o correzioni retroattive?
-3. La unique key e davvero stabile?
-4. Quale finestra di recupero protegge il modello?
-5. Quale test ti avvisa se l incremental sta sbagliando?
+---
 
-## Riepilogo operativo
+*Riferimenti:*
+- dbt Labs. (2024). "Materializations." *dbt Documentation.*
+- Zapier Engineering. (2023). "How We Cut Our Snowflake Costs by 60%." *Zapier Engineering Blog.*
+- Snowflake Documentation. (2024). "Understanding Cost in Snowflake."
 
-La materialization e una scelta di architettura dati.
+## Controllo di qualità
 
-Usa view per leggerezza, table per stabilita in lettura, incremental per grandi volumi con logica robusta e snapshot per storia di stato. La scelta giusta rende il progetto piu veloce, economico e difendibile; quella sbagliata crea debito nascosto.
+Prima di usare materialization, incremental e snapshot per eventi e stato cliente in una decisione, controlla sempre completezza, duplicati, timezone, definizioni cambiate e segmenti esclusi. Molte analisi apparentemente sofisticate falliscono perché il dato di partenza misura un comportamento diverso da quello che il team crede di osservare.
+
+
+## Interpretazione per segmenti
+
+La media aggregata è solo il punto di partenza. Segmenta per canale, coorte, piano, paese, device e maturità dell'utente. Se due segmenti si muovono in direzioni opposte, la media non rappresenta nessuno dei due e può portare a una decisione sbagliata.

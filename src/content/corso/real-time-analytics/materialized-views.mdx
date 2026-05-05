@@ -1,0 +1,187 @@
+---
+title: "Materialized Views e Continuous Aggregates"
+description: >-
+  Tecniche avanzate di pre-aggregazione per query real-time su enormi volumi di dati.
+module: "\"Modulo 12: Real-Time Analytics con Kafka e ClickHouse\""
+order: 6
+category: Tecnico
+headerImage: /course-headers/real-time-analytics-materialized-ginnytech-ad.png
+headerImageAlt: >-
+  Materialized Views - immagine ufficiale della lezione su GinnyTech
+difficulty: advanced
+duration: 22 min
+prerequisites:
+  - real-time-analytics/dashboards
+learningObjectives:
+  - Comprendere il problema analitico e il contesto decisionale
+  - Applicare esempi, metriche e controlli a casi reali
+---
+
+# Materialized Views e Continuous Aggregates
+
+Il pattern più potente in ClickHouse per volumi real-time è la catena di materialized views. Invece di aggregare miliardi di eventi grezzi a ogni refresh della dashboard, pre-calcoli le aggregazioni a strati, e la dashboard legge solo l'ultimo strato. È la differenza tra una query da 30 secondi e una da 30 millisecondi.
+
+## Catena di aggregazione a strati
+
+**Esempio: funnel di conversione in tempo reale**
+
+```
+Eventi Grezzi (Kafka)
+      │
+      ▼
+MV_events_per_minute: event_type × minuto, count()
+      │
+      ▼
+MV_funnel_hourly: funnel_step × ora, unique_users
+      │
+      ▼
+Dashboard: leggi da MV_funnel_hourly
+```
+
+**Livello 1 — Aggregazione al minuto:**
+```sql
+CREATE MATERIALIZED VIEW mv_events_per_minute
+ENGINE = SummingMergeTree()
+ORDER BY (event_time, event_type)
+AS SELECT toStartOfMinute(event_time) AS event_time,
+          event_type, count() AS cnt
+FROM kafka_events GROUP BY event_time, event_type;
+```
+
+**Livello 2 — Aggregazione oraria con deduplicazione utenti:**
+```sql
+CREATE MATERIALIZED VIEW mv_funnel_hourly
+ENGINE = AggregatingMergeTree()
+ORDER BY (hour, funnel_step)
+AS SELECT toStartOfHour(event_time) AS hour,
+          funnel_step,
+          uniqState(user_id) AS unique_users_state
+FROM mv_events_per_minute
+JOIN funnel_definitions USING (event_type)
+GROUP BY hour, funnel_step;
+```
+
+La dashboard legge da `mv_funnel_hourly` con `uniqMerge(unique_users_state)` — risultato in <100ms su qualsiasi volume.
+
+## Rettifiche tardive: il problema dei late-arriving events
+
+In un sistema reale, gli eventi possono arrivare in ritardo (dispositivo offline, latenza di rete). Se hai già emesso l'aggregazione per il minuto 10:00 e alle 10:03 arriva un evento con event_time 10:00, cosa fai?
+
+**Opzione 1 — Ignorare (at-least-once):** l'evento tardivo è perso. Semplice ma inaccurate.
+**Opzione 2 — Re-emissione:** la materialized view emette un UPDATE all'aggregazione precedente. ClickHouse non supporta UPDATE nativi in MV. Devi usare un sistema esterno (Flink, Kafka Streams) con retraction.
+**Opzione 3 — Correzione differita:** scrivi l'evento tardivo su una tabella separata e ogni ora fai un merge corretto. Accetti un errore temporaneo per la velocità.
+
+La scelta dipende dal requisito di accuratezza vs latenza. Per dashboard operative, opzione 1 è spesso accettabile (errore <1%). Per reporting finanziario, opzione 3.
+
+---
+
+*Riferimenti:*
+- ClickHouse. (2024). "Materialized Views." *clickhouse.com/docs.*
+- Akidau, T. et al. (2015). "The Dataflow Model." *VLDB 2015.*
+
+## Approfondimento operativo: leggere materialized views e continuous aggregates come sistema
+
+In un progetto reale, materialized views e continuous aggregates non vive mai isolato. È parte di un sistema più ampio fatto di decisioni, dati disponibili, vincoli tecnici, incentivi organizzativi e qualità dell'esecuzione. Il rischio dell'analista principiante è trattare il tema come una definizione: imparare il nome, ricordare due formule, applicare un template. Il lavoro professionale è diverso: bisogna capire quale problema risolve, quali assunzioni contiene e cosa succede quando quelle assunzioni non sono vere.
+
+Nel contesto di **real time analytics**, la prima domanda da fare non è "quale metrica calcolo?" ma: quale decisione dovrà essere presa grazie a questa analisi? Una dashboard, una query o un modello statistico hanno valore solo se riducono incertezza decisionale. Se non cambiano una scelta, sono documentazione o teatro analitico.
+
+Un buon modo per impostare il lavoro è usare questa sequenza:
+
+1. definire il problema in linguaggio business;
+2. identificare l'unità di analisi corretta: utente, account, evento, sessione, ordine, campagna;
+3. controllare se i dati misurano davvero il fenomeno o solo una sua ombra;
+4. costruire una metrica interpretabile;
+5. segmentare per evitare che la media nasconda pattern opposti;
+6. trasformare il risultato in una raccomandazione verificabile.
+
+## Caso reale: Netflix e la disciplina delle metriche
+
+Netflix è un esempio utile perché ha costruito molte decisioni di prodotto intorno a segnali comportamentali osservabili: completamento degli episodi, tempo di ricerca prima della riproduzione, abbandono dopo pochi minuti, ritorno nella settimana successiva, efficacia delle raccomandazioni. Il punto non è che ogni azienda debba copiare Netflix. Il punto è metodologico: il dato non viene trattato come ornamento, ma come infrastruttura decisionale.
+
+Quando Netflix valuta una modifica all'esperienza — una nuova riga di raccomandazioni, una diversa immagine di copertina, un algoritmo di ranking — non misura solo il click immediato. Misura anche segnali di qualità: l'utente guarda davvero il contenuto? torna nei giorni successivi? riduce il tempo speso a cercare? aumenta la soddisfazione implicita? Questa disciplina impedisce di ottimizzare vanity metric che sembrano positive nel breve ma danneggiano valore nel lungo periodo.
+
+Lo stesso principio vale qui: materialized views e continuous aggregates deve essere collegato a un outcome. Se il risultato non aiuta a scegliere tra due azioni alternative, l'analisi è incompleta.
+
+## Esempio SQL: costruire una vista di controllo
+
+Il pattern seguente è volutamente generico ma eseguibile nella maggior parte dei warehouse moderni. L'obiettivo è creare una base analitica con metrica, segmento e finestra temporale, così da poter confrontare periodi e gruppi senza riscrivere la logica ogni volta.
+
+```sql
+WITH base_events AS (
+  SELECT
+    user_id,
+    account_id,
+    event_type,
+    event_time,
+    DATE_TRUNC('week', event_time) AS week,
+    source,
+    device_type
+  FROM events
+  WHERE event_time >= CURRENT_DATE - INTERVAL '180 days'
+    AND user_id IS NOT NULL
+),
+weekly_user_metrics AS (
+  SELECT
+    week,
+    user_id,
+    COALESCE(source, 'unknown') AS source,
+    COALESCE(device_type, 'unknown') AS device_type,
+    COUNT(*) AS total_events,
+    COUNT(DISTINCT DATE(event_time)) AS active_days,
+    COUNT(DISTINCT event_type) AS event_diversity,
+    MAX(CASE WHEN event_type IN ('purchase', 'subscribe', 'activation') THEN 1 ELSE 0 END) AS reached_key_outcome
+  FROM base_events
+  GROUP BY week, user_id, source, device_type
+)
+SELECT
+  week,
+  source,
+  device_type,
+  COUNT(DISTINCT user_id) AS users,
+  ROUND(AVG(active_days), 2) AS avg_active_days,
+  ROUND(AVG(event_diversity), 2) AS avg_event_diversity,
+  ROUND(AVG(reached_key_outcome) * 100, 2) AS key_outcome_rate
+FROM weekly_user_metrics
+GROUP BY week, source, device_type
+ORDER BY week, source, device_type;
+```
+
+Questa query non pretende di essere la risposta finale. Serve a creare una superficie di osservazione: trend, segmenti, differenze tra canali, variazioni nel tempo. Da qui l'analista può formulare ipotesi più precise.
+
+## Esempio Python: controllare stabilità e anomalie
+
+Una metrica utile deve essere stabile abbastanza da orientare decisioni e sensibile abbastanza da segnalare cambiamenti reali. In Python possiamo controllare variazioni anomale settimana su settimana.
+
+```python
+import pandas as pd
+
+# df contiene: week, segment, users, key_outcome_rate
+# key_outcome_rate espresso in percentuale, es. 12.4
+
+df = df.sort_values(['segment', 'week']).copy()
+df['previous_rate'] = df.groupby('segment')['key_outcome_rate'].shift(1)
+df['wow_change_pp'] = df['key_outcome_rate'] - df['previous_rate']
+df['rolling_mean'] = df.groupby('segment')['key_outcome_rate'].transform(
+    lambda s: s.rolling(4, min_periods=2).mean()
+)
+df['rolling_std'] = df.groupby('segment')['key_outcome_rate'].transform(
+    lambda s: s.rolling(4, min_periods=2).std()
+)
+df['z_score'] = (df['key_outcome_rate'] - df['rolling_mean']) / df['rolling_std']
+
+anomalies = df[df['z_score'].abs() >= 2].sort_values('z_score')
+print(anomalies[['week', 'segment', 'key_outcome_rate', 'wow_change_pp', 'z_score']])
+```
+
+Il valore di questo controllo è pratico: evita di reagire a ogni oscillazione casuale, ma segnala quando una variazione merita investigazione. In un contesto aziendale, questo tipo di analisi può alimentare alert, review settimanali e retrospettive di prodotto.
+
+## Errori comuni da evitare
+
+Il primo errore è lavorare su dati aggregati troppo presto. Una media globale può nascondere due segmenti che si muovono in direzioni opposte. Il secondo errore è non controllare la qualità del dato: eventi duplicati, tracking incompleto, timezone incoerenti e cambi di definizione possono produrre conclusioni false. Il terzo errore è confondere correlazione e causalità: se gli utenti che usano una feature convertono di più, non significa automaticamente che la feature causi conversione. Potrebbero usarla perché sono già più motivati.
+
+Per ridurre questi rischi, ogni analisi dovrebbe includere almeno tre controlli: definizione esplicita della metrica, confronto per segmento e verifica contro un periodo precedente o gruppo di controllo.
+
+## Riepilogo
+
+Materialized Views e Continuous Aggregates va trattato come uno strumento decisionale, non come un argomento da manuale. Il valore nasce quando colleghi problema, dati, metrica, segmentazione e azione. Una buona analisi non termina con "il numero è salito" o "il numero è sceso". Termina con una frase operativa: quale decisione prendiamo, con quale livello di confidenza, e quale metrica useremo per sapere se avevamo ragione.
+

@@ -1,83 +1,174 @@
 ---
-title: ClickHouse engine design e MergeTree thinking
+title: "Change Data Capture (CDC) pattern"
 description: >-
-  ClickHouse engine design e MergeTree thinking. Lezione core del modulo
-  Real-Time Analytics & ClickHouse Systems con problema reale, modello
-  concettuale, formalizzazione rigorosa, caso applicato, lab a 3 livelli e
-  checkpoint finale.
-module: "Modulo 12: Real-Time Analytics & ClickHouse Systems"
-order: 2
+  Come catturare cambiamenti nei database transazionali e propagarli in real-time.
+module: "\"Modulo 12: Real-Time Analytics con Kafka e ClickHouse\""
+order: 4
 category: Tecnico
-headerImage: /course-headers/real-time-analytics-cdc-pattern-ginnytech-ad.png
+headerImage: /course-headers/real-time-analytics-cdc-ginnytech-ad.png
 headerImageAlt: >-
-  Change Data Capture (CDC) Patterns - immagine ufficiale della lezione su
-  GinnyTech, creata da AD
+  CDC Pattern - immagine ufficiale della lezione su GinnyTech, creata da AD
 difficulty: advanced
 duration: 22 min
 prerequisites:
-  - real-time-analytics/clickhouse-fondamenti
+  - real-time-analytics/clickhouse-rt
 learningObjectives:
-  - >-
-    Identificare quale decisione "ClickHouse engine design e MergeTree thinking"
-    aiuta a migliorare dentro Real-Time Analytics & ClickHouse Systems.
-  - >-
-    Esplicitare definizioni, assunzioni, guardrail e output operativi legati a
-    "ClickHouse engine design e MergeTree thinking".
-  - >-
-    Tradurre la lezione in un output pratico usando esercizi, dataset, notebook
-    o query del modulo.
+  - Comprendere il problema analitico e il contesto decisionale
+  - Applicare esempi, metriche e controlli a casi reali
 ---
-# CDC pattern: sincronizzare sistemi senza perdere consistenza
 
-Il Change Data Capture collega sistemi transazionali e analytics, ma porta con se problemi di ordine, aggiornamento e riconciliazione. Questa lezione ti aiuta a distinguere una replica tecnica da un flusso affidabile per decisioni operative e metriche coerenti.
+# Change Data Capture (CDC) pattern
 
-## Problema reale
-Replicare dati applicativi verso analytics con export periodici crea buchi temporali e incongruenze tra sistemi.
+Il team di dati di Zalando aveva un problema: ogni notte, un ETL copiava l'intero database degli ordini (120 milioni di righe, 4 ore di esecuzione) nel data warehouse. Il team marketing doveva aspettare fino alle 10 AM per vedere gli ordini del giorno prima. Il team passò a CDC: niente più copie complete, solo i cambiamenti (INSERT, UPDATE, DELETE) catturati in tempo reale dal transaction log e propagati via Kafka a ClickHouse. La copia notturna sparì. I dati erano disponibili con 30 secondi di latenza. CDC trasforma un database transazionale da sistema isolato a sorgente di eventi in tempo reale.
 
-## Modello concettuale
-Change Data Capture cattura insert/update/delete dal log transazionale e li propaga come stream ordinato.
+## Come funziona CDC
 
-## Formalizzazione rigorosa
-| Aspetto | Decisione | Impatto |
-|---|---|---|
-| Capture mode | snapshot + log | bootstrap affidabile |
-| Ordering | chiave + offset | consistenza stato |
-| Upsert strategy | merge in destinazione | qualità dato |
+CDC legge il transaction log del database (MySQL binlog, PostgreSQL WAL) e produce eventi per ogni modifica:
 
-## Esempio o caso studio
-CRM e billing disallineati su stato cliente. Con CDC continuo, dashboard revenue riflette aggiornamenti quasi in tempo reale.
+```
+INSERT → evento {op: "c", after: {id: 123, name: "Mario", ...}}
+UPDATE → evento {op: "u", before: {...}, after: {id: 123, name: "Maria", ...}}
+DELETE → evento {op: "d", before: {id: 123, ...}}
+```
 
-## Lab / esercizio
-**Livello base**: identifica tabelle candidate CDC e priorità.
+Debezium è lo standard de-facto open source per CDC. Si connette al database come replica, legge il log, e scrive i cambiamenti su Kafka.
 
-**Livello intermedio**: definisci chiave primaria e strategia upsert.
+## Architettura tipica
 
-**Livello research-grade**: valuta lag e impatto su KPI finanziari.
+```
+PostgreSQL ──► Debezium ──► Kafka ──► Kafka Connect Sink ──► ClickHouse
+                                   ──► Stream processor (ksqlDB/Flink) ──► Alerting
+```
 
-**Dataset e materiali consigliati**: log DB, snapshot iniziali, eventi update/cancel.
+In ClickHouse, usa il motore `ReplacingMergeTree` con `version` per gestire gli UPDATE senza deduplicazione istantanea:
 
-## Errore tipico da evitare
-Ignorare delete events e accumulare record fantasma nel warehouse.
+```sql
+CREATE TABLE customers (
+    id UInt64,
+    name String,
+    email String,
+    updated_at DateTime,
+    _version UInt64
+) ENGINE = ReplacingMergeTree(_version)
+ORDER BY id;
+```
 
-## Quiz o checkpoint
-1. Quale tabella migri prima in CDC?
-2. Come validi consistenza tra sorgente e target?
-3. Quale SLA di lag serve al business?
+`ReplacingMergeTree` mantiene l'ultima versione di ogni riga (basata su `ORDER BY`). La deduplicazione avviene durante i merge in background, non è istantanea. Per query accurate, aggiungi `FINAL`: `SELECT * FROM customers FINAL WHERE id = 123`.
 
-## Conclusioni
-CDC riduce frizione tra sistemi operativi e analitici, aumentando affidabilità delle decisioni.
+## Quando serve CDC (e quando no)
 
-## Applicazione operativa nel team
-Pianifica reconciliation automatica giornaliera tra fonte transazionale e layer analitico.
+- **CDC sì**: quando hai un database operativo (ordini, utenti) e vuoi dati near-real-time nel warehouse senza ETL pesanti.
+- **CDC no**: quando i dati sono già eventi nativi (clickstream, log) — non serve CDC, vanno direttamente in Kafka. Quando la latenza di ore è accettabile — il batch ETL è più semplice e meno costoso.
 
-## Approfondimento operativo: dal segnale all'azione
-In ambienti realtime la difficolta principale non e vedere prima un numero, ma reagire meglio senza generare caos operativo. Per questo ogni metrica critica deve avere soglie, owner e azione predefinita. Se un indicatore supera soglia, il team non dovrebbe discutere "cosa fare" da zero: dovrebbe eseguire un playbook, raccogliere evidenze e decidere se scalare intervento o rientrare.
+---
 
-Per mantenere affidabilità nel tempo, separa tre cicli: monitoraggio continuo (minuti), review operativa (giornaliera) e review strategica (settimanale/mensile). Nel primo ciclo intercetti anomalie; nel secondo risolvi cause tecniche; nel terzo correggi architettura e regole decisionali. Questa disciplina riduce allarmi inutili e migliora la qualità delle decisioni sotto pressione.
+*Riferimenti:*
+- Debezium Documentation. (2024). "Debezium Architecture." *debezium.io.*
+- Zalando. (2021). "From Nightly ETL to Real-Time CDC." *Zalando Engineering Blog.*
 
-Checklist pratica:
-- soglie calibrate su stagionalità e varianza;
-- playbook di risposta documentato;
-- ownership chiara per ogni KPI critico;
-- post-mortem breve dopo incidenti rilevanti;
-- aggiornamento periodico di dashboard e alert.
+## Approfondimento operativo: leggere change data capture (cdc) pattern come sistema
+
+In un progetto reale, change data capture (cdc) pattern non vive mai isolato. È parte di un sistema più ampio fatto di decisioni, dati disponibili, vincoli tecnici, incentivi organizzativi e qualità dell'esecuzione. Il rischio dell'analista principiante è trattare il tema come una definizione: imparare il nome, ricordare due formule, applicare un template. Il lavoro professionale è diverso: bisogna capire quale problema risolve, quali assunzioni contiene e cosa succede quando quelle assunzioni non sono vere.
+
+Nel contesto di **real time analytics**, la prima domanda da fare non è "quale metrica calcolo?" ma: quale decisione dovrà essere presa grazie a questa analisi? Una dashboard, una query o un modello statistico hanno valore solo se riducono incertezza decisionale. Se non cambiano una scelta, sono documentazione o teatro analitico.
+
+Un buon modo per impostare il lavoro è usare questa sequenza:
+
+1. definire il problema in linguaggio business;
+2. identificare l'unità di analisi corretta: utente, account, evento, sessione, ordine, campagna;
+3. controllare se i dati misurano davvero il fenomeno o solo una sua ombra;
+4. costruire una metrica interpretabile;
+5. segmentare per evitare che la media nasconda pattern opposti;
+6. trasformare il risultato in una raccomandazione verificabile.
+
+## Caso reale: Netflix e la disciplina delle metriche
+
+Netflix è un esempio utile perché ha costruito molte decisioni di prodotto intorno a segnali comportamentali osservabili: completamento degli episodi, tempo di ricerca prima della riproduzione, abbandono dopo pochi minuti, ritorno nella settimana successiva, efficacia delle raccomandazioni. Il punto non è che ogni azienda debba copiare Netflix. Il punto è metodologico: il dato non viene trattato come ornamento, ma come infrastruttura decisionale.
+
+Quando Netflix valuta una modifica all'esperienza — una nuova riga di raccomandazioni, una diversa immagine di copertina, un algoritmo di ranking — non misura solo il click immediato. Misura anche segnali di qualità: l'utente guarda davvero il contenuto? torna nei giorni successivi? riduce il tempo speso a cercare? aumenta la soddisfazione implicita? Questa disciplina impedisce di ottimizzare vanity metric che sembrano positive nel breve ma danneggiano valore nel lungo periodo.
+
+Lo stesso principio vale qui: change data capture (cdc) pattern deve essere collegato a un outcome. Se il risultato non aiuta a scegliere tra due azioni alternative, l'analisi è incompleta.
+
+## Esempio SQL: costruire una vista di controllo
+
+Il pattern seguente è volutamente generico ma eseguibile nella maggior parte dei warehouse moderni. L'obiettivo è creare una base analitica con metrica, segmento e finestra temporale, così da poter confrontare periodi e gruppi senza riscrivere la logica ogni volta.
+
+```sql
+WITH base_events AS (
+  SELECT
+    user_id,
+    account_id,
+    event_type,
+    event_time,
+    DATE_TRUNC('week', event_time) AS week,
+    source,
+    device_type
+  FROM events
+  WHERE event_time >= CURRENT_DATE - INTERVAL '180 days'
+    AND user_id IS NOT NULL
+),
+weekly_user_metrics AS (
+  SELECT
+    week,
+    user_id,
+    COALESCE(source, 'unknown') AS source,
+    COALESCE(device_type, 'unknown') AS device_type,
+    COUNT(*) AS total_events,
+    COUNT(DISTINCT DATE(event_time)) AS active_days,
+    COUNT(DISTINCT event_type) AS event_diversity,
+    MAX(CASE WHEN event_type IN ('purchase', 'subscribe', 'activation') THEN 1 ELSE 0 END) AS reached_key_outcome
+  FROM base_events
+  GROUP BY week, user_id, source, device_type
+)
+SELECT
+  week,
+  source,
+  device_type,
+  COUNT(DISTINCT user_id) AS users,
+  ROUND(AVG(active_days), 2) AS avg_active_days,
+  ROUND(AVG(event_diversity), 2) AS avg_event_diversity,
+  ROUND(AVG(reached_key_outcome) * 100, 2) AS key_outcome_rate
+FROM weekly_user_metrics
+GROUP BY week, source, device_type
+ORDER BY week, source, device_type;
+```
+
+Questa query non pretende di essere la risposta finale. Serve a creare una superficie di osservazione: trend, segmenti, differenze tra canali, variazioni nel tempo. Da qui l'analista può formulare ipotesi più precise.
+
+## Esempio Python: controllare stabilità e anomalie
+
+Una metrica utile deve essere stabile abbastanza da orientare decisioni e sensibile abbastanza da segnalare cambiamenti reali. In Python possiamo controllare variazioni anomale settimana su settimana.
+
+```python
+import pandas as pd
+
+# df contiene: week, segment, users, key_outcome_rate
+# key_outcome_rate espresso in percentuale, es. 12.4
+
+df = df.sort_values(['segment', 'week']).copy()
+df['previous_rate'] = df.groupby('segment')['key_outcome_rate'].shift(1)
+df['wow_change_pp'] = df['key_outcome_rate'] - df['previous_rate']
+df['rolling_mean'] = df.groupby('segment')['key_outcome_rate'].transform(
+    lambda s: s.rolling(4, min_periods=2).mean()
+)
+df['rolling_std'] = df.groupby('segment')['key_outcome_rate'].transform(
+    lambda s: s.rolling(4, min_periods=2).std()
+)
+df['z_score'] = (df['key_outcome_rate'] - df['rolling_mean']) / df['rolling_std']
+
+anomalies = df[df['z_score'].abs() >= 2].sort_values('z_score')
+print(anomalies[['week', 'segment', 'key_outcome_rate', 'wow_change_pp', 'z_score']])
+```
+
+Il valore di questo controllo è pratico: evita di reagire a ogni oscillazione casuale, ma segnala quando una variazione merita investigazione. In un contesto aziendale, questo tipo di analisi può alimentare alert, review settimanali e retrospettive di prodotto.
+
+## Errori comuni da evitare
+
+Il primo errore è lavorare su dati aggregati troppo presto. Una media globale può nascondere due segmenti che si muovono in direzioni opposte. Il secondo errore è non controllare la qualità del dato: eventi duplicati, tracking incompleto, timezone incoerenti e cambi di definizione possono produrre conclusioni false. Il terzo errore è confondere correlazione e causalità: se gli utenti che usano una feature convertono di più, non significa automaticamente che la feature causi conversione. Potrebbero usarla perché sono già più motivati.
+
+Per ridurre questi rischi, ogni analisi dovrebbe includere almeno tre controlli: definizione esplicita della metrica, confronto per segmento e verifica contro un periodo precedente o gruppo di controllo.
+
+## Riepilogo
+
+Change Data Capture (CDC) pattern va trattato come uno strumento decisionale, non come un argomento da manuale. Il valore nasce quando colleghi problema, dati, metrica, segmentazione e azione. Una buona analisi non termina con "il numero è salito" o "il numero è sceso". Termina con una frase operativa: quale decisione prendiamo, con quale livello di confidenza, e quale metrica useremo per sapere se avevamo ragione.
+

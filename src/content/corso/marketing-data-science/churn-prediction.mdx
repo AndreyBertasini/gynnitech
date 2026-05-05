@@ -1,0 +1,162 @@
+---
+title: "Modelli predittivi per LTV e churn"
+description: >-
+  Costruire modelli predittivi per Customer Lifetime Value e churn probability nel marketing.
+module: "\"Modulo 6: Marketing Data Science\""
+order: 15
+category: Tecnico
+difficulty: advanced
+duration: 22 min
+learningObjectives:
+  - Comprendere il problema analitico e il contesto decisionale
+  - Applicare esempi, metriche e controlli a casi reali
+prerequisites:
+  - marketing-data-science/incrementality
+---
+
+# Modelli predittivi per LTV e churn
+
+Prevedere quanto vale un cliente e quando se ne andrà sono i due problemi centrali del marketing data science. Non servono modelli complessi: servono feature ben progettate e metriche di valutazione appropriate al problema di business.
+
+## Churn prediction: feature che contano
+
+Le feature più predittive di churn in ordine di importanza (confermato su decine di implementazioni):
+
+1. **Recency** (giorni da ultima azione significativa) — il singolo miglior predittore, universalmente
+2. **Usage trend** (attività recente / attività precedente) — la direzione conta più del livello
+3. **Eventi negativi**: pagamento fallito, ticket supporto, downgrade piano
+4. **Engagement depth**: quante feature core usa abitualmente
+5. **Tenure**: clienti nuovi churnano più degli storici (paradosso apparente ma vero)
+
+```python
+df['recency'] = (df['today'] - df['last_active_date']).dt.days
+df['usage_trend'] = df['active_days_last_14'] / df['active_days_prev_14'].clip(lower=1)
+df['has_payment_failure'] = (df['failed_payments_30d'] > 0).astype(int)
+df['engagement_depth'] = df[['feature_A', 'feature_B', 'feature_C', 'feature_D']].sum(axis=1)
+df['tenure_months'] = (df['today'] - df['signup_date']).dt.days / 30.44
+```
+
+**Attenzione**: non usare MAI accuracy per valutare il modello su dataset sbilanciati. Con churn rate 5%, un modello che dice sempre "no churn" ha accuracy 95% — ma è completamente inutile. Metriche corrette: AUC-ROC (>0.80 buono), precision@K (es. precision nel top 20% dei più a rischio), lift.
+
+## LTV prediction: due approcci
+
+### Approccio probabilistico: BG/NBD + Gamma-Gamma
+
+Per retail/e-commerce con acquisti discreti e non subscription. Modella frequenza e valore come processi stocastici:
+
+```python
+from lifetimes import BetaGeoFitter, GammaGammaFitter
+
+# BG/NBD per frequenza acquisti futuri
+bgf = BetaGeoFitter(penalizer_coef=0.01)
+bgf.fit(df['frequency'], df['recency'], df['T'])
+
+# Gamma-Gamma per valore medio per acquisto
+ggf = GammaGammaFitter(penalizer_coef=0.01)
+ggf.fit(df['frequency'], df['monetary_value'])
+
+# LTV predetto a 12 mesi
+ltv_12m = ggf.customer_lifetime_value(
+    bgf, df['frequency'], df['recency'], df['T'],
+    df['monetary_value'], time=12, discount_rate=0.01)
+```
+
+**Vantaggio**: interpretabile, robusto, basato su assunzioni esplicite. **Limite**: adatto solo a pattern di acquisto discreti, non subscription.
+
+### Approccio machine learning: Gradient Boosting Regression
+
+Per SaaS/subscription o dati con molte feature comportamentali:
+
+```python
+from sklearn.ensemble import HistGradientBoostingRegressor
+from sklearn.model_selection import TimeSeriesSplit
+
+tscv = TimeSeriesSplit(n_splits=5)
+
+model = HistGradientBoostingRegressor(
+    max_iter=200, max_depth=5, learning_rate=0.05,
+    early_stopping=True, validation_fraction=0.1, random_state=42)
+
+# Feature: comportamento prime 4 settimane
+features = ['w1_sessions', 'w2_sessions', 'w3_sessions', 'w4_sessions',
+            'features_used_w4', 'support_tickets_w4', 'plan_type',
+            'acquisition_source', 'country', 'device_type']
+
+model.fit(X_train, y_train)
+predicted_ltv = model.predict(X_test)
+```
+
+**Vantaggio**: flessibile, cattura relazioni non lineari, gestisce molte feature. **Limite**: meno interpretabile, richiede più dati.
+
+## Implementazione in produzione
+
+```python
+# Pipeline di scoring batch (giornaliera)
+import joblib
+
+# Carica modello
+model = joblib.load('models/churn_model_v3.joblib')
+
+# Estrai feature da warehouse
+query = """
+SELECT c.customer_id, 
+       DATEDIFF('day', c.last_active, CURRENT_DATE) AS recency,
+       ...
+FROM customers c
+LEFT JOIN activity a ON c.customer_id = a.customer_id
+"""
+df = pd.read_sql(query, warehouse_engine)
+
+# Predici
+df['churn_probability'] = model.predict_proba(df[feature_cols])[:, 1]
+
+# Segmenta per azione
+df['action'] = pd.cut(df['churn_probability'],
+    bins=[0, 0.3, 0.6, 0.8, 1.0],
+    labels=['low_risk', 'monitor', 'high_risk', 'critical'])
+
+# Scrivi su tabella di activation
+df[['customer_id', 'churn_probability', 'action']].to_sql(
+    'mrt_activation__churn_prediction', warehouse_engine,
+    if_exists='replace', index=False)
+```
+
+## Monitoring del modello in produzione
+
+I modelli predittivi degradano nel tempo perché il comportamento dei clienti cambia. Monitora:
+
+```python
+def check_model_health(recent_data, actual_outcomes):
+    # Predici sul periodo recente
+    preds = model.predict_proba(recent_data[feature_cols])[:, 1]
+    auc = roc_auc_score(actual_outcomes['churned'], preds)
+    
+    # Verifica feature drift
+    for col in feature_cols:
+        ks_stat = ks_2samp(
+            training_data[col].dropna(),
+            recent_data[col].dropna()
+        ).statistic
+        if ks_stat > 0.15:  # feature significativamente diversa dal training
+            print(f"WARNING: {col} distribution shifted (KS={ks_stat:.3f})")
+    
+    # Alert se AUC scende sotto soglia
+    if auc < AUC_THRESHOLD_ALERT:
+        send_alert(f"Model AUC dropped to {auc:.3f}")
+```
+
+Ricorda: un modello in produzione è un processo continuo, non un artefatto statico.
+
+## Controllo di qualità
+
+Prima di usare modelli predittivi per ltv e churn in una decisione, controlla sempre completezza, duplicati, timezone, definizioni cambiate e segmenti esclusi. Molte analisi apparentemente sofisticate falliscono perché il dato di partenza misura un comportamento diverso da quello che il team crede di osservare.
+
+
+## Interpretazione per segmenti
+
+La media aggregata è solo il punto di partenza. Segmenta per canale, coorte, piano, paese, device e maturità dell'utente. Se due segmenti si muovono in direzioni opposte, la media non rappresenta nessuno dei due e può portare a una decisione sbagliata.
+
+
+## Decisione operativa
+
+Ogni analisi deve terminare con una scelta possibile: continuare, fermare, iterare, investire, rimuovere o approfondire. Se modelli predittivi per ltv e churn non cambia una decisione, probabilmente manca ancora il collegamento tra metrica e azione.
