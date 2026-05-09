@@ -69,7 +69,7 @@ export default defineConfig({
     starlight({
       title: 'GinnyTech',
       logo: {
-        src: './src/assets/logo-ginnytech.png',
+        src: './src/assets/logo-ginnytech.webp',
       },
       favicon: '/favicon-32x32.png',
       plugins: [
