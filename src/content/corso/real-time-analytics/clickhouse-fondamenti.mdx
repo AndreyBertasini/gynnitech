@@ -17,72 +17,199 @@ learningObjectives:
   - Applicare esempi, metriche e controlli a casi reali
 ---
 
-# ClickHouse: fondamenti e architettura
-
-Cloudflare processa oltre 20 milioni di richieste HTTP al secondo. I log di queste richieste vengono scritti in ClickHouse in tempo reale, e le query di analisi (top URL per traffico, tasso di errore per datacenter) restituiscono risultati in centinaia di millisecondi su miliardi di righe. Come è possibile? Perché ClickHouse non è un database: è un motore analitico column-oriented, progettato per una missione specifica: leggere milioni di righe, aggregarle, restituire il risultato il più velocemente possibile. È lo strumento giusto quando hai miliardi di eventi e domande che richiedono aggregazioni, filtri e group-by.
-
-## Column-oriented: il segreto della velocità
-
-In un database row-oriented (PostgreSQL, MySQL), i dati di una riga sono memorizzati tutti insieme su disco. `SELECT * FROM users WHERE id = 42` è efficiente: leggi un blocco, hai tutta la riga. `SELECT AVG(age) FROM users` è inefficiente: devi leggere tutte le righe complete anche se ti serve solo la colonna `age`.
-
-In ClickHouse, ogni colonna è memorizzata in file separati. `SELECT AVG(age) FROM users` legge SOLO il file della colonna `age`. Su un miliardo di righe, la differenza è tra leggere 8 GB (tutta la tabella) e leggere 8 MB (solo la colonna age). Questo è il motivo per cui ClickHouse è da 100 a 1000 volte più veloce su query analitiche.
-
-**Implicazioni pratiche**: non fare mai `SELECT *` su ClickHouse. Seleziona solo le colonne che ti servono. È letteralmente la differenza tra una query da 100ms e una da 10 secondi.
-
-## MergeTree: il motore di storage
-
-MergeTree è la famiglia di motori di storage principale. Le sue caratteristiche:
-
-1. **Ordine fisico (ORDER BY)**: le righe sono ordinate su disco secondo una chiave. È l'indice primario. ClickHouse salta interi blocchi (granuli) se non rientrano nel filtro della query. Scegliere l'ORDER BY giusto è la decisione di design più importante.
-
-2. **Partitioning (PARTITION BY)**: divide i dati in partizioni logiche. `PARTITION BY toYYYYMM(event_date)` crea una partizione per mese. Le query con filtro sulla data leggono solo le partizioni rilevanti.
-
-3. **Primary Key**: diversa da ORDER BY. La PK definisce quali righe vengono confrontate per la deduplicazione durante i merge. Deve essere un sottoinsieme dell'ORDER BY.
-
-**Esempio: tabella per eventi analitici**
-
-```sql
-CREATE TABLE events (
-    event_date Date,
-    event_time DateTime,
-    user_id UInt64,
-    event_type String,
-    properties String
-) ENGINE = MergeTree()
-PARTITION BY toYYYYMM(event_date)
-ORDER BY (user_id, event_time, event_type);
-```
-
-Con questa struttura, query come "tutti gli eventi dell'utente 12345" saranno fulminee perché i dati sono ordinati per user_id. Query come "eventi di tipo purchase di gennaio 2024" useranno sia il partizionamento (solo partizione gennaio) che l'ordine (skip sui blocchi che non contengono purchase).
-
-## Ottimizzazioni chiave
-
-1. **Codec**: `CODEC(Delta, ZSTD)` per timestamp e contatori — compressione estrema, decompressione veloce.
-2. **Materialized columns**: `MATERIALIZED toStartOfMonth(event_time)` — pre-calcola a INSERT time, non a SELECT time.
-3. **Projections**: mini-tabelle con ordine diverso, aggiornate automaticamente. Se ORDER BY è `user_id` ma spesso query per `event_type`, una projection con ORDER BY `event_type` accelera 100x.
-4. **Skip indexes**: indici aggiuntivi per valori unici (Bloom filter per user_id, set per country_code).
-
+title: "ClickHouse: fondamenti e architettura"
+description: >-
+  Introduzione a ClickHouse: architettura column-oriented, motore di storage e ottimizzazione per analytics real-time.
+module: "\"Modulo 12: Real-Time Analytics con Kafka e ClickHouse\""
+order: 2
+category: Tecnico
+headerImage: /course-headers/real-time-analytics-clickhouse-fondamenti-ginnytech-ad.webp
+headerImageAlt: >-
+  ClickHouse fondamenti - immagine ufficiale della lezione su GinnyTech, creata da AD
+difficulty: advanced
+duration: 22 min
+prerequisites:
+  - real-time-analytics/streaming
+learningObjectives:
+  - Comprendere il problema analitico e il contesto decisionale
+  - Applicare esempi, metriche e controlli a casi reali
 ---
 
-*Riferimenti:*
-- ClickHouse Documentation. (2024). "MergeTree Engine Family." *clickhouse.com/docs.*
-- Cloudflare. (2022). "How Cloudflare Uses ClickHouse for DNS Analytics." *Cloudflare Blog.*
+# ClickHouse: fondamenti e architettura
 
-## Controllo di qualità
+Immaginate di essere nel 2018, nel cuore delle operation di Cloudflare. L'azienda protegge e accelera una frazione significativa di Internet, gestendo in quel periodo circa 10 milioni di richieste HTTP al secondo. Ogni richiesta genera un log: un evento prezioso che contiene informazioni su attacchi DDoS, performance, errori e pattern di traffico. Il team di analytics si trova di fronte a una sfida monumentale: come analizzare in tempo reale un flusso di dati che supera i 2 petabyte al mese, fornendo insight quasi istantanei agli ingegneri e ai clienti? La loro soluzione precedente, basata su un cluster Elasticsearch, mostrava i suoi limiti in termini di costi e latenza su query complesse. La risposta a questa sfida è stata l'adozione di ClickHouse. Questo non è un semplice database relazionale; è un sistema di gestione di database colonnare (DBMS) costruito per un solo, ossessivo scopo: eseguire query analitiche (OLAP) su quantità immense di dati a una velocità che sfida l'intuizione. La promessa è quella di aggregare miliardi di righe in poche centinaia di millisecondi. In questa lezione, smonteremo l'architettura di ClickHouse per capire come mantiene questa promessa, partendo dal suo fondamento: l'orientamento a colonna.
 
-Prima di usare clickhouse: fondamenti e architettura in una decisione, controlla sempre completezza, duplicati, timezone, definizioni cambiate e segmenti esclusi. Molte analisi apparentemente sofisticate falliscono perché il dato di partenza misura un comportamento diverso da quello che il team crede di osservare.
+## Il Paradigma Colonare: Leggere Meno per Calcolare di Più
 
+Per comprendere la rivoluzione di ClickHouse, dobbiamo prima fare un passo indietro e confrontare le due filosofie dominanti nello storage dei dati: row-oriented e column-oriented. I sistemi tradizionali come PostgreSQL, MySQL o SQL Server sono *row-oriented*. Quando si salva una riga in una tabella `ordini` – contenente `id_ordine`, `id_utente`, `importo`, `data_transazione` – tutti questi valori vengono scritti consecutivamente su disco. Questa disposizione è ottimale per carichi di lavoro transazionali (OLTP), dove l'operazione tipica è recuperare, inserire o aggiornare un'intera riga. La query `SELECT * FROM ordini WHERE id_ordine = 12345` è incredibilmente efficiente: il sistema localizza l'inizio della riga sul disco e legge un blocco contiguo di dati per ottenere tutte le informazioni necessarie.
 
-## Interpretazione per segmenti
+Il mondo dell'analytics, però, pone domande radicalmente diverse. Raramente siamo interessati a un singolo ordine. Vogliamo sapere: "Qual è l'importo medio degli ordini nell'ultimo mese?" o "Quali sono i 10 utenti con la spesa totale più alta?". In un sistema row-oriented, per calcolare `AVG(importo)`, il database è costretto a leggere dal disco l'intera tabella, caricando in memoria ogni singola colonna di ogni singola riga, anche se ci serve solo la colonna `importo`. Su una tabella con miliardi di righe e decine di colonne, questo spreco di I/O (Input/Output) è la principale causa di lentezza.
 
-La media aggregata è solo il punto di partenza. Segmenta per canale, coorte, piano, paese, device e maturità dell'utente. Se due segmenti si muovono in direzioni opposte, la media non rappresenta nessuno dei due e può portare a una decisione sbagliata.
+ClickHouse rovescia questo modello. È un sistema *column-oriented*. Ogni colonna della tabella `ordini` è memorizzata in file separati. Il file `importo.col` contiene solo una sequenza di valori numerici, il file `data_transazione.col` solo una sequenza di date, e così via. Quando eseguiamo la query `SELECT AVG(importo) FROM ordini`, ClickHouse legge *esclusivamente* il file `importo.col`. Se la nostra tabella ha 20 colonne e un miliardo di righe, la quantità di dati letti dal disco è potenzialmente 20 volte inferiore. Questo, da solo, spiega un ordine di grandezza nel miglioramento delle performance. Ma i vantaggi non si fermano qui. Memorizzare dati omogenei (tutti numeri, tutte date) in modo contiguo apre la porta a due ottimizzazioni devastanti: la compressione e la vettorizzazione. La compressione è molto più efficace su dati dello stesso tipo. Un algoritmo come ZSTD o LZ4 può raggiungere rapporti di compressione di 5:1 o 10:1 su una colonna di interi, cosa impensabile su dati eterogenei di una riga. Inoltre, le CPU moderne sono dotate di istruzioni SIMD (Single Instruction, Multiple Data) che permettono di eseguire la stessa operazione (es. una somma) su un intero vettore di dati con un singolo ciclo di clock. L'elaborazione vettoriale è nativa per i dati organizzati per colonna, consentendo a ClickHouse di sfruttare al massimo l'hardware sottostante.
 
+## MergeTree: Il Motore di Storage Intelligente
 
-## Decisione operativa
+Se l'archiviazione colonnare è lo scheletro di ClickHouse, la famiglia di motori di storage `MergeTree` è il suo sistema nervoso centrale. È qui che risiede la vera magia che permette di interrogare petabyte di dati. Un motore `MergeTree` non è un monolite; è un'architettura basata sul concetto di Log-Structured Merge-Tree (LSM Tree), adattato per il mondo analitico. I dati in ingresso non modificano file esistenti, ma vengono scritti in nuovi blocchi di dati immutabili, ordinati e compressi, chiamati "parti". Periodicamente, un processo in background fonde ("merge") queste piccole parti in parti più grandi e ottimizzate, mantenendo il sistema performante.
 
-Ogni analisi deve terminare con una scelta possibile: continuare, fermare, iterare, investire, rimuovere o approfondire. Se clickhouse: fondamenti e architettura non cambia una decisione, probabilmente manca ancora il collegamento tra metrica e azione.
+Quando definiamo una tabella in ClickHouse, tre clausole sono determinanti per le performance:
 
+1.  **`PARTITION BY`**: Questa clausola suddivide fisicamente i dati in directory separate basate su una chiave. La scelta più comune per i dati di serie storiche è il mese o il giorno, ad esempio `PARTITION BY toYYYYMM(timestamp)`. Quando una query contiene una clausola `WHERE` che filtra su quella chiave (es. `WHERE timestamp >= '2023-01-01' AND timestamp < '2023-02-01'`), ClickHouse esegue il *partition pruning*: ignora completamente le directory delle partizioni che non soddisfano il criterio, riducendo drasticamente lo spazio di ricerca.
 
-## Metriche di verifica
+2.  **`ORDER BY`**: Questa è la decisione di design più critica in assoluto. A differenza dei database tradizionali, l' `ORDER BY` in una tabella `MergeTree` definisce l'ordine *fisico* con cui le righe sono memorizzate su disco all'interno di ogni partizione. Questo ordinamento funge da indice primario sparso. ClickHouse memorizza un "campione" dei valori della chiave di ordinamento ogni 8192 righe (un "granulo"). Quando si esegue una query con un filtro sulla chiave di ordinamento (es. `WHERE user_id = 'abc'`), ClickHouse consulta questo indice sparso per identificare rapidamente quali granuli *potrebbero* contenere i dati richiesti, saltando a piè pari la lettura di milioni o miliardi di righe che sicuramente non li contengono. Scegliere una chiave di ordinamento basata sulle colonne più frequentemente filtrate è la via maestra per query sub-secondo.
 
-Dopo l'intervento, definisci una metrica primaria e due guardrail. La metrica primaria misura il miglioramento atteso; le guardrail impediscono di ottenere quel miglioramento distruggendo retention, fiducia, qualità del dato o sostenibilità operativa.
+3.  **Primary Key**: In `MergeTree`, la chiave primaria è strettamente legata all' `ORDER BY`. Per il motore base, deve essere un prefisso (o coincidere) con la chiave di ordinamento. Il suo scopo principale non è garantire l'unicità come in un sistema OLTP, ma definire le colonne utilizzate durante il processo di merge per motori specializzati come `ReplacingMergeTree` (che mantiene solo l'ultima versione di una riga con la stessa chiave primaria) o `SummingMergeTree` (che somma colonne metriche per righe con la stessa chiave).
+
+```sql
+-- Esempio di una tabella per log di accesso a un servizio web
+CREATE TABLE ginnytech.website_logs (
+    event_date Date,
+    timestamp DateTime,
+    client_ip IPv4,
+    user_id Nullable(UInt64),
+    http_method String,
+    url String,
+    response_code UInt16,
+    response_time_ms UInt32
+) ENGINE = MergeTree()
+PARTITION BY toYYYYMM(event_date)
+ORDER BY (event_date, http_method, url);
+```
+In questo schema, le query che filtrano per un intervallo di date, un metodo HTTP specifico e un URL saranno fulminee. Il sistema prima selezionerà solo le partizioni mensili rilevanti, poi, all'interno di esse, userà l'indice sparso su `(event_date, http_method, url)` per leggere solo i granuli di dati necessari. Una query che filtra solo per `user_id`, invece, richiederà una scansione completa (full scan), risultando molto più lenta.
+
+## Caso di Studio: Uber e l'Osservabilità su Scala Planetaria
+
+Uber, con la sua complessa architettura a microservizi, genera una quantità di dati di log e metriche che sfida l'immaginazione. Parliamo di trilioni di messaggi al giorno, provenienti da migliaia di servizi distribuiti a livello globale. Per i team di ingegneri, la capacità di diagnosticare problemi, monitorare le performance e analizzare i trend in tempo reale non è un lusso, ma una necessità operativa. Inizialmente, Uber si affidava a una soluzione basata su Elasticsearch, potente per la ricerca testuale ma onerosa e lenta per le aggregazioni su larga scala.
+
+L'adozione di ClickHouse per il loro sistema di logging, chiamato "M3", ha rappresentato un punto di svolta. Hanno costruito una pipeline di dati che raccoglie log da tutte le fonti, li arricchisce e li indicizza in un massiccio cluster ClickHouse. La scelta del motore `MergeTree` è stata fondamentale. Le tabelle di log sono state partizionate per giorno e ordinate per un insieme di etichette ad alta cardinalità come il nome del servizio e l'hostname. Questo design ha permesso di ottenere un'efficienza straordinaria.
+
+I risultati sono stati impressionanti. Le query di diagnostica che prima richiedevano minuti per essere completate su Elasticsearch, su ClickHouse venivano eseguite in pochi secondi, anche analizzando terabyte di dati. Ad esempio, un ingegnere che investigava un picco di errori HTTP 500 per un servizio specifico poteva eseguire una query come `SELECT count() FROM logs WHERE service = 'payments' AND level = 'error' GROUP BY minute` su un intervallo di ore, ottenendo una risposta in meno di 5 secondi. Questo ha ridotto il *Mean Time To Detection* (MTTD) e il *Mean Time To Resolution* (MTTR) degli incidenti in modo significativo. Dal punto di vista economico, Uber ha riportato una riduzione dei costi dell'infrastruttura di logging di oltre il 75% rispetto alla soluzione precedente, grazie alla superiore efficienza di compressione e all'uso più razionale delle risorse computazionali di ClickHouse. Questo caso dimostra come la scelta di un'architettura specializzata per l'analisi di serie storiche possa avere un impatto diretto non solo sulle performance tecniche, ma anche sulla stabilità operativa e sui costi di un'azienda su scala globale.
+
+## Ottimizzazioni Avanzate: Proiezioni, Codec e Indici Sparsi
+
+Padroneggiare ClickHouse significa andare oltre le basi di `PARTITION BY` e `ORDER BY`. La piattaforma offre un arsenale di strumenti per ottimizzare ulteriormente lo storage e la velocità delle query, permettendo di adattare il sistema a pattern di accesso specifici.
+
+Una delle funzionalità più potenti sono le **Projections**. Una proiezione è, in sostanza, una copia parziale e riordinata dei dati della tabella principale, gestita e aggiornata automaticamente da ClickHouse. Immaginiamo la nostra tabella `website_logs` ordinata per `(event_date, http_method, url)`. Questa struttura è perfetta per analizzare il traffico di un URL specifico. Ma cosa succede se un altro team, quello di sicurezza, ha bisogno di interrogare frequentemente i log per `client_ip` per individuare attività sospette? Una query `WHERE client_ip = '...'` sarebbe lenta. Invece di duplicare i dati in un'altra tabella, possiamo creare una proiezione:
+
+```sql
+ALTER TABLE ginnytech.website_logs
+ADD PROJECTION p_by_ip (
+    SELECT
+        event_date,
+        client_ip,
+        url,
+        response_code
+    ORDER BY client_ip, event_date
+);
+```
+Quando inseriamo nuovi dati nella tabella principale, ClickHouse popolerà automaticamente anche questa proiezione, che è fisicamente ordinata per `client_ip`. Quando il query planner rileva una query che può essere soddisfatta più efficientemente dalla proiezione, la userà in modo trasparente, accelerando le ricerche per IP di ordini di grandezza.
+
+Un altro livello di ottimizzazione riguarda la **compressione**. ClickHouse permette di specificare `CODEC` a livello di colonna. Oltre ai codec generici come `ZSTD` e `LZ4`, ne esistono di specializzati. `Delta` è perfetto per dati che cambiano lentamente, come i timestamp: invece di memorizzare il valore assoluto, memorizza la differenza (delta) rispetto al valore precedente. `DoubleDelta` calcola il delta del delta, ideale per dati con un rateo di cambiamento costante. `T64` è un codec specializzato che elimina gli zeri iniziali dai numeri a 64 bit. Combinare questi codec può portare a risparmi di spazio enormi. Per esempio, una colonna `timestamp` `DateTime` (un `UInt32`) potrebbe essere definita come `timestamp DateTime CODEC(Delta, ZSTD)`.
+
+Infine, gli **Skip Indexes** (o indici di salto dati) offrono un meccanismo di pruning più granulare rispetto alla chiave primaria. Si tratta di piccole strutture dati, calcolate per ogni granulo, che riassumono i dati al suo interno. Un indice di tipo `minmax` su una colonna `response_time_ms` memorizzerà il valore minimo e massimo per ogni blocco di 8192 righe. Una query con `WHERE response_time_ms > 5000` potrà saltare tutti i granuli il cui valore massimo è inferiore a 5000. Un indice `bloom_filter` è eccellente per colonne ad alta cardinalità come `user_id`. Può dire con certezza se un `user_id` *non è presente* in un granulo, permettendo di saltarlo senza leggerlo. Questi indici aggiungono un piccolo overhead in scrittura ma possono accelerare drasticamente le query che non filtrano sulla chiave di ordinamento primaria.
+
+## Caso di Studio: Spotify e l'Analisi degli A/B Test
+
+Spotify vive di dati. Ogni interazione dell'utente – un play, uno skip, un'aggiunta a una playlist, una ricerca – è un segnale prezioso per migliorare l'esperienza e personalizzare i contenuti. Una delle pratiche centrali per l'evoluzione del prodotto è l'A/B testing su vasta scala. Ogni nuova funzionalità, ogni modifica all'algoritmo di raccomandazione viene testata su un sottoinsieme di utenti per misurarne l'impatto su metriche chiave come l'engagement, la retention e la soddisfazione.
+
+Per gestire l'analisi di centinaia di esperimenti simultanei, con dati provenienti da oltre 200 miliardi di eventi al giorno, Spotify si affida a ClickHouse. La loro piattaforma di A/B testing, chiamata "ABBA", utilizza ClickHouse come motore analitico principale. Gli eventi grezzi, che descrivono le interazioni degli utenti e la loro assegnazione a un gruppo di controllo o a una variante di test, vengono strimmati in tempo reale in tabelle ClickHouse.
+
+La struttura di queste tabelle è ottimizzata per il calcolo di metriche complesse. Sono partizionate per giorno e ordinate per `(experiment_id, user_id, timestamp)`. Questo permette di isolare rapidamente i dati di un singolo esperimento e di analizzare il comportamento di specifici utenti nel tempo. Grazie alla velocità di ClickHouse, i product manager e i data scientist possono costruire dashboard interattive che mostrano i risultati degli esperimenti quasi in tempo reale. Invece di attendere 24 ore per un batch job su Hadoop o Spark, possono segmentare i risultati per paese, tipo di dispositivo o coorte di utenti e ottenere risposte in pochi secondi. Questa agilità ha ridotto drasticamente il ciclo di iterazione. Un esempio concreto: testando una modifica all'algoritmo della playlist "Discover Weekly", il team ha potuto osservare un aumento del 12% nella metrica "salvataggi per utente" nel gruppo di test entro poche ore dal lancio, confermando l'ipotesi e accelerando il rollout globale. L'uso di ClickHouse ha trasformato il processo di sperimentazione, rendendolo più veloce, più granulare e, in definitiva, più efficace nel guidare le decisioni di prodotto.
+
+## Laboratorio Pratico: Modellare e Interrogare un Dataset di Eventi
+
+È il momento di mettere in pratica i concetti discussi. In questo laboratorio, progetteremo lo schema per una tabella destinata a raccogliere eventi di visualizzazione di pagina (`page_views`) per un sito di e-commerce e scriveremo alcune query per analizzare questi dati.
+
+### Esercizio 1: Progettazione dello Schema
+
+Il nostro obiettivo è registrare ogni volta che un utente visualizza una pagina. I dati che abbiamo a disposizione sono: `timestamp` dell'evento, `user_id`, `session_id`, `url` della pagina, `country_code` dell'utente e `device_type` (es. 'desktop', 'mobile'). Le query più comuni che prevediamo di eseguire sono:
+1.  Analisi del traffico giornaliero/mensile.
+2.  Costruzione di funnel di conversione, analizzando la sequenza di URL visitati da un utente in una sessione.
+3.  Analisi del comportamento degli utenti per paese.
+
+**Compito:** Scrivere l'istruzione `CREATE TABLE` per una tabella chiamata `ginnytech.page_views`, scegliendo attentamente le clausole `PARTITION BY` e `ORDER BY` per ottimizzare le query sopra descritte.
+
+*Soluzione Proposta:*
+```sql
+CREATE TABLE ginnytech.page_views (
+    event_date Date,
+    timestamp DateTime,
+    user_id UInt64,
+    session_id String,
+    url String,
+    country_code LowCardinality(String),
+    device_type LowCardinality(String)
+) ENGINE = MergeTree()
+PARTITION BY toYYYYMM(event_date)
+ORDER BY (user_id, session_id, timestamp);
+```
+*Razionale della scelta:*
+- **`PARTITION BY toYYYYMM(event_date)`**: Partizionare per mese è un buon compromesso. Permette un pruning efficiente per le analisi temporali senza creare un numero eccessivo di partizioni (come farebbe una partizione giornaliera su un lungo periodo).
+- **`ORDER BY (user_id, session_id, timestamp)`**: Questa chiave di ordinamento è ottimale per l'analisi dei percorsi utente. I dati di un singolo utente sono raggruppati fisicamente, e al loro interno, gli eventi di una stessa sessione sono contigui e ordinati cronologicamente. Questo rende le analisi di funnel estremamente veloci.
+- **`LowCardinality(String)`**: Per `country_code` e `device_type`, che hanno un numero limitato di valori distinti, l'uso del tipo `LowCardinality` ottimizza lo storage e le performance delle query che raggruppano o filtrano per queste colonne.
+
+### Esercizio 2: Query di Analisi
+
+Usando lo schema definito sopra, scrivere le query SQL per rispondere alle seguenti domande:
+
+1.  Quante visualizzazioni di pagina ci sono state nel mese di Maggio 2024?
+2.  Quali sono le 10 pagine più visitate (URL) da utenti desktop in Germania ('DE') a Giugno 2024?
+3.  Qual è la durata media delle sessioni (differenza tra max e min timestamp) iniziate il 1° Luglio 2024?
+
+*Soluzioni:*
+```sql
+-- 1. Page views totali a Maggio 2024
+SELECT count()
+FROM ginnytech.page_views
+WHERE event_date >= '2024-05-01' AND event_date <= '2024-05-31';
+
+-- 2. Top 10 pagine per utenti desktop in Germania a Giugno 2024
+SELECT
+    url,
+    count() AS page_views
+FROM ginnytech.page_views
+WHERE event_date >= '2024-06-01' AND event_date < '2024-07-01'
+  AND country_code = 'DE'
+  AND device_type = 'desktop'
+GROUP BY url
+ORDER BY page_views DESC
+LIMIT 10;
+
+-- 3. Durata media delle sessioni del 1° Luglio 2024
+SELECT avg(session_duration)
+FROM (
+    SELECT
+        session_id,
+        date_diff('second', min(timestamp), max(timestamp)) AS session_duration
+    FROM ginnytech.page_views
+    WHERE event_date = '2024-07-01'
+    GROUP BY session_id
+);
+```
+
+### Esercizio 3: Ottimizzazione con una Proiezione
+
+Il team di marketing ora chiede di poter analizzare rapidamente il numero di utenti unici per ogni paese su base giornaliera. La query `SELECT uniq(user_id) FROM page_views WHERE country_code = 'IT' GROUP BY event_date` sarebbe lenta perché né `country_code` né `event_date` sono l'inizio della nostra chiave di ordinamento.
+
+**Compito:** Progettare e scrivere il codice per una proiezione che possa aggregare i dati in anticipo per accelerare questo tipo di query.
+
+*Soluzione:*
+```sql
+ALTER TABLE ginnytech.page_views
+ADD PROJECTION proj_country_daily (
+    SELECT
+        country_code,
+        event_date,
+        count(),
+        uniqState(user_id)
+    GROUP BY country_code, event_date
+);
+```
+Questa proiezione crea una vista materializzata aggregata. Quando eseguiamo una query compatibile, come `SELECT country_code, event_date, uniqMerge(user_id) FROM ginnytech.page_views GROUP BY country_code, event_date`, ClickHouse la eseguirà sulla proiezione, ottenendo risultati quasi istantanei.
+
+## Riepilogo: I Pilastri di ClickHouse
+
+Ripercorriamo i concetti cardine che rendono ClickHouse uno strumento eccezionale per l'analytics in tempo reale. La sua potenza non deriva da un singolo trucco, ma da una serie di decisioni architetturali mirate a un obiettivo specifico: la velocità nelle query OLAP.
+
+Il primo pilastro è l'**archiviazione colonnare**. Leggendo dal disco solo le colonne strettamente necessarie per una query, si minimizza l'I/O, che è spesso il collo di bottiglia principale. Questo approccio, inoltre, massimizza l'efficacia della compressione e permette di sfruttare l'elaborazione vettoriale delle CPU moderne.
+
+Il secondo pilastro è il motore **MergeTree**. La sua architettura basata su parti di dati immutabili e processi di merge in background garantisce alte velocità di scrittura senza sacrificare le performance in lettura. All'interno di MergeTree, la scelta della **chiave di partizionamento (`PARTITION BY`)** e, soprattutto, della **chiave di ordinamento (`ORDER BY`)** è l'atto di design più impattante. Un corretto ordinamento fisico dei dati funge da indice primario, consentendo a Click
