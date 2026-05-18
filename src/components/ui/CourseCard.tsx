@@ -27,7 +27,7 @@ export const CourseCard = ({
   return (
     <a
       href={`/course/${id}/`}
-      className="group relative block h-full animate-fade-in-up opacity-0 rounded-2xl focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-acid-yellow focus-visible:ring-offset-2 focus-visible:ring-offset-[#050505]"
+      className="group relative block h-full animate-fade-in-up opacity-0 rounded-2xl focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-acid-yellow focus-visible:ring-offset-2 focus-visible:ring-offset-[var(--sl-color-bg)]"
       style={{ animationDelay: `${index * 100}ms`, animationFillMode: 'forwards' }}
     >
       <div className="absolute inset-0 rounded-[1.75rem] bg-gradient-to-br from-white/10 to-white/0 opacity-0 transition-opacity duration-500 group-hover:opacity-100" />

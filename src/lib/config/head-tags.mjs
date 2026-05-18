@@ -74,11 +74,19 @@ const starlightHeadTags = [
   {
     tag: 'script',
     content: `
-      // Force dark mode if no preference is stored
-      if (!localStorage.getItem('starlight-theme')) {
-        document.documentElement.setAttribute('data-theme', 'dark');
-        localStorage.setItem('starlight-theme', 'dark');
-      }
+      // Apply saved theme immediately to prevent flash
+      (function() {
+        var theme = localStorage.getItem('starlight-theme');
+        if (theme === 'light' || theme === 'dark') {
+          document.documentElement.setAttribute('data-theme', theme);
+        } else {
+          // First visit: use system preference or default to dark
+          var prefersLight = window.matchMedia('(prefers-color-scheme: light)').matches;
+          var initial = prefersLight ? 'light' : 'dark';
+          document.documentElement.setAttribute('data-theme', initial);
+          localStorage.setItem('starlight-theme', initial);
+        }
+      })();
     `,
   },
 ];

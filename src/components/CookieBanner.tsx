@@ -37,7 +37,7 @@ export const CookieBanner = () => {
     if (!showBanner) return null;
 
     return (
-        <div className="fixed bottom-0 left-0 right-0 z-[100] p-4 md:p-6 bg-brand-dark/95 backdrop-blur-md border-t border-white/10 shadow-[0_-10px_40px_rgba(0,0,0,0.5)] animate-in slide-in-from-bottom-10 fade-in duration-500">
+        <div className="fixed bottom-0 left-0 right-0 z-[100] p-4 md:p-6 bg-[var(--sl-color-bg)]/95 backdrop-blur-md border-t border-white/10 shadow-[0_-10px_40px_rgba(0,0,0,0.5)] animate-in slide-in-from-bottom-10 fade-in duration-500">
             <div className="container mx-auto max-w-5xl flex flex-col md:flex-row items-center justify-between gap-6">
                 <div className="flex-1 text-sm text-slate-300 leading-relaxed max-w-2xl">
                     <p className="mb-2 font-bold text-white text-base">🍪 Privacy & Cookie Policy</p>
