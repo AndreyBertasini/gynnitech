@@ -34,6 +34,7 @@ export const Navbar = () => {
           <a href="/progress" className="text-sm font-medium text-acid-yellow hover:text-acid-yellow/80 transition-colors">Progresso</a>
           <a href="/perche-questo-corso" className="text-sm font-medium text-slate-300 hover:text-neon-blue transition-colors hover:drop-shadow-[0_0_8px_rgba(0,243,255,0.5)]">Informazioni</a>
           <a href={LINKEDIN_URL} target="_blank" rel="noreferrer" className="text-sm font-medium text-slate-300 hover:text-neon-blue transition-colors hover:drop-shadow-[0_0_8px_rgba(0,243,255,0.5)]">Chi sono</a>
+          <a href="/newsletter" className="text-sm font-medium text-acid-yellow hover:text-acid-yellow/80 transition-colors">Newsletter</a>
           <SearchWidget />
           <ThemeToggle />
         </div>
