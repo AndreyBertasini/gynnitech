@@ -1,5 +1,6 @@
 import React from 'react';
 import { Clock, ArrowRight } from 'lucide-react';
+import { OptimizedImage } from '../OptimizedImage';
 
 interface LessonCardProps {
   title: string;
@@ -35,12 +36,12 @@ export const LessonCard = ({
 
       {imageSrc && (
         <div className="relative mb-5 overflow-hidden rounded-[1.25rem] border border-white/10 bg-white/[0.03]">
-          <img
+          <OptimizedImage
             src={imageSrc}
             alt={imageAlt || title}
             className="h-40 w-full object-cover transition-transform duration-500 group-hover:scale-[1.03]"
-            loading="lazy"
-            decoding="async"
+            lazy={true}
+            fit="cover"
           />
           <div className="absolute inset-0 bg-gradient-to-t from-[#0a0e14] via-[#0a0e14]/25 to-transparent" />
           <span className="absolute left-4 top-4 flex items-center justify-center w-9 h-9 rounded-xl bg-black/40 border border-white/10 text-xs font-orbitron text-slate-100 shadow-[0_0_16px_rgba(0,0,0,0.35)] backdrop-blur-md transition-colors group-hover:text-neon-blue group-hover:border-neon-blue/30">

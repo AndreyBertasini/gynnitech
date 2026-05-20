@@ -1,5 +1,6 @@
 import React from 'react';
 import { ArrowRight, BookOpen } from 'lucide-react';
+import { OptimizedImage } from '../OptimizedImage';
 
 interface CourseCardProps {
   id: string;
@@ -40,12 +41,12 @@ export const CourseCard = ({
           <div className="relative overflow-hidden rounded-[1.45rem] border border-white/10 bg-white/[0.03]">
             {imageSrc ? (
               <>
-                <img
+                <OptimizedImage
                   src={imageSrc}
                   alt={imageAlt || title}
                   className="h-48 w-full object-cover transition-transform duration-500 group-hover:scale-[1.05] sm:h-52"
-                  loading="lazy"
-                  decoding="async"
+                  lazy={true}
+                  fit="cover"
                 />
                 <div className="absolute inset-0 bg-gradient-to-t from-[#05070b]/95 via-[#05070b]/35 to-transparent" />
               </>
