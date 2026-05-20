@@ -4,6 +4,7 @@ import tailwindcss from '@tailwindcss/vite';
 import starlight from '@astrojs/starlight';
 import react from '@astrojs/react';
 import sitemap from '@astrojs/sitemap';
+import partytown from '@astrojs/partytown';
 
 import fs from 'node:fs';
 import mermaid from 'astro-mermaid';
@@ -66,6 +67,11 @@ export default defineConfig({
       theme: 'dark',
     }),
     sitemap(),
+    partytown({
+      config: {
+        forward: ['dataLayer.push'],
+      },
+    }),
     starlight({
       title: 'GinnyTech',
       logo: {
