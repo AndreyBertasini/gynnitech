@@ -10,6 +10,7 @@ const redirectEntries = [
   ['/corso/getting-started/introduction', '/course/data-collection/introduction'],
   ['/corso/getting-started/framework', '/course/data-collection/framework'],
   ['/corso/getting-started/terminology', '/course/data-collection/terminology'],
+  ['/learning-path', '/course/learning-path'],
 ];
 
 const isInternalPath = (value) => typeof value === 'string' && value.startsWith('/');
