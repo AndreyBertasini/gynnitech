@@ -44,7 +44,7 @@ export const CookieBanner = () => {
                     <p>
                         Utilizziamo cookie tecnici e di analisi per migliorare l'esperienza e capire come viene usato il corso.
                         Rispettiamo la tua privacy: il tracciamento si attiva solo con il tuo consenso.
-                        <a href="/privacy" className="text-neon-blue hover:text-neon-blue/80 underline ml-1 transition-colors">Leggi la policy completa.</a>
+                        <a href="/privacy" className="text-accent hover:text-accent/80 underline ml-1 transition-colors">Leggi la policy completa.</a>
                     </p>
                 </div>
 

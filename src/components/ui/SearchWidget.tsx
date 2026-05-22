@@ -263,7 +263,7 @@ export const SearchWidget = ({ mobile = false }: { mobile?: boolean }) => {
                       <div className="mb-2 text-[11px] uppercase tracking-[0.18em] text-slate-500">
                         {result.kind === 'blog' ? 'Articolo' : result.kind === 'course' ? 'Lezione' : 'Pagina'}
                       </div>
-                      <h4 className="text-white font-medium group-hover:text-neon-blue transition-colors mb-1 flex items-center gap-2">
+                      <h4 className="text-white font-medium group-hover:text-accent transition-colors mb-1 flex items-center gap-2">
                          {result.url.includes('/blog') ? <FileText className="w-4 h-4 opacity-50"/> : <BookOpen className="w-4 h-4 opacity-50"/>}
                          <span dangerouslySetInnerHTML={{ __html: result.meta.title ?? result.plainTitle }} />
                       </h4>
