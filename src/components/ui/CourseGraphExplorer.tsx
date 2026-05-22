@@ -257,7 +257,7 @@ export const CourseGraphExplorer = ({ graph, title, description }: CourseGraphEx
 
       <section className="space-y-5">
         <div>
-          <p className="text-[11px] font-semibold uppercase tracking-[0.24em] text-acid-yellow">Percorsi automatici</p>
+          <p className="text-[11px] font-semibold uppercase tracking-[0.24em] text-accent">Percorsi automatici</p>
           <h2 className="mt-2 text-3xl font-semibold text-white">Entrate rapide nel catalogo</h2>
         </div>
         <div className="grid gap-4 lg:grid-cols-2 xl:grid-cols-4">
@@ -275,7 +275,7 @@ export const CourseGraphExplorer = ({ graph, title, description }: CourseGraphEx
               className={clsx(
                 'rounded-[28px] border p-5 text-left transition',
                 activeRouteId === route.id
-                  ? 'border-acid-yellow/40 bg-acid-yellow/10'
+                  ? 'border-accent/40 bg-accent/10'
                   : 'border-white/10 bg-white/[0.03] hover:border-white/20 hover:bg-white/[0.05]',
               )}
             >
@@ -427,7 +427,7 @@ export const CourseGraphExplorer = ({ graph, title, description }: CourseGraphEx
               <div className="grid gap-6 2xl:grid-cols-[minmax(0,1.35fr)_340px]">
                 <section className="rounded-[28px] border border-white/10 bg-white/[0.03] p-5 md:p-6">
                   <div className="mb-6 flex items-center gap-3">
-                    <BookOpen className="h-5 w-5 text-acid-yellow" />
+                    <BookOpen className="h-5 w-5 text-accent" />
                     <div>
                       <h4 className="text-2xl font-semibold text-white">Lezioni del modulo</h4>
                       <p className="text-sm text-slate-400">Ordine reale, prerequisiti e punti di ponte verso il resto del corso.</p>
@@ -507,7 +507,7 @@ export const CourseGraphExplorer = ({ graph, title, description }: CourseGraphEx
 
                   <section className="rounded-[28px] border border-white/10 bg-white/[0.03] p-5">
                     <div className="mb-4 flex items-center gap-3">
-                      <Sparkles className="h-5 w-5 text-acid-yellow" />
+                      <Sparkles className="h-5 w-5 text-accent" />
                       <div>
                         <h4 className="text-xl font-semibold text-white">Lezioni ponte</h4>
                         <p className="text-sm text-slate-400">Lezioni che collegano questo modulo al resto del corso.</p>
@@ -515,7 +515,7 @@ export const CourseGraphExplorer = ({ graph, title, description }: CourseGraphEx
                     </div>
                     <div className="space-y-3">
                       {bridgeLessons.length > 0 ? bridgeLessons.map((lesson) => (
-                        <a key={lesson.id} href={lessonHref(lesson.id)} className="block rounded-2xl border border-white/10 bg-white/[0.04] p-4 transition hover:border-acid-yellow/30 hover:bg-acid-yellow/10">
+                        <a key={lesson.id} href={lessonHref(lesson.id)} className="block rounded-2xl border border-white/10 bg-white/[0.04] p-4 transition hover:border-accent/30 hover:bg-accent/10">
                           <p className="text-sm font-semibold text-white">{lesson.title}</p>
                           <p className="mt-2 text-xs leading-6 text-slate-400">
                             richiama {topModuleNamesFromLessons(lesson.externalPrerequisites, lessonsById, modulesById).join(', ') || 'nessun modulo esterno'}

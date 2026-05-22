@@ -57,7 +57,7 @@ export const CookieBanner = () => {
                     </button>
                     <button
                         onClick={handleAccept}
-                        className="flex-1 md:flex-none px-6 py-2.5 rounded-lg bg-[#ccff00] hover:bg-[#b3e600] text-black font-bold shadow-[0_0_15px_rgba(204,255,0,0.2)] hover:shadow-[0_0_20px_rgba(204,255,0,0.4)] transition-all text-sm"
+                        className="flex-1 md:flex-none px-6 py-2.5 rounded-lg bg-accent hover:bg-[#b3e600] text-black font-bold shadow-[0_0_15px_rgba(204,255,0,0.2)] hover:shadow-[0_0_20px_rgba(204,255,0,0.4)] transition-all text-sm"
                     >
                         Accetta Tutto
                     </button>

@@ -186,7 +186,7 @@ export const SearchWidget = ({ mobile = false }: { mobile?: boolean }) => {
         aria-controls="site-search-dialog"
         aria-expanded={isOpen}
       >
-        <Search className={`text-acid-yellow group-hover:text-acid-yellow/80 transition-colors ${mobile ? 'w-5 h-5' : 'w-5 h-5'}`} />
+        <Search className={`text-accent group-hover:text-accent/80 transition-colors ${mobile ? 'w-5 h-5' : 'w-5 h-5'}`} />
         <span className={`${mobile ? 'inline text-base' : 'hidden lg:inline text-sm'} font-medium`}>Cerca</span>
       </button>
 
