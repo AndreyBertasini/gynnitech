@@ -28,11 +28,11 @@ export const LessonCard = ({
   return (
     <a
       href={href}
-      className="group relative flex flex-col h-full overflow-hidden rounded-2xl border border-white/10 bg-[#0a0e14]/80 p-6 transition-all duration-300 hover:border-neon-blue/50 hover:shadow-[0_0_30px_-10px_rgba(0,243,255,0.2)] hover:-translate-y-1 animate-fade-in-up opacity-0 backdrop-blur-md"
+      className="group relative flex flex-col h-full overflow-hidden rounded-2xl border border-white/10 bg-[#0a0e14]/80 p-6 transition-all duration-300 hover:border-accent/50 hover:shadow-[0_0_30px_-10px_rgba(204,255,0,0.2)] hover:-translate-y-1 animate-fade-in-up opacity-0 backdrop-blur-md"
       style={{ animationDelay: `${index * 100}ms`, animationFillMode: 'forwards' }}
     >
       {/* Top Decoration */}
-      <div className="absolute top-0 left-0 w-full h-1 bg-gradient-to-r from-transparent via-white/10 to-transparent group-hover:via-neon-blue/80 transition-all duration-500" />
+      <div className="absolute top-0 left-0 w-full h-1 bg-gradient-to-r from-transparent via-white/10 to-transparent group-hover:via-accent/80 transition-all duration-500" />
 
       {imageSrc && (
         <div className="relative mb-5 overflow-hidden rounded-[1.25rem] border border-white/10 bg-white/[0.03]">
@@ -44,7 +44,7 @@ export const LessonCard = ({
             fit="cover"
           />
           <div className="absolute inset-0 bg-gradient-to-t from-[#0a0e14] via-[#0a0e14]/25 to-transparent" />
-          <span className="absolute left-4 top-4 flex items-center justify-center w-9 h-9 rounded-xl bg-black/40 border border-white/10 text-xs font-orbitron text-slate-100 shadow-[0_0_16px_rgba(0,0,0,0.35)] backdrop-blur-md transition-colors group-hover:text-neon-blue group-hover:border-neon-blue/30">
+          <span className="absolute left-4 top-4 flex items-center justify-center w-9 h-9 rounded-xl bg-black/40 border border-white/10 text-xs font-orbitron text-slate-100 shadow-[0_0_16px_rgba(0,0,0,0.35)] backdrop-blur-md transition-colors group-hover:text-accent group-hover:border-accent/30">
             {index + 1}
           </span>
         </div>
@@ -52,7 +52,7 @@ export const LessonCard = ({
 
       <div className={`mb-4 flex items-center ${imageSrc ? 'justify-end' : 'justify-between'}`}>
         {!imageSrc && (
-          <span className="flex items-center justify-center w-8 h-8 rounded-lg bg-white/5 border border-white/10 text-xs font-orbitron text-slate-400 group-hover:text-neon-blue group-hover:border-neon-blue/30 transition-colors shadow-inner">
+          <span className="flex items-center justify-center w-8 h-8 rounded-lg bg-white/5 border border-white/10 text-xs font-orbitron text-slate-400 group-hover:text-accent group-hover:border-accent/30 transition-colors shadow-inner">
             {index + 1}
           </span>
         )}
@@ -70,7 +70,7 @@ export const LessonCard = ({
         </div>
       </div>
 
-      <h3 className="text-xl font-bold text-white mb-3 leading-snug group-hover:text-neon-blue transition-colors font-audiowide tracking-wide">
+      <h3 className="text-xl font-bold text-white mb-3 leading-snug group-hover:text-accent transition-colors font-audiowide tracking-wide">
         {title}
       </h3>
 
@@ -93,8 +93,8 @@ export const LessonCard = ({
       )}
 
       <div className="mt-auto flex items-center gap-2 text-sm font-medium text-white/50 group-hover:text-white transition-colors">
-        <span className="group-hover:underline decoration-neon-blue/50 underline-offset-4 font-orbitron">Vai alla lezione</span>
-        <ArrowRight className="w-4 h-4 transition-transform duration-300 group-hover:translate-x-1 text-neon-blue" />
+        <span className="group-hover:underline decoration-accent/50 underline-offset-4 font-orbitron">Vai alla lezione</span>
+        <ArrowRight className="w-4 h-4 transition-transform duration-300 group-hover:translate-x-1 text-accent" />
       </div>
     </a>
   );

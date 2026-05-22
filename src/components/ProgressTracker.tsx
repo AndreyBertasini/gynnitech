@@ -79,7 +79,7 @@ export function CompletionButton({ moduleId, slug }: { moduleId: string; slug: s
         <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
           <span style={{ fontSize: '1.4rem' }}>{completed ? '✅' : '⬜'}</span>
           <span style={{
-            color: completed ? '#ccff00' : '#94a3b8',
+            color: completed ? 'var(--color-accent)' : '#94a3b8',
             fontSize: '0.95rem', fontWeight: 500,
           }}>
             {completed ? 'Lezione completata!' : 'Segna come completata'}
@@ -91,7 +91,7 @@ export function CompletionButton({ moduleId, slug }: { moduleId: string; slug: s
             padding: '0.6rem 1.4rem', borderRadius: '999px',
             border: completed ? '1px solid rgba(148,163,184,0.3)' : '1px solid rgba(204,255,0,0.4)',
             background: completed ? 'transparent' : 'rgba(204,255,0,0.12)',
-            color: completed ? '#94a3b8' : '#ccff00',
+            color: completed ? '#94a3b8' : 'var(--color-accent)',
             fontSize: '0.875rem', fontWeight: 600, cursor: 'pointer', transition: 'all 0.25s',
           }}
         >
@@ -121,12 +121,12 @@ export function ProgressBar({ moduleId, totalLessons }: { moduleId: string; tota
     <div style={{ width: '100%' }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '0.5rem', fontSize: '0.85rem' }}>
         <span style={{ color: '#cbd5e1', fontWeight: 500 }}>Progresso modulo</span>
-        <span style={{ color: '#ccff00', fontWeight: 600 }}>{completed}/{totalLessons} ({pct}%)</span>
+        <span style={{ color: 'var(--color-accent)', fontWeight: 600 }}>{completed}/{totalLessons} ({pct}%)</span>
       </div>
       <div style={{ width: '100%', height: '8px', background: 'rgba(255,255,255,0.06)', borderRadius: '999px', overflow: 'hidden' }}>
         <div style={{
           height: '100%', width: `${pct}%`,
-          background: 'linear-gradient(90deg, #ccff00, #a3e635, #84cc16)',
+          background: 'linear-gradient(90deg, var(--color-accent), #a3e635, #84cc16)',
           borderRadius: '999px', boxShadow: '0 0 12px rgba(204,255,0,0.35)',
           transition: 'width 0.8s ease-out',
         }} />

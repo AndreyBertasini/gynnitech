@@ -133,7 +133,7 @@ export function EmailCapturePopup() {
         {status === 'success' ? (
           <div style={{ textAlign: 'center', padding: '1rem 0' }}>
             <span style={{ fontSize: '2.5rem', display: 'block', marginBottom: '0.5rem' }}>📬</span>
-            <h3 style={{ color: '#ccff00', fontSize: '1.15rem', fontWeight: 700, margin: '0 0 0.25rem' }}>
+            <h3 style={{ color: 'var(--color-accent)', fontSize: '1.15rem', fontWeight: 700, margin: '0 0 0.25rem' }}>
               Controlla la tua email!
             </h3>
             <p style={{ color: '#94a3b8', fontSize: '0.9rem', margin: 0 }}>
@@ -179,7 +179,7 @@ export function EmailCapturePopup() {
                   border: 'none',
                   background: status === 'loading'
                     ? 'rgba(204,255,0,0.3)'
-                    : '#ccff00',
+                    : 'var(--color-accent)',
                   color: '#0a0f1e', fontSize: '0.9rem', fontWeight: 700,
                   cursor: status === 'loading' ? 'wait' : 'pointer',
                   transition: 'all 0.2s',

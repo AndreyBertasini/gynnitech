@@ -7,7 +7,7 @@ export const Feedback = () => {
   if (voted) {
     return (
       <div
-        className="mt-12 p-4 rounded-lg bg-mint-500/10 border border-mint-500/20 text-mint-400 text-sm font-medium text-center animate-fade-in-up"
+        className="mt-12 p-4 rounded-lg bg-accent/10 border border-accent/20 text-accent text-sm font-medium text-center animate-fade-in-up"
       >
         Thanks for your feedback!
       </div>
@@ -21,7 +21,7 @@ export const Feedback = () => {
         <div className="flex items-center gap-2">
           <button 
             onClick={() => setVoted('up')}
-            className="p-2 rounded-md hover:bg-white/5 text-slate-400 hover:text-mint-400 transition-colors"
+            className="p-2 rounded-md hover:bg-white/5 text-slate-400 hover:text-accent transition-colors"
             aria-label="Yes"
           >
             <ThumbsUp className="w-5 h-5" />

@@ -169,7 +169,7 @@ function ArticleRow({ post }: { post: CollectionEntry<'blog'> }) {
       </div>
       <span
         style={{
-          color: '#ccff00',
+          color: 'var(--color-accent)',
           fontSize: '0.82rem',
           fontWeight: 600,
           whiteSpace: 'nowrap',

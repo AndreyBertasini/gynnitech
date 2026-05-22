@@ -77,7 +77,7 @@ function renderTable(columns: string[], rows: string[][]): string {
     '<table style="width:100%;border-collapse:collapse;font-size:0.85rem;margin-top:0.5rem">';
   html += '<thead><tr>';
   columns.forEach((col) => {
-    html += `<th style="border:1px solid rgba(255,255,255,0.12);padding:0.4rem 0.6rem;text-align:left;color:#ccff00;background:rgba(204,255,0,0.06)">${col}</th>`;
+    html += `<th style="border:1px solid rgba(255,255,255,0.12);padding:0.4rem 0.6rem;text-align:left;color:var(--color-accent);background:rgba(204,255,0,0.06)">${col}</th>`;
   });
   html += '</tr></thead><tbody>';
   rows.forEach((row) => {
@@ -144,7 +144,7 @@ export function SqlExercise({ description, hint, initialQuery, solutionQuery }: 
     >
       <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '1rem' }}>
         <span style={{ fontSize: '1.2rem' }}>🖥️</span>
-        <span style={{ color: '#ccff00', fontWeight: 700, fontSize: '0.95rem' }}>Prova tu!</span>
+        <span style={{ color: 'var(--color-accent)', fontWeight: 700, fontSize: '0.95rem' }}>Prova tu!</span>
       </div>
 
       <p style={{ color: '#cbd5e1', fontSize: '0.9rem', margin: '0 0 1rem', lineHeight: 1.6 }}>
@@ -183,7 +183,7 @@ export function SqlExercise({ description, hint, initialQuery, solutionQuery }: 
             padding: '0.55rem 1.2rem',
             borderRadius: '8px',
             border: 'none',
-            background: running ? 'rgba(204,255,0,0.3)' : '#ccff00',
+            background: running ? 'rgba(204,255,0,0.3)' : 'var(--color-accent)',
             color: '#0a0f1e',
             fontWeight: 700,
             fontSize: '0.85rem',

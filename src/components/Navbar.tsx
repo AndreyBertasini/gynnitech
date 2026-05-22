@@ -1,7 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { HamburgerMenuIcon, Cross2Icon } from '@radix-ui/react-icons';
 import { SearchWidget } from './ui/SearchWidget';
-import { ThemeToggle } from './ThemeToggle';
 import { BOOKING_URL, LINKEDIN_URL } from '../consts';
 
 export const Navbar = () => {
@@ -18,30 +17,25 @@ export const Navbar = () => {
   }, []);
 
   return (
-    <nav className={`fixed top-0 left-0 right-0 z-[100] transition-[background-color,box-shadow] duration-300 ${isScrolled ? 'bg-[var(--sl-color-bg-nav)] shadow-2xl' : 'bg-transparent'}`}>
+    <nav className={`fixed top-0 left-0 right-0 z-[100] transition-[background-color] duration-300 ${isScrolled ? 'bg-brand-dark' : 'bg-transparent'}`}>
       <div className="max-w-7xl mx-auto px-6 h-16 flex items-center justify-between">
         {/* Logo */}
         <a href="/" className="flex items-center font-bold text-xl text-white tracking-tight group font-ui">
-          <span className="text-transparent bg-clip-text bg-gradient-to-r from-white to-slate-300 group-hover:text-acid-yellow group-hover:bg-none transition-colors drop-shadow-[0_0_5px_rgba(255,255,255,0.2)]">
-            GinnyTech
-          </span>
+          GinnyTech
         </a>
 
         {/* Desktop Menu */}
         <div className="hidden md:flex items-center gap-8">
-          <a href="/" className="text-sm font-medium text-slate-300 hover:text-neon-blue transition-colors hover:drop-shadow-[0_0_8px_rgba(0,243,255,0.5)]">Home</a>
-          <a href="/blog" className="text-sm font-medium text-slate-300 hover:text-neon-blue transition-colors hover:drop-shadow-[0_0_8px_rgba(0,243,255,0.5)]">Articoli</a>
-          <a href="/progress" className="text-sm font-medium text-acid-yellow hover:text-acid-yellow/80 transition-colors">Progresso</a>
-          <a href="/perche-questo-corso" className="text-sm font-medium text-slate-300 hover:text-neon-blue transition-colors hover:drop-shadow-[0_0_8px_rgba(0,243,255,0.5)]">Informazioni</a>
-          <a href={LINKEDIN_URL} target="_blank" rel="noreferrer" className="text-sm font-medium text-slate-300 hover:text-neon-blue transition-colors hover:drop-shadow-[0_0_8px_rgba(0,243,255,0.5)]">Chi sono</a>
-          <a href="/newsletter" className="text-sm font-medium text-acid-yellow hover:text-acid-yellow/80 transition-colors">Newsletter</a>
+          <a href="/" className="text-sm font-medium text-slate-300 hover:text-white transition-colors">Home</a>
+          <a href="/blog" className="text-sm font-medium text-slate-300 hover:text-white transition-colors">Articoli</a>
+          <a href="/perche-questo-corso" className="text-sm font-medium text-slate-300 hover:text-white transition-colors">Informazioni</a>
+          <a href={LINKEDIN_URL} target="_blank" rel="noreferrer" className="text-sm font-medium text-slate-300 hover:text-white transition-colors">Chi sono</a>
           <SearchWidget />
-          <ThemeToggle />
         </div>
 
         {/* CTA */}
         <div className="hidden md:flex items-center gap-4">
-          <a href={BOOKING_URL} target="_blank" rel="noreferrer" className="bg-acid-yellow/10 hover:bg-acid-yellow/20 text-acid-yellow border border-acid-yellow/50 hover:border-acid-yellow px-5 py-2 rounded-full text-sm font-semibold transition-[background-color,border-color,box-shadow] shadow-[0_0_15px_rgba(204,255,0,0.2)] hover:shadow-[0_0_25px_rgba(204,255,0,0.5)] backdrop-blur-sm">
+          <a href={BOOKING_URL} target="_blank" rel="noreferrer" className="bg-accent/10 hover:bg-accent/20 text-accent border border-accent/30 hover:border-accent px-5 py-2 rounded-full text-sm font-semibold transition-all">
             Prenota una call
           </a>
         </div>
@@ -59,10 +53,10 @@ export const Navbar = () => {
         </div>
       </div>
 
-      {/* Mobile Menu - CSS transition instead of framer-motion */}
+      {/* Mobile Menu */}
       <div
         ref={menuRef}
-        className="md:hidden bg-[var(--sl-color-bg)] border-b border-white/10 overflow-hidden transition-[max-height,opacity] duration-300 ease-in-out"
+        className="md:hidden bg-brand-dark border-b border-glass-border overflow-hidden transition-[max-height,opacity] duration-300 ease-in-out"
         style={{
           maxHeight: isMobileMenuOpen ? menuRef.current?.scrollHeight ? `${menuRef.current.scrollHeight}px` : '500px' : '0px',
           opacity: isMobileMenuOpen ? 1 : 0,
@@ -74,12 +68,10 @@ export const Navbar = () => {
           <a href="/blog" className="text-slate-300 hover:text-white font-medium">Articoli</a>
           <a href="/perche-questo-corso" className="text-slate-300 hover:text-white font-medium">Informazioni</a>
           <a href={LINKEDIN_URL} target="_blank" rel="noreferrer" className="text-slate-300 hover:text-white font-medium">Chi sono</a>
-          <div className="flex items-center justify-between">
-            <span className="text-slate-400 text-sm">Tema</span>
-            <ThemeToggle />
-          </div>
-          <hr className="border-white/10 my-2" />
-          <a href={BOOKING_URL} target="_blank" rel="noreferrer" className="bg-acid-yellow/10 hover:bg-acid-yellow/20 text-acid-yellow border border-acid-yellow/50 hover:border-acid-yellow text-center py-3 rounded-lg font-semibold transition-[background-color,border-color,box-shadow] shadow-[0_0_15px_rgba(204,255,0,0.2)] hover:shadow-[0_0_25px_rgba(204,255,0,0.5)] backdrop-blur-sm">Prenota una call</a>
+          <hr className="border-glass-border my-2" />
+          <a href={BOOKING_URL} target="_blank" rel="noreferrer" className="bg-accent/10 hover:bg-accent/20 text-accent border border-accent/30 hover:border-accent text-center py-3 rounded-lg font-semibold transition-all">
+            Prenota una call
+          </a>
         </div>
       </div>
     </nav>
