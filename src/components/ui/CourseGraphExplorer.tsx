@@ -164,10 +164,10 @@ export const CourseGraphExplorer = ({ graph, title, description }: CourseGraphEx
 
   return (
     <section className="space-y-10">
-      <section className="rounded-[32px] border border-white/10 bg-[radial-gradient(circle_at_top_left,_rgba(0,243,255,0.12),_transparent_35%),linear-gradient(180deg,rgba(13,18,28,0.98),rgba(6,8,14,0.98))] p-6 shadow-[0_32px_90px_-54px_rgba(0,243,255,0.4)] md:p-8 xl:p-10">
+      <section className="rounded-[32px] border border-white/10 bg-[radial-gradient(circle_at_top_left,_rgba(204,255,0,0.12),_transparent_35%),linear-gradient(180deg,rgba(13,18,28,0.98),rgba(6,8,14,0.98))] p-6 shadow-[0_32px_90px_-54px_rgba(204,255,0,0.4)] md:p-8 xl:p-10">
         <div className="grid gap-8 xl:grid-cols-[minmax(0,1.45fr)_360px]">
           <div>
-            <div className="mb-4 inline-flex items-center gap-2 rounded-full border border-neon-blue/20 bg-neon-blue/10 px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.24em] text-neon-blue">
+            <div className="mb-4 inline-flex items-center gap-2 rounded-full border border-accent/20 bg-accent/10 px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.24em] text-accent">
               <Waypoints className="h-3.5 w-3.5" />
               Learning Path Dinamico
             </div>
@@ -213,7 +213,7 @@ export const CourseGraphExplorer = ({ graph, title, description }: CourseGraphEx
       <section className="space-y-5">
         <div className="flex flex-col gap-3 md:flex-row md:items-end md:justify-between">
           <div>
-            <p className="text-[11px] font-semibold uppercase tracking-[0.24em] text-neon-mint">Vista di insieme</p>
+            <p className="text-[11px] font-semibold uppercase tracking-[0.24em] text-accent">Vista di insieme</p>
             <h2 className="mt-2 text-3xl font-semibold text-white">Le fasi del corso</h2>
           </div>
           <p className="max-w-2xl text-sm leading-7 text-slate-400">
@@ -229,7 +229,7 @@ export const CourseGraphExplorer = ({ graph, title, description }: CourseGraphEx
                 <span className="rounded-full border border-white/10 bg-white/[0.05] px-3 py-1 text-[10px] font-semibold uppercase tracking-[0.2em] text-slate-300">
                   Fase {index + 1}
                 </span>
-                <span className="text-xs text-neon-blue">{stage.crossStageOutgoingCount} out</span>
+                <span className="text-xs text-accent">{stage.crossStageOutgoingCount} out</span>
               </div>
               <h3 className="text-xl font-semibold text-white">{stage.title}</h3>
               <p className="mt-3 text-sm leading-7 text-slate-300">{stage.description}</p>
@@ -257,7 +257,7 @@ export const CourseGraphExplorer = ({ graph, title, description }: CourseGraphEx
 
       <section className="space-y-5">
         <div>
-          <p className="text-[11px] font-semibold uppercase tracking-[0.24em] text-acid-yellow">Percorsi automatici</p>
+          <p className="text-[11px] font-semibold uppercase tracking-[0.24em] text-accent">Percorsi automatici</p>
           <h2 className="mt-2 text-3xl font-semibold text-white">Entrate rapide nel catalogo</h2>
         </div>
         <div className="grid gap-4 lg:grid-cols-2 xl:grid-cols-4">
@@ -275,7 +275,7 @@ export const CourseGraphExplorer = ({ graph, title, description }: CourseGraphEx
               className={clsx(
                 'rounded-[28px] border p-5 text-left transition',
                 activeRouteId === route.id
-                  ? 'border-acid-yellow/40 bg-acid-yellow/10'
+                  ? 'border-accent/40 bg-accent/10'
                   : 'border-white/10 bg-white/[0.03] hover:border-white/20 hover:bg-white/[0.05]',
               )}
             >
@@ -294,7 +294,7 @@ export const CourseGraphExplorer = ({ graph, title, description }: CourseGraphEx
       <section className="rounded-[32px] border border-white/10 bg-[#0b1017]/90 p-6 md:p-8">
         <div className="mb-6 flex flex-col gap-3 xl:flex-row xl:items-end xl:justify-between">
           <div>
-            <p className="text-[11px] font-semibold uppercase tracking-[0.24em] text-neon-blue">Esplora il corso</p>
+            <p className="text-[11px] font-semibold uppercase tracking-[0.24em] text-accent">Esplora il corso</p>
             <h2 className="mt-2 text-3xl font-semibold text-white">Moduli e lezioni, in modo leggibile</h2>
           </div>
           <p className="max-w-2xl text-sm leading-7 text-slate-400">
@@ -312,7 +312,7 @@ export const CourseGraphExplorer = ({ graph, title, description }: CourseGraphEx
                 value={query}
                 onChange={(event) => setQuery(event.target.value)}
                 placeholder="Cerca un modulo"
-                className="w-full rounded-2xl border border-white/10 bg-[#070b10] py-3 pl-11 pr-4 text-sm text-white outline-none transition placeholder:text-slate-500 focus:border-neon-blue/40 focus:ring-2 focus:ring-neon-blue/20"
+                className="w-full rounded-2xl border border-white/10 bg-[#070b10] py-3 pl-11 pr-4 text-sm text-white outline-none transition placeholder:text-slate-500 focus:border-accent/40 focus:ring-2 focus:ring-accent/20"
               />
             </label>
 
@@ -326,7 +326,7 @@ export const CourseGraphExplorer = ({ graph, title, description }: CourseGraphEx
                 className={clsx(
                   'rounded-full border px-3 py-1.5 text-xs font-medium transition',
                   activeStageId === 'all' && activeRouteId === 'all'
-                    ? 'border-neon-blue/40 bg-neon-blue/10 text-neon-blue'
+                    ? 'border-accent/40 bg-accent/10 text-accent'
                     : 'border-white/10 bg-white/[0.03] text-slate-300 hover:border-white/20 hover:text-white',
                 )}
               >
@@ -344,7 +344,7 @@ export const CourseGraphExplorer = ({ graph, title, description }: CourseGraphEx
                   className={clsx(
                     'rounded-full border px-3 py-1.5 text-xs font-medium transition',
                     activeStageId === stage.id
-                      ? 'border-neon-blue/40 bg-neon-blue/10 text-neon-blue'
+                      ? 'border-accent/40 bg-accent/10 text-accent'
                       : 'border-white/10 bg-white/[0.03] text-slate-300 hover:border-white/20 hover:text-white',
                   )}
                 >
@@ -363,7 +363,7 @@ export const CourseGraphExplorer = ({ graph, title, description }: CourseGraphEx
                     className={clsx(
                       'w-full rounded-[24px] border p-4 text-left transition',
                       selectedModule?.id === module.id
-                        ? 'border-neon-blue/40 bg-neon-blue/10'
+                        ? 'border-accent/40 bg-accent/10'
                         : 'border-white/10 bg-white/[0.03] hover:border-white/20 hover:bg-white/[0.05]',
                     )}
                   >
@@ -389,14 +389,14 @@ export const CourseGraphExplorer = ({ graph, title, description }: CourseGraphEx
               <section className="rounded-[28px] border border-white/10 bg-white/[0.03] p-5 md:p-6">
                 <div className="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
                   <div className="max-w-3xl">
-                    <p className="text-[11px] font-semibold uppercase tracking-[0.22em] text-neon-mint">
+                    <p className="text-[11px] font-semibold uppercase tracking-[0.22em] text-accent">
                       Modulo attivo · {selectedModule.stageTitle}
                     </p>
                     <h3 className="mt-2 text-3xl font-semibold text-white">{selectedModule.title}</h3>
                     <p className="mt-4 text-sm leading-7 text-slate-300">{selectedModule.description}</p>
                   </div>
                   <div className="flex flex-wrap gap-3">
-                    <a href={moduleHref(selectedModule.id)} className="inline-flex items-center gap-2 rounded-full border border-neon-blue/20 bg-neon-blue/10 px-4 py-2 text-sm font-medium text-neon-blue transition hover:border-neon-blue/40 hover:bg-neon-blue/15">
+                    <a href={moduleHref(selectedModule.id)} className="inline-flex items-center gap-2 rounded-full border border-accent/20 bg-accent/10 px-4 py-2 text-sm font-medium text-accent transition hover:border-accent/40 hover:bg-accent/15">
                       Apri modulo
                       <MoveRight className="h-4 w-4" />
                     </a>
@@ -427,17 +427,17 @@ export const CourseGraphExplorer = ({ graph, title, description }: CourseGraphEx
               <div className="grid gap-6 2xl:grid-cols-[minmax(0,1.35fr)_340px]">
                 <section className="rounded-[28px] border border-white/10 bg-white/[0.03] p-5 md:p-6">
                   <div className="mb-6 flex items-center gap-3">
-                    <BookOpen className="h-5 w-5 text-acid-yellow" />
+                    <BookOpen className="h-5 w-5 text-accent" />
                     <div>
                       <h4 className="text-2xl font-semibold text-white">Lezioni del modulo</h4>
                       <p className="text-sm text-slate-400">Ordine reale, prerequisiti e punti di ponte verso il resto del corso.</p>
                     </div>
                   </div>
 
-                  <div className="relative space-y-4 pl-5 before:absolute before:bottom-2 before:left-2 before:top-2 before:w-px before:bg-gradient-to-b before:from-neon-blue/40 before:via-white/10 before:to-transparent">
+                  <div className="relative space-y-4 pl-5 before:absolute before:bottom-2 before:left-2 before:top-2 before:w-px before:bg-gradient-to-b before:from-accent/40 before:via-white/10 before:to-transparent">
                     {selectedModule.lessons.map((lesson) => (
                       <article key={lesson.id} className="relative rounded-[24px] border border-white/10 bg-[#0a0f15] p-5">
-                        <span className="absolute -left-[1.62rem] top-6 flex h-7 w-7 items-center justify-center rounded-full border border-neon-blue/30 bg-[#09121d] text-[11px] font-semibold text-neon-blue">
+                        <span className="absolute -left-[1.62rem] top-6 flex h-7 w-7 items-center justify-center rounded-full border border-accent/30 bg-[#09121d] text-[11px] font-semibold text-accent">
                           {lesson.order}
                         </span>
                         <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
@@ -465,7 +465,7 @@ export const CourseGraphExplorer = ({ graph, title, description }: CourseGraphEx
                             <p className="mt-1 text-white">{lesson.dependents.length}</p>
                           </div>
                         </div>
-                        <a href={lessonHref(lesson.id)} className="mt-5 inline-flex items-center gap-2 text-sm font-medium text-neon-blue transition hover:text-neon-blue/80">
+                        <a href={lessonHref(lesson.id)} className="mt-5 inline-flex items-center gap-2 text-sm font-medium text-accent transition hover:text-accent/80">
                           Apri la lezione
                           <MoveRight className="h-4 w-4" />
                         </a>
@@ -477,7 +477,7 @@ export const CourseGraphExplorer = ({ graph, title, description }: CourseGraphEx
                 <div className="space-y-6">
                   <section className="rounded-[28px] border border-white/10 bg-white/[0.03] p-5">
                     <div className="mb-4 flex items-center gap-3">
-                      <GitBranch className="h-5 w-5 text-neon-mint" />
+                      <GitBranch className="h-5 w-5 text-accent" />
                       <div>
                         <h4 className="text-xl font-semibold text-white">Connessioni del modulo</h4>
                         <p className="text-sm text-slate-400">Da dove arriva e dove porta.</p>
@@ -487,18 +487,18 @@ export const CourseGraphExplorer = ({ graph, title, description }: CourseGraphEx
                       <div>
                         <p className="mb-2 text-[11px] uppercase tracking-[0.18em] text-slate-500">Arriva da</p>
                         {selectedModuleIncoming.length > 0 ? selectedModuleIncoming.map((edge) => (
-                          <button key={`${edge.source}-${edge.target}`} type="button" onClick={() => setSelectedModuleId(edge.source)} className="mb-2 flex w-full items-center justify-between rounded-2xl border border-white/10 bg-white/[0.04] px-3 py-2 text-left transition hover:border-neon-blue/30 hover:bg-neon-blue/10">
+                          <button key={`${edge.source}-${edge.target}`} type="button" onClick={() => setSelectedModuleId(edge.source)} className="mb-2 flex w-full items-center justify-between rounded-2xl border border-white/10 bg-white/[0.04] px-3 py-2 text-left transition hover:border-accent/30 hover:bg-accent/10">
                             <span className="text-sm text-white">{modulesById[edge.source]?.title || edge.source}</span>
-                            <span className="text-xs text-neon-blue">{edge.count}</span>
+                            <span className="text-xs text-accent">{edge.count}</span>
                           </button>
                         )) : <p className="text-sm text-slate-400">Nessun ponte esterno rilevante in ingresso.</p>}
                       </div>
                       <div>
                         <p className="mb-2 text-[11px] uppercase tracking-[0.18em] text-slate-500">Porta verso</p>
                         {selectedModuleOutgoing.length > 0 ? selectedModuleOutgoing.map((edge) => (
-                          <button key={`${edge.source}-${edge.target}`} type="button" onClick={() => setSelectedModuleId(edge.target)} className="mb-2 flex w-full items-center justify-between rounded-2xl border border-white/10 bg-white/[0.04] px-3 py-2 text-left transition hover:border-neon-blue/30 hover:bg-neon-blue/10">
+                          <button key={`${edge.source}-${edge.target}`} type="button" onClick={() => setSelectedModuleId(edge.target)} className="mb-2 flex w-full items-center justify-between rounded-2xl border border-white/10 bg-white/[0.04] px-3 py-2 text-left transition hover:border-accent/30 hover:bg-accent/10">
                             <span className="text-sm text-white">{modulesById[edge.target]?.title || edge.target}</span>
-                            <span className="text-xs text-neon-blue">{edge.count}</span>
+                            <span className="text-xs text-accent">{edge.count}</span>
                           </button>
                         )) : <p className="text-sm text-slate-400">Questo modulo lavora soprattutto al suo interno.</p>}
                       </div>
@@ -507,7 +507,7 @@ export const CourseGraphExplorer = ({ graph, title, description }: CourseGraphEx
 
                   <section className="rounded-[28px] border border-white/10 bg-white/[0.03] p-5">
                     <div className="mb-4 flex items-center gap-3">
-                      <Sparkles className="h-5 w-5 text-acid-yellow" />
+                      <Sparkles className="h-5 w-5 text-accent" />
                       <div>
                         <h4 className="text-xl font-semibold text-white">Lezioni ponte</h4>
                         <p className="text-sm text-slate-400">Lezioni che collegano questo modulo al resto del corso.</p>
@@ -515,7 +515,7 @@ export const CourseGraphExplorer = ({ graph, title, description }: CourseGraphEx
                     </div>
                     <div className="space-y-3">
                       {bridgeLessons.length > 0 ? bridgeLessons.map((lesson) => (
-                        <a key={lesson.id} href={lessonHref(lesson.id)} className="block rounded-2xl border border-white/10 bg-white/[0.04] p-4 transition hover:border-acid-yellow/30 hover:bg-acid-yellow/10">
+                        <a key={lesson.id} href={lessonHref(lesson.id)} className="block rounded-2xl border border-white/10 bg-white/[0.04] p-4 transition hover:border-accent/30 hover:bg-accent/10">
                           <p className="text-sm font-semibold text-white">{lesson.title}</p>
                           <p className="mt-2 text-xs leading-6 text-slate-400">
                             richiama {topModuleNamesFromLessons(lesson.externalPrerequisites, lessonsById, modulesById).join(', ') || 'nessun modulo esterno'}
@@ -530,7 +530,7 @@ export const CourseGraphExplorer = ({ graph, title, description }: CourseGraphEx
                     <p className="mt-2 text-sm text-slate-400">Le lezioni con piu prerequisiti o maggiore effetto sul resto del modulo.</p>
                     <div className="mt-4 space-y-3">
                       {densestLessons.map((lesson) => (
-                        <a key={lesson.id} href={lessonHref(lesson.id)} className="block rounded-2xl border border-white/10 bg-white/[0.04] p-4 transition hover:border-neon-blue/30 hover:bg-neon-blue/10">
+                        <a key={lesson.id} href={lessonHref(lesson.id)} className="block rounded-2xl border border-white/10 bg-white/[0.04] p-4 transition hover:border-accent/30 hover:bg-accent/10">
                           <div className="flex items-center justify-between gap-3">
                             <p className="text-sm font-semibold text-white">{lesson.title}</p>
                             <span className="rounded-full border border-white/10 bg-white/[0.05] px-2 py-1 text-[10px] uppercase tracking-[0.18em] text-slate-300">{lesson.prerequisites.length} prereq</span>

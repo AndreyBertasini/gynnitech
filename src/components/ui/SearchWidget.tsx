@@ -186,7 +186,7 @@ export const SearchWidget = ({ mobile = false }: { mobile?: boolean }) => {
         aria-controls="site-search-dialog"
         aria-expanded={isOpen}
       >
-        <Search className={`text-acid-yellow group-hover:text-acid-yellow/80 transition-colors ${mobile ? 'w-5 h-5' : 'w-5 h-5'}`} />
+        <Search className={`text-accent group-hover:text-accent/80 transition-colors ${mobile ? 'w-5 h-5' : 'w-5 h-5'}`} />
         <span className={`${mobile ? 'inline text-base' : 'hidden lg:inline text-sm'} font-medium`}>Cerca</span>
       </button>
 
@@ -263,7 +263,7 @@ export const SearchWidget = ({ mobile = false }: { mobile?: boolean }) => {
                       <div className="mb-2 text-[11px] uppercase tracking-[0.18em] text-slate-500">
                         {result.kind === 'blog' ? 'Articolo' : result.kind === 'course' ? 'Lezione' : 'Pagina'}
                       </div>
-                      <h4 className="text-white font-medium group-hover:text-neon-blue transition-colors mb-1 flex items-center gap-2">
+                      <h4 className="text-white font-medium group-hover:text-accent transition-colors mb-1 flex items-center gap-2">
                          {result.url.includes('/blog') ? <FileText className="w-4 h-4 opacity-50"/> : <BookOpen className="w-4 h-4 opacity-50"/>}
                          <span dangerouslySetInnerHTML={{ __html: result.meta.title ?? result.plainTitle }} />
                       </h4>

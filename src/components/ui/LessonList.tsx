@@ -28,13 +28,13 @@ export const LessonList = ({ lessons }: { lessons: Lesson[] }) => {
                 <div className={cn(
                   "flex h-8 w-8 items-center justify-center rounded-full border text-xs font-mono transition-colors",
                   lesson.isCompleted 
-                    ? "border-neon-mint/50 bg-neon-mint/10 text-neon-mint" 
+                    ? "border-accent/50 bg-accent/10 text-accent" 
                     : "border-white/10 bg-white/5 text-slate-500 group-hover:border-white/20"
                 )}>
                   {lesson.isCompleted ? <CheckCircle className="h-4 w-4" /> : index + 1}
                 </div>
                 <div>
-                  <h4 className="text-sm font-semibold text-white group-hover:text-neon-mint transition-colors">
+                  <h4 className="text-sm font-semibold text-white group-hover:text-accent transition-colors">
                     {lesson.title}
                   </h4>
                   {lesson.duration && (
@@ -62,7 +62,7 @@ export const LessonList = ({ lessons }: { lessons: Lesson[] }) => {
               {!lesson.isLocked && (
                 <a 
                   href={`/course/${lesson.id.replace(/\.[^/.]+$/, "")}/`}
-                  className="inline-flex items-center gap-2 rounded-lg bg-white/5 px-4 py-2 text-xs font-medium text-white transition-colors hover:bg-neon-mint/10 hover:text-neon-mint border border-white/10 hover:border-neon-mint/20"
+                  className="inline-flex items-center gap-2 rounded-lg bg-white/5 px-4 py-2 text-xs font-medium text-white transition-colors hover:bg-accent/10 hover:text-accent border border-white/10 hover:border-accent/20"
                 >
                   <PlayCircle className="h-4 w-4" />
                   Vai alla lezione

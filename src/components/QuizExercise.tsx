@@ -76,7 +76,7 @@ export function QuizExercise({ quizId, title, questions }: Props) {
     >
       <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: submitted ? '1rem' : '1.25rem' }}>
         <span style={{ fontSize: '1.3rem' }}>🧠</span>
-        <span style={{ color: '#ccff00', fontWeight: 700, fontSize: '1rem' }}>
+        <span style={{ color: 'var(--color-accent)', fontWeight: 700, fontSize: '1rem' }}>
           {title || 'Mettiti alla prova'}
         </span>
         <span style={{ color: '#475569', fontSize: '0.8rem', marginLeft: 'auto' }}>
@@ -108,7 +108,7 @@ export function QuizExercise({ quizId, title, questions }: Props) {
                 lineHeight: 1.5,
               }}
             >
-              <span style={{ color: '#ccff00', marginRight: '0.4rem' }}>{qi + 1}.</span>
+              <span style={{ color: 'var(--color-accent)', marginRight: '0.4rem' }}>{qi + 1}.</span>
               {q.text}
             </p>
 
@@ -127,7 +127,7 @@ export function QuizExercise({ quizId, title, questions }: Props) {
                   bg = 'rgba(204,255,0,0.06)';
                   border = '1px solid rgba(204,255,0,0.35)';
                   dot = '●';
-                  labelColor = '#ccff00';
+                  labelColor = 'var(--color-accent)';
                 }
                 if (showCorrect) {
                   bg = 'rgba(34,197,94,0.08)';
@@ -215,7 +215,7 @@ export function QuizExercise({ quizId, title, questions }: Props) {
           <>
             <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
               <span style={{ fontSize: '1.5rem' }}>{scoreEmoji}</span>
-              <span style={{ color: '#ccff00', fontWeight: 700 }}>
+              <span style={{ color: 'var(--color-accent)', fontWeight: 700 }}>
                 {correctCount}/{questions.length} corrette ({pct}%)
               </span>
             </div>
@@ -248,7 +248,7 @@ export function QuizExercise({ quizId, title, questions }: Props) {
                 padding: '0.6rem 1.5rem',
                 borderRadius: '10px',
                 border: 'none',
-                background: allAnswered ? '#ccff00' : 'rgba(204,255,0,0.2)',
+                background: allAnswered ? 'var(--color-accent)' : 'rgba(204,255,0,0.2)',
                 color: allAnswered ? '#0a0f1e' : 'rgba(204,255,0,0.4)',
                 fontWeight: 700,
                 fontSize: '0.88rem',

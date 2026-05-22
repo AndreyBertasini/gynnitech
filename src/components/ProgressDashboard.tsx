@@ -71,7 +71,7 @@ export function ProgressDashboard({ modules }: Props) {
           <span style={{ color: 'white', fontWeight: 700, fontSize: '1rem' }}>
             Progresso totale
           </span>
-          <span style={{ color: '#ccff00', fontWeight: 700, fontSize: '1.1rem' }}>
+          <span style={{ color: 'var(--color-accent)', fontWeight: 700, fontSize: '1.1rem' }}>
             {totalCompleted}/{totalLessons} ({overallPct}%)
           </span>
         </div>
@@ -90,7 +90,7 @@ export function ProgressDashboard({ modules }: Props) {
             style={{
               height: '100%',
               width: `${overallPct}%`,
-              background: 'linear-gradient(90deg, #ccff00, #a3e635, #84cc16)',
+              background: 'linear-gradient(90deg, var(--color-accent), #a3e635, #84cc16)',
               borderRadius: '999px',
               boxShadow: '0 0 16px rgba(204,255,0,0.35)',
               transition: 'width 0.8s ease-out',
@@ -165,7 +165,7 @@ export function ProgressDashboard({ modules }: Props) {
                   {mod.completed === mod.totalLessons && '✅ '}
                   {mod.title}
                 </span>
-                <span style={{ color: '#ccff00', fontWeight: 600, fontSize: '0.82rem', whiteSpace: 'nowrap' }}>
+                <span style={{ color: 'var(--color-accent)', fontWeight: 600, fontSize: '0.82rem', whiteSpace: 'nowrap' }}>
                   {mod.completed}/{mod.totalLessons}
                 </span>
               </div>
@@ -186,7 +186,7 @@ export function ProgressDashboard({ modules }: Props) {
                     background:
                       mod.completed === mod.totalLessons
                         ? '#22c55e'
-                        : 'linear-gradient(90deg, #ccff00, #a3e635)',
+                        : 'linear-gradient(90deg, var(--color-accent), #a3e635)',
                     borderRadius: '999px',
                     transition: 'width 0.6s ease-out',
                   }}

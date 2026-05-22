@@ -32,7 +32,7 @@ export function ModuleSummary({ moduleId, title, description, lessonCount, diffi
       <div style={{ display: 'flex', alignItems: 'flex-start', gap: '0.75rem' }}>
         <span style={{ fontSize: '1.8rem', lineHeight: 1 }}>{emoji}</span>
         <div>
-          <h3 style={{ color: '#ccff00', fontWeight: 700, fontSize: '0.95rem', margin: '0 0 0.5rem' }}>
+          <h3 style={{ color: 'var(--color-accent)', fontWeight: 700, fontSize: '0.95rem', margin: '0 0 0.5rem' }}>
             Cosa imparerai in questo modulo
           </h3>
           <p style={{ color: '#94a3b8', fontSize: '0.86rem', margin: '0 0 0.75rem', lineHeight: 1.55 }}>
@@ -56,7 +56,7 @@ export function ModuleSummary({ moduleId, title, description, lessonCount, diffi
             <a
               href={`/course/${moduleId}`}
               style={{
-                color: '#ccff00', fontSize: '0.78rem', fontWeight: 600,
+                color: 'var(--color-accent)', fontSize: '0.78rem', fontWeight: 600,
                 textDecoration: 'none', marginLeft: 'auto',
               }}
             >
