@@ -1,18 +1,16 @@
-import type { ImageMetadata } from 'astro';
 import { MODULE_COVER_IMAGES } from '../data/module-cover-images';
 
-const moduleCoverAssets = import.meta.glob('../../images/*.{png,jpg,jpeg,webp,avif}', {
-  eager: true,
-  import: 'default',
-}) as Record<string, ImageMetadata>;
+export interface ModuleCoverImage {
+  src: string;
+}
 
-export function getModuleCoverImage(moduleId: string): ImageMetadata | undefined {
-  const filename = MODULE_COVER_IMAGES[moduleId];
-  if (!filename) {
+export function getModuleCoverImage(moduleId: string): ModuleCoverImage | undefined {
+  const src = MODULE_COVER_IMAGES[moduleId];
+  if (!src) {
     return undefined;
   }
 
-  return Object.entries(moduleCoverAssets).find(([assetPath]) => assetPath.endsWith(`/${filename}`))?.[1];
+  return { src };
 }
 
 export function getModuleCoverAlt(moduleTitle: string): string {
