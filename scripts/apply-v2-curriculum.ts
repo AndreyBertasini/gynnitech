@@ -110,11 +110,11 @@ function bodyForLesson(module: CourseModule, title: string, isSupplemental: bool
   const context = phaseContext[module.phase];
   const practiceKit = getLessonPracticeKit(module, title, isSupplemental);
   const supplementalIntro = isSupplemental
-    ? `> Questa pagina resta come approfondimento supplementare del modulo. Non appartiene al conteggio delle 210 lezioni core, ma rafforza i passaggi piu delicati del percorso.\n\n`
+    ? `> Questa pagina resta come approfondimento supplementare del modulo. Non appartiene al conteggio delle 216 lezioni core, ma rafforza i passaggi piu delicati del percorso.\n\n`
     : '';
   const conceptMapNote =
     module.id === 'panoramica' && fileName === 'mappe-concettuali.mdx'
-      ? `Questa pagina conserva anche la funzione di mappa di orientamento: il percorso ufficiale conta **19 moduli** e **210 lezioni** core distribuite in 5 fasi, dalla fondazione fino a **Direzioni in Analitica: Marketing, Prodotto, Finanza** e **Fondamenti Filosofici dell Analisi dei Dati**.\n\n`
+      ? `Questa pagina conserva anche la funzione di mappa di orientamento: il percorso ufficiale conta **19 moduli** e **216 lezioni** core distribuite in 5 fasi, dalla fondazione fino a **Direzioni in Analitica: Marketing, Prodotto, Finanza** e **Fondamenti Filosofici dell Analisi dei Dati**.\n\n`
       : '';
   const datasetAssets = practiceKit.datasetPack.assets.map((item) => `- ${item}`).join('\n');
 
@@ -287,11 +287,11 @@ async function rewriteLearningPath(): Promise<void> {
   const learningPathPath = path.join(CONTENT_ROOT, 'learning-path.mdx');
   const title = 'Learning Path - Percorso Formativo Completo V2';
   const description =
-    'Pagina guida per leggere il percorso GinnyTech V2: 19 moduli, 210 lezioni core, 5 fasi, capstone finale e 3 track conclusivi.';
+    'Pagina guida per leggere il percorso GinnyTech V2: 19 moduli, 216 lezioni core, 5 fasi, capstone finale e 3 track conclusivi.';
 
   const body = `## La logica del percorso
 
-La V2 del corso mantiene la struttura a **19 moduli** ma rende esplicita una differenza che prima si intuiva soltanto: il catalogo non e un archivio di argomenti, e un percorso a **5 fasi** con **210 lezioni core** e un capstone finale che obbliga a ricomporre tutto.
+La V2 del corso mantiene la struttura a **19 moduli** ma rende esplicita una differenza che prima si intuiva soltanto: il catalogo non e un archivio di argomenti, e un percorso a **5 fasi** con **216 lezioni core** e un capstone finale che obbliga a ricomporre tutto.
 
 ${COURSE_PHASES.map((phase, index) => `${index + 1}. **${phase.title}**: ${phase.description}`).join('\n')}
 

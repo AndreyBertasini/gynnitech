@@ -6,6 +6,7 @@ import matter from "gray-matter";
 import { COURSE_MODULES, COURSE_PHASES, COURSE_TRACKS } from "../src/data/course-program";
 
 const CONTENT_ROOT = path.join(process.cwd(), "src/content");
+const PUBLIC_ROOT = path.join(process.cwd(), "public");
 const FRONTMATTER_REQUIRED_FIELDS: Record<"blog" | "corso", string[]> = {
     blog: ["title", "description", "date", "category"],
     corso: ["title", "description"],
@@ -32,6 +33,7 @@ const REQUIRED_V2_LAB_SIGNALS = [
     "Livello research-grade",
     "Dataset e materiali consigliati",
 ];
+const REMOTE_IMAGE_REGEX = /^https?:\/\//i;
 
 /**
  * Validates that a relative path resolves to a location within the base directory.
@@ -249,6 +251,39 @@ async function validateCollection(collection: "blog" | "corso"): Promise<Validat
             }
         }
 
+        const rawHeaderImage = data.headerImage;
+        if (isLessonFile && rawHeaderImage !== undefined) {
+            if (typeof rawHeaderImage !== "string" || rawHeaderImage.trim() === "") {
+                result.errors.push(buildMessage(file, "headerImage", "headerImage must be a non-empty string when present"));
+            } else {
+                const headerImage = rawHeaderImage.trim();
+                if (headerImage.startsWith("/")) {
+                    const publicImagePath = validatePath(PUBLIC_ROOT, headerImage.replace(/^\/+/, ""));
+                    try {
+                        await fs.access(publicImagePath);
+                    } catch {
+                        result.errors.push(
+                            buildMessage(file, "headerImage", `referenced public image does not exist: ${headerImage}`),
+                        );
+                    }
+                } else if (!REMOTE_IMAGE_REGEX.test(headerImage)) {
+                    pushEditorialIssue(
+                        result,
+                        file,
+                        "headerImage",
+                        `headerImage should be an absolute public path or remote URL (received: ${JSON.stringify(headerImage)})`,
+                    );
+                }
+
+                const rawHeaderImageAlt = data.headerImageAlt;
+                if (typeof rawHeaderImageAlt !== "string" || rawHeaderImageAlt.trim() === "") {
+                    result.errors.push(buildMessage(file, "headerImageAlt", "missing alt text for headerImage"));
+                } else if (rawHeaderImageAlt.trim().length < 20) {
+                    pushEditorialIssue(result, file, "headerImageAlt", "header image alt text is very short");
+                }
+            }
+        }
+
         if (!isLessonFile) {
             continue;
         }
@@ -359,8 +394,8 @@ async function validateCollection(collection: "blog" | "corso"): Promise<Validat
         if (COURSE_TRACKS.length !== 3) {
             result.errors.push(buildMessage(path.join(process.cwd(), "src/data/course-program.ts"), "course-program", "expected exactly 3 final tracks"));
         }
-        if (expectedCoreLessonCount !== 210) {
-            result.errors.push(buildMessage(path.join(process.cwd(), "src/data/course-program.ts"), "course-program", `expected V2 blueprint to define 210 core lessons (received: ${expectedCoreLessonCount})`));
+        if (expectedCoreLessonCount !== 216) {
+            result.errors.push(buildMessage(path.join(process.cwd(), "src/data/course-program.ts"), "course-program", `expected V2 blueprint to define 216 core lessons (received: ${expectedCoreLessonCount})`));
         }
         if (totalCoreLessons !== expectedCoreLessonCount) {
             pushEditorialIssue(result, path.join(process.cwd(), "src/content/corso"), "core-lessons", `expected ${expectedCoreLessonCount} ordered core lessons, found ${totalCoreLessons}`);

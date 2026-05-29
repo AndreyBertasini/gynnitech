@@ -1,5 +1,5 @@
 const redirectEntries = [
-  ['/corso/marketing/brand', '/course/marketing-data-science/brand'],
+  ['/corso/marketing/brand', '/course/analisi-marketing/efficacia-brand'],
   ['/corso/marketing/economics', '/course/marketing-data-science/unit-economics'],
   ['/corso/marketing/attribution', '/course/marketing-data-science/attribution'],
   ['/corso/infrastructure/clickhouse', '/course/data-warehousing/clickhouse'],

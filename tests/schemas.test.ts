@@ -58,10 +58,10 @@ describe("Content Schemas", () => {
             const result = blogSchema.safeParse(invalid);
             expect(result.success).toBe(false);
             if (!result.success) {
-                const errors = result.error.flatten().fieldErrors;
-                expect(errors.description).toBeDefined();
-                expect(errors.date).toBeDefined();
-                expect(errors.category).toBeDefined();
+                const errorFields = new Set(result.error.issues.map((issue) => issue.path[0]));
+                expect(errorFields.has("description")).toBe(true);
+                expect(errorFields.has("date")).toBe(true);
+                expect(errorFields.has("category")).toBe(true);
             }
         });
 

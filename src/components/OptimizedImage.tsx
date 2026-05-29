@@ -1,37 +1,24 @@
-import React from 'react';
-
 interface Props {
-  /** Primary modern-format image (WebP or AVIF) */
+  /** Primary image, preferably WebP or AVIF. */
   src: string;
-  /** Fallback image in JPEG/PNG format */
+  /** Explicit fallback image, used only when the file exists. */
   fallbackSrc?: string;
-  /** Alt text for accessibility */
+  /** Alt text for accessibility. */
   alt: string;
-  /** Additional CSS classes */
+  /** Additional CSS classes. */
   className?: string;
-  /** Whether to lazy load */
+  /** Whether to lazy load. */
   lazy?: boolean;
-  /** Object-fit style */
+  /** Object-fit style. */
   fit?: 'cover' | 'contain' | 'fill' | 'none' | 'scale-down';
-  /** Width attribute */
+  /** Width attribute. */
   width?: number;
-  /** Height attribute */
+  /** Height attribute. */
   height?: number;
-  /** Decoding mode */
+  /** Decoding mode. */
   decoding?: 'async' | 'sync' | 'auto';
 }
 
-/**
- * OptimizedImage — renders an image with modern format sources (WebP, AVIF)
- * and a JPEG/PNG fallback via the <picture> element.
- * 
- * Automatically detects format from the src extension. If src is already
- * .webp or .avif, generates appropriate fallback paths by changing extension.
- * 
- * Usage:
- *   <OptimizedImage src="/images/cover.webp" alt="Cover" />
- *   <OptimizedImage src="/images/cover.avif" alt="Cover" fallbackSrc="/images/cover.jpg" />
- */
 export function OptimizedImage({
   src,
   fallbackSrc,
@@ -43,28 +30,11 @@ export function OptimizedImage({
   height,
   decoding = 'async',
 }: Props) {
-  // Derive fallback path by swapping extension
-  const deriveFallback = (): string | undefined => {
-    if (fallbackSrc) return fallbackSrc;
-    
-    const lower = src.toLowerCase();
-    if (lower.endsWith('.webp')) {
-      return src.replace(/\.webp$/i, '.jpg');
-    }
-    if (lower.endsWith('.avif')) {
-      // Try .webp then .jpg
-      return undefined; // we handle AVIF→WebP→JPEG chain below
-    }
-    return undefined; // src is already JPEG/PNG, no fallback needed
-  };
-
-  const jpgFallback = deriveFallback();
   const isAvif = src.toLowerCase().endsWith('.avif');
   const isWebp = src.toLowerCase().endsWith('.webp');
   const isModern = isAvif || isWebp;
 
   if (!isModern) {
-    // Already a fallback format; just render a plain img
     return (
       <img
         src={src}
@@ -81,21 +51,14 @@ export function OptimizedImage({
 
   return (
     <picture>
-      {/* AVIF source if the primary is AVIF */}
-      {isAvif && (
-        <source srcSet={src} type="image/avif" />
-      )}
-      {/* WebP source */}
+      {isAvif && <source srcSet={src} type="image/avif" />}
       {isAvif ? (
-        // WebP fallback for AVIF
         <source srcSet={src.replace(/\.avif$/i, '.webp')} type="image/webp" />
       ) : (
-        // Direct WebP
         <source srcSet={src} type="image/webp" />
       )}
-      {/* JPEG/PNG fallback */}
       <img
-        src={jpgFallback || src.replace(/\.(webp|avif)$/i, '.jpg')}
+        src={fallbackSrc || src}
         alt={alt}
         className={className}
         loading={lazy ? 'lazy' : 'eager'}

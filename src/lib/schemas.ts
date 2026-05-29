@@ -1,4 +1,4 @@
-import { z } from "zod";
+import { z } from "astro/zod";
 
 export const blogSchema = z.object({
     title: z.string(),
@@ -26,5 +26,5 @@ export const corsoSchema = z.object({
 export const productsSchema = z.object({
     id: z.string(),
     name: z.string(),
-    processedAt: z.string().datetime()
+    processedAt: z.iso.datetime()
 });

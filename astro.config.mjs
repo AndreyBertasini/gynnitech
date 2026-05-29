@@ -5,6 +5,7 @@ import starlight from '@astrojs/starlight';
 import react from '@astrojs/react';
 import sitemap from '@astrojs/sitemap';
 import partytown from '@astrojs/partytown';
+import { unified } from '@astrojs/markdown-remark';
 
 import fs from 'node:fs';
 import mermaid from 'astro-mermaid';
@@ -55,11 +56,16 @@ export default defineConfig({
     }
   },
   vite: {
-    plugins: [/** @type {any} */ (tailwindcss())]
+    plugins: [/** @type {any} */ (tailwindcss())],
+    build: {
+      chunkSizeWarningLimit: 700,
+    },
   },
   markdown: {
-    remarkPlugins: [remarkMath],
-    rehypePlugins: [[rehypeKatex, { strict: 'ignore' }]],
+    processor: unified({
+      remarkPlugins: [remarkMath],
+      rehypePlugins: [[rehypeKatex, { strict: 'ignore' }]],
+    }),
   },
   integrations: [
     react(),

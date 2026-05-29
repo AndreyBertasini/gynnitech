@@ -1,5 +1,4 @@
 import { useEffect, useState } from 'react';
-import { ProgressBar } from './ProgressTracker';
 
 interface ModuleInfo {
   id: string;

@@ -5,11 +5,6 @@ const THEME_EVENT = 'ginnytech:theme-changed';
 
 type Theme = 'dark' | 'light';
 
-function getSystemPreference(): Theme {
-  if (typeof window === 'undefined') return 'dark';
-  return window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark';
-}
-
 function getStoredTheme(): Theme {
   if (typeof window === 'undefined') return 'dark';
   const stored = localStorage.getItem(THEME_KEY);

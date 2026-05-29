@@ -1,5 +1,3 @@
-import { useEffect, useState } from 'react';
-
 interface Props {
   moduleId: string;
   title: string;
@@ -33,7 +31,7 @@ export function ModuleSummary({ moduleId, title, description, lessonCount, diffi
         <span style={{ fontSize: '1.8rem', lineHeight: 1 }}>{emoji}</span>
         <div>
           <h3 style={{ color: 'var(--color-accent)', fontWeight: 700, fontSize: '0.95rem', margin: '0 0 0.5rem' }}>
-            Cosa imparerai in questo modulo
+            Cosa imparerai in {title}
           </h3>
           <p style={{ color: '#94a3b8', fontSize: '0.86rem', margin: '0 0 0.75rem', lineHeight: 1.55 }}>
             {description}
