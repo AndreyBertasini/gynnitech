@@ -2,6 +2,7 @@
 import { defineConfig } from 'astro/config';
 import tailwindcss from '@tailwindcss/vite';
 import starlight from '@astrojs/starlight';
+import mdx from '@astrojs/mdx';
 import react from '@astrojs/react';
 import sitemap from '@astrojs/sitemap';
 import partytown from '@astrojs/partytown';
@@ -63,6 +64,7 @@ export default defineConfig({
   },
   markdown: {
     processor: unified({
+      gfm: true,
       remarkPlugins: [remarkMath],
       rehypePlugins: [[rehypeKatex, { strict: 'ignore' }]],
     }),
@@ -119,6 +121,10 @@ export default defineConfig({
         ...staticSidebarSections.slice(1),
       ],
 
+    }),
+    mdx({
+      optimize: true,
+      gfm: true,
     }),
     ...(hasSentryDsn ? [sentry({
       authToken: process.env.SENTRY_AUTH_TOKEN,

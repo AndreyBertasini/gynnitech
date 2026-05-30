@@ -393,6 +393,22 @@ function auditImages(html: string, file: string, issues: Issue[]): void {
     }
 }
 
+function stripCodeContent(html: string): string {
+    return html
+        .replace(/<pre\b[\s\S]*?<\/pre>/gi, "")
+        .replace(/<code\b[\s\S]*?<\/code>/gi, "");
+}
+
+function auditMarkdownRendering(html: string, file: string, issues: Issue[]): void {
+    const searchableHtml = stripCodeContent(html);
+    if (/<p>\s*\|[^<]*\r?\n\s*\|[:\-\s|]+\r?\n/i.test(searchableHtml)) {
+        issues.push({
+            file,
+            message: "raw Markdown table rendered as paragraph; check Markdown GFM support",
+        });
+    }
+}
+
 async function main(): Promise<void> {
     if (!await pathExists(DIST_ROOT)) {
         throw new Error("dist/ does not exist. Run `npm run build` before `npm run audit:site`.");
@@ -441,6 +457,7 @@ async function main(): Promise<void> {
 
         auditSeo(html, file, issues, isRedirectPage);
         auditImages(html, file, issues);
+        auditMarkdownRendering(html, file, issues);
 
         if (!isRedirectPage && file !== "404.html") {
             const performance = await collectRoutePerformance(html, assetSizeCache);
