@@ -1,23 +1,31 @@
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
+import initSqlJs from 'sql.js';
+import sqlWasmUrl from 'sql.js/dist/sql-wasm.wasm?url';
+import { currentSiteLanguage } from '../utils/language';
 
-// Load sql.js from CDN — returns a fresh DB with sample tables
-async function createSampleDb(): Promise<any> {
-  // Load the WASM engine
-  if (!(window as any).initSqlJs) {
-    await new Promise<void>((resolve, reject) => {
-      const script = document.createElement('script');
-      script.src = 'https://cdnjs.cloudflare.com/ajax/libs/sql.js/1.10.3/sql-wasm.js';
-      script.onload = () => resolve();
-      script.onerror = () => reject(new Error('Failed to load SQL engine'));
-      document.head.appendChild(script);
-    });
-  }
+type ResultTable = {
+  columns: string[];
+  rows: string[][];
+};
 
-  const SQL = await (window as any).initSqlJs({
-    locateFile: (file: string) =>
-      `https://cdnjs.cloudflare.com/ajax/libs/sql.js/1.10.3/${file}`,
+interface Props {
+  description: string;
+  hint?: string;
+  initialQuery?: string;
+  solutionQuery?: string;
+}
+
+let sqlModulePromise: Promise<any> | null = null;
+
+const getSqlModule = () => {
+  sqlModulePromise ??= initSqlJs({
+    locateFile: () => sqlWasmUrl,
   });
+  return sqlModulePromise;
+};
 
+async function createSampleDb(): Promise<any> {
+  const SQL = await getSqlModule();
   const db = new SQL.Database();
 
   db.run(`
@@ -42,6 +50,7 @@ async function createSampleDb(): Promise<any> {
     INSERT INTO utenti VALUES (6, 'Elena Blu', 'elena@ex.com', '2025-03-01', 'google');
     INSERT INTO utenti VALUES (7, 'Franco Viola', 'franco@ex.com', '2025-03-05', 'facebook');
     INSERT INTO utenti VALUES (8, 'Maria Rosa', 'maria@ex.com', '2025-03-10', 'direct');
+    INSERT INTO utenti VALUES (9, 'Nadia Argento', 'nadia@ex.com', '2025-03-18', 'newsletter');
 
     INSERT INTO ordini VALUES (1, 1, 150.00, '2025-01-20', 'Scarpe running', 'Sport');
     INSERT INTO ordini VALUES (2, 1, 89.90, '2025-02-15', 'Maglietta tecnica', 'Abbigliamento');
@@ -54,6 +63,10 @@ async function createSampleDb(): Promise<any> {
     INSERT INTO ordini VALUES (9, 6, 55.00, '2025-03-15', 'Fascia cardio', 'Sport');
     INSERT INTO ordini VALUES (10, 1, 310.00, '2025-03-20', 'Scarpe trail', 'Sport');
     INSERT INTO ordini VALUES (11, 8, 180.00, '2025-03-22', 'Giacca antivento', 'Abbigliamento');
+    INSERT INTO ordini VALUES (12, 1, 89.90, '2025-02-15', 'Maglietta tecnica', 'Abbigliamento');
+    INSERT INTO ordini VALUES (13, 7, 19.90, '2025-03-23', 'Sticker pack', 'Accessori');
+    INSERT INTO ordini VALUES (14, 7, 260.00, '2025-03-24', 'Action camera', 'Elettronica');
+    INSERT INTO ordini VALUES (15, 8, 95.00, '2025-03-25', 'Zaino running', 'Sport');
 
     INSERT INTO eventi VALUES (1, 1, 'page_view', '2025-01-15', '/home');
     INSERT INTO eventi VALUES (2, 1, 'page_view', '2025-01-15', '/prodotti/sport');
@@ -67,66 +80,118 @@ async function createSampleDb(): Promise<any> {
     INSERT INTO eventi VALUES (10, 5, 'page_view', '2025-03-01', '/home');
     INSERT INTO eventi VALUES (11, 3, 'page_view', '2025-03-08', '/prodotti/elettronica');
     INSERT INTO eventi VALUES (12, 3, 'purchase', '2025-03-10', '/checkout');
+    INSERT INTO eventi VALUES (13, 5, 'page_view', '2025-03-11', '/prodotti/elettronica');
+    INSERT INTO eventi VALUES (14, 5, 'page_view', '2025-03-11', '/products/electronics');
+
+    CREATE VIEW users AS
+      SELECT id, nome AS name, email, creato_il AS created_at, fonte AS source
+      FROM utenti;
+
+    CREATE VIEW orders AS
+      SELECT
+        id,
+        utente_id AS user_id,
+        importo AS amount,
+        data_ordine AS order_date,
+        prodotto AS product,
+        categoria,
+        CASE categoria
+          WHEN 'Sport' THEN 'Sports'
+          WHEN 'Abbigliamento' THEN 'Clothing'
+          WHEN 'Elettronica' THEN 'Electronics'
+          WHEN 'Accessori' THEN 'Accessories'
+          ELSE categoria
+        END AS category
+      FROM ordini;
+
+    CREATE VIEW events AS
+      SELECT
+        id,
+        utente_id AS user_id,
+        tipo AS type,
+        data_evento AS event_date,
+        pagina,
+        CASE pagina
+          WHEN '/prodotti/elettronica' THEN '/products/electronics'
+          WHEN '/prodotti/sport' THEN '/products/sport'
+          ELSE pagina
+        END AS page
+      FROM eventi;
   `);
 
-  return { db, SQL };
+  return db;
 }
 
-function renderTable(columns: string[], rows: string[][]): string {
-  let html =
-    '<table style="width:100%;border-collapse:collapse;font-size:0.85rem;margin-top:0.5rem">';
-  html += '<thead><tr>';
-  columns.forEach((col) => {
-    html += `<th style="border:1px solid rgba(255,255,255,0.12);padding:0.4rem 0.6rem;text-align:left;color:var(--color-accent);background:rgba(204,255,0,0.06)">${col}</th>`;
-  });
-  html += '</tr></thead><tbody>';
-  rows.forEach((row) => {
-    html += '<tr>';
-    row.forEach((cell) => {
-      html += `<td style="border:1px solid rgba(255,255,255,0.06);padding:0.35rem 0.6rem;color:#e2e8f0">${cell}</td>`;
-    });
-    html += '</tr>';
-  });
-  html += '</tbody></table>';
-  html += `<p style="color:#64748b;font-size:0.75rem;margin-top:0.4rem">${rows.length} righe</p>`;
-  return html;
-}
-
-interface Props {
-  description: string;
-  hint?: string;
-  initialQuery?: string;
-  solutionQuery?: string;
-}
+const copyByLanguage = {
+  it: {
+    title: 'Prova tu',
+    placeholder: 'Scrivi la tua query SQL qui...',
+    running: 'Esecuzione...',
+    run: 'Esegui',
+    shortcut: 'Ctrl+Enter per eseguire',
+    showHint: 'Suggerimento',
+    hideHint: 'Nascondi suggerimento',
+    showSolution: 'Soluzione',
+    hideSolution: 'Nascondi soluzione',
+    solutionLabel: 'Soluzione:',
+    emptyResult: 'Query eseguita. Nessun risultato da mostrare.',
+    rows: 'righe',
+    errorFallback: 'Errore SQL',
+  },
+  en: {
+    title: 'Try it yourself',
+    placeholder: 'Write your SQL query here...',
+    running: 'Running...',
+    run: 'Run',
+    shortcut: 'Ctrl+Enter to run',
+    showHint: 'Hint',
+    hideHint: 'Hide hint',
+    showSolution: 'Solution',
+    hideSolution: 'Hide solution',
+    solutionLabel: 'Solution:',
+    emptyResult: 'Query executed. No result to show.',
+    rows: 'rows',
+    errorFallback: 'SQL error',
+  },
+};
 
 export function SqlExercise({ description, hint, initialQuery, solutionQuery }: Props) {
+  const language = currentSiteLanguage();
+  const copy = copyByLanguage[language];
   const [query, setQuery] = useState(initialQuery || '');
-  const [result, setResult] = useState<string | null>(null);
+  const [table, setTable] = useState<ResultTable | null>(null);
+  const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [showHint, setShowHint] = useState(false);
   const [showSolution, setShowSolution] = useState(false);
   const [running, setRunning] = useState(false);
 
+  const normalizedQuery = useMemo(() => query.replaceAll('\\n', '\n'), [query]);
+  const normalizedSolution = useMemo(() => solutionQuery?.replaceAll('\\n', '\n'), [solutionQuery]);
+
   const runQuery = async () => {
-    if (!query.trim()) return;
+    if (!normalizedQuery.trim()) return;
     setRunning(true);
-    setResult(null);
+    setTable(null);
+    setMessage(null);
     setError(null);
 
     try {
-      const { db } = await createSampleDb();
-      const queryResult = db.exec(query);
+      const db = await createSampleDb();
+      const queryResult = db.exec(normalizedQuery);
       db.close();
 
       if (queryResult.length === 0) {
-        setResult('✅ Query eseguita (nessun risultato da mostrare)');
+        setMessage(copy.emptyResult);
       } else {
         const { columns, values } = queryResult[0];
-        const rows = values.map((row: any[]) => row.map((v: any) => (v === null ? 'NULL' : String(v))));
-        setResult(renderTable(columns, rows));
+        setTable({
+          columns,
+          rows: values.map((row: any[]) => row.map((value: any) => (value === null ? 'NULL' : String(value)))),
+        });
       }
     } catch (err: any) {
-      setError(err.message || 'Errore SQL');
+      setError(err.message || copy.errorFallback);
     } finally {
       setRunning(false);
     }
@@ -134,6 +199,7 @@ export function SqlExercise({ description, hint, initialQuery, solutionQuery }: 
 
   return (
     <div
+      data-sql-exercise
       style={{
         border: '1px solid rgba(204,255,0,0.15)',
         borderRadius: '14px',
@@ -143,8 +209,8 @@ export function SqlExercise({ description, hint, initialQuery, solutionQuery }: 
       }}
     >
       <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '1rem' }}>
-        <span style={{ fontSize: '1.2rem' }}>🖥️</span>
-        <span style={{ color: 'var(--color-accent)', fontWeight: 700, fontSize: '0.95rem' }}>Prova tu!</span>
+        <span aria-hidden="true" style={{ fontSize: '1rem', fontWeight: 700 }}>[SQL]</span>
+        <span style={{ color: 'var(--color-accent)', fontWeight: 700, fontSize: '0.95rem' }}>{copy.title}</span>
       </div>
 
       <p style={{ color: '#cbd5e1', fontSize: '0.9rem', margin: '0 0 1rem', lineHeight: 1.6 }}>
@@ -152,12 +218,12 @@ export function SqlExercise({ description, hint, initialQuery, solutionQuery }: 
       </p>
 
       <textarea
-        value={query}
-        onChange={(e) => setQuery(e.target.value)}
-        placeholder="Scrivi la tua query SQL qui..."
+        value={normalizedQuery}
+        onChange={(event) => setQuery(event.target.value)}
+        placeholder={copy.placeholder}
         rows={5}
-        onKeyDown={(e) => {
-          if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) runQuery();
+        onKeyDown={(event) => {
+          if (event.key === 'Enter' && (event.ctrlKey || event.metaKey)) runQuery();
         }}
         style={{
           width: '100%',
@@ -178,7 +244,7 @@ export function SqlExercise({ description, hint, initialQuery, solutionQuery }: 
       <div style={{ display: 'flex', gap: '0.5rem', marginTop: '0.75rem', flexWrap: 'wrap', alignItems: 'center' }}>
         <button
           onClick={runQuery}
-          disabled={running || !query.trim()}
+          disabled={running || !normalizedQuery.trim()}
           style={{
             padding: '0.55rem 1.2rem',
             borderRadius: '8px',
@@ -190,10 +256,10 @@ export function SqlExercise({ description, hint, initialQuery, solutionQuery }: 
             cursor: running ? 'wait' : 'pointer',
           }}
         >
-          {running ? 'Esecuzione...' : '▶ Esegui'}
+          {running ? copy.running : copy.run}
         </button>
 
-        <span style={{ color: '#475569', fontSize: '0.72rem' }}>Ctrl+Enter per eseguire</span>
+        <span style={{ color: '#475569', fontSize: '0.72rem' }}>{copy.shortcut}</span>
 
         {hint && (
           <button
@@ -208,11 +274,11 @@ export function SqlExercise({ description, hint, initialQuery, solutionQuery }: 
               cursor: 'pointer',
             }}
           >
-            {showHint ? 'Nascondi suggerimento' : '💡 Suggerimento'}
+            {showHint ? copy.hideHint : copy.showHint}
           </button>
         )}
 
-        {solutionQuery && (
+        {normalizedSolution && (
           <button
             onClick={() => setShowSolution(!showSolution)}
             style={{
@@ -225,7 +291,7 @@ export function SqlExercise({ description, hint, initialQuery, solutionQuery }: 
               cursor: 'pointer',
             }}
           >
-            {showSolution ? 'Nascondi soluzione' : '👁️ Soluzione'}
+            {showSolution ? copy.hideSolution : copy.showSolution}
           </button>
         )}
       </div>
@@ -242,13 +308,13 @@ export function SqlExercise({ description, hint, initialQuery, solutionQuery }: 
             fontSize: '0.85rem',
           }}
         >
-          💡 {hint}
+          {hint}
         </div>
       )}
 
-      {showSolution && solutionQuery && (
+      {showSolution && normalizedSolution && (
         <div style={{ marginTop: '0.75rem' }}>
-          <p style={{ color: '#64748b', fontSize: '0.8rem', margin: '0 0 0.4rem' }}>Soluzione:</p>
+          <p style={{ color: '#64748b', fontSize: '0.8rem', margin: '0 0 0.4rem' }}>{copy.solutionLabel}</p>
           <pre
             style={{
               padding: '0.75rem 1rem',
@@ -262,7 +328,7 @@ export function SqlExercise({ description, hint, initialQuery, solutionQuery }: 
               margin: 0,
             }}
           >
-            {solutionQuery}
+            {normalizedSolution}
           </pre>
         </div>
       )}
@@ -279,11 +345,27 @@ export function SqlExercise({ description, hint, initialQuery, solutionQuery }: 
             fontSize: '0.85rem',
           }}
         >
-          ❌ {error}
+          {error}
         </div>
       )}
 
-      {result && (
+      {message && (
+        <div
+          style={{
+            marginTop: '0.75rem',
+            padding: '0.75rem 1rem',
+            borderRadius: '10px',
+            background: 'rgba(0,0,0,0.3)',
+            border: '1px solid rgba(255,255,255,0.06)',
+            color: '#cbd5e1',
+            fontSize: '0.85rem',
+          }}
+        >
+          {message}
+        </div>
+      )}
+
+      {table && (
         <div
           style={{
             marginTop: '0.75rem',
@@ -294,8 +376,49 @@ export function SqlExercise({ description, hint, initialQuery, solutionQuery }: 
             maxWidth: '100%',
             overflow: 'auto',
           }}
-          dangerouslySetInnerHTML={{ __html: result }}
-        />
+        >
+          <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.85rem', marginTop: '0.5rem' }}>
+            <thead>
+              <tr>
+                {table.columns.map((column) => (
+                  <th
+                    key={column}
+                    style={{
+                      border: '1px solid rgba(255,255,255,0.12)',
+                      padding: '0.4rem 0.6rem',
+                      textAlign: 'left',
+                      color: 'var(--color-accent)',
+                      background: 'rgba(204,255,0,0.06)',
+                    }}
+                  >
+                    {column}
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {table.rows.map((row, rowIndex) => (
+                <tr key={`${rowIndex}-${row.join('|')}`}>
+                  {row.map((cell, cellIndex) => (
+                    <td
+                      key={`${rowIndex}-${cellIndex}`}
+                      style={{
+                        border: '1px solid rgba(255,255,255,0.06)',
+                        padding: '0.35rem 0.6rem',
+                        color: '#e2e8f0',
+                      }}
+                    >
+                      {cell}
+                    </td>
+                  ))}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          <p style={{ color: '#64748b', fontSize: '0.75rem', marginTop: '0.4rem' }}>
+            {table.rows.length} {copy.rows}
+          </p>
+        </div>
       )}
     </div>
   );

@@ -66,6 +66,8 @@ const skipTags = new Set([
   'textarea',
 ]);
 
+const translatableAttrNames = new Set(['title', 'alt', 'aria-label', 'aria-description', 'placeholder']);
+
 const knownNoTranslate = new Set([
   'GinnyTech',
   'MarTech',
@@ -143,6 +145,70 @@ const removeAttr = (node: any, name: string) => {
   node.attrs = node.attrs?.filter((attr: { name: string }) => attr.name !== name) ?? [];
 };
 
+const translatableIslandPropsByExport = new Map<string, Set<string>>([
+  ['SqlExercise', new Set(['description', 'hint'])],
+]);
+
+const parseAstroProps = (node: any) => {
+  const rawProps = attrValue(node, 'props');
+  if (!rawProps) return null;
+
+  try {
+    return JSON.parse(rawProps) as Record<string, unknown>;
+  } catch {
+    return null;
+  }
+};
+
+const serializedStringValue = (value: unknown) => {
+  if (!Array.isArray(value) || value.length < 2) return null;
+  return value[0] === 0 && typeof value[1] === 'string' ? value[1] : null;
+};
+
+const setSerializedStringValue = (props: Record<string, unknown>, propName: string, value: string) => {
+  const current = props[propName];
+  if (!Array.isArray(current) || current.length < 2 || current[0] !== 0) return;
+  current[1] = value;
+};
+
+const collectAstroIslandProps = (node: any, strings: Map<string, string>) => {
+  if (!isElementNode(node) || node.tagName !== 'astro-island') return;
+
+  const componentExport = attrValue(node, 'component-export');
+  const propNames = translatableIslandPropsByExport.get(String(componentExport));
+  if (!propNames) return;
+
+  const props = parseAstroProps(node);
+  if (!props) return;
+
+  for (const propName of propNames) {
+    const value = serializedStringValue(props[propName]);
+    if (value && shouldTranslate(value)) strings.set(hashText(value), value);
+  }
+};
+
+const applyAstroIslandPropTranslations = (node: any, cache: TranslationCache) => {
+  if (!isElementNode(node) || node.tagName !== 'astro-island') return;
+
+  const componentExport = attrValue(node, 'component-export');
+  const propNames = translatableIslandPropsByExport.get(String(componentExport));
+  if (!propNames) return;
+
+  const props = parseAstroProps(node);
+  if (!props) return;
+
+  let changed = false;
+  for (const propName of propNames) {
+    const value = serializedStringValue(props[propName]);
+    if (value && shouldTranslate(value)) {
+      setSerializedStringValue(props, propName, translateCached(cache, value));
+      changed = true;
+    }
+  }
+
+  if (changed) setAttr(node, 'props', JSON.stringify(props));
+};
+
 const shouldTranslate = (text: string) => {
   const trimmed = text.trim();
   if (!trimmed) return false;
@@ -181,24 +247,24 @@ const isTranslatableMeta = (node: any, attrName: string) => {
 
 const collectStrings = (node: any, strings: Map<string, string>, blocked = false) => {
   const isBlocked = blocked || (isElementNode(node) && skipTags.has(node.tagName));
-  if (isBlocked) return;
 
   if (node.nodeName === '#text' && typeof node.value === 'string') {
     const core = node.value.trim();
-    if (shouldTranslate(core)) strings.set(hashText(core), core);
+    if (!isBlocked && shouldTranslate(core)) strings.set(hashText(core), core);
   }
 
   if (isElementNode(node)) {
+    if (!isBlocked) collectAstroIslandProps(node, strings);
+
     for (const attr of node.attrs ?? []) {
-      if (
-        ['title', 'alt', 'aria-label', 'aria-description', 'placeholder'].includes(attr.name) ||
-        isTranslatableMeta(node, attr.name)
-      ) {
+      if (translatableAttrNames.has(attr.name) || isTranslatableMeta(node, attr.name)) {
         const value = attr.value.trim();
         if (shouldTranslate(value)) strings.set(hashText(value), value);
       }
     }
   }
+
+  if (isBlocked) return;
 
   for (const child of node.childNodes ?? []) {
     collectStrings(child, strings, isBlocked);
@@ -359,22 +425,22 @@ const rewriteDocumentMetadata = (document: any, relativeHtmlPath: string) => {
 
 const applyTranslations = (node: any, cache: TranslationCache, blocked = false) => {
   const isBlocked = blocked || (isElementNode(node) && skipTags.has(node.tagName));
-  if (isBlocked) return;
 
   if (node.nodeName === '#text' && typeof node.value === 'string') {
-    node.value = withTranslatedWhitespace(node.value, (text) => translateCached(cache, text));
+    if (!isBlocked) node.value = withTranslatedWhitespace(node.value, (text) => translateCached(cache, text));
   }
 
   if (isElementNode(node)) {
+    if (!isBlocked) applyAstroIslandPropTranslations(node, cache);
+
     for (const attr of node.attrs ?? []) {
-      if (
-        ['title', 'alt', 'aria-label', 'aria-description', 'placeholder'].includes(attr.name) ||
-        isTranslatableMeta(node, attr.name)
-      ) {
+      if (translatableAttrNames.has(attr.name) || isTranslatableMeta(node, attr.name)) {
         attr.value = withTranslatedWhitespace(attr.value, (text) => translateCached(cache, text));
       }
     }
   }
+
+  if (isBlocked) return;
 
   for (const child of node.childNodes ?? []) {
     applyTranslations(child, cache, isBlocked);
