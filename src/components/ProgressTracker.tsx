@@ -1,6 +1,5 @@
 import { useEffect, useState } from 'react';
-
-// ---- Storage ----
+import { currentSiteLanguage } from '../utils/language';
 
 interface LessonProgress {
   moduleId: string;
@@ -17,7 +16,9 @@ function loadProgress(): Record<string, LessonProgress> {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
     return raw ? JSON.parse(raw) : {};
-  } catch { return {}; }
+  } catch {
+    return {};
+  }
 }
 
 function saveProgress(progress: Record<string, LessonProgress>): void {
@@ -42,13 +43,25 @@ export function isLessonCompleted(moduleId: string, slug: string): boolean {
 }
 
 function countCompleted(moduleId: string): number {
-  return Object.values(loadProgress()).filter(p => p.moduleId === moduleId && p.completed).length;
+  return Object.values(loadProgress()).filter((progress) => progress.moduleId === moduleId && progress.completed).length;
 }
-
-// ---- Completion Button ----
 
 export function CompletionButton({ moduleId, slug }: { moduleId: string; slug: string }) {
   const [completed, setCompleted] = useState(false);
+  const language = currentSiteLanguage();
+  const copy = language === 'en'
+    ? {
+        completedStatus: 'Lesson completed!',
+        incompleteStatus: 'Mark as completed',
+        undo: 'Undo',
+        complete: 'Completed',
+      }
+    : {
+        completedStatus: 'Lezione completata!',
+        incompleteStatus: 'Segna come completata',
+        undo: 'Annulla',
+        complete: 'Completata',
+      };
 
   useEffect(() => {
     setCompleted(isLessonCompleted(moduleId, slug));
@@ -73,39 +86,47 @@ export function CompletionButton({ moduleId, slug }: { moduleId: string; slug: s
         borderRadius: '14px',
         background: completed ? 'rgba(204,255,0,0.06)' : 'rgba(255,255,255,0.025)',
         padding: '1.25rem 1.5rem',
-        display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-        flexWrap: 'wrap', gap: '1rem', transition: 'all 0.3s ease',
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'space-between',
+        flexWrap: 'wrap',
+        gap: '1rem',
+        transition: 'all 0.3s ease',
       }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
-          <span style={{ fontSize: '1.4rem' }}>{completed ? '✅' : '⬜'}</span>
+          <span style={{ fontSize: '0.8rem', fontWeight: 700 }}>{completed ? '[x]' : '[ ]'}</span>
           <span style={{
             color: completed ? 'var(--color-accent)' : '#94a3b8',
-            fontSize: '0.95rem', fontWeight: 500,
+            fontSize: '0.95rem',
+            fontWeight: 500,
           }}>
-            {completed ? 'Lezione completata!' : 'Segna come completata'}
+            {completed ? copy.completedStatus : copy.incompleteStatus}
           </span>
         </div>
         <button
           onClick={toggle}
           style={{
-            padding: '0.6rem 1.4rem', borderRadius: '999px',
+            padding: '0.6rem 1.4rem',
+            borderRadius: '999px',
             border: completed ? '1px solid rgba(148,163,184,0.3)' : '1px solid rgba(204,255,0,0.4)',
             background: completed ? 'transparent' : 'rgba(204,255,0,0.12)',
             color: completed ? '#94a3b8' : 'var(--color-accent)',
-            fontSize: '0.875rem', fontWeight: 600, cursor: 'pointer', transition: 'all 0.25s',
+            fontSize: '0.875rem',
+            fontWeight: 600,
+            cursor: 'pointer',
+            transition: 'all 0.25s',
           }}
         >
-          {completed ? 'Annulla' : 'Completata ✓'}
+          {completed ? copy.undo : copy.complete}
         </button>
       </div>
     </div>
   );
 }
 
-// ---- Progress Bar (reads from localStorage) ----
-
 export function ProgressBar({ moduleId, totalLessons }: { moduleId: string; totalLessons: number }) {
   const [completed, setCompleted] = useState(0);
+  const language = currentSiteLanguage();
 
   const refresh = () => setCompleted(countCompleted(moduleId));
 
@@ -120,14 +141,18 @@ export function ProgressBar({ moduleId, totalLessons }: { moduleId: string; tota
   return (
     <div style={{ width: '100%' }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '0.5rem', fontSize: '0.85rem' }}>
-        <span style={{ color: '#cbd5e1', fontWeight: 500 }}>Progresso modulo</span>
+        <span style={{ color: '#cbd5e1', fontWeight: 500 }}>
+          {language === 'en' ? 'Module progress' : 'Progresso modulo'}
+        </span>
         <span style={{ color: 'var(--color-accent)', fontWeight: 600 }}>{completed}/{totalLessons} ({pct}%)</span>
       </div>
       <div style={{ width: '100%', height: '8px', background: 'rgba(255,255,255,0.06)', borderRadius: '999px', overflow: 'hidden' }}>
         <div style={{
-          height: '100%', width: `${pct}%`,
+          height: '100%',
+          width: `${pct}%`,
           background: 'linear-gradient(90deg, var(--color-accent), #a3e635, #84cc16)',
-          borderRadius: '999px', boxShadow: '0 0 12px rgba(204,255,0,0.35)',
+          borderRadius: '999px',
+          boxShadow: '0 0 12px rgba(204,255,0,0.35)',
           transition: 'width 0.8s ease-out',
         }} />
       </div>

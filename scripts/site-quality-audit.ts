@@ -16,9 +16,10 @@ const MAX_SINGLE_CSS_ASSET_BYTES = 190_000;
 const MAX_FONT_BYTES = 90_000;
 const REDIRECT_ENTRIES = redirectEntries as Array<[string, string]>;
 const REDIRECT_SOURCE_FILES = new Set(
-    REDIRECT_ENTRIES.map(([source]) => {
+    REDIRECT_ENTRIES.flatMap(([source]) => {
         const sourcePath = source.endsWith("/") ? source : `${source}/`;
-        return `${sourcePath.replace(/^\//, "")}index.html`;
+        const file = `${sourcePath.replace(/^\//, "")}index.html`;
+        return [file, `en/${file}`];
     }),
 );
 
