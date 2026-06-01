@@ -4,7 +4,7 @@ Piattaforma editoriale e formativa in italiano su MarTech, data engineering, ana
 
 ## Stack
 
-- Astro 5
+- Astro 6
 - React 19 per componenti interattivi
 - Tailwind CSS 4
 - MDX content collections per blog e corso

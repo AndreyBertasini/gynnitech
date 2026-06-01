@@ -14,6 +14,7 @@ const MAX_ROUTE_ISLAND_JS_BYTES = 320_000;
 const MAX_SINGLE_JS_ASSET_BYTES = 700_000;
 const MAX_SINGLE_CSS_ASSET_BYTES = 190_000;
 const MAX_FONT_BYTES = 90_000;
+const MOJIBAKE_MARKER_REGEX = /(?:\u00c3[\u0080-\u00bf]|\u00c2[\u0080-\u00bf]|\u00e2\u20ac[\u0080-\u2122]|\ufffd)/;
 const REDIRECT_ENTRIES = redirectEntries as Array<[string, string]>;
 const REDIRECT_SOURCE_FILES = new Set(
     REDIRECT_ENTRIES.flatMap(([source]) => {
@@ -409,6 +410,16 @@ function auditMarkdownRendering(html: string, file: string, issues: Issue[]): vo
     }
 }
 
+function auditTextEncoding(html: string, file: string, issues: Issue[]): void {
+    const searchableHtml = stripCodeContent(html);
+    if (MOJIBAKE_MARKER_REGEX.test(searchableHtml)) {
+        issues.push({
+            file,
+            message: "possible mojibake or replacement character in rendered text",
+        });
+    }
+}
+
 async function main(): Promise<void> {
     if (!await pathExists(DIST_ROOT)) {
         throw new Error("dist/ does not exist. Run `npm run build` before `npm run audit:site`.");
@@ -458,6 +469,7 @@ async function main(): Promise<void> {
         auditSeo(html, file, issues, isRedirectPage);
         auditImages(html, file, issues);
         auditMarkdownRendering(html, file, issues);
+        auditTextEncoding(html, file, issues);
 
         if (!isRedirectPage && file !== "404.html") {
             const performance = await collectRoutePerformance(html, assetSizeCache);

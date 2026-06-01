@@ -87,12 +87,13 @@ export const GET: APIRoute = async () => {
     modules,
     _meta: {
       syncHint:
-        'POST completed lesson slugs (e.g. {"completed": ["panoramica/come-studiare-bene-questo-corso", "advanced-sql/window-functions-avanzate"]}) to sync progress across devices. Client-side: store in localStorage under ginnytech_completed_lessons.',
+        'Progress is stored client-side in localStorage under ginnytech_progress. Quiz state uses keys prefixed with ginnytech_quiz_.',
       localStoragePrefix: 'ginnytech_',
+      progressKey: 'ginnytech_progress',
+      quizKeyPrefix: 'ginnytech_quiz_',
       completionKeys: [
-        'ginnytech_completed_lessons',
-        'ginnytech_module_progress',
-        'ginnytech_quiz_scores',
+        'ginnytech_progress',
+        'ginnytech_quiz_*',
       ],
       endpoints: {
         progressPage: '/progress',

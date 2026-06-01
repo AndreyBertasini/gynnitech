@@ -13,7 +13,7 @@ npm run check            # validate:content + astro check + vitest (pre-commit)
 
 ## Architecture
 
-Astro 5 + Starlight static site. Content collections in `src/content/`. Course
+Astro 6 + Starlight static site. Content collections in `src/content/`. Course
 content in `src/content/corso/` with 15 module subdirectories. Tailwind CSS 4
 via Vite plugin. Cloudflare Pages deploy from `main` branch.
 
