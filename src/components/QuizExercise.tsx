@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useEffect, useState } from 'react';
 
 interface Question {
   id: string;
@@ -60,9 +60,8 @@ export function QuizExercise({ quizId, title, questions }: Props) {
   const correctCount = questions.filter((q) => answers[q.id] === q.correctIndex).length;
   const allAnswered = questions.every((q) => answers[q.id] !== undefined);
   const pct = Math.round((correctCount / questions.length) * 100);
-
-  const scoreEmoji =
-    pct === 100 ? '🏆' : pct >= 80 ? '🌟' : pct >= 60 ? '👍' : pct >= 40 ? '📖' : '💪';
+  const scoreLabel =
+    pct === 100 ? 'Perfetto' : pct >= 80 ? 'Ottimo' : pct >= 60 ? 'Buono' : pct >= 40 ? 'Da rivedere' : 'Ripasso';
 
   return (
     <div
@@ -75,7 +74,7 @@ export function QuizExercise({ quizId, title, questions }: Props) {
       }}
     >
       <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: submitted ? '1rem' : '1.25rem' }}>
-        <span style={{ fontSize: '1.3rem' }}>🧠</span>
+        <span style={{ fontSize: '0.75rem', fontWeight: 700 }}>[QUIZ]</span>
         <span style={{ color: 'var(--color-accent)', fontWeight: 700, fontSize: '1rem' }}>
           {title || 'Mettiti alla prova'}
         </span>
@@ -120,25 +119,25 @@ export function QuizExercise({ quizId, title, questions }: Props) {
 
                 let bg = 'rgba(255,255,255,0.03)';
                 let border = '1px solid rgba(255,255,255,0.08)';
-                let dot = '○';
+                let dot = '( )';
                 let labelColor = '#94a3b8';
 
                 if (isSelected && !isRevealed) {
                   bg = 'rgba(204,255,0,0.06)';
                   border = '1px solid rgba(204,255,0,0.35)';
-                  dot = '●';
+                  dot = '(x)';
                   labelColor = 'var(--color-accent)';
                 }
                 if (showCorrect) {
                   bg = 'rgba(34,197,94,0.08)';
                   border = '1px solid rgba(34,197,94,0.3)';
-                  dot = '✓';
+                  dot = 'OK';
                   labelColor = '#22c55e';
                 }
                 if (showWrong) {
                   bg = 'rgba(248,113,113,0.08)';
                   border = '1px solid rgba(248,113,113,0.25)';
-                  dot = '✗';
+                  dot = 'NO';
                   labelColor = '#f87171';
                 }
 
@@ -165,9 +164,10 @@ export function QuizExercise({ quizId, title, questions }: Props) {
                   >
                     <span
                       style={{
-                        fontSize: '0.9rem',
-                        minWidth: '1.2rem',
+                        fontSize: '0.75rem',
+                        minWidth: '1.4rem',
                         textAlign: 'center',
+                        fontWeight: 700,
                       }}
                     >
                       {dot}
@@ -194,7 +194,7 @@ export function QuizExercise({ quizId, title, questions }: Props) {
                   color: '#94a3b8',
                 }}
               >
-                {isCorrect ? '✅' : '❌'} {q.explanation}
+                {isCorrect ? 'Corretto:' : 'Rivedi:'} {q.explanation}
               </div>
             )}
           </div>
@@ -214,7 +214,7 @@ export function QuizExercise({ quizId, title, questions }: Props) {
         {submitted ? (
           <>
             <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-              <span style={{ fontSize: '1.5rem' }}>{scoreEmoji}</span>
+              <span style={{ color: '#cbd5e1', fontSize: '0.85rem', fontWeight: 700 }}>{scoreLabel}</span>
               <span style={{ color: 'var(--color-accent)', fontWeight: 700 }}>
                 {correctCount}/{questions.length} corrette ({pct}%)
               </span>
@@ -231,14 +231,14 @@ export function QuizExercise({ quizId, title, questions }: Props) {
                 cursor: 'pointer',
               }}
             >
-              Riprova ↺
+              Riprova
             </button>
           </>
         ) : (
           <>
             <span style={{ color: '#475569', fontSize: '0.78rem' }}>
               {allAnswered
-                ? 'Tutte risposte date — invia per vedere i risultati!'
+                ? 'Tutte risposte date - invia per vedere i risultati!'
                 : `${questions.filter((q) => answers[q.id] !== undefined).length}/${questions.length} risposte`}
             </span>
             <button

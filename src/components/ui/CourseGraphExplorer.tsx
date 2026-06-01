@@ -176,20 +176,20 @@ export const CourseGraphExplorer = ({ graph, title, description }: CourseGraphEx
             </h1>
             <p className="mt-5 max-w-3xl text-base leading-8 text-slate-300 md:text-lg">
               {description ||
-                'La pagina si rigenera dai contenuti reali del corso: ordine dei moduli, lezioni, prerequisiti e collegamenti vengono ricostruiti ogni volta che aggiorni il catalogo.'}
+                'Usa questa mappa per scegliere il prossimo passo: ordine dei moduli, prerequisiti, lezioni ponte e collegamenti restano coerenti con il percorso reale.'}
             </p>
             <div className="mt-6 grid gap-3 md:grid-cols-3">
               <div className="rounded-2xl border border-white/10 bg-white/[0.04] p-4">
                 <p className="text-[11px] uppercase tracking-[0.2em] text-slate-500">Moduli</p>
-                <p className="mt-2 text-sm leading-6 text-slate-200">derivati da `src/data/course-modules.ts`</p>
+                <p className="mt-2 text-sm leading-6 text-slate-200">perimetro completo del percorso</p>
               </div>
               <div className="rounded-2xl border border-white/10 bg-white/[0.04] p-4">
                 <p className="text-[11px] uppercase tracking-[0.2em] text-slate-500">Lezioni</p>
-                <p className="mt-2 text-sm leading-6 text-slate-200">lette da `src/content/corso/*/*.mdx`</p>
+                <p className="mt-2 text-sm leading-6 text-slate-200">ordine, prerequisiti e collegamenti</p>
               </div>
               <div className="rounded-2xl border border-white/10 bg-white/[0.04] p-4">
                 <p className="text-[11px] uppercase tracking-[0.2em] text-slate-500">Mappa</p>
-                <p className="mt-2 text-sm leading-6 text-slate-200">conteggi e dipendenze ricalcolati automaticamente</p>
+                <p className="mt-2 text-sm leading-6 text-slate-200">entrate rapide e lezioni ponte</p>
               </div>
             </div>
           </div>
@@ -298,8 +298,8 @@ export const CourseGraphExplorer = ({ graph, title, description }: CourseGraphEx
             <h2 className="mt-2 text-3xl font-semibold text-white">Moduli e lezioni, in modo leggibile</h2>
           </div>
           <p className="max-w-2xl text-sm leading-7 text-slate-400">
-            Cerca, filtra per fase o entra da un percorso automatico. La selezione qui sotto resta aggiornata quando cambi
-            moduli, lezioni o prerequisiti nel catalogo.
+            Cerca, filtra per fase o entra da un percorso rapido. La selezione qui sotto mostra moduli, lezioni e prerequisiti
+            con link diretti alle pagine del corso.
           </p>
         </div>
 
@@ -390,7 +390,7 @@ export const CourseGraphExplorer = ({ graph, title, description }: CourseGraphEx
                 <div className="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
                   <div className="max-w-3xl">
                     <p className="text-[11px] font-semibold uppercase tracking-[0.22em] text-accent">
-                      Modulo attivo · {selectedModule.stageTitle}
+                      Modulo attivo - {selectedModule.stageTitle}
                     </p>
                     <h3 className="mt-2 text-3xl font-semibold text-white">{selectedModule.title}</h3>
                     <p className="mt-4 text-sm leading-7 text-slate-300">{selectedModule.description}</p>
@@ -536,7 +536,7 @@ export const CourseGraphExplorer = ({ graph, title, description }: CourseGraphEx
                             <span className="rounded-full border border-white/10 bg-white/[0.05] px-2 py-1 text-[10px] uppercase tracking-[0.18em] text-slate-300">{lesson.prerequisites.length} prereq</span>
                           </div>
                           <p className="mt-2 text-xs leading-6 text-slate-400">
-                            sblocca {lesson.dependents.length} lezioni · {lesson.externalDependents.length} fuori modulo
+                            sblocca {lesson.dependents.length} lezioni - {lesson.externalDependents.length} fuori modulo
                           </p>
                         </a>
                       ))}
