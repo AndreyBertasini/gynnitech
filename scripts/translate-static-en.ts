@@ -35,6 +35,7 @@ const batchLimit = Number(process.env.TRANSLATION_BATCH_LIMIT ?? 0);
 const concurrency = Math.max(1, Number(process.env.TRANSLATION_CONCURRENCY ?? 3));
 const maxRetries = Number(process.env.TRANSLATION_MAX_RETRIES ?? 6);
 const force = process.env.TRANSLATION_FORCE === '1';
+const translateCodeBlocks = process.env.TRANSLATE_CODE_BLOCKS !== '0';
 const redirects = redirectEntries as Array<[string, string]>;
 
 const redirectSourceFile = (source: string) => {
@@ -68,6 +69,16 @@ const skipTags = new Set([
 
 const translatableAttrNames = new Set(['title', 'alt', 'aria-label', 'aria-description', 'placeholder']);
 
+const translatableJsonLdKeys = new Set([
+  'name',
+  'headline',
+  'alternativeHeadline',
+  'description',
+  'articleSection',
+  'caption',
+  'text',
+]);
+
 const knownNoTranslate = new Set([
   'GinnyTech',
   'MarTech',
@@ -95,6 +106,9 @@ const knownNoTranslate = new Set([
 
 const localAssetPattern =
   /\.(avif|webp|png|jpe?g|gif|svg|ico|css|js|mjs|map|json|xml|txt|pdf|woff2?|ttf|otf|mp4|webm|mp3|wav)$/i;
+
+const italianCodeBlockSignal =
+  /\b(?:abbiamo|aggiungi|aggiornamento|alto|andato|aumentare|calcola|calcolare|campagna|campagne|clienti|cliente|codice|composito|confronto|controllo|dati|dato|definisci|domanda|esempio|feature|giorno|indice|lezione|media|mese|metrica|modello|normalizzato|numero|obiettivo|ordini|pesato|pesi|prenotazioni|prezzo|principale|problema|prodotto|profitto|ricavo|rischio|scelta|segmento|settimana|simulazione|spesa|strategici|transazioni|utente|utenti|vendite)\b|[àèéìòù]/i;
 
 const nowIso = () => new Date().toISOString();
 
@@ -145,10 +159,6 @@ const removeAttr = (node: any, name: string) => {
   node.attrs = node.attrs?.filter((attr: { name: string }) => attr.name !== name) ?? [];
 };
 
-const translatableIslandPropsByExport = new Map<string, Set<string>>([
-  ['SqlExercise', new Set(['description', 'hint'])],
-]);
-
 const parseAstroProps = (node: any) => {
   const rawProps = attrValue(node, 'props');
   if (!rawProps) return null;
@@ -160,52 +170,164 @@ const parseAstroProps = (node: any) => {
   }
 };
 
-const serializedStringValue = (value: unknown) => {
-  if (!Array.isArray(value) || value.length < 2) return null;
-  return value[0] === 0 && typeof value[1] === 'string' ? value[1] : null;
+const nonTranslatableAstroPropKeys = new Set([
+  'id',
+  'moduleId',
+  'stageId',
+  'quizId',
+  'icon',
+  'color',
+  'href',
+  'url',
+  'path',
+  'slug',
+  'order',
+  'index',
+  'correctIndex',
+  'difficulty',
+  'duration',
+  'totalLessons',
+  'totalModules',
+  'totalLinks',
+  'lessonCount',
+  'moduleCount',
+  'internalLinks',
+  'internalLinkCount',
+  'crossModuleLinks',
+  'crossModuleIncomingCount',
+  'crossModuleOutgoingCount',
+  'crossStageIncomingCount',
+  'crossStageOutgoingCount',
+]);
+
+const nonTranslatableAstroPropContainers = new Set([
+  'ids',
+  'moduleIds',
+  'lessonIds',
+  'prerequisites',
+  'dependents',
+  'externalPrerequisites',
+  'externalDependents',
+]);
+
+const translatableAstroPropKeys = new Set([
+  'title',
+  'description',
+  'summary',
+  'text',
+  'explanation',
+  'label',
+  'category',
+  'stageTitle',
+  'format',
+  'hint',
+  'kicker',
+]);
+
+const translatableAstroPropContainers = new Set([
+  'options',
+  'items',
+  'deliverables',
+  'criteria',
+  'checkpoints',
+  'questions',
+]);
+
+const cssUtilityListPattern = /^(?:from|to|via|bg|text|border|ring|shadow|hover|focus|dark|sm|md|lg|xl|2xl)[\w:/.-]*(?:\s+(?:from|to|via|bg|text|border|ring|shadow|hover|focus|dark|sm|md|lg|xl|2xl)[\w:/.-]*)+$/;
+
+const shouldTranslateAstroPropString = (text: string, key: string | undefined, pathKeys: string[]) => {
+  const trimmed = text.trim();
+  if (!shouldTranslate(trimmed)) return false;
+  if (key && nonTranslatableAstroPropKeys.has(key)) return false;
+  if (pathKeys.some((pathKey) => nonTranslatableAstroPropContainers.has(pathKey))) return false;
+  if (cssUtilityListPattern.test(trimmed)) return false;
+  if (localAssetPattern.test(trimmed)) return false;
+
+  if (key && translatableAstroPropKeys.has(key)) return true;
+  if (pathKeys.some((pathKey) => translatableAstroPropContainers.has(pathKey))) return true;
+
+  return /\s/.test(trimmed) && !/^[a-z0-9-_/]+$/i.test(trimmed);
 };
 
-const setSerializedStringValue = (props: Record<string, unknown>, propName: string, value: string) => {
-  const current = props[propName];
-  if (!Array.isArray(current) || current.length < 2 || current[0] !== 0) return;
-  current[1] = value;
+const collectAstroSerializedStrings = (
+  value: unknown,
+  strings: Map<string, string>,
+  key?: string,
+  pathKeys: string[] = [],
+) => {
+  if (Array.isArray(value) && value.length >= 2 && typeof value[0] === 'number') {
+    const payload = value[1];
+    if (typeof payload === 'string') {
+      if (shouldTranslateAstroPropString(payload, key, pathKeys)) strings.set(hashText(payload), payload);
+      return;
+    }
+    collectAstroSerializedStrings(payload, strings, key, pathKeys);
+    return;
+  }
+
+  if (Array.isArray(value)) {
+    for (const item of value) collectAstroSerializedStrings(item, strings, key, pathKeys);
+    return;
+  }
+
+  if (!value || typeof value !== 'object') return;
+
+  for (const [childKey, childValue] of Object.entries(value)) {
+    collectAstroSerializedStrings(childValue, strings, childKey, [...pathKeys, childKey]);
+  }
+};
+
+const applyAstroSerializedTranslations = (
+  value: unknown,
+  cache: TranslationCache,
+  key?: string,
+  pathKeys: string[] = [],
+): boolean => {
+  let changed = false;
+
+  if (Array.isArray(value) && value.length >= 2 && typeof value[0] === 'number') {
+    const payload = value[1];
+    if (typeof payload === 'string') {
+      if (shouldTranslateAstroPropString(payload, key, pathKeys)) {
+        value[1] = translateCached(cache, payload);
+        return value[1] !== payload;
+      }
+      return false;
+    }
+    return applyAstroSerializedTranslations(payload, cache, key, pathKeys);
+  }
+
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      changed = applyAstroSerializedTranslations(item, cache, key, pathKeys) || changed;
+    }
+    return changed;
+  }
+
+  if (!value || typeof value !== 'object') return false;
+
+  for (const [childKey, childValue] of Object.entries(value)) {
+    changed = applyAstroSerializedTranslations(childValue, cache, childKey, [...pathKeys, childKey]) || changed;
+  }
+  return changed;
 };
 
 const collectAstroIslandProps = (node: any, strings: Map<string, string>) => {
   if (!isElementNode(node) || node.tagName !== 'astro-island') return;
 
-  const componentExport = attrValue(node, 'component-export');
-  const propNames = translatableIslandPropsByExport.get(String(componentExport));
-  if (!propNames) return;
-
   const props = parseAstroProps(node);
   if (!props) return;
 
-  for (const propName of propNames) {
-    const value = serializedStringValue(props[propName]);
-    if (value && shouldTranslate(value)) strings.set(hashText(value), value);
-  }
+  collectAstroSerializedStrings(props, strings);
 };
 
 const applyAstroIslandPropTranslations = (node: any, cache: TranslationCache) => {
   if (!isElementNode(node) || node.tagName !== 'astro-island') return;
 
-  const componentExport = attrValue(node, 'component-export');
-  const propNames = translatableIslandPropsByExport.get(String(componentExport));
-  if (!propNames) return;
-
   const props = parseAstroProps(node);
   if (!props) return;
 
-  let changed = false;
-  for (const propName of propNames) {
-    const value = serializedStringValue(props[propName]);
-    if (value && shouldTranslate(value)) {
-      setSerializedStringValue(props, propName, translateCached(cache, value));
-      changed = true;
-    }
-  }
-
+  const changed = applyAstroSerializedTranslations(props, cache);
   if (changed) setAttr(node, 'props', JSON.stringify(props));
 };
 
@@ -218,6 +340,80 @@ const shouldTranslate = (text: string) => {
   if (/^[\w.+-]+@[\w.-]+\.[a-z]{2,}$/i.test(trimmed)) return false;
   if (!/[A-Za-zÀ-ÖØ-öø-ÿ]/.test(trimmed)) return false;
   return true;
+};
+
+const textContent = (node: any): string => {
+  if (node.nodeName === '#text' && typeof node.value === 'string') return node.value;
+  return (node.childNodes ?? []).map(textContent).join('');
+};
+
+const shouldTranslateCodeBlock = (text: string) => {
+  if (!translateCodeBlocks) return false;
+  const trimmed = text.trim();
+  if (trimmed.length < 20) return false;
+  if (!/[A-Za-zÀ-ÿ]/.test(trimmed)) return false;
+  return italianCodeBlockSignal.test(trimmed);
+};
+
+const isJsonLdScript = (node: any) =>
+  isElementNode(node) &&
+  node.tagName === 'script' &&
+  String(attrValue(node, 'type') ?? '').toLowerCase() === 'application/ld+json';
+
+const findFirstChildElement = (node: any, tagName: string): any | undefined =>
+  (node.childNodes ?? []).find((child: any) => isElementNode(child) && child.tagName === tagName);
+
+const replaceElementText = (node: any, value: string) => {
+  const codeChild = isElementNode(node) && node.tagName === 'pre' ? findFirstChildElement(node, 'code') : undefined;
+  const target = codeChild ?? node;
+  target.childNodes = [{ nodeName: '#text', value }];
+};
+
+const readJsonLd = (node: any) => {
+  try {
+    return JSON.parse(textContent(node));
+  } catch {
+    return null;
+  }
+};
+
+const collectJsonLdStrings = (value: unknown, strings: Map<string, string>, key?: string) => {
+  if (typeof value === 'string') {
+    if (key && translatableJsonLdKeys.has(key) && shouldTranslate(value)) {
+      strings.set(hashText(value), value);
+    }
+    return;
+  }
+
+  if (Array.isArray(value)) {
+    for (const item of value) collectJsonLdStrings(item, strings, key);
+    return;
+  }
+
+  if (!value || typeof value !== 'object') return;
+
+  for (const [childKey, childValue] of Object.entries(value)) {
+    collectJsonLdStrings(childValue, strings, childKey);
+  }
+};
+
+const applyJsonLdTranslations = (value: unknown, cache: TranslationCache, key?: string): unknown => {
+  if (typeof value === 'string') {
+    return key && translatableJsonLdKeys.has(key) && shouldTranslate(value) ? translateCached(cache, value) : value;
+  }
+
+  if (Array.isArray(value)) {
+    return value.map((item) => applyJsonLdTranslations(item, cache, key));
+  }
+
+  if (!value || typeof value !== 'object') return value;
+
+  return Object.fromEntries(
+    Object.entries(value).map(([childKey, childValue]) => [
+      childKey,
+      applyJsonLdTranslations(childValue, cache, childKey),
+    ]),
+  );
 };
 
 const withTranslatedWhitespace = (raw: string, translate: (text: string) => string) => {
@@ -246,6 +442,24 @@ const isTranslatableMeta = (node: any, attrName: string) => {
 };
 
 const collectStrings = (node: any, strings: Map<string, string>, blocked = false) => {
+  if (isJsonLdScript(node)) {
+    const jsonLd = readJsonLd(node);
+    if (jsonLd) collectJsonLdStrings(jsonLd, strings);
+    return;
+  }
+
+  if (isElementNode(node) && node.tagName === 'pre') {
+    const codeBlock = textContent(node);
+    if (shouldTranslateCodeBlock(codeBlock)) strings.set(hashText(codeBlock), codeBlock);
+    return;
+  }
+
+  if (isElementNode(node) && node.tagName === 'code') {
+    const inlineCode = textContent(node);
+    if (shouldTranslateCodeBlock(inlineCode)) strings.set(hashText(inlineCode), inlineCode);
+    return;
+  }
+
   const isBlocked = blocked || (isElementNode(node) && skipTags.has(node.tagName));
 
   if (node.nodeName === '#text' && typeof node.value === 'string') {
@@ -424,6 +638,28 @@ const rewriteDocumentMetadata = (document: any, relativeHtmlPath: string) => {
 };
 
 const applyTranslations = (node: any, cache: TranslationCache, blocked = false) => {
+  if (isJsonLdScript(node)) {
+    const jsonLd = readJsonLd(node);
+    if (jsonLd) replaceElementText(node, JSON.stringify(applyJsonLdTranslations(jsonLd, cache)));
+    return;
+  }
+
+  if (isElementNode(node) && node.tagName === 'pre') {
+    const codeBlock = textContent(node);
+    if (shouldTranslateCodeBlock(codeBlock)) {
+      replaceElementText(node, translateCached(cache, codeBlock));
+    }
+    return;
+  }
+
+  if (isElementNode(node) && node.tagName === 'code') {
+    const inlineCode = textContent(node);
+    if (shouldTranslateCodeBlock(inlineCode)) {
+      replaceElementText(node, translateCached(cache, inlineCode));
+    }
+    return;
+  }
+
   const isBlocked = blocked || (isElementNode(node) && skipTags.has(node.tagName));
 
   if (node.nodeName === '#text' && typeof node.value === 'string') {
@@ -508,7 +744,7 @@ const requestTranslation = async (items: TranslationItem[], attempt = 1): Promis
           {
             role: 'system',
             content:
-              'You are a professional Italian-to-English localization engine for a technical education website about MarTech, analytics engineering, data engineering, statistics, SQL, Python, Kafka, ClickHouse, product analytics, and marketing analytics. Translate only user-visible text into fluent English. Preserve brand names, URLs, code identifiers, numbers, acronyms, and technical product names. Keep the original meaning and tone. Return only a valid JSON object shaped as {"translations":{"id":"translated text"}}.',
+              'You are a professional Italian-to-English localization engine for a technical education website about MarTech, analytics engineering, data engineering, statistics, SQL, Python, Kafka, ClickHouse, product analytics, and marketing analytics. Translate only user-visible text into fluent English. Preserve brand names, URLs, code identifiers, numbers, acronyms, and technical product names. If an item is a code block, SQL block, Python block, terminal block, Mermaid diagram, or ASCII diagram, preserve executable syntax, indentation, punctuation, identifiers, variable names, function names, table names, URLs, and commands exactly; translate only natural-language comments, prose labels, explanatory strings, and diagram labels when appropriate. Keep the original meaning and tone. Return only a valid JSON object shaped as {"translations":{"id":"translated text"}}.',
           },
           {
             role: 'user',
