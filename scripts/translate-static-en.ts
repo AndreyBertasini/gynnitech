@@ -35,6 +35,7 @@ const batchLimit = Number(process.env.TRANSLATION_BATCH_LIMIT ?? 0);
 const concurrency = Math.max(1, Number(process.env.TRANSLATION_CONCURRENCY ?? 3));
 const maxRetries = Number(process.env.TRANSLATION_MAX_RETRIES ?? 6);
 const force = process.env.TRANSLATION_FORCE === '1';
+const translateCodeBlocks = process.env.TRANSLATE_CODE_BLOCKS !== '0';
 const redirects = redirectEntries as Array<[string, string]>;
 
 const redirectSourceFile = (source: string) => {
@@ -68,6 +69,16 @@ const skipTags = new Set([
 
 const translatableAttrNames = new Set(['title', 'alt', 'aria-label', 'aria-description', 'placeholder']);
 
+const translatableJsonLdKeys = new Set([
+  'name',
+  'headline',
+  'alternativeHeadline',
+  'description',
+  'articleSection',
+  'caption',
+  'text',
+]);
+
 const knownNoTranslate = new Set([
   'GinnyTech',
   'MarTech',
@@ -95,6 +106,9 @@ const knownNoTranslate = new Set([
 
 const localAssetPattern =
   /\.(avif|webp|png|jpe?g|gif|svg|ico|css|js|mjs|map|json|xml|txt|pdf|woff2?|ttf|otf|mp4|webm|mp3|wav)$/i;
+
+const italianCodeBlockSignal =
+  /\b(?:abbiamo|aggiornamento|alto|andato|aumentare|calcola|calcolare|campagna|campagne|clienti|cliente|codice|confronto|controllo|dati|dato|definisci|domanda|esempio|feature|giorno|lezione|media|mese|metrica|modello|numero|obiettivo|ordini|prenotazioni|prezzo|principale|problema|prodotto|profitto|ricavo|rischio|scelta|segmento|settimana|simulazione|spesa|transazioni|utente|utenti|vendite)\b|[àèéìòù]/i;
 
 const nowIso = () => new Date().toISOString();
 
@@ -220,6 +234,80 @@ const shouldTranslate = (text: string) => {
   return true;
 };
 
+const textContent = (node: any): string => {
+  if (node.nodeName === '#text' && typeof node.value === 'string') return node.value;
+  return (node.childNodes ?? []).map(textContent).join('');
+};
+
+const shouldTranslateCodeBlock = (text: string) => {
+  if (!translateCodeBlocks) return false;
+  const trimmed = text.trim();
+  if (trimmed.length < 20) return false;
+  if (!/[A-Za-zÀ-ÿ]/.test(trimmed)) return false;
+  return italianCodeBlockSignal.test(trimmed);
+};
+
+const isJsonLdScript = (node: any) =>
+  isElementNode(node) &&
+  node.tagName === 'script' &&
+  String(attrValue(node, 'type') ?? '').toLowerCase() === 'application/ld+json';
+
+const findFirstChildElement = (node: any, tagName: string): any | undefined =>
+  (node.childNodes ?? []).find((child: any) => isElementNode(child) && child.tagName === tagName);
+
+const replaceElementText = (node: any, value: string) => {
+  const codeChild = isElementNode(node) && node.tagName === 'pre' ? findFirstChildElement(node, 'code') : undefined;
+  const target = codeChild ?? node;
+  target.childNodes = [{ nodeName: '#text', value }];
+};
+
+const readJsonLd = (node: any) => {
+  try {
+    return JSON.parse(textContent(node));
+  } catch {
+    return null;
+  }
+};
+
+const collectJsonLdStrings = (value: unknown, strings: Map<string, string>, key?: string) => {
+  if (typeof value === 'string') {
+    if (key && translatableJsonLdKeys.has(key) && shouldTranslate(value)) {
+      strings.set(hashText(value), value);
+    }
+    return;
+  }
+
+  if (Array.isArray(value)) {
+    for (const item of value) collectJsonLdStrings(item, strings, key);
+    return;
+  }
+
+  if (!value || typeof value !== 'object') return;
+
+  for (const [childKey, childValue] of Object.entries(value)) {
+    collectJsonLdStrings(childValue, strings, childKey);
+  }
+};
+
+const applyJsonLdTranslations = (value: unknown, cache: TranslationCache, key?: string): unknown => {
+  if (typeof value === 'string') {
+    return key && translatableJsonLdKeys.has(key) && shouldTranslate(value) ? translateCached(cache, value) : value;
+  }
+
+  if (Array.isArray(value)) {
+    return value.map((item) => applyJsonLdTranslations(item, cache, key));
+  }
+
+  if (!value || typeof value !== 'object') return value;
+
+  return Object.fromEntries(
+    Object.entries(value).map(([childKey, childValue]) => [
+      childKey,
+      applyJsonLdTranslations(childValue, cache, childKey),
+    ]),
+  );
+};
+
 const withTranslatedWhitespace = (raw: string, translate: (text: string) => string) => {
   const match = raw.match(/^(\s*)([\s\S]*?)(\s*)$/);
   if (!match) return raw;
@@ -246,6 +334,24 @@ const isTranslatableMeta = (node: any, attrName: string) => {
 };
 
 const collectStrings = (node: any, strings: Map<string, string>, blocked = false) => {
+  if (isJsonLdScript(node)) {
+    const jsonLd = readJsonLd(node);
+    if (jsonLd) collectJsonLdStrings(jsonLd, strings);
+    return;
+  }
+
+  if (isElementNode(node) && node.tagName === 'pre') {
+    const codeBlock = textContent(node);
+    if (shouldTranslateCodeBlock(codeBlock)) strings.set(hashText(codeBlock), codeBlock);
+    return;
+  }
+
+  if (isElementNode(node) && node.tagName === 'code') {
+    const inlineCode = textContent(node);
+    if (shouldTranslateCodeBlock(inlineCode)) strings.set(hashText(inlineCode), inlineCode);
+    return;
+  }
+
   const isBlocked = blocked || (isElementNode(node) && skipTags.has(node.tagName));
 
   if (node.nodeName === '#text' && typeof node.value === 'string') {
@@ -424,6 +530,28 @@ const rewriteDocumentMetadata = (document: any, relativeHtmlPath: string) => {
 };
 
 const applyTranslations = (node: any, cache: TranslationCache, blocked = false) => {
+  if (isJsonLdScript(node)) {
+    const jsonLd = readJsonLd(node);
+    if (jsonLd) replaceElementText(node, JSON.stringify(applyJsonLdTranslations(jsonLd, cache)));
+    return;
+  }
+
+  if (isElementNode(node) && node.tagName === 'pre') {
+    const codeBlock = textContent(node);
+    if (shouldTranslateCodeBlock(codeBlock)) {
+      replaceElementText(node, translateCached(cache, codeBlock));
+    }
+    return;
+  }
+
+  if (isElementNode(node) && node.tagName === 'code') {
+    const inlineCode = textContent(node);
+    if (shouldTranslateCodeBlock(inlineCode)) {
+      replaceElementText(node, translateCached(cache, inlineCode));
+    }
+    return;
+  }
+
   const isBlocked = blocked || (isElementNode(node) && skipTags.has(node.tagName));
 
   if (node.nodeName === '#text' && typeof node.value === 'string') {
@@ -508,7 +636,7 @@ const requestTranslation = async (items: TranslationItem[], attempt = 1): Promis
           {
             role: 'system',
             content:
-              'You are a professional Italian-to-English localization engine for a technical education website about MarTech, analytics engineering, data engineering, statistics, SQL, Python, Kafka, ClickHouse, product analytics, and marketing analytics. Translate only user-visible text into fluent English. Preserve brand names, URLs, code identifiers, numbers, acronyms, and technical product names. Keep the original meaning and tone. Return only a valid JSON object shaped as {"translations":{"id":"translated text"}}.',
+              'You are a professional Italian-to-English localization engine for a technical education website about MarTech, analytics engineering, data engineering, statistics, SQL, Python, Kafka, ClickHouse, product analytics, and marketing analytics. Translate only user-visible text into fluent English. Preserve brand names, URLs, code identifiers, numbers, acronyms, and technical product names. If an item is a code block, SQL block, Python block, terminal block, Mermaid diagram, or ASCII diagram, preserve executable syntax, indentation, punctuation, identifiers, variable names, function names, table names, URLs, and commands exactly; translate only natural-language comments, prose labels, explanatory strings, and diagram labels when appropriate. Keep the original meaning and tone. Return only a valid JSON object shaped as {"translations":{"id":"translated text"}}.',
           },
           {
             role: 'user',
