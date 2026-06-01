@@ -108,7 +108,7 @@ const localAssetPattern =
   /\.(avif|webp|png|jpe?g|gif|svg|ico|css|js|mjs|map|json|xml|txt|pdf|woff2?|ttf|otf|mp4|webm|mp3|wav)$/i;
 
 const italianCodeBlockSignal =
-  /\b(?:abbiamo|aggiornamento|alto|andato|aumentare|calcola|calcolare|campagna|campagne|clienti|cliente|codice|confronto|controllo|dati|dato|definisci|domanda|esempio|feature|giorno|lezione|media|mese|metrica|modello|numero|obiettivo|ordini|prenotazioni|prezzo|principale|problema|prodotto|profitto|ricavo|rischio|scelta|segmento|settimana|simulazione|spesa|transazioni|utente|utenti|vendite)\b|[àèéìòù]/i;
+  /\b(?:abbiamo|aggiungi|aggiornamento|alto|andato|aumentare|calcola|calcolare|campagna|campagne|clienti|cliente|codice|composito|confronto|controllo|dati|dato|definisci|domanda|esempio|feature|giorno|indice|lezione|media|mese|metrica|modello|normalizzato|numero|obiettivo|ordini|pesato|pesi|prenotazioni|prezzo|principale|problema|prodotto|profitto|ricavo|rischio|scelta|segmento|settimana|simulazione|spesa|strategici|transazioni|utente|utenti|vendite)\b|[àèéìòù]/i;
 
 const nowIso = () => new Date().toISOString();
 
@@ -159,10 +159,6 @@ const removeAttr = (node: any, name: string) => {
   node.attrs = node.attrs?.filter((attr: { name: string }) => attr.name !== name) ?? [];
 };
 
-const translatableIslandPropsByExport = new Map<string, Set<string>>([
-  ['SqlExercise', new Set(['description', 'hint'])],
-]);
-
 const parseAstroProps = (node: any) => {
   const rawProps = attrValue(node, 'props');
   if (!rawProps) return null;
@@ -174,52 +170,164 @@ const parseAstroProps = (node: any) => {
   }
 };
 
-const serializedStringValue = (value: unknown) => {
-  if (!Array.isArray(value) || value.length < 2) return null;
-  return value[0] === 0 && typeof value[1] === 'string' ? value[1] : null;
+const nonTranslatableAstroPropKeys = new Set([
+  'id',
+  'moduleId',
+  'stageId',
+  'quizId',
+  'icon',
+  'color',
+  'href',
+  'url',
+  'path',
+  'slug',
+  'order',
+  'index',
+  'correctIndex',
+  'difficulty',
+  'duration',
+  'totalLessons',
+  'totalModules',
+  'totalLinks',
+  'lessonCount',
+  'moduleCount',
+  'internalLinks',
+  'internalLinkCount',
+  'crossModuleLinks',
+  'crossModuleIncomingCount',
+  'crossModuleOutgoingCount',
+  'crossStageIncomingCount',
+  'crossStageOutgoingCount',
+]);
+
+const nonTranslatableAstroPropContainers = new Set([
+  'ids',
+  'moduleIds',
+  'lessonIds',
+  'prerequisites',
+  'dependents',
+  'externalPrerequisites',
+  'externalDependents',
+]);
+
+const translatableAstroPropKeys = new Set([
+  'title',
+  'description',
+  'summary',
+  'text',
+  'explanation',
+  'label',
+  'category',
+  'stageTitle',
+  'format',
+  'hint',
+  'kicker',
+]);
+
+const translatableAstroPropContainers = new Set([
+  'options',
+  'items',
+  'deliverables',
+  'criteria',
+  'checkpoints',
+  'questions',
+]);
+
+const cssUtilityListPattern = /^(?:from|to|via|bg|text|border|ring|shadow|hover|focus|dark|sm|md|lg|xl|2xl)[\w:/.-]*(?:\s+(?:from|to|via|bg|text|border|ring|shadow|hover|focus|dark|sm|md|lg|xl|2xl)[\w:/.-]*)+$/;
+
+const shouldTranslateAstroPropString = (text: string, key: string | undefined, pathKeys: string[]) => {
+  const trimmed = text.trim();
+  if (!shouldTranslate(trimmed)) return false;
+  if (key && nonTranslatableAstroPropKeys.has(key)) return false;
+  if (pathKeys.some((pathKey) => nonTranslatableAstroPropContainers.has(pathKey))) return false;
+  if (cssUtilityListPattern.test(trimmed)) return false;
+  if (localAssetPattern.test(trimmed)) return false;
+
+  if (key && translatableAstroPropKeys.has(key)) return true;
+  if (pathKeys.some((pathKey) => translatableAstroPropContainers.has(pathKey))) return true;
+
+  return /\s/.test(trimmed) && !/^[a-z0-9-_/]+$/i.test(trimmed);
 };
 
-const setSerializedStringValue = (props: Record<string, unknown>, propName: string, value: string) => {
-  const current = props[propName];
-  if (!Array.isArray(current) || current.length < 2 || current[0] !== 0) return;
-  current[1] = value;
+const collectAstroSerializedStrings = (
+  value: unknown,
+  strings: Map<string, string>,
+  key?: string,
+  pathKeys: string[] = [],
+) => {
+  if (Array.isArray(value) && value.length >= 2 && typeof value[0] === 'number') {
+    const payload = value[1];
+    if (typeof payload === 'string') {
+      if (shouldTranslateAstroPropString(payload, key, pathKeys)) strings.set(hashText(payload), payload);
+      return;
+    }
+    collectAstroSerializedStrings(payload, strings, key, pathKeys);
+    return;
+  }
+
+  if (Array.isArray(value)) {
+    for (const item of value) collectAstroSerializedStrings(item, strings, key, pathKeys);
+    return;
+  }
+
+  if (!value || typeof value !== 'object') return;
+
+  for (const [childKey, childValue] of Object.entries(value)) {
+    collectAstroSerializedStrings(childValue, strings, childKey, [...pathKeys, childKey]);
+  }
+};
+
+const applyAstroSerializedTranslations = (
+  value: unknown,
+  cache: TranslationCache,
+  key?: string,
+  pathKeys: string[] = [],
+): boolean => {
+  let changed = false;
+
+  if (Array.isArray(value) && value.length >= 2 && typeof value[0] === 'number') {
+    const payload = value[1];
+    if (typeof payload === 'string') {
+      if (shouldTranslateAstroPropString(payload, key, pathKeys)) {
+        value[1] = translateCached(cache, payload);
+        return value[1] !== payload;
+      }
+      return false;
+    }
+    return applyAstroSerializedTranslations(payload, cache, key, pathKeys);
+  }
+
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      changed = applyAstroSerializedTranslations(item, cache, key, pathKeys) || changed;
+    }
+    return changed;
+  }
+
+  if (!value || typeof value !== 'object') return false;
+
+  for (const [childKey, childValue] of Object.entries(value)) {
+    changed = applyAstroSerializedTranslations(childValue, cache, childKey, [...pathKeys, childKey]) || changed;
+  }
+  return changed;
 };
 
 const collectAstroIslandProps = (node: any, strings: Map<string, string>) => {
   if (!isElementNode(node) || node.tagName !== 'astro-island') return;
 
-  const componentExport = attrValue(node, 'component-export');
-  const propNames = translatableIslandPropsByExport.get(String(componentExport));
-  if (!propNames) return;
-
   const props = parseAstroProps(node);
   if (!props) return;
 
-  for (const propName of propNames) {
-    const value = serializedStringValue(props[propName]);
-    if (value && shouldTranslate(value)) strings.set(hashText(value), value);
-  }
+  collectAstroSerializedStrings(props, strings);
 };
 
 const applyAstroIslandPropTranslations = (node: any, cache: TranslationCache) => {
   if (!isElementNode(node) || node.tagName !== 'astro-island') return;
 
-  const componentExport = attrValue(node, 'component-export');
-  const propNames = translatableIslandPropsByExport.get(String(componentExport));
-  if (!propNames) return;
-
   const props = parseAstroProps(node);
   if (!props) return;
 
-  let changed = false;
-  for (const propName of propNames) {
-    const value = serializedStringValue(props[propName]);
-    if (value && shouldTranslate(value)) {
-      setSerializedStringValue(props, propName, translateCached(cache, value));
-      changed = true;
-    }
-  }
-
+  const changed = applyAstroSerializedTranslations(props, cache);
   if (changed) setAttr(node, 'props', JSON.stringify(props));
 };
 
