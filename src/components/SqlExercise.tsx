@@ -1,5 +1,5 @@
 import { useMemo, useState } from 'react';
-import initSqlJs from 'sql.js';
+import initSqlJs, { type Database, type SqlJsStatic, type SqlValue } from 'sql.js';
 import sqlWasmUrl from 'sql.js/dist/sql-wasm.wasm?url';
 import { currentSiteLanguage } from '../utils/language';
 
@@ -15,7 +15,7 @@ interface Props {
   solutionQuery?: string;
 }
 
-let sqlModulePromise: Promise<any> | null = null;
+let sqlModulePromise: Promise<SqlJsStatic> | null = null;
 
 const getSqlModule = () => {
   sqlModulePromise ??= initSqlJs({
@@ -24,7 +24,7 @@ const getSqlModule = () => {
   return sqlModulePromise;
 };
 
-async function createSampleDb(): Promise<any> {
+async function createSampleDb(): Promise<Database> {
   const SQL = await getSqlModule();
   const db = new SQL.Database();
 
@@ -122,6 +122,12 @@ async function createSampleDb(): Promise<any> {
   return db;
 }
 
+const formatSqlValue = (value: SqlValue): string => {
+  if (value === null) return 'NULL';
+  if (value instanceof Uint8Array) return `[blob ${value.byteLength} bytes]`;
+  return String(value);
+};
+
 const copyByLanguage = {
   it: {
     title: 'Prova tu',
@@ -187,11 +193,11 @@ export function SqlExercise({ description, hint, initialQuery, solutionQuery }: 
         const { columns, values } = queryResult[0];
         setTable({
           columns,
-          rows: values.map((row: any[]) => row.map((value: any) => (value === null ? 'NULL' : String(value)))),
+          rows: values.map((row) => row.map(formatSqlValue)),
         });
       }
-    } catch (err: any) {
-      setError(err.message || copy.errorFallback);
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : copy.errorFallback);
     } finally {
       setRunning(false);
     }

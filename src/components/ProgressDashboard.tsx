@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { countCompletedLessons, LESSON_COMPLETED_EVENT } from '../utils/progress';
 
 interface ModuleInfo {
   id: string;
@@ -12,35 +13,19 @@ interface Props {
   modules: ModuleInfo[];
 }
 
-const STORAGE_KEY = 'ginnytech_progress';
-const EVENT_KEY = 'ginnytech:lesson-completed';
-
-function countModuleCompleted(moduleId: string): number {
-  try {
-    const raw = localStorage.getItem(STORAGE_KEY);
-    if (!raw) return 0;
-    const progress = JSON.parse(raw);
-    return Object.values(progress).filter(
-      (p: any) => p.moduleId === moduleId && p.completed
-    ).length;
-  } catch {
-    return 0;
-  }
-}
-
 export function ProgressDashboard({ modules }: Props) {
   const [, setTick] = useState(0);
 
   const refresh = () => setTick((t) => t + 1);
 
   useEffect(() => {
-    window.addEventListener(EVENT_KEY, refresh);
-    return () => window.removeEventListener(EVENT_KEY, refresh);
+    window.addEventListener(LESSON_COMPLETED_EVENT, refresh);
+    return () => window.removeEventListener(LESSON_COMPLETED_EVENT, refresh);
   }, []);
 
   const moduleData = modules.map((mod) => ({
     ...mod,
-    completed: countModuleCompleted(mod.id),
+    completed: countCompletedLessons(mod.id),
   }));
 
   const totalCompleted = moduleData.reduce((s, m) => s + m.completed, 0);
@@ -161,7 +146,7 @@ export function ProgressDashboard({ modules }: Props) {
                     maxWidth: '70%',
                   }}
                 >
-                  {mod.completed === mod.totalLessons && '✅ '}
+                  {mod.completed === mod.totalLessons && '[OK] '}
                   {mod.title}
                 </span>
                 <span style={{ color: 'var(--color-accent)', fontWeight: 600, fontSize: '0.82rem', whiteSpace: 'nowrap' }}>

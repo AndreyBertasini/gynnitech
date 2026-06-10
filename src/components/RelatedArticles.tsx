@@ -1,4 +1,5 @@
 import type { CollectionEntry } from 'astro:content';
+import { ArrowRight, BookOpen, Newspaper } from 'lucide-react';
 
 interface Props {
   currentPost: CollectionEntry<'blog'>;
@@ -38,7 +39,7 @@ export function RelatedArticles({ currentPost, allPosts }: Props) {
             marginBottom: '1.25rem',
           }}
         >
-          <span style={{ fontSize: '1.2rem' }}>📰</span>
+          <Newspaper aria-hidden="true" size={18} color="var(--color-accent)" />
           <h3
             style={{
               color: 'white',
@@ -80,7 +81,7 @@ export function RelatedArticles({ currentPost, allPosts }: Props) {
           marginBottom: '1.25rem',
         }}
       >
-        <span style={{ fontSize: '1.2rem' }}>📖</span>
+        <BookOpen aria-hidden="true" size={18} color="var(--color-accent)" />
         <h3
           style={{
             color: 'white',
@@ -173,9 +174,12 @@ function ArticleRow({ post }: { post: CollectionEntry<'blog'> }) {
           fontSize: '0.82rem',
           fontWeight: 600,
           whiteSpace: 'nowrap',
+          display: 'inline-flex',
+          alignItems: 'center',
+          gap: '0.25rem',
         }}
       >
-        Leggi →
+        Leggi <ArrowRight aria-hidden="true" size={14} />
       </span>
     </a>
   );

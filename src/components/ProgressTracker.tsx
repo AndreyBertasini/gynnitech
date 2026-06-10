@@ -1,49 +1,25 @@
 import { useEffect, useState } from 'react';
 import { currentSiteLanguage } from '../utils/language';
-
-interface LessonProgress {
-  moduleId: string;
-  slug: string;
-  completed: boolean;
-  timestamp: number;
-}
-
-const STORAGE_KEY = 'ginnytech_progress';
-const COMPLETION_EVENT = 'ginnytech:lesson-completed';
-
-function loadProgress(): Record<string, LessonProgress> {
-  if (typeof window === 'undefined') return {};
-  try {
-    const raw = localStorage.getItem(STORAGE_KEY);
-    return raw ? JSON.parse(raw) : {};
-  } catch {
-    return {};
-  }
-}
-
-function saveProgress(progress: Record<string, LessonProgress>): void {
-  if (typeof window === 'undefined') return;
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(progress));
-}
-
-function getKey(moduleId: string, slug: string): string {
-  return `${moduleId}/${slug}`;
-}
+import {
+  countCompletedLessons,
+  dispatchLessonCompleted,
+  isLessonCompleted as readLessonCompleted,
+  lessonProgressKey,
+  LESSON_COMPLETED_EVENT,
+  loadLessonProgress,
+  saveLessonProgress,
+} from '../utils/progress';
 
 export function markLessonCompleted(moduleId: string, slug: string): void {
-  const progress = loadProgress();
-  const key = getKey(moduleId, slug);
+  const progress = loadLessonProgress();
+  const key = lessonProgressKey(moduleId, slug);
   progress[key] = { moduleId, slug, completed: true, timestamp: Date.now() };
-  saveProgress(progress);
-  window.dispatchEvent(new CustomEvent(COMPLETION_EVENT, { detail: { moduleId, slug } }));
+  saveLessonProgress(progress);
+  dispatchLessonCompleted(moduleId, slug);
 }
 
 export function isLessonCompleted(moduleId: string, slug: string): boolean {
-  return !!loadProgress()[getKey(moduleId, slug)]?.completed;
-}
-
-function countCompleted(moduleId: string): number {
-  return Object.values(loadProgress()).filter((progress) => progress.moduleId === moduleId && progress.completed).length;
+  return readLessonCompleted(moduleId, slug);
 }
 
 export function CompletionButton({ moduleId, slug }: { moduleId: string; slug: string }) {
@@ -69,9 +45,9 @@ export function CompletionButton({ moduleId, slug }: { moduleId: string; slug: s
 
   const toggle = () => {
     if (completed) {
-      const progress = loadProgress();
-      delete progress[getKey(moduleId, slug)];
-      saveProgress(progress);
+      const progress = loadLessonProgress();
+      delete progress[lessonProgressKey(moduleId, slug)];
+      saveLessonProgress(progress);
       setCompleted(false);
     } else {
       markLessonCompleted(moduleId, slug);
@@ -128,12 +104,12 @@ export function ProgressBar({ moduleId, totalLessons }: { moduleId: string; tota
   const [completed, setCompleted] = useState(0);
   const language = currentSiteLanguage();
 
-  const refresh = () => setCompleted(countCompleted(moduleId));
+  const refresh = () => setCompleted(countCompletedLessons(moduleId));
 
   useEffect(() => {
     refresh();
-    window.addEventListener(COMPLETION_EVENT, refresh);
-    return () => window.removeEventListener(COMPLETION_EVENT, refresh);
+    window.addEventListener(LESSON_COMPLETED_EVENT, refresh);
+    return () => window.removeEventListener(LESSON_COMPLETED_EVENT, refresh);
   }, [moduleId]);
 
   const pct = totalLessons > 0 ? Math.round((completed / totalLessons) * 100) : 0;

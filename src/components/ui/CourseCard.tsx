@@ -1,5 +1,5 @@
-import React from 'react';
 import { ArrowRight, BookOpen, Activity, Database, GitMerge, Zap, BrainCircuit, Server, FlaskConical, BarChart, HardDrive, Radio, LayoutDashboard, Map as MapIcon } from 'lucide-react';
+import type { LucideIcon } from 'lucide-react';
 
 interface CourseCardProps {
   id: string;
@@ -13,7 +13,7 @@ interface CourseCardProps {
   imageAlt?: string;
 }
 
-const IconMap: Record<string, React.ComponentType<any>> = {
+const IconMap: Record<string, LucideIcon> = {
   Activity, Database, GitMerge, Zap, BrainCircuit, Server, FlaskConical, BarChart, HardDrive, Radio, LayoutDashboard, Map: MapIcon
 };
 

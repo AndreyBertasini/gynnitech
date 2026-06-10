@@ -1,72 +1,49 @@
-import { afterEach, beforeEach, describe, expect, test } from 'vitest';
+import { afterEach, describe, expect, test, vi } from 'vitest';
 import { setPartitionedCookie } from './cookies.js';
 
 describe('setPartitionedCookie', () => {
-  let originalDocument: typeof global.document | undefined;
-
-  beforeEach(() => {
-    // Save the original document global if it exists
-    if (typeof global.document !== 'undefined') {
-      originalDocument = global.document;
-    }
-  });
-
   afterEach(() => {
-    // Restore the original document global
-    if (originalDocument) {
-      global.document = originalDocument;
-    } else {
-      // @ts-ignore
-      delete global.document;
-    }
+    vi.unstubAllGlobals();
   });
 
-  test('sets a partitioned cookie correctly when document is defined', () => {
+  const mockCookieDocument = () => {
     let cookieStore = '';
 
-    // Mock the document object with a cookie setter
-    const mockDocument = {
-      get cookie() {
-        return cookieStore;
+    return {
+      document: {
+        get cookie() {
+          return cookieStore;
+        },
+        set cookie(value: string) {
+          cookieStore = value;
+        },
       },
-      set cookie(value) {
-        cookieStore = value;
-      }
+      getCookieStore: () => cookieStore,
     };
+  };
 
-    // Assign mock to global.document
-    // @ts-ignore: simplified mock
-    global.document = mockDocument;
+  test('sets a partitioned cookie correctly when document is defined', () => {
+    const { document, getCookieStore } = mockCookieDocument();
+
+    vi.stubGlobal('document', document);
 
     setPartitionedCookie('testName', 'testValue');
 
-    expect(cookieStore).toBe('testName=testValue; Path=/; Secure; SameSite=None; Partitioned');
+    expect(getCookieStore()).toBe('testName=testValue; Path=/; Secure; SameSite=None; Partitioned');
   });
 
   test('encodes cookie name and value', () => {
-    let cookieStore = '';
+    const { document, getCookieStore } = mockCookieDocument();
 
-    const mockDocument = {
-      get cookie() {
-        return cookieStore;
-      },
-      set cookie(value) {
-        cookieStore = value;
-      }
-    };
-
-    // @ts-ignore: simplified mock
-    global.document = mockDocument;
+    vi.stubGlobal('document', document);
 
     setPartitionedCookie('foo bar', 'baz=qux');
 
-    expect(cookieStore).toBe('foo%20bar=baz%3Dqux; Path=/; Secure; SameSite=None; Partitioned');
+    expect(getCookieStore()).toBe('foo%20bar=baz%3Dqux; Path=/; Secure; SameSite=None; Partitioned');
   });
 
   test('does not throw when document is undefined', () => {
-    // Ensure document is undefined
-    // @ts-ignore
-    delete global.document;
+    vi.stubGlobal('document', undefined);
 
     expect(() => {
       setPartitionedCookie('any', 'value');

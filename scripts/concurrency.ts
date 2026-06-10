@@ -1,4 +1,8 @@
 export const pLimit = (limit: number) => {
+    if (!Number.isInteger(limit) || limit < 1) {
+        throw new Error('pLimit requires a positive integer limit.');
+    }
+
     const queue: (() => void)[] = [];
     let activeCount = 0;
 
@@ -10,7 +14,7 @@ export const pLimit = (limit: number) => {
     };
 
     const run = async <T>(fn: () => Promise<T>): Promise<T> => {
-        const execute = async (resolve: (value: T | PromiseLike<T>) => void, reject: (reason?: any) => void) => {
+        const execute = async (resolve: (value: T | PromiseLike<T>) => void, reject: (reason?: unknown) => void) => {
             activeCount++;
             try {
                 const result = await fn();

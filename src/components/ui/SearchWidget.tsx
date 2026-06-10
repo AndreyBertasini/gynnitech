@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { Search, X, Loader2, FileText, BookOpen } from 'lucide-react';
 import type { SiteLanguage } from '../../utils/language';
 
@@ -11,9 +11,29 @@ import {
   type SearchResultCandidate,
 } from './search-utils';
 
+type PagefindSearchResultData = {
+  url: string;
+  excerpt: string;
+  meta: SearchResultCandidate['meta'];
+};
+
+type PagefindSearchResult = {
+  score: number;
+  data: () => Promise<PagefindSearchResultData>;
+};
+
+type PagefindModule = {
+  options: (options: { excerptLength: number; ranking: typeof PAGEFIND_RANKING }) => Promise<void> | void;
+  init: () => Promise<void> | void;
+  search: (
+    query: string,
+    options: { ranking: typeof PAGEFIND_RANKING },
+  ) => Promise<{ results: PagefindSearchResult[] }>;
+};
+
 declare global {
   interface Window {
-    pagefind: any;
+    pagefind?: PagefindModule;
   }
 }
 
@@ -90,8 +110,7 @@ export const SearchWidget = ({ mobile = false, language = 'it' }: { mobile?: boo
     setIsInitializingSearch(true);
     try {
       const pagefindUrl = "/pagefind/pagefind.js?url";
-      // @ts-ignore
-      const pagefind = await import(/* @vite-ignore */ pagefindUrl);
+      const pagefind = (await import(/* @vite-ignore */ pagefindUrl)) as PagefindModule;
       await pagefind.options({
         excerptLength: 22,
         ranking: PAGEFIND_RANKING,
@@ -101,7 +120,7 @@ export const SearchWidget = ({ mobile = false, language = 'it' }: { mobile?: boo
       setIsScriptLoaded(true);
       setLoadError(null);
     } catch (e) {
-      window.pagefind = undefined as any;
+      window.pagefind = undefined;
       setIsScriptLoaded(false);
       setLoadError(copy.unavailable);
       console.warn("Pagefind not loaded (likely in Dev mode or not built yet).", e);
@@ -159,7 +178,8 @@ export const SearchWidget = ({ mobile = false, language = 'it' }: { mobile?: boo
   useEffect(() => {
     const handleSearch = async () => {
       const trimmedQuery = query.trim();
-      if (!trimmedQuery || trimmedQuery.length < MIN_SEARCH_QUERY_LENGTH || !window.pagefind) {
+      const pagefind = window.pagefind;
+      if (!trimmedQuery || trimmedQuery.length < MIN_SEARCH_QUERY_LENGTH || !pagefind) {
         setResults([]);
         setIsLoading(false);
         return;
@@ -168,11 +188,11 @@ export const SearchWidget = ({ mobile = false, language = 'it' }: { mobile?: boo
       const searchId = ++activeSearchId.current;
       setIsLoading(true);
       try {
-        const search = await window.pagefind.search(trimmedQuery, {
+        const search = await pagefind.search(trimmedQuery, {
           ranking: PAGEFIND_RANKING,
         });
         const data = await Promise.all(
-          search.results.slice(0, SEARCH_CANDIDATE_LIMIT).map(async (result: any) => {
+          search.results.slice(0, SEARCH_CANDIDATE_LIMIT).map(async (result) => {
             const payload = await result.data();
             return {
               ...payload,

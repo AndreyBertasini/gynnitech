@@ -63,7 +63,7 @@ export const GET: APIRoute = async () => {
   const manifest = {
     version: '1.0',
     generatedAt: new Date().toISOString(),
-    courseTitle: 'GinnyTech — MarTech & Analytics Engineering',
+    courseTitle: 'GinnyTech - MarTech & Analytics Engineering',
     totalModules: modules.length,
     totalLessons,
     phases: COURSE_PHASES.map((p) => ({
