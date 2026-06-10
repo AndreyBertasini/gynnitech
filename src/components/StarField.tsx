@@ -5,10 +5,11 @@ interface Star {
   y: number;
   size: number;
   opacity: number;
-  speed: number;
+  driftX: number;
+  driftY: number;
   twinkleSpeed: number;
   twinklePhase: number;
-  hue: number; // subtle color variation
+  hue: number;
 }
 
 interface Particle {
@@ -29,21 +30,20 @@ interface ShootingStar {
   speed: number;
   angle: number;
   opacity: number;
-  active: boolean;
-  trail: { x: number; y: number; opacity: number }[];
-  hue: number; // color of the comet (cyan, lime, etc.)
+  width: number;
+  hue: number;
   life: number;
+  maxLife: number;
+  shimmer: number;
 }
 
-// Optimization constants
 const OPACITY_STEP = 0.05;
-// Max opacity ~ 1.25 -> 25 steps + 1 safety
 const NUM_OPACITY_BUCKETS = Math.ceil(1.3 / OPACITY_STEP) + 1;
-// Hues: 0 (white), 60 (yellow), 180 (cyan) -> indices 0, 1, 2
-// NOTE: This optimization assumes stars only use these 3 hues as defined in initStars.
-// If new hues are added, they must be added to this map or they will default to index 0 (white).
 const HUE_MAP: Record<number, number> = { 0: 0, 60: 1, 180: 2 };
 const TOTAL_BUCKETS = 3 * NUM_OPACITY_BUCKETS;
+const COMET_HUES = [78, 120, 168, 188, 210];
+
+const randomBetween = (min: number, max: number) => min + Math.random() * (max - min);
 
 export const StarField = () => {
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -55,138 +55,285 @@ export const StarField = () => {
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
 
+    const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
     let stars: Star[] = [];
     let particles: Particle[] = [];
     let shootingStars: ShootingStar[] = [];
-    let animationFrameId: number;
+    let animationFrameId: number | undefined;
+    let resizeObserver: ResizeObserver | undefined;
     let width = 0;
     let height = 0;
+    let pixelRatio = 1;
     let lastTime = 0;
-    let timeSinceLastShootingStar = 0;
-    let shootingStarInterval = Math.random() * 2000 + 1500;
+    let timeSinceLastShower = 0;
+    let nextShowerIn = 500;
 
-    // Pre-allocated buckets for batching draw calls
-    // Using simple arrays of Star references to avoid object allocation per frame
     const starBuckets: Star[][] = Array.from({ length: TOTAL_BUCKETS }, () => []);
-    // Glow buckets only need to track stars that have glow (Hue 0, low opacity)
-    // But we reuse the same bucket structure for simplicity in indexing
-    // (though only Hue 0 buckets will likely be used for glow as it's white)
     const glowBuckets: Star[][] = Array.from({ length: TOTAL_BUCKETS }, () => []);
 
     const getBucketIndex = (hue: number, opacity: number): number => {
       const hueIdx = HUE_MAP[hue] || 0;
-      let opacityIdx = Math.floor(opacity / OPACITY_STEP);
-      if (opacityIdx < 0) opacityIdx = 0;
-      if (opacityIdx >= NUM_OPACITY_BUCKETS) opacityIdx = NUM_OPACITY_BUCKETS - 1;
+      const opacityIdx = Math.max(
+        0,
+        Math.min(NUM_OPACITY_BUCKETS - 1, Math.floor(opacity / OPACITY_STEP)),
+      );
       return hueIdx * NUM_OPACITY_BUCKETS + opacityIdx;
     };
 
-    const resize = () => {
-      width = window.innerWidth;
-      height = window.innerHeight;
-      canvas.width = width;
-      canvas.height = height;
-      initStars();
-    };
-
     const initStars = () => {
-      const starCount = Math.floor((width * height) / 2500);
+      const density = width < 768 ? 4200 : 3000;
+      const starCount = Math.max(80, Math.floor((width * height) / density));
       stars = [];
+
       for (let i = 0; i < starCount; i++) {
         stars.push({
           x: Math.random() * width,
           y: Math.random() * height,
-          size: Math.random() * 1.5 + 0.3,
-          opacity: Math.random(),
-          speed: Math.random() * 0.15 + 0.03,
-          twinkleSpeed: Math.random() * 0.04 + 0.01,
+          size: randomBetween(0.35, 1.65),
+          opacity: randomBetween(0.25, 1),
+          driftX: randomBetween(1.5, 5),
+          driftY: randomBetween(-1.2, 0.6),
+          twinkleSpeed: randomBetween(0.004, 0.018),
           twinklePhase: Math.random() * Math.PI * 2,
-          hue: Math.random() > 0.85 ? (Math.random() > 0.5 ? 180 : 60) : 0, // some stars cyan or yellow
+          hue: Math.random() > 0.88 ? (Math.random() > 0.5 ? 180 : 60) : 0,
         });
       }
     };
 
-    const cometHues = [180, 160, 80, 300, 200]; // cyan, teal, lime, magenta, blue
-
-    const createShootingStar = (): ShootingStar => {
-      const startX = Math.random() * width * 0.8;
-      const startY = Math.random() * (height * 0.4);
+    const createShootingStar = (laneY?: number, delayOffset = 0, hue?: number): ShootingStar => {
+      const angle = randomBetween(-0.08, 0.17);
+      const length = Math.min(width * 0.46, randomBetween(210, 420));
+      const speed = Math.min(920, Math.max(520, width * randomBetween(0.52, 0.78)));
+      const startY = laneY ?? randomBetween(height * 0.11, height * 0.56);
 
       return {
-        x: startX,
-        y: startY,
-        length: Math.random() * 100 + 120,
-        speed: Math.random() * 150 + 100, // pixels per second (time-based)
-        angle: Math.PI / 4 + (Math.random() * 0.3 - 0.15),
-        opacity: 1,
-        active: true,
-        trail: [],
-        hue: cometHues[Math.floor(Math.random() * cometHues.length)],
+        x: -length - randomBetween(80, 260) - delayOffset,
+        y: startY + randomBetween(-24, 24),
+        length,
+        speed,
+        angle,
+        opacity: 0,
+        width: randomBetween(1.5, 2.8),
+        hue: hue ?? COMET_HUES[Math.floor(Math.random() * COMET_HUES.length)],
         life: 0,
+        maxLife: ((width + length + 420 + delayOffset) / speed) * 1000,
+        shimmer: randomBetween(0, Math.PI * 2),
       };
     };
 
-    const spawnParticles = (x: number, y: number, hue: number) => {
-      const count = Math.random() > 0.6 ? 2 : 1;
+    const spawnMeteorShower = (opening = false) => {
+      if (reduceMotion || width === 0 || height === 0) return;
+
+      const cometCount = opening ? 4 : Math.random() > 0.72 ? 3 : Math.random() > 0.38 ? 2 : 1;
+      const laneY = randomBetween(height * 0.12, height * 0.48);
+      const hue = COMET_HUES[Math.floor(Math.random() * COMET_HUES.length)];
+
+      for (let i = 0; i < cometCount; i++) {
+        shootingStars.push(createShootingStar(laneY + i * randomBetween(18, 38), i * randomBetween(120, 230), hue));
+      }
+    };
+
+    const spawnParticles = (star: ShootingStar) => {
+      const count = Math.random() > 0.58 ? 2 : 1;
+      const tailOffset = randomBetween(18, star.length * 0.48);
+      const baseX = star.x - Math.cos(star.angle) * tailOffset;
+      const baseY = star.y - Math.sin(star.angle) * tailOffset;
+
       for (let i = 0; i < count; i++) {
         particles.push({
-          x,
-          y,
-          size: Math.random() * 2 + 0.5,
-          opacity: Math.random() * 0.8 + 0.2,
-          decay: Math.random() * 0.015 + 0.008,
-          vx: (Math.random() - 0.5) * 0.5,
-          vy: (Math.random() - 0.5) * 0.5 + 0.2,
-          hue: hue + (Math.random() * 30 - 15),
+          x: baseX + randomBetween(-6, 6),
+          y: baseY + randomBetween(-5, 5),
+          size: randomBetween(0.45, 1.8),
+          opacity: randomBetween(0.25, 0.9) * star.opacity,
+          decay: randomBetween(0.8, 1.6),
+          vx: randomBetween(-10, 22),
+          vy: randomBetween(-12, 18),
+          hue: star.hue + randomBetween(-18, 18),
         });
+      }
+    };
+
+    const resize = () => {
+      const rect = canvas.getBoundingClientRect();
+      width = Math.max(1, Math.floor(rect.width || window.innerWidth));
+      height = Math.max(1, Math.floor(rect.height || window.innerHeight));
+      pixelRatio = Math.min(window.devicePixelRatio || 1, 2);
+
+      canvas.width = Math.floor(width * pixelRatio);
+      canvas.height = Math.floor(height * pixelRatio);
+      ctx.setTransform(pixelRatio, 0, 0, pixelRatio, 0, 0);
+
+      initStars();
+      particles = [];
+      shootingStars = [];
+      timeSinceLastShower = 0;
+      nextShowerIn = 350;
+
+      if (reduceMotion) {
+        drawStaticSky();
+      }
+    };
+
+    const drawStarBuckets = (deltaTime: number, animate: boolean) => {
+      for (let i = 0; i < TOTAL_BUCKETS; i++) {
+        starBuckets[i].length = 0;
+        glowBuckets[i].length = 0;
+      }
+
+      const seconds = deltaTime / 1000;
+
+      for (const star of stars) {
+        if (animate) {
+          star.twinklePhase += star.twinkleSpeed * deltaTime;
+          star.x += star.driftX * seconds;
+          star.y += star.driftY * seconds;
+
+          if (star.x > width + 8) star.x = -8;
+          if (star.y < -8) star.y = height + 8;
+          if (star.y > height + 8) star.y = -8;
+        }
+
+        const twinkle = animate ? Math.sin(star.twinklePhase) * 0.5 + 0.5 : 0.75;
+        const currentOpacity = star.opacity * (0.38 + twinkle * 0.62);
+        starBuckets[getBucketIndex(star.hue, currentOpacity)].push(star);
+
+        if (star.size > 1.15 && currentOpacity > 0.58) {
+          glowBuckets[getBucketIndex(0, currentOpacity * 0.11)].push(star);
+        }
+      }
+
+      for (let i = 0; i < TOTAL_BUCKETS; i++) {
+        const bucket = starBuckets[i];
+        if (bucket.length === 0) continue;
+
+        const hueIdx = Math.floor(i / NUM_OPACITY_BUCKETS);
+        const opacityIdx = i % NUM_OPACITY_BUCKETS;
+        const hue = hueIdx === 0 ? 0 : hueIdx === 1 ? 60 : 180;
+        const opacity = opacityIdx * OPACITY_STEP + OPACITY_STEP / 2;
+        ctx.fillStyle = hue > 0 ? `hsla(${hue}, 82%, 84%, ${opacity})` : `rgba(255, 255, 255, ${opacity})`;
+
+        ctx.beginPath();
+        for (const star of bucket) {
+          ctx.moveTo(star.x + star.size, star.y);
+          ctx.arc(star.x, star.y, star.size, 0, Math.PI * 2);
+        }
+        ctx.fill();
+      }
+
+      for (let i = 0; i < TOTAL_BUCKETS; i++) {
+        const bucket = glowBuckets[i];
+        if (bucket.length === 0) continue;
+
+        const opacityIdx = i % NUM_OPACITY_BUCKETS;
+        const opacity = opacityIdx * OPACITY_STEP + OPACITY_STEP / 2;
+        ctx.fillStyle = `rgba(255, 255, 255, ${opacity})`;
+
+        ctx.beginPath();
+        for (const star of bucket) {
+          const glowSize = star.size * 3.3;
+          ctx.moveTo(star.x + glowSize, star.y);
+          ctx.arc(star.x, star.y, glowSize, 0, Math.PI * 2);
+        }
+        ctx.fill();
       }
     };
 
     const drawShootingStar = (star: ShootingStar) => {
-      if (!star.active) return;
+      const tailX = star.x - Math.cos(star.angle) * star.length;
+      const tailY = star.y - Math.sin(star.angle) * star.length;
+      const shimmer = 0.84 + Math.sin(star.life * 0.018 + star.shimmer) * 0.16;
+      const alpha = star.opacity * shimmer;
 
-      // Store trail points
-      star.trail.unshift({ x: star.x, y: star.y, opacity: star.opacity });
-      if (star.trail.length > 30) star.trail.pop();
+      ctx.save();
+      ctx.globalCompositeOperation = 'lighter';
 
-      // Draw trail using a single linear gradient line for performance
-      if (star.trail.length > 1) {
-        const last = star.trail[star.trail.length - 1];
-        const gradient = ctx.createLinearGradient(star.x, star.y, last.x, last.y);
-        gradient.addColorStop(0, `hsla(${star.hue}, 100%, 95%, ${star.opacity})`);
-        gradient.addColorStop(0.3, `hsla(${star.hue}, 100%, 80%, ${star.opacity * 0.6})`);
-        gradient.addColorStop(1, `hsla(${star.hue}, 100%, 70%, 0)`);
+      const outer = ctx.createLinearGradient(star.x, star.y, tailX, tailY);
+      outer.addColorStop(0, `hsla(${star.hue}, 100%, 96%, ${alpha * 0.9})`);
+      outer.addColorStop(0.18, `hsla(${star.hue}, 100%, 76%, ${alpha * 0.34})`);
+      outer.addColorStop(0.58, `hsla(${star.hue}, 100%, 62%, ${alpha * 0.12})`);
+      outer.addColorStop(1, `hsla(${star.hue}, 100%, 54%, 0)`);
 
-        ctx.strokeStyle = gradient;
-        ctx.lineWidth = 2.5;
-        ctx.lineCap = 'round';
-        ctx.lineJoin = 'round';
-        ctx.beginPath();
-        ctx.moveTo(star.trail[0].x, star.trail[0].y);
-        for (let i = 1; i < star.trail.length; i++) {
-          ctx.lineTo(star.trail[i].x, star.trail[i].y);
-        }
-        ctx.stroke();
-      }
+      ctx.strokeStyle = outer;
+      ctx.lineWidth = star.width * 5.2;
+      ctx.lineCap = 'round';
+      ctx.beginPath();
+      ctx.moveTo(tailX, tailY);
+      ctx.lineTo(star.x, star.y);
+      ctx.stroke();
 
-      // Bright head glow (outer)
-      const headGlow = ctx.createRadialGradient(star.x, star.y, 0, star.x, star.y, 18);
-      headGlow.addColorStop(0, `hsla(${star.hue}, 100%, 95%, ${star.opacity * 0.5})`);
-      headGlow.addColorStop(0.4, `hsla(${star.hue}, 100%, 70%, ${star.opacity * 0.15})`);
+      const core = ctx.createLinearGradient(star.x, star.y, tailX, tailY);
+      core.addColorStop(0, `rgba(255, 255, 255, ${alpha})`);
+      core.addColorStop(0.24, `hsla(${star.hue}, 100%, 86%, ${alpha * 0.78})`);
+      core.addColorStop(1, `hsla(${star.hue}, 100%, 70%, 0)`);
+
+      ctx.strokeStyle = core;
+      ctx.lineWidth = star.width;
+      ctx.beginPath();
+      ctx.moveTo(tailX, tailY);
+      ctx.lineTo(star.x, star.y);
+      ctx.stroke();
+
+      const headGlow = ctx.createRadialGradient(star.x, star.y, 0, star.x, star.y, 28);
+      headGlow.addColorStop(0, `rgba(255, 255, 255, ${alpha})`);
+      headGlow.addColorStop(0.18, `hsla(${star.hue}, 100%, 82%, ${alpha * 0.52})`);
+      headGlow.addColorStop(0.5, `hsla(${star.hue}, 100%, 64%, ${alpha * 0.14})`);
       headGlow.addColorStop(1, `hsla(${star.hue}, 100%, 50%, 0)`);
       ctx.fillStyle = headGlow;
       ctx.beginPath();
-      ctx.arc(star.x, star.y, 18, 0, Math.PI * 2);
+      ctx.arc(star.x, star.y, 28, 0, Math.PI * 2);
       ctx.fill();
 
-      // Bright head core
-      const headCore = ctx.createRadialGradient(star.x, star.y, 0, star.x, star.y, 3.5);
-      headCore.addColorStop(0, `rgba(255, 255, 255, ${star.opacity})`);
-      headCore.addColorStop(1, `hsla(${star.hue}, 100%, 80%, 0)`);
-      ctx.fillStyle = headCore;
+      ctx.fillStyle = `rgba(255, 255, 255, ${alpha})`;
       ctx.beginPath();
-      ctx.arc(star.x, star.y, 3.5, 0, Math.PI * 2);
+      ctx.arc(star.x, star.y, 2.2 + star.width * 0.5, 0, Math.PI * 2);
       ctx.fill();
+
+      ctx.restore();
+    };
+
+    const updateShootingStars = (deltaTime: number) => {
+      const seconds = deltaTime / 1000;
+
+      shootingStars = shootingStars.filter((star) => {
+        star.life += deltaTime;
+        const progress = Math.min(1, star.life / star.maxLife);
+        star.opacity = Math.sin(progress * Math.PI);
+        star.x += Math.cos(star.angle) * star.speed * seconds;
+        star.y += Math.sin(star.angle) * star.speed * seconds;
+
+        if (Math.random() > 0.54) {
+          spawnParticles(star);
+        }
+
+        drawShootingStar(star);
+        return progress < 1 && star.x < width + star.length + 80 && star.y > -120 && star.y < height + 120;
+      });
+    };
+
+    const updateParticles = (deltaTime: number) => {
+      const seconds = deltaTime / 1000;
+
+      particles = particles.filter((particle) => {
+        particle.opacity -= particle.decay * seconds;
+        if (particle.opacity <= 0) return false;
+
+        particle.x += particle.vx * seconds;
+        particle.y += particle.vy * seconds;
+        particle.size *= 1 - 0.55 * seconds;
+
+        ctx.fillStyle = `hsla(${particle.hue}, 100%, 82%, ${particle.opacity})`;
+        ctx.beginPath();
+        ctx.arc(particle.x, particle.y, Math.max(0.2, particle.size), 0, Math.PI * 2);
+        ctx.fill();
+
+        return true;
+      });
+    };
+
+    const drawStaticSky = () => {
+      ctx.clearRect(0, 0, width, height);
+      drawStarBuckets(0, false);
     };
 
     const draw = (timestamp: number) => {
@@ -194,180 +341,68 @@ export const StarField = () => {
       let deltaTime = timestamp - lastTime;
       lastTime = timestamp;
 
-      // Cap deltaTime to prevent huge jumps when tab regains focus
       if (deltaTime > 100) deltaTime = 16;
 
       ctx.clearRect(0, 0, width, height);
+      drawStarBuckets(deltaTime, true);
 
-      // --- Optimized Star Rendering ---
-
-      // 1. Update and Bucket Stars
-      // Clear buckets
-      for (let i = 0; i < TOTAL_BUCKETS; i++) {
-        starBuckets[i].length = 0;
-        glowBuckets[i].length = 0;
+      timeSinceLastShower += deltaTime;
+      if (timeSinceLastShower >= nextShowerIn) {
+        spawnMeteorShower();
+        timeSinceLastShower = 0;
+        nextShowerIn = randomBetween(2600, 5200);
       }
 
-      stars.forEach((star) => {
-        // Update physics/animation
-        star.twinklePhase += star.twinkleSpeed;
-        const twinkle = Math.sin(star.twinklePhase) * 0.8 + 0.5;
-        const currentOpacity = star.opacity * (0.3 + twinkle * 0.7);
-
-        // Bucket for main star draw
-        const bucketIdx = getBucketIndex(star.hue, currentOpacity);
-        starBuckets[bucketIdx].push(star);
-
-        // Bucket for glow draw (if applicable)
-        if (star.size > 1.2 && currentOpacity > 0.6) {
-          const glowOpacity = currentOpacity * 0.1;
-          // Glow is always white (hue 0)
-          const glowIdx = getBucketIndex(0, glowOpacity);
-          glowBuckets[glowIdx].push(star);
-        }
-
-        // Update position for next frame
-        star.y -= star.speed;
-        if (star.y < 0) {
-          star.y = height;
-          star.x = Math.random() * width;
-        }
-      });
-
-      // 2. Draw Star Buckets
-      for (let i = 0; i < TOTAL_BUCKETS; i++) {
-        if (starBuckets[i].length === 0) continue;
-
-        const hueIdx = Math.floor(i / NUM_OPACITY_BUCKETS);
-        const opacityIdx = i % NUM_OPACITY_BUCKETS;
-
-        const hue = hueIdx === 0 ? 0 : (hueIdx === 1 ? 60 : 180);
-        // Use midpoint of opacity step to average out
-        const opacity = (opacityIdx * OPACITY_STEP) + (OPACITY_STEP / 2);
-
-        if (hue > 0) {
-          ctx.fillStyle = `hsla(${hue}, 80%, 85%, ${opacity})`;
-        } else {
-          ctx.fillStyle = `rgba(255, 255, 255, ${opacity})`;
-        }
-
-        ctx.beginPath();
-        const bucket = starBuckets[i];
-        for (let j = 0; j < bucket.length; j++) {
-          const s = bucket[j];
-          ctx.moveTo(s.x + s.size, s.y);
-          ctx.arc(s.x, s.y, s.size, 0, Math.PI * 2);
-        }
-        ctx.fill();
-      }
-
-      // 3. Draw Glow Buckets
-      for (let i = 0; i < TOTAL_BUCKETS; i++) {
-        if (glowBuckets[i].length === 0) continue;
-
-        const opacityIdx = i % NUM_OPACITY_BUCKETS;
-        const opacity = (opacityIdx * OPACITY_STEP) + (OPACITY_STEP / 2);
-
-        // Glow is always white
-        ctx.fillStyle = `rgba(255, 255, 255, ${opacity})`;
-
-        ctx.beginPath();
-        const bucket = glowBuckets[i];
-        for (let j = 0; j < bucket.length; j++) {
-          const s = bucket[j];
-          // Glow is 3x larger
-          const glowSize = s.size * 3;
-          ctx.moveTo(s.x + glowSize, s.y);
-          ctx.arc(s.x, s.y, glowSize, 0, Math.PI * 2);
-        }
-        ctx.fill();
-      }
-
-      // --- End Optimized Star Rendering ---
-
-      // Spawn shooting stars
-      timeSinceLastShootingStar += deltaTime;
-      if (timeSinceLastShootingStar > shootingStarInterval) {
-        shootingStars.push(createShootingStar());
-        timeSinceLastShootingStar = 0;
-        shootingStarInterval = Math.random() * 5000 + 6000; // 6-11s between comets
-      }
-
-      // Update & draw shooting stars
-      const dt = deltaTime / 1000; // convert to seconds
-      shootingStars = shootingStars.filter((star) => {
-        if (!star.active) return false;
-
-        star.x += Math.cos(star.angle) * star.speed * dt;
-        star.y += Math.sin(star.angle) * star.speed * dt;
-        star.life += deltaTime;
-
-        // Spawn sparkle particles along trail (reduced frequency)
-        if (Math.random() > 0.7) {
-          spawnParticles(
-            star.x - Math.cos(star.angle) * 5 + (Math.random() - 0.5) * 4,
-            star.y - Math.sin(star.angle) * 5 + (Math.random() - 0.5) * 4,
-            star.hue
-          );
-        }
-
-        // Fade out after leaving screen
-        if (star.x > width + 50 || star.y > height + 50 || star.x < -50) {
-          star.active = false;
-          return false;
-        }
-
-        drawShootingStar(star);
-        return true;
-      });
-
-      // Update & draw particles (sparkles)
-      particles = particles.filter((p) => {
-        p.opacity -= p.decay * deltaTime * 0.06;
-        if (p.opacity <= 0) return false;
-
-        p.x += p.vx * deltaTime * 0.06;
-        p.y += p.vy * deltaTime * 0.06;
-        p.size *= 1 - 0.02 * deltaTime * 0.06;
-
-        ctx.fillStyle = `hsla(${p.hue}, 100%, 80%, ${p.opacity})`;
-        ctx.beginPath();
-        ctx.arc(p.x, p.y, p.size, 0, Math.PI * 2);
-        ctx.fill();
-
-        return true;
-      });
+      updateShootingStars(deltaTime);
+      updateParticles(deltaTime);
 
       animationFrameId = requestAnimationFrame(draw);
     };
 
-    // Pause animation when tab is hidden to save CPU
     const handleVisibility = () => {
-      if (document.hidden) {
+      if (document.hidden && animationFrameId !== undefined) {
         cancelAnimationFrame(animationFrameId);
-      } else {
+        animationFrameId = undefined;
+      } else if (!document.hidden && !reduceMotion && animationFrameId === undefined) {
         lastTime = 0;
         animationFrameId = requestAnimationFrame(draw);
       }
     };
 
+    const hostElement = canvas.parentElement ?? canvas;
+    resizeObserver = new ResizeObserver(resize);
+    resizeObserver.observe(hostElement);
     window.addEventListener('resize', resize);
     document.addEventListener('visibilitychange', handleVisibility);
+
     resize();
-    animationFrameId = requestAnimationFrame(draw);
+
+    if (!reduceMotion) {
+      spawnMeteorShower(true);
+      animationFrameId = requestAnimationFrame(draw);
+    }
 
     return () => {
+      resizeObserver?.disconnect();
       window.removeEventListener('resize', resize);
       document.removeEventListener('visibilitychange', handleVisibility);
-      cancelAnimationFrame(animationFrameId);
+      if (animationFrameId !== undefined) {
+        cancelAnimationFrame(animationFrameId);
+      }
     };
   }, []);
 
   return (
     <canvas
       ref={canvasRef}
-      className="absolute inset-0 z-1 pointer-events-none mix-blend-screen"
-      style={{ width: '100%', height: '100%' }}
+      aria-hidden="true"
+      className="absolute inset-0 z-[2] pointer-events-none opacity-95 mix-blend-screen"
+      style={{
+        width: '100%',
+        height: '100%',
+        WebkitMaskImage: 'linear-gradient(to bottom, transparent 0%, black 12%, black 72%, transparent 100%)',
+        maskImage: 'linear-gradient(to bottom, transparent 0%, black 12%, black 72%, transparent 100%)',
+      } as React.CSSProperties}
     />
   );
 };
