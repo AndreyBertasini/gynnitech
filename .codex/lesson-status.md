@@ -1,12 +1,13 @@
 # Lesson Status
 
-Updated: 2026-05-03
+Updated: 2026-06-12
 
 ## Stato globale
 
-- Catalogo V2 allineato: 19 moduli, 210 lezioni core, 9 risorse supplementari.
+- Catalogo V2 allineato: 21 moduli, 236 lezioni core, 0 risorse supplementari.
 - Validazione contenuti pulita anche in modalita `STRICT_EDITORIAL=1`.
 - Audit catalogo pulito dopo sincronizzazione dei conteggi overview.
+- Aggiunti i moduli finali `ai-data-workflows` e `agentic-ai-data-workflows` con 20 nuove lezioni core.
 
 ## Batch completato
 

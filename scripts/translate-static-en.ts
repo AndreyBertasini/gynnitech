@@ -533,6 +533,7 @@ const rewriteDocumentMetadata = (document: any, relativeHtmlPath: string) => {
   const enUrl = absoluteUrl(enPath);
   const canonicalUrl = redirectTarget ? absoluteUrl(prefixEnglishHref(redirectTarget)) : enUrl;
   let headNode: any | undefined;
+  let hasEnglishAlternate = false;
 
   const localizeLanguageSwitcherLink = (node: any, targetLanguage: string) => {
     if (targetLanguage === 'it') {
@@ -599,6 +600,10 @@ const rewriteDocumentMetadata = (document: any, relativeHtmlPath: string) => {
       if (node.tagName === 'link' && attrValue(node, 'rel') === 'alternate') {
         const hreflang = attrValue(node, 'hreflang');
         if (hreflang === 'x-default' || hreflang === 'it-IT') setAttr(node, 'href', originalUrl);
+        if (hreflang === 'en-US') {
+          setAttr(node, 'href', enUrl);
+          hasEnglishAlternate = true;
+        }
       }
 
       if (node.tagName === 'meta') {
@@ -618,7 +623,7 @@ const rewriteDocumentMetadata = (document: any, relativeHtmlPath: string) => {
 
   visit(document);
 
-  if (headNode) {
+  if (headNode && !hasEnglishAlternate) {
     headNode.childNodes ??= [];
     headNode.childNodes.push(
       { nodeName: '#text', value: '\n\t\t' },

@@ -238,7 +238,14 @@ export default defineConfig({
       customCss: [
         './src/styles/custom.css',
         '@fontsource/inter/400.css',
+        '@fontsource/inter/500.css',
         '@fontsource/inter/600.css',
+        '@fontsource/inter/700.css',
+        '@fontsource/montserrat/400.css',
+        '@fontsource/montserrat/500.css',
+        '@fontsource/montserrat/600.css',
+        '@fontsource/montserrat/700.css',
+        '@fontsource/montserrat/800.css',
       ],
       sidebar: [
         staticSidebarSections[0],

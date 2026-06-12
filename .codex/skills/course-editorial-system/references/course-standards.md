@@ -25,6 +25,8 @@ Use the folder under `src/content/corso` as the canonical module id. The `module
 | `significativita-statistica` | `Modulo 17: Significativita Statistica, A/B Testing e Experimentation Science` |
 | `direzioni-analitica` | `Modulo 18: Direzioni in Analitica: Marketing, Prodotto, Finanza` |
 | `filosofia-analisi-dati` | `Modulo 19: Fondamenti Filosofici dell Analisi dei Dati` |
+| `ai-data-workflows` | `Modulo 20: AI per Analisi Dati, Data Engineering e AutoML` |
+| `agentic-ai-data-workflows` | `Modulo 21: Agentic AI per Analisi Dati, Data Engineering e AutoML` |
 
 ## Lesson Archetypes
 

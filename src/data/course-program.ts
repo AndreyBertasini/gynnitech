@@ -91,7 +91,7 @@ export const COURSE_PHASES: CoursePhase[] = [
   {
     id: 'direction',
     title: 'Direzione e Profondita',
-    description: 'Ruoli, responsabilita economica, causalita e lettura critica dei dati in contesti decisionali complessi.',
+    description: 'Ruoli, responsabilita economica, causalita, AI applicata e lettura critica dei dati in contesti decisionali complessi.',
   },
 ];
 
@@ -148,11 +148,11 @@ export const COURSE_TRACKS: CourseTrack[] = [
     title: 'Data Platform & Analytics Engineering',
     summary:
       'Track finale per chi vuole progettare lo stack analitico end-to-end, dal tracking al warehouse fino al serving layer.',
-    moduleIds: ['data-collection', 'data-warehousing', 's3-data-lake', 'kafka-streaming', 'real-time-analytics', 'infrastructure-ops', 'advanced-sql', 'analytics-engineering'],
+    moduleIds: ['data-collection', 'data-warehousing', 's3-data-lake', 'kafka-streaming', 'real-time-analytics', 'infrastructure-ops', 'advanced-sql', 'analytics-engineering', 'ai-data-workflows', 'agentic-ai-data-workflows'],
     outcomes: [
       'Disegnare architetture analitiche scalabili con contratti, QA e osservabilita.',
       'Costruire modelli dati riusabili con dbt e semantic layer.',
-      'Sostenere pipeline batch e realtime con disciplina operativa.',
+      'Sostenere pipeline batch, realtime, AI-assisted e agentiche con disciplina operativa.',
     ],
   },
 ];
@@ -1208,6 +1208,114 @@ export const COURSE_MODULES: CourseModule[] = [
       { title: 'Incertezza, rischio e ignoranza' },
       { title: "Dalla causalità classica al futuro dell'analisi dati" },
       { title: 'Caso studio: pensiero filosofico e decisione di business' },
+    ],
+  },
+  {
+    id: 'ai-data-workflows',
+    title: 'AI per Analisi Dati, Data Engineering e AutoML',
+    description:
+      'Usa AI generativa e AutoML per accelerare analisi, pipeline, feature e decision memo senza perdere controllo, qualita e ownership.',
+    objective: 'Applicare AI al lavoro sui dati come sistema controllato, non come scorciatoia opaca.',
+    phase: 'direction',
+    prerequisites: ['Modulo 19 consigliato: causalita, evidenza e responsabilita analitica.', 'Esperienza con analisi, SQL, metriche e architetture dati del percorso core.'],
+    seoTitle: 'AI per Analisi Dati, Data Engineering e AutoML | GinnyTech',
+    seoDescription:
+      'Modulo GinnyTech su AI per data work: prompting analitico, EDA assistita, SQL, data quality, data engineering, AutoML, leakage, drift e casi end-to-end.',
+    seoKeywords: ['ai data analytics', 'ai data engineering', 'automl', 'prompting analitico', 'ai assisted analytics'],
+    icon: 'BrainCircuit',
+    color: 'from-teal-400 to-amber-400',
+    completionPack: {
+      assignment: {
+        title: 'Assignment: workflow AI-assisted per data work',
+        summary: 'Disegna un workflow controllato che usa AI per accelerare analisi, documentazione, feature o AutoML con review umana.',
+        deliverables: ['Decision brief.', 'Prompt e controlli.', 'Risk register.', 'Output revisionabile.'],
+      },
+      caseStudy: {
+        title: 'Caso studio end-to-end: AI-assisted analytics workflow',
+        summary: 'Applica AI a un caso churn, forecasting o funnel diagnostics, separando supporto automatico e responsabilita analitica.',
+        deliverables: ['Problem framing.', 'Controlli dati.', 'Model/analysis review.', 'Decision memo.'],
+      },
+      cheatSheet: {
+        title: 'Cheat sheet: AI per data work',
+        summary: 'Regole rapide per decidere cosa delegare all AI, cosa controllare e quando fermare il workflow.',
+        deliverables: ['Checklist.', 'Prompt patterns.', 'Failure modes.'],
+      },
+      rubric: {
+        title: 'Rubrica di valutazione modulo',
+        summary: 'Valuta qualita del workflow, controlli su dati e modello, chiarezza dell ownership e utilita della decisione finale.',
+        criteria: ['Decisione chiara.', 'Controlli robusti.', 'Uso appropriato dell AI.', 'Output revisionabile.'],
+      },
+    },
+    examSummary: {
+      title: 'Esame modulo: AI-assisted data workflow review',
+      format: 'Pacchetto con workflow, prompt, controlli, output analitico e decision memo finale.',
+      checkpoints: ['Scope AI esplicito.', 'Quality gates.', 'Baseline manuale.', 'Rischi e monitoraggio.'],
+    },
+    coreLessons: [
+      { title: 'AI come acceleratore del lavoro sui dati' },
+      { title: 'Prompting analitico e controllo delle domande' },
+      { title: 'Analisi esplorativa assistita' },
+      { title: 'SQL, notebook e data storytelling con AI' },
+      { title: 'Data cleaning, data quality e feature engineering' },
+      { title: 'AI per data engineering, mapping e documentazione' },
+      { title: 'AutoML per classificazione, regressione e forecasting' },
+      { title: 'Valutazione: leakage, drift, metriche e limiti' },
+      { title: 'Caso studio: workflow AI-assisted end-to-end' },
+      { title: 'Cheat sheet: AI per data work' },
+    ],
+  },
+  {
+    id: 'agentic-ai-data-workflows',
+    title: 'Agentic AI per Analisi Dati, Data Engineering e AutoML',
+    description:
+      'Progetta workflow agentici per analisi, SQL, pipeline, AutoML e analytics operations con tool, stato, guardrail, eval e approval.',
+    objective: 'Costruire workflow agentici utili e osservabili per data work professionale.',
+    phase: 'direction',
+    prerequisites: ['Modulo 20 consigliato: AI-assisted data work e AutoML.', 'Conoscenza di semantic layer, pipeline dati, valutazione modelli e governance.'],
+    seoTitle: 'Agentic AI per Analisi Dati, Data Engineering e AutoML | GinnyTech',
+    seoDescription:
+      'Modulo GinnyTech su agentic AI per data work: tool, state, memory, handoff, human approval, agentic SQL, AutoML, observability, eval e cost control.',
+    seoKeywords: ['agentic ai data analytics', 'ai agents data engineering', 'agentic automl', 'human in the loop', 'ai workflow governance'],
+    icon: 'GitMerge',
+    color: 'from-violet-500 to-cyan-400',
+    completionPack: {
+      assignment: {
+        title: 'Assignment: agentic analytics workflow',
+        summary: 'Disegna un workflow agentico con ruoli, tool, stato, guardrail, approval e metriche di osservabilita.',
+        deliverables: ['Workflow map.', 'Tool policy.', 'Approval gates.', 'Eval plan.'],
+      },
+      caseStudy: {
+        title: 'Caso studio end-to-end: agentic analytics operations',
+        summary: 'Progetta un sistema agentico per metric review, incidenti dati, query controllate e raccomandazioni operative.',
+        deliverables: ['System design.', 'Runbook.', 'Trace/eval plan.', 'Decision memo.'],
+      },
+      cheatSheet: {
+        title: 'Cheat sheet: agentic AI per data work',
+        summary: 'Checklist operativa per usare agenti su dati con sicurezza, limiti, logging e fallback.',
+        deliverables: ['Guardrail checklist.', 'Approval matrix.', 'Failure modes.'],
+      },
+      rubric: {
+        title: 'Rubrica di valutazione modulo',
+        summary: 'Valuta utilita del workflow, confini degli agenti, osservabilita, sicurezza, controllo costi e qualita degli handoff.',
+        criteria: ['Tool boundaries.', 'Human approval.', 'Observability.', 'Cost and risk control.'],
+      },
+    },
+    examSummary: {
+      title: 'Esame modulo: agentic data workflow defense',
+      format: 'Review architetturale di un workflow agentico con trace, eval, policy strumenti e rollout controllato.',
+      checkpoints: ['Tool scope chiaro.', 'State e handoff.', 'Guardrail testati.', 'Rollback e owner finale.'],
+    },
+    coreLessons: [
+      { title: 'Da AI assistita ad agentic AI per data work' },
+      { title: 'Tool, state, memory, handoff e guardrail' },
+      { title: 'Agentic data analysis con controlli umani' },
+      { title: 'Agentic SQL e semantic layer con approval' },
+      { title: 'Agentic data engineering: pipeline, runbook e incidenti' },
+      { title: 'Agentic AutoML: planning, training, review e deploy' },
+      { title: 'Multi-agent workflow: analyst, engineer, reviewer, owner' },
+      { title: 'Observability, evals, sicurezza e cost control' },
+      { title: 'Caso studio: sistema agentico per analytics operations' },
+      { title: 'Cheat sheet: agentic AI per data work' },
     ],
   },
 ];

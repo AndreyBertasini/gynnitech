@@ -215,6 +215,52 @@ function linkHref(html: string, rel: string): string | undefined {
     return undefined;
 }
 
+function alternateLinksByHreflang(html: string): Map<string, Set<string>> {
+    const alternates = new Map<string, Set<string>>();
+
+    for (const match of html.matchAll(/<link\b[^>]*>/gi)) {
+        const attributes = getAttributes(match[0]);
+        const relTokens = (attributes.rel ?? "").toLowerCase().split(/\s+/).filter(Boolean);
+        const hreflang = attributes.hreflang;
+        const href = attributes.href;
+
+        if (!relTokens.includes("alternate") || !hreflang || !href) {
+            continue;
+        }
+
+        if (!alternates.has(hreflang)) {
+            alternates.set(hreflang, new Set());
+        }
+        alternates.get(hreflang)?.add(href);
+    }
+
+    return alternates;
+}
+
+function expectedLocalizedUrls(canonical: string): { italianUrl: string; englishUrl: string } | undefined {
+    try {
+        const canonicalUrl = new URL(canonical);
+        if (canonicalUrl.origin !== SITE_ORIGIN) {
+            return undefined;
+        }
+
+        const pathname = canonicalUrl.pathname;
+        const italianPathname = pathname === "/en" || pathname === "/en/"
+            ? "/"
+            : pathname.startsWith("/en/")
+                ? pathname.slice(3)
+                : pathname;
+        const englishPathname = italianPathname === "/" ? "/en/" : `/en${italianPathname}`;
+
+        return {
+            italianUrl: `${SITE_ORIGIN}${italianPathname}`,
+            englishUrl: `${SITE_ORIGIN}${englishPathname}`,
+        };
+    } catch {
+        return undefined;
+    }
+}
+
 function formatBytes(bytes: number): string {
     if (bytes >= 1_000_000) {
         return `${(bytes / 1_000_000).toFixed(2)} MB`;
@@ -355,7 +401,7 @@ function auditRoutePerformance(performance: RoutePerformance, file: string, issu
 }
 
 function auditSeo(html: string, file: string, issues: Issue[], isRedirectPage: boolean): void {
-    if (isRedirectPage || file === "404.html") {
+    if (isRedirectPage || file.endsWith("404.html")) {
         return;
     }
 
@@ -374,6 +420,18 @@ function auditSeo(html: string, file: string, issues: Issue[], isRedirectPage: b
     }
     if (!canonical || !canonical.startsWith(SITE_ORIGIN)) {
         issues.push({ file, message: "missing canonical URL on site origin" });
+    } else {
+        const expectedUrls = expectedLocalizedUrls(canonical);
+        const alternates = alternateLinksByHreflang(html);
+        if (expectedUrls && !alternates.get("it-IT")?.has(expectedUrls.italianUrl)) {
+            issues.push({ file, message: `missing it-IT alternate ${expectedUrls.italianUrl}` });
+        }
+        if (expectedUrls && !alternates.get("en-US")?.has(expectedUrls.englishUrl)) {
+            issues.push({ file, message: `missing en-US alternate ${expectedUrls.englishUrl}` });
+        }
+        if (expectedUrls && !alternates.get("x-default")?.has(expectedUrls.italianUrl)) {
+            issues.push({ file, message: `missing x-default alternate ${expectedUrls.italianUrl}` });
+        }
     }
     if (!ogTitle || !ogDescription || !ogImage) {
         issues.push({ file, message: "missing Open Graph title, description, or image" });

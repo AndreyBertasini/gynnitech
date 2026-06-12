@@ -39,7 +39,7 @@ describe('buildCourseGraph', () => {
       },
     ]);
 
-    expect(graph.stats.totalModules).toBe(19);
+    expect(graph.stats.totalModules).toBe(21);
     expect(graph.stats.totalLessons).toBe(3);
     expect(graph.stats.totalLinks).toBe(2);
     expect(graph.stats.internalLinks).toBe(1);

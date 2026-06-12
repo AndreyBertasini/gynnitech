@@ -14,6 +14,7 @@ export const Navbar = () => {
   const copy = language === 'en'
     ? {
         articles: 'Articles',
+        agents: 'AI Agents',
         about: 'About',
         profile: 'About me',
         booking: 'Book a call',
@@ -22,6 +23,7 @@ export const Navbar = () => {
       }
     : {
         articles: 'Articoli',
+        agents: 'Agenti AI',
         about: 'Informazioni',
         profile: 'Chi sono',
         booking: 'Prenota una call',
@@ -53,6 +55,7 @@ export const Navbar = () => {
         {/* Desktop Menu */}
         <div className="hidden md:flex items-center gap-8">
           <a href={localHref('/')} className="text-sm font-medium text-slate-300 hover:text-white transition-colors">Home</a>
+          <a href={localHref('/agenti-analisi-dati')} className="text-sm font-medium text-slate-300 hover:text-white transition-colors">{copy.agents}</a>
           <a href={localHref('/blog')} className="text-sm font-medium text-slate-300 hover:text-white transition-colors">{copy.articles}</a>
           <a href={localHref('/perche-questo-corso')} className="text-sm font-medium text-slate-300 hover:text-white transition-colors">{copy.about}</a>
           <a href={LINKEDIN_URL} target="_blank" rel="noreferrer" className="text-sm font-medium text-slate-300 hover:text-white transition-colors">{copy.profile}</a>
@@ -93,6 +96,7 @@ export const Navbar = () => {
         <div className="flex flex-col p-6 gap-4">
           <SearchWidget mobile language={language} />
           <a href={localHref('/')} className="text-slate-300 hover:text-white font-medium">Home</a>
+          <a href={localHref('/agenti-analisi-dati')} className="text-slate-300 hover:text-white font-medium">{copy.agents}</a>
           <a href={localHref('/blog')} className="text-slate-300 hover:text-white font-medium">{copy.articles}</a>
           <a href={localHref('/perche-questo-corso')} className="text-slate-300 hover:text-white font-medium">{copy.about}</a>
           <a href={LINKEDIN_URL} target="_blank" rel="noreferrer" className="text-slate-300 hover:text-white font-medium">{copy.profile}</a>

@@ -385,8 +385,8 @@ async function validateCollection(collection: "blog" | "corso"): Promise<Validat
         }
 
         const expectedCoreLessonCount = COURSE_MODULES.reduce((sum, module) => sum + module.coreLessons.length, 0);
-        if (COURSE_MODULES.length !== 19) {
-            result.errors.push(buildMessage(path.join(process.cwd(), "src/data/course-program.ts"), "course-program", "expected exactly 19 modules"));
+        if (COURSE_MODULES.length !== 21) {
+            result.errors.push(buildMessage(path.join(process.cwd(), "src/data/course-program.ts"), "course-program", "expected exactly 21 modules"));
         }
         if (COURSE_PHASES.length !== 5) {
             result.errors.push(buildMessage(path.join(process.cwd(), "src/data/course-program.ts"), "course-program", "expected exactly 5 phases"));
@@ -394,8 +394,8 @@ async function validateCollection(collection: "blog" | "corso"): Promise<Validat
         if (COURSE_TRACKS.length !== 3) {
             result.errors.push(buildMessage(path.join(process.cwd(), "src/data/course-program.ts"), "course-program", "expected exactly 3 final tracks"));
         }
-        if (expectedCoreLessonCount !== 216) {
-            result.errors.push(buildMessage(path.join(process.cwd(), "src/data/course-program.ts"), "course-program", `expected V2 blueprint to define 216 core lessons (received: ${expectedCoreLessonCount})`));
+        if (expectedCoreLessonCount !== 236) {
+            result.errors.push(buildMessage(path.join(process.cwd(), "src/data/course-program.ts"), "course-program", `expected V2 blueprint to define 236 core lessons (received: ${expectedCoreLessonCount})`));
         }
         if (totalCoreLessons !== expectedCoreLessonCount) {
             pushEditorialIssue(result, path.join(process.cwd(), "src/content/corso"), "core-lessons", `expected ${expectedCoreLessonCount} ordered core lessons, found ${totalCoreLessons}`);
