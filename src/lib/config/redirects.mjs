@@ -1,4 +1,4 @@
-const redirectEntries = [
+const legacyRedirectEntries = [
   ['/corso/marketing/brand', '/course/analisi-marketing/efficacia-brand'],
   ['/corso/marketing/economics', '/course/marketing-data-science/unit-economics'],
   ['/corso/marketing/attribution', '/course/marketing-data-science/attribution'],
@@ -11,6 +11,10 @@ const redirectEntries = [
   ['/corso/getting-started/framework', '/course/data-collection/framework'],
   ['/corso/getting-started/terminology', '/course/data-collection/terminology'],
 ];
+
+const englishRedirectEntries = legacyRedirectEntries.map(([source, target]) => [`/en${source}`, `/en${target}`]);
+
+const redirectEntries = [...legacyRedirectEntries, ...englishRedirectEntries];
 
 const isInternalPath = (value) => typeof value === 'string' && value.startsWith('/');
 
@@ -36,4 +40,4 @@ validateRedirectEntries(redirectEntries);
 
 const redirects = Object.fromEntries(redirectEntries);
 
-export { redirectEntries, redirects, validateRedirectEntries };
+export { legacyRedirectEntries, redirectEntries, redirects, validateRedirectEntries };

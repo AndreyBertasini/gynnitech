@@ -17,10 +17,9 @@ const MAX_FONT_BYTES = 90_000;
 const MOJIBAKE_MARKER_REGEX = /(?:\u00c3[\u0080-\u00bf]|\u00c2[\u0080-\u00bf]|\u00e2\u20ac[\u0080-\u2122]|\ufffd)/;
 const REDIRECT_ENTRIES = redirectEntries as Array<[string, string]>;
 const REDIRECT_SOURCE_FILES = new Set(
-    REDIRECT_ENTRIES.flatMap(([source]) => {
+    REDIRECT_ENTRIES.map(([source]) => {
         const sourcePath = source.endsWith("/") ? source : `${source}/`;
-        const file = `${sourcePath.replace(/^\//, "")}index.html`;
-        return [file, `en/${file}`];
+        return `${sourcePath.replace(/^\//, "")}index.html`;
     }),
 );
 
