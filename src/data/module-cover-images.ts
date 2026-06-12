@@ -18,6 +18,6 @@ export const MODULE_COVER_IMAGES: Record<string, string> = {
   'significativita-statistica': '/course-module-images/significativita-statistica.webp',
   'direzioni-analitica': '/course-module-images/direzioni-analitica.webp',
   'filosofia-analisi-dati': '/course-module-images/filosofia-analisi-dati.webp',
-  'ai-data-workflows': '/course-module-images/ai-data-workflows.webp',
-  'agentic-ai-data-workflows': '/course-module-images/agentic-ai-data-workflows.webp',
+  'ai-data-workflows': '/course-module-images/ai-data-workflows-v2.webp',
+  'agentic-ai-data-workflows': '/course-module-images/agentic-ai-data-workflows-v2.webp',
 };
