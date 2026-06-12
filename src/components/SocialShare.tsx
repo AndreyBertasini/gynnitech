@@ -18,25 +18,25 @@ export function SocialShare({ url, title }: Props) {
       name: 'LinkedIn',
       href: `https://www.linkedin.com/sharing/share-offsite/?url=${encodedUrl}`,
       icon: 'in',
-      color: '#0077b5',
+      color: 'var(--color-accent)',
     },
     {
       name: 'Twitter / X',
       href: `https://twitter.com/intent/tweet?url=${encodedUrl}&text=${encodedTitle}`,
       icon: 'X',
-      color: '#1da1f2',
+      color: 'var(--color-accent)',
     },
     {
       name: 'WhatsApp',
       href: `https://wa.me/?text=${encodedTitle}%20${encodedUrl}`,
       icon: 'WA',
-      color: '#25d366',
+      color: 'var(--color-accent)',
     },
     {
       name: copy.copyLink,
       href: '#',
       icon: 'URL',
-      color: '#64748b',
+      color: 'rgba(255,255,255,0.28)',
       onClick: (event: React.MouseEvent) => {
         event.preventDefault();
         navigator.clipboard.writeText(url).then(() => {

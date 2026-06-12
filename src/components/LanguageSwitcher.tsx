@@ -47,7 +47,7 @@ export default function LanguageSwitcher({ className = '' }: { className?: strin
         data-language-target="en"
         className={`flex h-7 min-w-8 items-center justify-center rounded-full px-2 transition ${
           language === 'en'
-            ? 'bg-emerald-300 text-slate-950'
+            ? 'bg-accent text-slate-950'
             : 'text-slate-300 hover:bg-white/10 hover:text-white'
         }`}
         aria-current={language === 'en' ? 'page' : undefined}
