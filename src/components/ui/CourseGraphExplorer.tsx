@@ -440,6 +440,18 @@ export const CourseGraphExplorer = ({ graph, title, description }: CourseGraphEx
                         <span className="absolute -left-[1.62rem] top-6 flex h-7 w-7 items-center justify-center rounded-full border border-accent/30 bg-[#09121d] text-[11px] font-semibold text-accent">
                           {lesson.order}
                         </span>
+                        {lesson.headerImage && (
+                          <div className="relative mb-5 overflow-hidden rounded-[20px] border border-white/10 bg-white/[0.03]">
+                            <img
+                              src={lesson.headerImage}
+                              alt={lesson.headerImageAlt || lesson.title}
+                              className="h-40 w-full object-cover sm:h-48"
+                              loading="lazy"
+                              decoding="async"
+                            />
+                            <div className="absolute inset-0 bg-gradient-to-t from-[#0a0f15]/80 via-transparent to-transparent" />
+                          </div>
+                        )}
                         <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
                           <div className="max-w-3xl">
                             <h5 className="text-xl font-semibold text-white">{lesson.title}</h5>

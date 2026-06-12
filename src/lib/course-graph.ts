@@ -9,6 +9,8 @@ export interface CourseGraphSourceEntry {
     category?: string;
     duration?: string;
     difficulty?: string;
+    headerImage?: string;
+    headerImageAlt?: string;
     prerequisites?: string[];
   };
 }
@@ -37,6 +39,8 @@ export interface CourseGraphLesson {
   category: string;
   duration?: string;
   difficulty?: string;
+  headerImage?: string;
+  headerImageAlt?: string;
   prerequisites: string[];
   dependents: string[];
   internalPrerequisites: string[];
@@ -153,6 +157,8 @@ export function buildCourseGraph(entries: CourseGraphSourceEntry[]): CourseGraph
     const externalPrerequisites = prerequisites.filter((value) => !value.startsWith(`${moduleId}/`));
     const internalDependents = dependents.filter((value) => value.startsWith(`${moduleId}/`));
     const externalDependents = dependents.filter((value) => !value.startsWith(`${moduleId}/`));
+    const headerImage = typeof entry.data.headerImage === 'string' ? entry.data.headerImage.trim() : '';
+    const headerImageAlt = typeof entry.data.headerImageAlt === 'string' ? entry.data.headerImageAlt.trim() : '';
 
     totalLinks += prerequisites.length;
     internalLinks += internalPrerequisites.length;
@@ -174,6 +180,8 @@ export function buildCourseGraph(entries: CourseGraphSourceEntry[]): CourseGraph
       category: entry.data.category?.trim() || 'Lezione',
       duration: entry.data.duration,
       difficulty: entry.data.difficulty,
+      headerImage: headerImage || undefined,
+      headerImageAlt: headerImageAlt || undefined,
       prerequisites,
       dependents,
       internalPrerequisites,
