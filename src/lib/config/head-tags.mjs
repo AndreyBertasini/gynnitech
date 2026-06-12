@@ -28,25 +28,56 @@ const starlightHeadTags = [
   },
   {
     tag: 'script',
-    attrs: {
-      async: true,
-      src: 'https://www.googletagmanager.com/gtag/js?id=G-NXL5WZC0SR',
-    },
-  },
-  {
-    tag: 'script',
     content: `
       window.dataLayer = window.dataLayer || [];
       function gtag(){dataLayer.push(arguments);}
       window.gtag = gtag;
-      gtag('consent', 'default', {
+
+      var deniedConsent = {
         ad_storage: 'denied',
         ad_user_data: 'denied',
         ad_personalization: 'denied',
         analytics_storage: 'denied'
+      };
+      var analyticsConsent = Object.assign({}, deniedConsent, { analytics_storage: 'granted' });
+
+      gtag('consent', 'default', deniedConsent);
+
+      function loadGoogleAnalytics() {
+        if (window.__ginnytechGaLoaded) return;
+        window.__ginnytechGaLoaded = true;
+        var script = document.createElement('script');
+        script.async = true;
+        script.src = 'https://www.googletagmanager.com/gtag/js?id=G-NXL5WZC0SR';
+        document.head.appendChild(script);
+        gtag('js', new Date());
+        gtag('config', 'G-NXL5WZC0SR');
+      }
+
+      function scheduleAnalyticsLoad() {
+        if ('requestIdleCallback' in window) {
+          window.requestIdleCallback(loadGoogleAnalytics, { timeout: 3000 });
+        } else {
+          window.setTimeout(loadGoogleAnalytics, 1800);
+        }
+      }
+
+      try {
+        var savedConsent = localStorage.getItem('cookie-consent');
+        if (savedConsent === 'analytics-granted' || savedConsent === 'granted') {
+          gtag('consent', 'update', analyticsConsent);
+          scheduleAnalyticsLoad();
+        }
+      } catch (_) {}
+
+      window.addEventListener('ginnytech:analytics-consent-granted', function() {
+        gtag('consent', 'update', analyticsConsent);
+        scheduleAnalyticsLoad();
       });
-      gtag('js', new Date());
-      gtag('config', 'G-NXL5WZC0SR');
+
+      window.addEventListener('ginnytech:analytics-consent-denied', function() {
+        gtag('consent', 'update', deniedConsent);
+      });
     `,
   },
   {

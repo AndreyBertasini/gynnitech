@@ -45,6 +45,7 @@ interface Window {
   dataLayer?: unknown[];
   gtag?: GinnyTechGtag;
   __ginnytechGaLoaded?: boolean;
+  ginnytechOpenCookiePreferences?: () => void;
 }
 
 declare module 'sql.js/dist/sql-wasm.wasm?url' {
