@@ -73,9 +73,14 @@ const translatableJsonLdKeys = new Set([
   'name',
   'headline',
   'alternativeHeadline',
+  'areaServed',
   'description',
   'articleSection',
+  'audienceType',
   'caption',
+  'category',
+  'serviceOutput',
+  'serviceType',
   'text',
 ]);
 
