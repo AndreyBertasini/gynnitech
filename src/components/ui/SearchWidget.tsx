@@ -6,6 +6,7 @@ import {
   MIN_SEARCH_QUERY_LENGTH,
   PAGEFIND_RANKING,
   SEARCH_CANDIDATE_LIMIT,
+  normalizeSearchText,
   rankSearchResults,
   type RankedSearchResult,
   type SearchResultCandidate,
@@ -37,6 +38,42 @@ declare global {
   }
 }
 
+const SEARCH_DEBOUNCE_MS = 180;
+const SEARCH_CACHE_LIMIT = 50;
+const searchResultCache = new Map<string, RankedSearchResult[]>();
+let pagefindLoadPromise: Promise<PagefindModule> | null = null;
+
+const rememberSearchResults = (key: string, results: RankedSearchResult[]) => {
+  if (searchResultCache.size >= SEARCH_CACHE_LIMIT) {
+    const oldestKey = searchResultCache.keys().next().value;
+    if (oldestKey) searchResultCache.delete(oldestKey);
+  }
+
+  searchResultCache.set(key, results);
+};
+
+const loadPagefindModule = async () => {
+  if (window.pagefind) return window.pagefind;
+
+  pagefindLoadPromise ??= (async () => {
+    const pagefindUrl = "/pagefind/pagefind.js?url";
+    const pagefind = (await import(/* @vite-ignore */ pagefindUrl)) as PagefindModule;
+    await pagefind.options({
+      excerptLength: 26,
+      ranking: PAGEFIND_RANKING,
+    });
+    await pagefind.init();
+    window.pagefind = pagefind;
+    return pagefind;
+  })().catch((error) => {
+    pagefindLoadPromise = null;
+    window.pagefind = undefined;
+    throw error;
+  });
+
+  return pagefindLoadPromise;
+};
+
 export const SearchWidget = ({ mobile = false, language = 'it' }: { mobile?: boolean; language?: SiteLanguage }) => {
   const [isOpen, setIsOpen] = useState(false);
   const [query, setQuery] = useState('');
@@ -48,7 +85,6 @@ export const SearchWidget = ({ mobile = false, language = 'it' }: { mobile?: boo
   const [loadError, setLoadError] = useState<string | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
   const modalRef = useRef<HTMLDivElement>(null);
-  const isLoadingScript = useRef(false);
   const activeSearchId = useRef(0);
   const copy = language === 'en'
     ? {
@@ -104,29 +140,18 @@ export const SearchWidget = ({ mobile = false, language = 'it' }: { mobile?: boo
       setLoadError(null);
       return;
     }
-    if (isLoadingScript.current) return;
 
-    isLoadingScript.current = true;
     setIsInitializingSearch(true);
     try {
-      const pagefindUrl = "/pagefind/pagefind.js?url";
-      const pagefind = (await import(/* @vite-ignore */ pagefindUrl)) as PagefindModule;
-      await pagefind.options({
-        excerptLength: 22,
-        ranking: PAGEFIND_RANKING,
-      });
-      await pagefind.init();
-      window.pagefind = pagefind;
+      await loadPagefindModule();
       setIsScriptLoaded(true);
       setLoadError(null);
     } catch (e) {
-      window.pagefind = undefined;
       setIsScriptLoaded(false);
       setLoadError(copy.unavailable);
       console.warn("Pagefind not loaded (likely in Dev mode or not built yet).", e);
     } finally {
       setIsInitializingSearch(false);
-      isLoadingScript.current = false;
     }
   };
 
@@ -179,13 +204,22 @@ export const SearchWidget = ({ mobile = false, language = 'it' }: { mobile?: boo
     const handleSearch = async () => {
       const trimmedQuery = query.trim();
       const pagefind = window.pagefind;
+      const searchId = ++activeSearchId.current;
+
       if (!trimmedQuery || trimmedQuery.length < MIN_SEARCH_QUERY_LENGTH || !pagefind) {
         setResults([]);
         setIsLoading(false);
         return;
       }
 
-      const searchId = ++activeSearchId.current;
+      const cacheKey = normalizeSearchText(trimmedQuery);
+      const cachedResults = searchResultCache.get(cacheKey);
+      if (cachedResults) {
+        setResults(cachedResults);
+        setIsLoading(false);
+        return;
+      }
+
       setIsLoading(true);
       try {
         const search = await pagefind.search(trimmedQuery, {
@@ -203,7 +237,9 @@ export const SearchWidget = ({ mobile = false, language = 'it' }: { mobile?: boo
 
         if (searchId !== activeSearchId.current) return;
 
-        setResults(rankSearchResults(data, trimmedQuery));
+        const rankedResults = rankSearchResults(data, trimmedQuery);
+        rememberSearchResults(cacheKey, rankedResults);
+        setResults(rankedResults);
       } catch (e) {
         console.error(e);
         if (searchId !== activeSearchId.current) return;
@@ -215,7 +251,7 @@ export const SearchWidget = ({ mobile = false, language = 'it' }: { mobile?: boo
       }
     };
 
-    const timeoutId = setTimeout(handleSearch, 220);
+    const timeoutId = setTimeout(handleSearch, SEARCH_DEBOUNCE_MS);
     return () => clearTimeout(timeoutId);
   }, [query, isScriptLoaded]);
 

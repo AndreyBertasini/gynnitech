@@ -207,6 +207,7 @@ export default defineConfig({
     }),
     withMarkdownProcessorCompat(starlight({
       title: 'GinnyTech',
+      pagefind: false,
       logo: {
         src: './src/assets/logo-ginnytech.webp',
       },
