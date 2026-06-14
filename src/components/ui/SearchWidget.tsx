@@ -269,7 +269,7 @@ export const SearchWidget = ({ mobile = false, language = 'it' }: { mobile?: boo
             role="dialog"
             aria-modal="true"
             aria-labelledby="site-search-title"
-            className="relative w-full max-w-2xl bg-[#0F1115] border border-white/10 rounded-2xl shadow-[0_0_50px_rgba(0,0,0,0.5)] overflow-hidden flex flex-col max-h-[80vh] transition-all duration-200"
+            className="relative w-full max-w-2xl bg-[#0F1115] border border-white/10 rounded-2xl shadow-[0_0_50px_rgba(0,0,0,0.5)] overflow-hidden flex flex-col max-h-[80vh] transition duration-200"
             style={{
               opacity: isVisible ? 1 : 0,
               transform: isVisible ? 'scale(1) translateY(0)' : 'scale(0.95) translateY(-20px)',
@@ -321,7 +321,7 @@ export const SearchWidget = ({ mobile = false, language = 'it' }: { mobile?: boo
                       key={result.url}
                       href={result.url}
                       onClick={() => setIsOpen(false)}
-                      className="block p-4 rounded-xl hover:bg-white/5 border border-transparent hover:border-white/5 transition-all group"
+                      className="block p-4 rounded-xl hover:bg-white/5 border border-transparent hover:border-white/5 transition group"
                     >
                       <div className="mb-2 text-[11px] uppercase tracking-[0.18em] text-slate-500">
                         {result.kind === 'blog' ? copy.article : result.kind === 'course' ? copy.lesson : copy.page}

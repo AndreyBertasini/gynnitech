@@ -171,7 +171,7 @@ export const CourseGraphExplorer = ({ graph, title, description }: CourseGraphEx
               <Waypoints className="h-3.5 w-3.5" />
               Learning Path Dinamico
             </div>
-            <h2 className="max-w-4xl font-heading text-3xl font-bold tracking-tight text-white md:text-4xl">
+            <h2 className="max-w-4xl font-heading text-3xl font-bold tracking-tight text-white">
               {title || 'Mappa del corso, moduli e lezioni collegati in automatico'}
             </h2>
             <p className="mt-5 max-w-3xl text-base leading-8 text-slate-300 md:text-lg">
@@ -445,6 +445,8 @@ export const CourseGraphExplorer = ({ graph, title, description }: CourseGraphEx
                             <img
                               src={lesson.headerImage}
                               alt={lesson.headerImageAlt || lesson.title}
+                              width={1200}
+                              height={630}
                               className="h-40 w-full object-cover sm:h-48"
                               loading="lazy"
                               decoding="async"

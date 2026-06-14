@@ -32,13 +32,15 @@ export const CourseCard = ({
   return (
     <a
       href={`/course/${id}/`}
-      className="group relative block h-full rounded-lg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-2 focus-visible:ring-offset-brand-dark border border-glass-border bg-brand-surface hover:border-accent hover:-translate-y-0.5 transition-all duration-200 overflow-hidden"
+      className="group relative block h-full rounded-lg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-2 focus-visible:ring-offset-brand-dark border border-glass-border bg-brand-surface hover:border-accent hover:-translate-y-0.5 transition duration-200 overflow-hidden"
     >
       {imageSrc && (
         <div className="relative overflow-hidden">
           <img
             src={imageSrc}
             alt={imageAlt || title}
+            width={1200}
+            height={675}
             className="h-44 w-full object-cover transition-transform duration-300 group-hover:scale-[1.03] sm:h-48"
             loading="lazy"
             decoding="async"

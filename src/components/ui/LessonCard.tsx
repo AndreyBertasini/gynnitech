@@ -28,11 +28,11 @@ export const LessonCard = ({
   return (
     <a
       href={href}
-      className="group relative flex flex-col h-full overflow-hidden rounded-2xl border border-white/10 bg-[#0a0e14]/80 p-6 transition-all duration-300 hover:border-accent/50 hover:shadow-[0_0_30px_-10px_rgba(204,255,0,0.2)] hover:-translate-y-1 animate-fade-in-up opacity-0 backdrop-blur-md"
+      className="group relative flex flex-col h-full overflow-hidden rounded-2xl border border-white/10 bg-[#0a0e14]/80 p-6 transition duration-300 hover:border-accent/50 hover:shadow-[0_0_30px_-10px_rgba(204,255,0,0.2)] hover:-translate-y-1 animate-fade-in-up opacity-0 backdrop-blur-md"
       style={{ animationDelay: `${index * 100}ms`, animationFillMode: 'forwards' }}
     >
       {/* Top Decoration */}
-      <div className="absolute top-0 left-0 w-full h-1 bg-gradient-to-r from-transparent via-white/10 to-transparent group-hover:via-accent/80 transition-all duration-500" />
+      <div className="absolute top-0 left-0 w-full h-1 bg-gradient-to-r from-transparent via-white/10 to-transparent group-hover:via-accent/80 transition-colors duration-500" />
 
       {imageSrc && (
         <div className="relative mb-5 overflow-hidden rounded-[1.25rem] border border-white/10 bg-white/[0.03]">

@@ -105,19 +105,19 @@ export const CookieBanner = () => {
             <div className="grid w-full grid-cols-1 gap-2 sm:w-auto sm:grid-cols-3">
               <button
                 onClick={() => saveConsent(false)}
-                className="min-h-10 rounded-md border border-white/10 px-4 py-2 text-sm font-medium text-slate-200 transition-all hover:bg-white/5 sm:min-w-32"
+                className="min-h-10 rounded-md border border-white/10 px-4 py-2 text-sm font-medium text-slate-200 transition hover:bg-white/5 sm:min-w-32"
               >
                 Rifiuta analytics
               </button>
               <button
                 onClick={() => setShowPreferences(true)}
-                className="min-h-10 rounded-md border border-white/10 px-4 py-2 text-sm font-medium text-slate-200 transition-all hover:bg-white/5 sm:min-w-32"
+                className="min-h-10 rounded-md border border-white/10 px-4 py-2 text-sm font-medium text-slate-200 transition hover:bg-white/5 sm:min-w-32"
               >
                 Gestisci
               </button>
               <button
                 onClick={() => saveConsent(true)}
-                className="min-h-10 rounded-md bg-[#ccff00] px-4 py-2 text-sm font-bold text-[#08090d] shadow-[0_0_15px_rgba(204,255,0,0.25)] transition-all hover:bg-[#b3e600] hover:shadow-[0_0_20px_rgba(204,255,0,0.4)] sm:min-w-36"
+                className="min-h-10 rounded-md bg-[#ccff00] px-4 py-2 text-sm font-bold text-[#08090d] shadow-[0_0_15px_rgba(204,255,0,0.25)] transition hover:bg-[#b3e600] hover:shadow-[0_0_20px_rgba(204,255,0,0.4)] sm:min-w-36"
               >
                 Accetta analytics
               </button>
@@ -166,13 +166,13 @@ export const CookieBanner = () => {
               </a>
               <button
                 onClick={() => saveConsent(false)}
-                className="min-h-10 rounded-md border border-white/10 px-4 py-2 text-sm font-medium text-slate-200 transition-all hover:bg-white/5"
+                className="min-h-10 rounded-md border border-white/10 px-4 py-2 text-sm font-medium text-slate-200 transition hover:bg-white/5"
               >
                 Rifiuta tutto
               </button>
               <button
                 onClick={() => saveConsent(analyticsEnabled)}
-                className="min-h-10 rounded-md bg-[#ccff00] px-5 py-2 text-sm font-bold text-[#08090d] transition-all hover:bg-[#b3e600]"
+                className="min-h-10 rounded-md bg-[#ccff00] px-5 py-2 text-sm font-bold text-[#08090d] transition hover:bg-[#b3e600]"
               >
                 Salva preferenze
               </button>

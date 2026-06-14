@@ -17,7 +17,7 @@ export function Progress({ value, className }: { value: number; className?: stri
       style={{ transform: 'translateZ(0)' }}
     >
       <ProgressPrimitive.Indicator
-        className="h-full w-full flex-1 bg-gradient-to-r from-accent via-accent to-accent transition-all duration-700 ease-out shadow-[0_0_10px_rgba(204,255,0,0.5)]"
+        className="h-full w-full flex-1 bg-gradient-to-r from-accent via-accent to-accent transition-[width] duration-700 ease-out shadow-[0_0_10px_rgba(204,255,0,0.5)]"
         style={{ transform: `translateX(-${100 - (value || 0)}%)` }}
       />
     </ProgressPrimitive.Root>
