@@ -1,10 +1,10 @@
 const DIACRITICS_REGEX = /[\u0300-\u036f]/g;
 const HTML_TAG_REGEX = /<[^>]*>/g;
 const MULTISPACE_REGEX = /\s+/g;
-const NON_WORD_REGEX = /[^a-z0-9/ -]/g;
+const NON_WORD_REGEX = /[^a-z0-9/#_+ -]/g;
 
-export const SEARCH_RESULTS_LIMIT = 6;
-export const SEARCH_CANDIDATE_LIMIT = 12;
+export const SEARCH_RESULTS_LIMIT = 8;
+export const SEARCH_CANDIDATE_LIMIT = 32;
 export const MIN_SEARCH_QUERY_LENGTH = 2;
 
 export const PAGEFIND_RANKING = {

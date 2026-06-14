@@ -10,6 +10,10 @@ describe("normalizeSearchText", () => {
   test("normalizes accents and strips html", () => {
     expect(normalizeSearchText("  Ric\u00e9rca <mark>SQL</mark> ")).toBe("ricerca sql");
   });
+
+  test("keeps technical search characters", () => {
+    expect(normalizeSearchText("C++ CI/CD prompt_v2 #tag")).toBe("c++ ci/cd prompt_v2 #tag");
+  });
 });
 
 describe("rankSearchResults", () => {

@@ -211,6 +211,7 @@ export default defineConfig({
         src: './src/assets/logo-ginnytech.webp',
       },
       favicon: '/favicon-32x32.png',
+      pagefind: false,
       plugins: [
         starlightImageZoom(),
       ],
