@@ -10,6 +10,8 @@ interface CourseCardProps {
   lessonCount: number;
   index: number;
   imageSrc?: string;
+  imageWidth?: number;
+  imageHeight?: number;
   imageAlt?: string;
 }
 
@@ -25,9 +27,19 @@ export const CourseCard = ({
   lessonCount,
   index,
   imageSrc,
+  imageWidth,
+  imageHeight,
   imageAlt,
 }: CourseCardProps) => {
   const Icon = IconMap[iconName] || BookOpen;
+  const moduleImageSrcSet = imageSrc?.startsWith('/course-module-images/')
+    ? [450, 720, 900]
+        .map((width) => {
+          const responsiveSrc = imageSrc.replace('/course-module-images/', `/course-module-images/responsive/${width}/`);
+          return `${responsiveSrc} ${width}w`;
+        })
+        .join(', ')
+    : undefined;
 
   return (
     <a
@@ -38,9 +50,11 @@ export const CourseCard = ({
         <div className="relative overflow-hidden">
           <img
             src={imageSrc}
+            srcSet={moduleImageSrcSet}
+            sizes="(min-width: 1024px) 31vw, (min-width: 768px) 45vw, calc(100vw - 3rem)"
             alt={imageAlt || title}
-            width={1200}
-            height={675}
+            width={imageWidth || 900}
+            height={imageHeight || 382}
             className="h-44 w-full object-cover transition-transform duration-300 group-hover:scale-[1.03] sm:h-48"
             loading="lazy"
             decoding="async"

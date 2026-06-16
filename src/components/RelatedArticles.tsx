@@ -1,14 +1,31 @@
 import type { CollectionEntry } from 'astro:content';
 import { ArrowRight, BookOpen, Newspaper } from 'lucide-react';
 
+type BlogLikePost = CollectionEntry<'blog'> | CollectionEntry<'blogEn'>;
+
 interface Props {
-  currentPost: CollectionEntry<'blog'>;
-  allPosts: CollectionEntry<'blog'>[];
+  currentPost: BlogLikePost;
+  allPosts: BlogLikePost[];
+  basePath?: string;
+  locale?: 'it' | 'en';
 }
 
-export function RelatedArticles({ currentPost, allPosts }: Props) {
+export function RelatedArticles({ currentPost, allPosts, basePath = '/blog', locale = 'it' }: Props) {
   const currentCategory = currentPost.data.category?.trim().toLowerCase() ?? '';
   const currentSlug = currentPost.id.replace(/\.[^/.]+$/, '');
+  const copy = locale === 'en'
+    ? {
+        recent: 'Recent articles',
+        related: 'Related articles',
+        readingTime: 'min read',
+        read: 'Read',
+      }
+    : {
+        recent: 'Articoli recenti',
+        related: 'Articoli correlati',
+        readingTime: 'min di lettura',
+        read: 'Leggi',
+      };
 
   // Find related: same category, exclude self, sort by date descending, take 3
   const related = allPosts
@@ -48,7 +65,7 @@ export function RelatedArticles({ currentPost, allPosts }: Props) {
               margin: 0,
             }}
           >
-            Articoli recenti
+            {copy.recent}
           </h3>
         </div>
         <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem' }}>
@@ -57,7 +74,7 @@ export function RelatedArticles({ currentPost, allPosts }: Props) {
             .sort((a, b) => b.data.date.getTime() - a.data.date.getTime())
             .slice(0, 3)
             .map((post) => (
-              <ArticleRow key={post.id} post={post} />
+              <ArticleRow key={post.id} post={post} basePath={basePath} locale={locale} copy={copy} />
             ))}
         </div>
       </div>
@@ -90,21 +107,31 @@ export function RelatedArticles({ currentPost, allPosts }: Props) {
             margin: 0,
           }}
         >
-          Articoli correlati
+          {copy.related}
         </h3>
       </div>
       <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem' }}>
         {related.map((post) => (
-          <ArticleRow key={post.id} post={post} />
+          <ArticleRow key={post.id} post={post} basePath={basePath} locale={locale} copy={copy} />
         ))}
       </div>
     </div>
   );
 }
 
-function ArticleRow({ post }: { post: CollectionEntry<'blog'> }) {
+function ArticleRow({
+  post,
+  basePath,
+  locale,
+  copy,
+}: {
+  post: BlogLikePost;
+  basePath: string;
+  locale: 'it' | 'en';
+  copy: { readingTime: string; read: string };
+}) {
   const slug = post.id.replace(/\.[^/.]+$/, '');
-  const date = post.data.date.toLocaleDateString('it-IT', {
+  const date = post.data.date.toLocaleDateString(locale === 'en' ? 'en-US' : 'it-IT', {
     year: 'numeric',
     month: 'long',
     day: 'numeric',
@@ -114,7 +141,7 @@ function ArticleRow({ post }: { post: CollectionEntry<'blog'> }) {
 
   return (
     <a
-      href={`/blog/${slug}`}
+      href={`${basePath.replace(/\/$/, '')}/${slug}`}
       style={{
         textDecoration: 'none',
         color: 'inherit',
@@ -164,7 +191,7 @@ function ArticleRow({ post }: { post: CollectionEntry<'blog'> }) {
         >
           <span style={{ color: '#64748b', fontSize: '0.75rem' }}>{date}</span>
           <span style={{ color: '#475569', fontSize: '0.75rem' }}>
-            {readingTime} min di lettura
+            {readingTime} {copy.readingTime}
           </span>
         </div>
       </div>
@@ -179,7 +206,7 @@ function ArticleRow({ post }: { post: CollectionEntry<'blog'> }) {
           gap: '0.25rem',
         }}
       >
-        Leggi <ArrowRight aria-hidden="true" size={14} />
+        {copy.read} <ArrowRight aria-hidden="true" size={14} />
       </span>
     </a>
   );

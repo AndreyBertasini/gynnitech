@@ -858,6 +858,12 @@ const generateEnglishPages = async (htmlFiles: string[], cache: TranslationCache
     rewriteDocumentMetadata(document, relativePath);
 
     const targetPath = path.join(distDir, 'en', relativePath);
+    try {
+      await fs.access(targetPath);
+      continue;
+    } catch {
+      // No explicit English page exists, so generate one from the Italian HTML.
+    }
     await fs.mkdir(path.dirname(targetPath), { recursive: true });
     await fs.writeFile(targetPath, parse5.serialize(document), 'utf8');
   }
