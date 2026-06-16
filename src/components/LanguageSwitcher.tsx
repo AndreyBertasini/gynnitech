@@ -6,8 +6,8 @@ import {
   type SiteLanguage,
 } from '../utils/language';
 
-export default function LanguageSwitcher({ className = '' }: { className?: string }) {
-  const [language, setLanguage] = useState<SiteLanguage>(() => currentSiteLanguage());
+export default function LanguageSwitcher({ className = '', initialLanguage }: { className?: string; initialLanguage?: SiteLanguage }) {
+  const [language, setLanguage] = useState<SiteLanguage>(() => initialLanguage ?? currentSiteLanguage());
   const [hrefs, setHrefs] = useState(() => ({
     it: currentLocalizedHref('it'),
     en: currentLocalizedHref('en'),

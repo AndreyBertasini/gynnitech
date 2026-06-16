@@ -5,10 +5,10 @@ import { SearchWidget } from './ui/SearchWidget';
 import { BOOKING_URL, LINKEDIN_URL } from '../consts';
 import { currentSiteLanguage, localizedPath, type SiteLanguage } from '../utils/language';
 
-export const Navbar = () => {
+export const Navbar = ({ lang }: { lang?: SiteLanguage }) => {
   const [isScrolled, setIsScrolled] = useState(false);
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
-  const [language, setLanguage] = useState<SiteLanguage>(() => currentSiteLanguage());
+  const [language, setLanguage] = useState<SiteLanguage>(() => lang ?? currentSiteLanguage());
   const menuRef = useRef<HTMLDivElement>(null);
 
   const copy = language === 'en'
@@ -64,7 +64,7 @@ export const Navbar = () => {
 
         {/* CTA */}
         <div className="hidden md:flex items-center gap-4">
-          <LanguageSwitcher />
+          <LanguageSwitcher initialLanguage={language} />
           <a href={BOOKING_URL} target="_blank" rel="noreferrer" className="bg-accent/10 hover:bg-accent/20 text-accent border border-accent/30 hover:border-accent px-5 py-2 rounded-full text-sm font-semibold transition">
             {copy.booking}
           </a>
@@ -73,7 +73,7 @@ export const Navbar = () => {
         {/* Mobile Toggle */}
         <div className="flex items-center gap-3 md:hidden">
           <SearchWidget language={language} />
-          <LanguageSwitcher className="shrink-0" />
+          <LanguageSwitcher className="shrink-0" initialLanguage={language} />
           <button
             className="text-white p-2"
             onClick={() => setIsMobileMenuOpen(!isMobileMenuOpen)}
