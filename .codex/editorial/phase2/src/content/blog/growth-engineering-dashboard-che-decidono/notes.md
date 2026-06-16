@@ -1,0 +1,7 @@
+- [TAGLIATO: rimozione di introduzioni generiche e ripetizioni per concentrare il testo sull'argomento centrale]
+- [TAGLIATO: eliminazione di frasi decorative e enfasi superflua]
+- [AGGIUNTO: collegamenti logici per mantenere la coerenza tra sezioni]
+- [AGGIUNTO: traduzione adattata in inglese con tono naturale e fluido]
+- [MANTENUTO: struttura originale con sezioni e punti chiave per chiarezza didattica]
+- [MANTENUTO: esempi, checklist e metriche essenziali per l'applicazione pratica]
+- [RISTRUTTURATO: testo per rispettare le regole editoriali e l'angolo scelto sulla disciplina delle decisioni in condizioni di incertezza]

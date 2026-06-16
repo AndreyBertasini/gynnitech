@@ -1,0 +1,7 @@
+- [TAGLIATO: introduzioni generiche e ripetizioni]
+- [TAGLIATO: aperture e chiusure promozionali]
+- [AGGIUNTO: collegamenti logici per fluidità]
+- [AGGIUNTO: struttura coerente secondo disciplina decisionale sotto incertezza]
+- [MANTENUTO: schema operativo, esempio, metriche, errori, checklist, opinione e azione]
+- [RIFORMULATO: linguaggio per maggiore concretezza e incisività]
+- [RIFORMULATO: versione inglese come adattamento nativo, non traduzione letterale]

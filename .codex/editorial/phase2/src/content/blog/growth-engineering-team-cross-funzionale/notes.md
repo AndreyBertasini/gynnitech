@@ -1,0 +1,7 @@
+- [TAGLIATO: rimozione di aperture generiche e ripetizioni non essenziali]
+- [TAGLIATO: eliminazione di frasi decorative e filler]
+- [AGGIUNTO: collegamenti logici per fluidità tra sezioni]
+- [AGGIUNTO: mantenimento di tutte le sezioni richieste per un articolo coerente e completo]
+- [AGGIUNTO: traduzione adattata in inglese con tono naturale e diretto]
+- [TAGLIATO: nessun codice o blocchi non didattici presenti, quindi nessuna rimozione di codice]
+- [AGGIUNTO: enfasi sull'importanza della disciplina decisionale sotto incertezza come filo conduttore]

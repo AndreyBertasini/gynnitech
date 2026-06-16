@@ -1,0 +1,7 @@
+- [TAGLIATO] Rimosso l'introduzione generica e ripetizioni per concentrare il testo sulla disciplina decisionale.
+- [TAGLIATO] Eliminati dettagli superflui e spiegazioni troppo verbose mantenendo esempi concreti e casi reali.
+- [AGGIUNTO] Inserite sezioni standard di corso (Problema reale, Modello concettuale, Formalizzazione rigorosa, Esempio o caso studio, Lab / esercizio, Errore tipico da evitare, Quiz o checkpoint) per coerenza editoriale.
+- [AGGIUNTO] Rafforzata la connessione tra scelta tecnica SQL e impatto decisionale, in linea con l'angolo editoriale "The discipline of making decisions under uncertainty".
+- [AGGIUNTO] Mantenuti esempi DoorDash, Netflix, Uber e Airbnb per concretezza e rilevanza.
+- [AGGIUNTO] Conservati componenti SqlExercise e riferimenti accademici per valore didattico e pratico.
+- [AGGIUNTO] Sintesi finale per sottolineare l'importanza della scelta semantica nelle join avanzate come disciplina decisionale.

@@ -1,0 +1,9 @@
+- [TAGLIATO] Rimosso il codice SQL originale e i dettagli troppo didascalici per favorire un discorso editoriale coerente.
+- [TAGLIATO] Eliminati esempi eccessivamente dettagliati e ripetitivi, mantenendo solo quelli che esplicitano il valore decisionale.
+- [AGGIUNTO] Introdotto un modello concettuale e una formalizzazione rigorosa per collegare tecniche SQL a decisioni pratiche.
+- [AGGIUNTO] Inserito un laboratorio pratico con descrizione tabellare e obiettivi chiari.
+- [AGGIUNTO] Strutturato la lezione con sezioni obbligatorie per un corso avanzato, mantenendo un filo conduttore sulla disciplina della decisione sotto incertezza.
+- [AGGIUNTO] Traduzione inglese adattata per fluidità e chiarezza, non letterale.
+- [AGGIUNTO] Mantenuti riferimenti ai casi reali per ancorare la teoria alla pratica.
+- [AGGIUNTO] Inserito checkpoint/quiz per consolidare la comprensione e collegare analisi a decisioni.
+- [TAGLIATO] Rimosse sezioni decorative, promozionali e ripetitive.

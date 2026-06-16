@@ -1,0 +1,8 @@
+- [TAGLIATO: introduzioni generiche e ripetizioni non necessarie]
+- [TAGLIATO: dettagli troppo tecnici o numerici che non aggiungevano valore diretto alla riflessione]
+- [TAGLIATO: sezioni di panico o allarmismo non supportate da analisi]
+- [AGGIUNTO: struttura coerente con l'angolo editoriale sulla decisione sotto incertezza]
+- [AGGIUNTO: sezioni con domande guida e regole pratiche per aziende normali]
+- [AGGIUNTO: quiz/checkpoint per stimolare la riflessione]
+- [AGGIUNTO: conclusione che lega scenario e disciplina decisionale]
+- [AGGIUNTO: mantenuti grafici e riferimenti essenziali come link e tabelle per supportare i punti chiave]

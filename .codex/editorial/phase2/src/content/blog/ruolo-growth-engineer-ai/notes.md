@@ -1,0 +1,8 @@
+- [TAGLIATO: rimozione di aperture generiche e ripetizioni]
+- [TAGLIATO: eliminazione di enfasi decorative e frasi promozionali]
+- [TAGLIATO: rimozione di sezioni non essenziali o filler]
+- [AGGIUNTO: collegamenti logici tra sezioni per coerenza]
+- [AGGIUNTO: mantenimento di tutti i punti chiave e liste per chiarezza]
+- [AGGIUNTO: traduzione adattata in inglese con tono naturale e fluido]
+- [AGGIUNTO: rispetto delle intestazioni richieste e struttura coerente con l'angolo editoriale]
+- [AGGIUNTO: conclusione che lega il ruolo del growth engineer all'incertezza e al processo decisionale]

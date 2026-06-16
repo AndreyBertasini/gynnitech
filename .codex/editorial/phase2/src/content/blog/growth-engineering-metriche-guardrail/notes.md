@@ -1,0 +1,7 @@
+- [TAGLIATO: rimozione di introduzioni generiche e ripetizioni per mantenere il testo focalizzato sulla disciplina decisionale sotto incertezza]
+- [TAGLIATO: eliminazione di frasi decorative e filler]
+- [AGGIUNTO: collegamenti logici tra sezioni per fluidità]
+- [AGGIUNTO: mantenimento di tutte le sezioni richieste per una lezione coerente]
+- [AGGIUNTO: traduzione adattata in inglese con tono naturale e diretto]
+- [MANTENUTO: esempi pratici, checklist e opinioni per supportare l'argomentazione]
+- [RISTRUTTURATO: testo in un organismo editoriale coerente, eliminando ripetizioni e migliorando la chiarezza]

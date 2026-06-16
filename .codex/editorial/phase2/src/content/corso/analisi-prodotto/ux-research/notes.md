@@ -1,0 +1,14 @@
+- [TAGLIATO:] Removed introductory filler and generic AI-style openings.
+- [TAGLIATO:] Removed decorative emphasis and repetitive statements.
+- [TAGLIATO:] Removed redundant explanations and overly detailed narrative sections that do not advance the argument.
+- [AGGIUNTO:] Added explicit logical bridges connecting conceptual model, formalization, examples, and exercises.
+- [AGGIUNTO:] Structured the content into the required editorial organism with exact level-2 headings as per instructions.
+- [AGGIUNTO:] Preserved all code blocks, tables, and examples that illustrate the discipline of decision-making under uncertainty.
+- [AGGIUNTO:] Transformed code snippets into prose where appropriate, but kept the SQL query as is due to its teaching value.
+- [AGGIUNTO:] Made the Italian version concrete, opinionated, and native in style.
+- [AGGIUNTO:] Adapted the English version to be a native adaptation, not a literal translation.
+- [AGGIUNTO:] Included a summary section that ties the lesson to the discipline of making decisions under uncertainty.
+- [AGGIUNTO:] Included quiz/checkpoint questions to reinforce learning and decision focus.
+- [AGGIUNTO:] Included lab exercises with progressive difficulty to practice the concepts.
+- [AGGIUNTO:] Maintained references for further reading.
+- [TAGLIATO:] Removed the original frontmatter and metadata as per instructions.

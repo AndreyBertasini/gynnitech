@@ -1,0 +1,6 @@
+- [TAGLIATO: apertura generica e ripetizioni sull'entusiasmo del lancio]
+- [TAGLIATO: frasi decorative e ripetizioni sul valore della trasparenza]
+- [TAGLIATO: riferimenti promozionali e inviti non essenziali]
+- [AGGIUNTO: collegamenti logici tra sezioni per fluidità]
+- [AGGIUNTO: precisazioni concrete su cosa misurare e come applicare il rollout]
+- [AGGIUNTO: conclusione più incisiva e coerente con l'angolo editoriale sulla decisione sotto incertezza]

@@ -1,0 +1,8 @@
+- [TAGLIATO: eliminati i passaggi introduttivi generici e le ripetizioni superflue per mantenere il testo conciso e focalizzato sulla disciplina del decision making sotto incertezza]
+- [TAGLIATO: rimosse aperture e chiusure decorative per mantenere un tono diretto e concreto]
+- [AGGIUNTO: collegamenti logici tra sezioni per migliorare la coesione del testo]
+- [AGGIUNTO: traduzione adattata in inglese con tono naturale e fluido, non letterale]
+- [AGGIUNTO: mantenute tutte le sezioni richieste per un corso strutturato, con titoli esatti e contenuti coerenti]
+- [TAGLIATO: rimosse espressioni enfatiche e promozionali per mantenere un tono editoriale e opinabile]
+- [AGGIUNTO: chiarimenti su metriche e processi decisionali per sottolineare la disciplina del decision making sotto incertezza]
+- [TAGLIATO: eliminati riferimenti vaghi a strumenti o ruoli non necessari per il focus del testo]

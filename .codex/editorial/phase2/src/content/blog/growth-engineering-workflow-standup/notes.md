@@ -1,0 +1,8 @@
+- [TAGLIATO: Introduzione generica e ripetizioni sull'importanza dello standup]
+- [TAGLIATO: Frasi decorative e ripetizioni sul ruolo del growth engineer]
+- [AGGIUNTO: Struttura chiara con sezioni obbligatorie per una lezione coerente]
+- [AGGIUNTO: Lab con livelli di difficoltà e materiali consigliati]
+- [AGGIUNTO: Quiz/checkpoint per favorire la riflessione]
+- [AGGIUNTO: Conclusione che lega il tema al contesto AI e alla disciplina decisionale sotto incertezza]
+- [MANTENUTO: Schema operativo in 5 punti, esempio pratico, checklist e metriche]
+- [MANTENUTO: Linguaggio concreto e opinioni editoriali espresse in modo diretto]

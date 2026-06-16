@@ -1,0 +1,8 @@
+- [TAGLIATO: Introduzioni generiche e ripetizioni, decorazioni e frasi di apertura non essenziali]
+- [TAGLIATO: Dettagli superflui su strumenti o dashboard]
+- [TAGLIATO: Frasi enfatiche e promozionali]
+- [AGGIUNTO: Struttura coerente con sezioni obbligatorie per lezioni su decisioni sotto incertezza]
+- [AGGIUNTO: Lab con livelli di difficoltà e materiali consigliati]
+- [AGGIUNTO: Domande di checkpoint per stimolare riflessione critica]
+- [AGGIUNTO: Conclusione che lega il tema al contesto AI-driven e ruolo futuro del growth engineer]
+- [AGGIUNTO: Collegamenti logici tra sezioni per fluidità e coerenza editoriale]

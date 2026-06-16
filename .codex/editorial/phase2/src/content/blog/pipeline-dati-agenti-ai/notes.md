@@ -1,0 +1,8 @@
+- [TAGLIATO: Introduzioni generiche e ripetizioni su AI e pipeline]
+- [TAGLIATO: Frasi promozionali e riferimenti a corsi non essenziali per la comprensione]
+- [AGGIUNTO: Sezioni strutturate secondo il modello richiesto con titoli precisi]
+- [AGGIUNTO: Lab con livelli e materiali consigliati]
+- [AGGIUNTO: Quiz per verificare la comprensione]
+- [AGGIUNTO: Conclusione che lega il tema al processo decisionale sotto incertezza]
+- [MANTENUTO: Esempio pratico e dettagli tecnici su pipeline e controlli]
+- [RIDOTTO: Passaggi ridondanti e spiegazioni troppo generiche]

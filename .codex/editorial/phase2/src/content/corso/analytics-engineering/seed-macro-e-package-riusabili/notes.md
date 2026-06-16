@@ -1,0 +1,11 @@
+- [TAGLIATO:] Rimozione di ripetizioni e introduzioni generiche.
+- [TAGLIATO:] Eliminazione di dettagli superflui o troppo tecnici non essenziali per l'argomento decisionale.
+- [AGGIUNTO:] Inserimento di sezioni con struttura didattica coerente (Problema reale, Modello concettuale, Formalizzazione rigorosa, ecc.) per trasformare il testo in un organismo editoriale.
+- [AGGIUNTO:] Chiarezza e concretezza nell'italiano, con tono più diretto e opinioni editoriali.
+- [AGGIUNTO:] Adattamento inglese non letterale ma naturale e fluido.
+- [PRESERVATO:] Tabelle, checklist, esempi, e snippet di configurazione essenziali per comprendere il workflow e la collaborazione tecnica.
+- [RISTRUTTURATO:] Il contenuto è stato organizzato per seguire la disciplina della decisione sotto incertezza, collegando il processo tecnico a scelte operative e rischi.
+- [RIMOSSO:] Frasi di riempimento, slogan e riferimenti promozionali.
+- [MANTENUTO:] Riferimenti bibliografici per approfondimenti.
+- [MANTENUTO:] Lab con livelli di difficoltà e materiali consigliati per esercitazioni pratiche.
+- [MANTENUTO:] Quiz finale per autovalutazione.

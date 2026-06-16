@@ -1,0 +1,9 @@
+- [TAGLIATO] Eliminati i passaggi introduttivi generici e ripetizioni per concentrare il testo sulla disciplina operativa e decisionale.
+- [TAGLIATO] Rimosse descrizioni troppo generiche e promesse vaghe sull'AI, per focalizzarsi su processi e controlli.
+- [TAGLIATO] Tolti riferimenti promozionali e link tecnici che non aggiungevano valore diretto alla lezione.
+- [AGGIUNTO] Inserite tabelle e modelli concettuali esplicativi per chiarire i livelli di lavoro e controllo.
+- [AGGIUNTO] Strutturato il testo secondo le sezioni obbligatorie per lezioni di corso, con titoli precisi e contenuti concreti.
+- [AGGIUNTO] Dettagliato esempi, errori tipici e quiz per stimolare riflessione e applicazione pratica.
+- [AGGIUNTO] Fornito lab con livelli di difficoltà e indicazioni per dataset e materiali, per favorire l'apprendimento progressivo.
+- [AGGIUNTO] Conclusione operativa che ribadisce l'importanza di workflow osservabili e controllabili, non solo di velocità.
+- [AGGIUNTO] Versione inglese adattata per fluidità e chiarezza, non traduzione letterale.

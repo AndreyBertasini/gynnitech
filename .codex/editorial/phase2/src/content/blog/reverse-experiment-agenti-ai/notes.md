@@ -1,0 +1,8 @@
+- [TAGLIATO: rimozione di aperture generiche e ripetizioni ridondanti]
+- [TAGLIATO: frasi di richiamo promozionale e inviti non essenziali]
+- [AGGIUNTO: collegamenti logici più netti tra sezioni per fluidità]
+- [AGGIUNTO: formulazioni più incisive e concrete per l'italiano]
+- [AGGIUNTO: adattamento culturale e stilistico per la versione inglese]
+- [MANTENUTO: struttura con sezioni obbligatorie e contenuti tecnici]
+- [MANTENUTO: esempi, liste, e link didattici per approfondimento]
+- [RISTRUTTURATO: per coerenza con l'angolo editoriale sulla decisione sotto incertezza]

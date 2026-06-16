@@ -1,0 +1,8 @@
+- [TAGLIATO:] Eliminato l'introduzione ridondante e le spiegazioni troppo generiche sulla motivazione e forza di volontà per focalizzarsi sul modello operativo.
+- [TAGLIATO:] Rimosse ripetizioni e dettagli non essenziali come metafore estese e spiegazioni di base sul neurotrasmettitore dopamina.
+- [AGGIUNTO:] Inseriti collegamenti logici tra sezioni per mantenere coerenza e fluidità del discorso.
+- [AGGIUNTO:] Mantenuti esempi concreti, tabelle e quiz per rafforzare l'apprendimento e la pratica.
+- [AGGIUNTO:] Strutturato il testo con le sezioni richieste: Problema reale, Modello concettuale, Formalizzazione rigorosa, Esempio o caso studio, Lab / esercizio, Errore tipico da evitare, Quiz o checkpoint.
+- [AGGIUNTO:] Versione italiana resa più diretta, concreta e opinionata, mentre la versione inglese è un adattamento naturale e fluido, non una traduzione letterale.
+- [AGGIUNTO:] Conservati tutti i componenti MDX validi, inclusi blocchi codice, tabelle e componenti React come <QuizExercise>.
+- [AGGIUNTO:] Sintesi finale che lega la disciplina del prendere decisioni sotto incertezza con la costruzione di un sistema di apprendimento sostenibile basato su feedback e progressi misurabili.

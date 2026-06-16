@@ -1,0 +1,8 @@
+- [TAGLIATO: rimozione di frasi introduttive generiche e ripetizioni]
+- [TAGLIATO: eliminazione di passaggi decorativi e enfatici]
+- [TAGLIATO: rimozione di riferimenti promozionali diretti e link espliciti]
+- [AGGIUNTO: collegamenti logici tra sezioni per fluidità]
+- [AGGIUNTO: conclusione che integra il tema della disciplina decisionale sotto incertezza]
+- [AGGIUNTO: ristrutturazione in sezioni coerenti con l'angolo editoriale]
+- [AGGIUNTO: mantenimento di esempi concreti e raccomandazioni operative]
+- [AGGIUNTO: traduzione adattata in inglese con tono naturale e conciso]

@@ -19,41 +19,53 @@ learningObjectives:
   - Comprendere il problema analitico e il contesto decisionale
   - Applicare esempi, metriche e controlli a casi reali
 ---
-import { SqlExercise } from '../../../components/SqlExercise';
+# EXPLAIN, ottimizzazione e tuning delle performance
 
-# EXPLAIN, optimization e performance tuning
+Il lunedì mattina il dashboard impiega dodici minuti, il PM chiede un filtro in più, e il costo del warehouse cresce senza che la query diventi più stabile. Prima di riscrivere tutto, serve capire cosa sta succedendo davvero nel motore di database. Questa lezione parte dal query plan, non dall'intuizione.
 
+## Problema reale
 
-Il dashboard del lunedì impiega dodici minuti, il PM chiede di aggiungere un filtro e il warehouse scala costi senza rendere la query più stabile. Prima di riscrivere tutto, devi capire cosa sta facendo davvero il motore. **EXPLAIN, optimization e performance tuning** parte dal query plan, non dall'intuizione.
+Nel contesto di query analitiche complesse, spesso il problema è scrivere query corrette e performanti anche quando grain, finestre, coorti e casi limite complicano la logica. Il tuning non è un esercizio accademico, ma un processo per migliorare decisioni reali con dati affidabili e azioni concrete.
 
-## Una scena da cui partire
+## Modello concettuale
 
-Leggi la lezione come una sessione di diagnosi: individua scansioni inutili, join costose, aggregazioni anticipate o filtri applicati troppo tardi. L'obiettivo non è micro-ottimizzare per sport, ma rendere la query abbastanza veloce, leggibile e prevedibile da stare in produzione.
+| Fase     | Cosa chiarire                                  | Output                  |
+|----------|------------------------------------------------|-------------------------|
+| Domanda  | Quale scelta reale deve migliorare?             | Decisione da prendere   |
+| Misura   | Quale segnale osservabile rappresenta il problema? | Metrica o dato sorgente |
+| Controllo| Quale baseline rende il risultato interpretabile? | Confronto credibile     |
+| Azione   | Che cosa cambia dopo l'analisi?                  | Prossimo passo operativo|
 
-- **Contesto:** Quale collo di bottiglia rende la query fragile?
-- **Metodo:** Quale evidenza del piano conferma la diagnosi?
-- **Applicazione:** Quale intervento faresti prima di cambiare l'architettura?
+Questo modello semplice guida l'analisi: ogni intervento tecnico deve rafforzare almeno uno di questi punti.
 
-## Leggere EXPLAIN: l'anatomia di un query plan
+## Formalizzazione rigorosa
 
-`EXPLAIN` è il comando universale per vedere cosa il database fa *davvero* con la tua query. La sintassi è identica in tutti i database:
+Per affrontare EXPLAIN e tuning, definisci prima l'unità di lavoro (riga, partizione, finestra, join, coorte o metrica temporale), poi il segnale principale (correttezza, performance, duplicati, grain, stabilità), la baseline (periodo precedente, gruppo comparabile, benchmark), la decisione attesa (query, modello, test, pattern riusabile) e il rischio (confondere un numero con una prova).
 
-```sql
-EXPLAIN SELECT ... FROM ... WHERE ...;
-```
+| Elemento       | Specifica richiesta                                             |
+|----------------|----------------------------------------------------------------|
+| Unità di analisi| riga, partizione, finestra, join, coorte o metrica temporale    |
+| Segnale        | correttezza, performance, duplicati, grain, stabilità           |
+| Baseline       | periodo precedente, gruppo comparabile, benchmark o controfattuale |
+| Decisione      | query, modello intermedio, test SQL o pattern riusabile         |
+| Rischio        | scambiare un numero disponibile per una prova sufficiente       |
 
-L'output è un albero di operazioni. Le più comuni:
+La formalizzazione è solida quando un altro analista può riprodurre la logica e ottenere la stessa decisione.
 
-| Operazione | Significato | Allarme se... |
-|-----------|-------------|---------------|
-| **Seq Scan / Full Scan** | Legge tutta la tabella | Dovrebbe apparire solo su tabelle piccole (&lt;10K righe) o quando serve davvero tutto |
-| **Index Scan** | Usa un indice per trovare righe | Buono se selettivo |
-| **Index Only Scan** | L'indice contiene tutte le colonne richieste | Ottimo, nessun accesso alla tabella |
-| **Hash Join** | Costruisce una hash table in memoria | OK se la tabella inner è piccola; allarme se è grande |
-| **Nested Loop** | Per ogni riga di A, cerca in B | Allarme se B è grande e senza indice |
-| **Sort** | Ordina dati (spesso per GROUP BY o ORDER BY) | Allarme se il sort è su disco (work_mem insufficiente) |
+## Leggere EXPLAIN: anatomia di un query plan
 
-**Caso reale: Come leggere un EXPLAIN in PostgreSQL**
+EXPLAIN mostra cosa fa il database con la query, rivelando scansioni, join, aggregazioni e filtri. Le operazioni più comuni sono:
+
+| Operazione       | Significato                         | Allarme se...                                  |
+|------------------|-----------------------------------|-----------------------------------------------|
+| Seq Scan / Full Scan | Legge tutta la tabella          | Solo su tabelle piccole o quando serve tutto  |
+| Index Scan       | Usa un indice per trovare righe   | Buono se selettivo                            |
+| Index Only Scan  | L'indice copre tutte le colonne   | Ottimo, nessun accesso alla tabella           |
+| Hash Join        | Costruisce una hash table in memoria | OK se la tabella inner è piccola; allarme se grande |
+| Nested Loop      | Per ogni riga di A cerca in B     | Allarme se B è grande e senza indice          |
+| Sort             | Ordina dati (GROUP BY, ORDER BY)  | Allarme se sort su disco (memoria insufficiente) |
+
+### Caso reale in PostgreSQL
 
 ```sql
 EXPLAIN ANALYZE
@@ -65,203 +77,78 @@ WHERE c.country = 'IT'
 GROUP BY c.name;
 ```
 
-Output annotato:
-```
-HashAggregate  (actual time=845.2..850.1 rows=42300 loops=1)
-  ->  Hash Join  (actual time=320.5..780.3 rows=850000 loops=1)
-        Hash Cond: (o.customer_id = c.id)
-        ->  Seq Scan on orders o  (actual time=0.05..210.2 rows=1200000 loops=1)
-              Filter: (order_date >= '2024-01-01')
-        ->  Hash  (actual time=318.2..318.2 rows=50000 loops=1)
-              ->  Seq Scan on customers c  (actual time=0.02..180.5 rows=50000 loops=1)
-                    Filter: (country = 'IT')
-```
+L'output mostra due Seq Scan, un Hash Join e un HashAggregate in memoria. Il problema è la lettura completa di `orders` (1.2M righe). Aggiungendo un indice su `orders(customer_id, order_date)`, la Seq Scan diventa Index Only Scan, riducendo il tempo del 70%.
 
-Quello che vediamo:
-- **Due Seq Scan**: entrambe le tabelle vengono lette completamente. Gli indici su `o.customer_id` e `c.country` non esistono o non vengono usati.
-- **Hash Join con `orders` come inner**: il database sceglie di hash-joinare `orders` (1.2M righe) con `customers` filtrata (50K righe). L'ordine è ragionevole (inner più piccola), ma la lettura completa di `orders` è il bottleneck.
-- **HashAggregate su 850K righe**: l'aggregazione è in memoria (nessun "Disk:" nell'output), buono.
+## Strategie di ottimizzazione: gerarchia di interventi
 
-**Ottimizzazione**: aggiungendo un indice su `orders(customer_id, order_date)`, la Seq Scan su orders diventerebbe un Index Only Scan, eliminando il 70% del tempo.
+1. Riduci il volume di dati letto filtrando presto (WHERE su colonne indicizzate o partizionate).
+2. Riduci il lavoro di JOIN con anti-join, semi-join o pre-aggregazioni.
+3. Usa indici compositi e parziali che coprano le colonne richieste.
+4. Configura la memoria per sort e hash join (work_mem, join_buffer_size).
 
-## Strategie di ottimizzazione: la gerarchia di interventi
+## ClickHouse: un paradigma diverso
 
-L'ottimizzazione SQL segue una gerarchia, dal più impattante al più sottile:
+ClickHouse è column-oriented, memorizza ogni colonna separatamente. Questo permette di leggere solo le colonne necessarie, accelerando le query analitiche su grandi dataset.
 
-1. **Riduci il volume di dati letto** (prima di tutto il resto)
-   - Filtra presto con WHERE su colonne partizionate o indicizzate
-   - Usa subquery/CTE che restringono il dataset prima delle JOIN
+Ottimizzazioni specifiche:
+- **ORDER BY della tabella:** indice primario per saltare blocchi inutili.
+- **Codec di compressione:** riducono spazio e accelerano decompressione.
+- **Materialized columns:** colonne calcolate all'INSERT per espressioni costose.
+- **Projection:** mini-tabelle ordinate diversamente per query frequenti.
 
-2. **Riduci il lavoro di JOIN**
-   - Anti-join (`NOT EXISTS`) invece di `LEFT JOIN ... WHERE IS NULL`
-   - Semi-join (`EXISTS`) invece di `INNER JOIN` quando non servono colonne della seconda tabella
-   - Pre-aggregazione prima del JOIN se il grain è diverso
+### Caso reale: Cloudflare
 
-3. **Usa gli indici**
-   - Indici compositi nell'ordine delle clausole WHERE/GROUP BY
-   - Indici parziali con WHERE per filtri frequenti
-   - Index Only Scan richiede che l'indice copra tutte le colonne SELECT
-
-4. **Configura la memoria**
-   - `work_mem` (PostgreSQL) / `max_memory_usage` (ClickHouse) per sort e hash in memoria
-   - `join_buffer_size` per hash join senza swap su disco
-
-## ClickHouse: un modello di performance diverso
-
-ClickHouse, usato da Cloudflare, Uber, Spotify e decine di altre aziende data-intensive, ha un modello di performance radicalmente diverso dai database row-based. Comprenderlo è essenziale perché sempre più aziende lo adottano per analytics.
-
-ClickHouse è **column-oriented**: i dati di ogni colonna sono memorizzati in file separati. Questo significa:
-- `SELECT COUNT(*) FROM huge_table` legge solo i metadati, zero colonne
-- `SELECT AVG(price) FROM orders` legge solo la colonna `price`
-- Ma `SELECT *` è lento esattamente come in un row-store
-
-**Ottimizzazioni specifiche di ClickHouse:**
-
-1. **ORDER BY della tabella (sorting key)**: È l'indice primario. Sceglilo in base alle query più frequenti. ClickHouse salta interi blocchi (granuli) se non rientrano nel filtro.
-
-2. **Codec di compressione**: `CODEC(ZSTD(3))` o `CODEC(Delta, ZSTD)` per colonne con pattern prevedibili. ClickHouse comprime i dati sul disco, e la decompressione è più veloce della lettura di dati non compressi.
-
-3. **Materialized columns**: Colonne calcolate al momento dell'INSERT, non della SELECT. Utili per espressioni costose usate frequentemente: `MATERIALIZED lower(email)` o `MATERIALIZED toStartOfMonth(order_date)`.
-
-4. **Projection**: Una mini-tabella ordinata diversamente dalla tabella principale, aggiornata automaticamente. Se la tua tabella è ordinata per `order_date` ma spesso query per `customer_id`, una projection ordinata per `customer_id` può accelerare 100x.
-
-**Caso reale: Cloudflare e le materialized columns**
-
-Cloudflare processa oltre 20 milioni di richieste HTTP al secondo, tracciate in ClickHouse come log row per richiesta. Nel 2021, il team di observability notò che le query di aggregazione per paese (`GROUP BY country_code`) richiedevano 45 secondi su 6 ore di dati.
-
-La soluzione fu una materialized column:
-
-```sql
-ALTER TABLE http_logs
-ADD COLUMN country_code String MATERIALIZED
-  ip_to_country(client_ip);
-```
-
-La funzione `ip_to_country()` veniva eseguita una volta per riga, al momento dell'INSERT, non milioni di volte al momento della query. Il tempo di esecuzione scese da 45 secondi a 0.8 secondi. Cloudflare Engineering ha pubblicato questo come esempio canonico di "pre-compute what you query often."
-
-## 🖥️ Prova in Sandbox
-
-<SqlExercise client:visible
-  description={`Trova le categorie di prodotto che generano più del 20% del revenue totale (analisi di Pareto). Usa SUM() su finestra per calcolare il totale e la percentuale cumulativa.`}
-  hint="Usa SUM(importo) OVER () per il totale, e SUM(importo) OVER (ORDER BY SUM(importo) DESC) per il cumulativo."
-  initialQuery={`SELECT categoria, SUM(importo) AS revenue\nFROM ordini\nGROUP BY categoria\nORDER BY revenue DESC`}
-  solutionQuery={`WITH ranked AS (\n  SELECT categoria, SUM(importo) AS revenue,\n    SUM(importo) OVER () AS totale,\n    SUM(importo) OVER (ORDER BY SUM(importo) DESC ROWS UNBOUNDED PRECEDING) AS cumulativo\n  FROM ordini\n  GROUP BY categoria\n)\nSELECT categoria, revenue, totale,\n  ROUND(cumulativo * 100.0 / totale, 1) AS pct_cumulativo\nFROM ranked\nORDER BY revenue DESC`}
-/>
-
-<SqlExercise client:visible
-  description={`Identifica gli utenti che NON hanno mai fatto un ordine, usando un anti-join con NOT EXISTS. Questo pattern è più efficiente di LEFT JOIN + IS NULL.`}
-  hint="Usa NOT EXISTS (SELECT 1 FROM ordini WHERE utente_id = utenti.id)."
-  initialQuery={`SELECT u.id, u.nome, u.fonte, u.creato_il\nFROM utenti u\nORDER BY u.id`}
-  solutionQuery={`SELECT u.id, u.nome, u.fonte, u.creato_il\nFROM utenti u\nWHERE NOT EXISTS (\n  SELECT 1 FROM ordini o\n  WHERE o.utente_id = u.id\n)\nORDER BY u.creato_il`}
-/>
+Cloudflare ha ridotto da 45 a 0.8 secondi una query di aggregazione con una materialized column che calcola il paese dall'IP al momento dell'INSERT, evitando calcoli ripetuti in query.
 
 ## Laboratorio pratico
 
-Usa il dataset `orders` da 5M righe e `customers` da 500K righe.
+Dataset: `orders` (5M righe), `customers` (500K righe).
 
-**Livello 1 — Lettura di EXPLAIN:** Esegui `EXPLAIN ANALYZE` su una query che unisce le due tabelle e aggrega. Identifica il collo di bottiglia (Seq Scan? Hash Join? Sort su disco?).
-
-**Livello 2 — Ottimizzazione:** Aggiungi un indice appropriato e ri-esegui `EXPLAIN ANALYZE`. Quanto è migliorato?
-
-**Livello 3 — Riscrittura:** Senza toccare indici, riscrivi la query per ridurre il tempo usando anti-join o pre-aggregazione. Confronta il piano di esecuzione con l'originale.
-
-## Checkpoint operativi
-
-1. **Cosa sono Seq Scan, Index Scan, e Hash Join? Quando uno Scan è accettabile e quando è un allarme?**
-
-2. **Qual è la gerarchia di ottimizzazione SQL dal punto di maggior impatto al più sottile?**
-
-3. **Perché ClickHouse è più veloce per query analitiche su poche colonne, e cosa sono le materialized columns?**
-
----
-
-*Riferimenti accademici:*
-- PostgreSQL Documentation. (2024). "14.1. Using EXPLAIN." *PostgreSQL 16 Manual.*
-- ClickHouse Documentation. (2024). "Query Performance Optimization." *ClickHouse Docs.*
-- Winand, M. (2012). *SQL Performance Explained*. Markus Winand. "The Anatomy of an Index."
-
-## Controllo di qualità
-
-Prima di usare explain, optimization e performance tuning in una decisione, controlla sempre completezza, duplicati, timezone, definizioni cambiate e segmenti esclusi. Molte analisi apparentemente sofisticate falliscono perché il dato di partenza misura un comportamento diverso da quello che il team crede di osservare.
-
-
-## Interpretazione per segmenti
-
-La media aggregata è solo il punto di partenza. Segmenta per canale, coorte, piano, paese, device e maturità dell'utente. Se due segmenti si muovono in direzioni opposte, la media non rappresenta nessuno dei due e può portare a una decisione sbagliata.
-
-## Problema reale
-
-Nel dominio di advanced SQL, **EXPLAIN, optimization e performance tuning** serve a risolvere questo problema: scrivere query analitiche corrette anche quando grain, finestre, coorti e casi limite diventano complessi. La lezione non va trattata come teoria isolata, ma come un modo per migliorare una scelta concreta con dati, assunzioni esplicite e controlli minimi.
-
-Obiettivo operativo: Comprendere il problema analitico e il contesto decisionale; Applicare esempi, metriche e controlli a casi reali. Se alla fine non sai indicare quale decisione cambia, quale dato osservi e quale errore vuoi evitare, la lezione non è ancora diventata competenza applicata.
-
-## Modello concettuale
-
-| Fase | Cosa chiarire | Output |
-|---|---|---|
-| Domanda | Quale scelta reale deve migliorare? | Decisione da prendere |
-| Misura | Quale segnale osservabile rappresenta il problema? | Metrica o dato sorgente |
-| Controllo | Quale baseline rende il risultato interpretabile? | Confronto credibile |
-| Azione | Che cosa cambia dopo l'analisi? | Prossimo passo operativo |
-
-Il modello concettuale è intenzionalmente semplice: decisione, dato, controllo, azione. Ogni approfondimento tecnico deve rafforzare almeno uno di questi quattro punti.
-
-## Formalizzazione rigorosa
-
-Per rendere **EXPLAIN, optimization e performance tuning** analizzabile, definisci prima l'unità di lavoro: **riga, partizione, finestra, join, coorte o metrica temporale**. Poi collega questa unità a una metrica osservabile: **correttezza, performance, duplicati, grain e stabilità del risultato**. Infine dichiara la decisione attesa: **query, modello intermedio, test SQL o pattern riusabile**.
-
-| Elemento | Specifica richiesta |
-|---|---|
-| Unità di analisi | riga, partizione, finestra, join, coorte o metrica temporale |
-| Segnale principale | correttezza, performance, duplicati, grain e stabilità del risultato |
-| Baseline | Periodo precedente, gruppo comparabile, benchmark o scenario controfattuale |
-| Decisione | query, modello intermedio, test SQL o pattern riusabile |
-| Rischio | Scambiare un numero disponibile per una prova sufficiente |
-
-La formalizzazione e solida quando un altro analista può riprodurre la logica, criticare le assunzioni e ottenere la stessa decisione partendo dagli stessi dati.
-
-## Esempio o caso studio
-
-Una query restituisce il risultato giusto ma blocca la dashboard proprio durante la review settimanale. Il team deve leggere il piano di esecuzione, distinguere scan inutili, join costosi e filtri applicati troppo tardi, poi scegliere se ottimizzare SQL, modello dati o indice.
-
-| Evidenza osservata | Lettura prudente | Azione consigliata |
-|---|---|---|
-| Il numero migliora | Potrebbe essere effetto reale o variazione normale | Cercare confronto e segmento |
-| Un segmento cambia più degli altri | La media aggregata nasconde una differenza | Separare coorti o casi d'uso |
-| Il costo cresce insieme al risultato | L'impatto va letto sul margine | Stimare trade-off e sostenibilità |
+- **Livello base:** esegui `EXPLAIN ANALYZE` su una query con join e aggregazione, individua il collo di bottiglia.
+- **Livello intermedio:** aggiungi un indice e verifica il miglioramento.
+- **Livello avanzato:** riscrivi la query usando anti-join o pre-aggregazione, confronta i piani.
 
 ## Lab / esercizio
 
 ### Livello base
 
-Scrivi una scheda di una pagina per **EXPLAIN, optimization e performance tuning**: decisione da supportare, metrica primaria, baseline, rischio principale e azione se il segnale e confermato.
+Scrivi la decisione che questa lezione dovrebbe migliorare, la metrica principale e il rischio da controllare.
 
 ### Livello intermedio
 
-Costruisci una tabella con tre segmenti, periodi o scenari. Per ciascuno indica cosa cambia, quale spiegazione alternativa e plausibile e quale controllo useresti prima di raccomandare un azione.
+Costruisci una tabella con baseline, segnale, interpretazione prudente e azione consigliata.
 
 ### Livello research-grade
 
-Prepara un decision memo: ipotesi, dati richiesti, criteri di esclusione, controlli di qualità, soglia decisionale, rischio residuo e piano di monitoraggio dopo la decisione.
+Trasforma l'esercizio in un memo decisionale con assunzioni, limiti, criterio di stop e controllo successivo.
 
 ### Dataset e materiali consigliati
 
-Usa warehouse SQL, dati ordini, eventi, sessioni, coorti, revenue e tabelle calendario. Se non hai accesso a dati reali, crea un dataset sintetico con almeno 200 righe, una dimensione temporale, una dimensione segmento e una metrica di outcome.
+Usa un export reale, un dataset sintetico o una dashboard gia esistente. Il materiale deve contenere una domanda, una metrica e una scelta da prendere.
 
 ## Errore tipico da evitare
 
-L'errore più comune e usare **EXPLAIN, optimization e performance tuning** come etichetta invece che come processo. Succede quando il team mostra un grafico senza decisione, una metrica senza baseline, o una conclusione senza indicare quale assunzione potrebbe invalidarla.
+Usare EXPLAIN e tuning come etichetta senza processo: mostrare grafici senza decisione, metriche senza baseline o conclusioni senza assumere rischi. Se non sai quale scelta sbaglieresti se i dati fossero instabili, manca il collegamento tra analisi e azione.
 
-La domanda di controllo è: se questo risultato fosse instabile, quale scelta sbaglierei? Se la risposta non è concreta, manca ancora il collegamento tra analisi e azione.
+## Quiz
+
+1. Quando è accettabile una Seq Scan? Quando è un problema?
+2. Qual è la gerarchia di ottimizzazione SQL?
+3. Perché ClickHouse è più veloce per query analitiche su poche colonne?
+4. Cosa sono le materialized columns?
+5. Come si traduce un piano EXPLAIN in una decisione concreta?
 
 ## Quiz o checkpoint
 
 1. Quale decisione concreta dovrebbe migliorare questa lezione?
-2. Quale unità di analisi rende il problema misurabile?
-3. Quale baseline useresti per evitare una lettura ingenua?
-4. Quale errore tipico potrebbe cambiare la conclusione?
-5. Quale output consegneresti a uno stakeholder non tecnico?
+2. Quale baseline rende interpretabile il risultato?
+3. Quale assunzione cambierebbe la conclusione se fosse falsa?
+4. Quale controllo minimo serve prima di presentare la raccomandazione?
 
 ## Riepilogo operativo
 
-**EXPLAIN, optimization e performance tuning** diventa utile quando produce una decisione più chiara, non quando aggiunge terminologia. Usa il framework problema, modello, formalizzazione, esempio, lab e checkpoint per trasformare la lezione in pratica verificabile. Categoria: Decisione. Difficoltà: advanced. Tempo stimato: 18 min.
+EXPLAIN, ottimizzazione e tuning diventano strumenti decisionali solo se producono scelte chiare e azioni concrete. La disciplina consiste nel collegare dati, modelli e decisioni in un processo ripetibile e trasparente.
+
+## Esempio o caso studio
+
+Applica il modello a una decisione reale: quale scelta deve cambiare, quale evidenza hai, quali assunzioni stai facendo e quale rischio rimane aperto. Se il caso non rende visibile questo passaggio, non e ancora pronto per essere automatizzato.

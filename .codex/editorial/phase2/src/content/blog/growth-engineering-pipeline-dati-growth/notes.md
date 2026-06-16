@@ -1,0 +1,8 @@
+- [TAGLIATO: rimozione di aperture generiche e ripetizioni per mantenere il testo focalizzato sulla disciplina decisionale sotto incertezza]
+- [TAGLIATO: eliminazione di enfasi decorative e frasi promozionali]
+- [AGGIUNTO: collegamenti logici per mantenere coerenza tra sezioni]
+- [AGGIUNTO: traduzione adattata in inglese con tono naturale e fluido]
+- [AGGIUNTO: mantenimento di tutte le sezioni richieste per una lezione coerente]
+- [TAGLIATO: rimozione di dettagli superflui e filler che non contribuiscono all'argomento centrale]
+- [AGGIUNTO: formulazione di checklist e punti chiave per facilitare l'applicazione pratica]
+- [MANTENUTO: struttura MDX valida e componenti didattici essenziali]

@@ -1,0 +1,8 @@
+- [TAGLIATO: rimozione di aperture generiche e ripetizioni]
+- [TAGLIATO: eliminazione di frasi decorative e promozionali]
+- [AGGIUNTO: collegamenti logici tra sezioni per coerenza]
+- [AGGIUNTO: conclusione esplicita per chiudere il discorso]
+- [AGGIUNTO: adattamento del linguaggio per maggiore concretezza e opinione editoriale]
+- [MANTENUTO: tutte le sezioni chiave con i titoli richiesti]
+- [MANTENUTO: esempi concreti e checklist per applicabilità]
+- [MANTENUTO: link al percorso GinnyTech come risorsa correlata]

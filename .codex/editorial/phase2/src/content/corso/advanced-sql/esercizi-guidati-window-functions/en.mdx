@@ -1,0 +1,193 @@
+# Sessionization and Behavioral Grouping
+
+Imagine a user opens an app at 8:02, returns at 8:37, clicks three products, then disappears until the afternoon. The logs contain only ordered events, but for the product team these blocks become sessions, intentions, and signals of friction. Sessionization and behavioral grouping build this intermediate layer without inventing unsupported stories.
+
+## Real-world problem
+
+In advanced SQL analytics, the challenge is turning raw events into stable, meaningful units. Defining what counts as a session, choosing the inactivity threshold, and grouping behaviors impact key metrics like conversion, retention, and UX diagnosis. The time threshold is a business choice, not a technical one: it must reflect the real behavior you want to capture.
+
+## Conceptual model
+
+| Phase     | What to clarify                                  | Output                   |
+|-----------|-------------------------------------------------|--------------------------|
+| Question  | Which real decision needs improvement?           | Decision to make          |
+| Measure   | Which observable signal represents the problem? | Metric or source data     |
+| Control   | Which baseline makes the result interpretable?  | Credible comparison       |
+| Action    | What changes after the analysis?                  | Next operational step     |
+
+This simple model guides every technical deep dive, which should strengthen at least one of these points.
+
+## Rigorous formalization
+
+To analyze sessionization and behavioral grouping, precisely define:
+
+| Element          | Required specification                                         |
+|------------------|----------------------------------------------------------------|
+| Unit of analysis | Row, partition, window, join, cohort, or temporal metric       |
+| Main signal      | Correctness, performance, duplicates, grain, result stability  |
+| Baseline         | Previous period, comparable group, benchmark, or counterfactual |
+| Decision         | Query, intermediate model, SQL test, or reusable pattern       |
+| Risk             | Mistaking an available number for sufficient proof             |
+
+Formalization is solid when another analyst can reproduce the logic and reach the same decision from the same data.
+
+## Example or case study
+
+User events arrive as isolated rows, but decisions require grouped sessions and sequences. Sessionization means defining inactivity thresholds, ordering, identity, and session boundaries before interpreting conversion or engagement.
+
+### SQL pattern for sessionization
+
+**Step 1: Mark the start of a new session**
+
+```sql
+WITH events_with_gap AS (
+  SELECT
+    user_id,
+    event_time,
+    event_type,
+    LAG(event_time) OVER (PARTITION BY user_id ORDER BY event_time) AS prev_event_time,
+    CASE
+      WHEN LAG(event_time) OVER (PARTITION BY user_id ORDER BY event_time) IS NULL THEN 1
+      WHEN EXTRACT(EPOCH FROM (event_time - LAG(event_time) OVER (PARTITION BY user_id ORDER BY event_time))) > 1800 THEN 1
+      ELSE 0
+    END AS is_new_session
+  FROM raw_events
+)
+```
+
+**Step 2: Assign a cumulative session number**
+
+```sql
+events_with_session AS (
+  SELECT *,
+    SUM(is_new_session) OVER (PARTITION BY user_id ORDER BY event_time ROWS UNBOUNDED PRECEDING) AS session_number
+  FROM events_with_gap
+)
+SELECT
+  user_id,
+  session_number,
+  MIN(event_time) AS session_start,
+  MAX(event_time) AS session_end,
+  COUNT(*) AS events_in_session,
+  EXTRACT(EPOCH FROM (MAX(event_time) - MIN(event_time))) AS session_duration_s
+FROM events_with_session
+GROUP BY user_id, session_number;
+```
+
+The `session_number` is a cumulative counter starting at 1 per user, incremented at each new session.
+
+### Extending to behavioral grouping
+
+Beyond temporal gaps, grouping by state changes or sequential patterns is often needed. For example, in an IoT sensor table measuring temperature every minute, group "overheating episodes" where temperature exceeds 30°C consecutively.
+
+```sql
+WITH temp_flagged AS (
+  SELECT
+    sensor_id,
+    measured_at,
+    temperature,
+    CASE WHEN temperature > 30 THEN 0 ELSE 1 END AS state,
+    LAG(CASE WHEN temperature > 30 THEN 0 ELSE 1 END) OVER (PARTITION BY sensor_id ORDER BY measured_at) AS prev_state
+  FROM sensor_readings
+),
+state_changes AS (
+  SELECT *,
+    CASE WHEN state != prev_state OR prev_state IS NULL THEN 1 ELSE 0 END AS is_new_episode
+  FROM temp_flagged
+)
+SELECT
+  sensor_id,
+  SUM(is_new_episode) OVER (PARTITION BY sensor_id ORDER BY measured_at ROWS UNBOUNDED PRECEDING) AS episode_id,
+  MIN(measured_at) AS episode_start,
+  MAX(measured_at) AS episode_end,
+  MAX(temperature) AS peak_temp
+FROM state_changes
+WHERE state = 0  -- only overheating episodes
+GROUP BY sensor_id, episode_id
+HAVING COUNT(*) >= 5;  -- at least 5 consecutive minutes
+```
+
+This pattern matches sessionization but triggers on logical state changes instead of time gaps.
+
+## Real case: Tesla's driving session analysis
+
+Tesla collects data from millions of connected vehicles, generating massive telemetry events. For the Autopilot team, sessionization groups driving events into distinct "trips." Defining a trip is complex: a 2-minute stop at a traffic light is still the same trip; a 15-minute stop at a service area may start a new trip depending on engine state and location.
+
+Conceptual query:
+
+```sql
+WITH vehicle_events AS (
+  SELECT
+    vin,
+    event_time,
+    gear,          -- 'P', 'D', 'R', 'N'
+    speed,
+    lat, lon,
+    LAG(gear) OVER (PARTITION BY vin ORDER BY event_time) AS prev_gear,
+    LAG(lat) OVER (PARTITION BY vin ORDER BY event_time) AS prev_lat,
+    LAG(lon) OVER (PARTITION BY vin ORDER BY event_time) AS prev_lon
+  FROM telemetry
+),
+trip_starts AS (
+  SELECT *,
+    CASE
+      WHEN prev_gear IS NULL THEN 1
+      WHEN prev_gear = 'P' AND gear = 'D'
+        AND haversine(prev_lat, prev_lon, lat, lon) > 0.1
+        THEN 1
+      ELSE 0
+    END AS is_new_trip
+  FROM vehicle_events
+)
+SELECT vin,
+  SUM(is_new_trip) OVER (PARTITION BY vin ORDER BY event_time ROWS UNBOUNDED PRECEDING) AS trip_id,
+  COUNT(*) AS events,
+  MAX(speed) AS max_speed,
+  MAX(event_time) - MIN(event_time) AS duration
+FROM trip_starts
+GROUP BY vin, trip_id;
+```
+
+This method allowed Tesla to reduce computational costs by moving sessionization server-side in batch.
+
+## Lab / exercise
+
+### Basic level
+
+Write a 30-minute threshold sessionization query on a clickstream dataset.
+
+### Intermediate level
+
+Extend sessionization to end a session when the user reaches the `thank_you` page, regardless of time gap.
+
+### Research-grade level
+
+Assign each session to the channel of its first event using `FIRST_VALUE`.
+
+### Recommended datasets and materials
+
+Use clickstream, orders, sessions, cohorts, and calendar tables. If real data is unavailable, create a synthetic dataset with at least 200 rows.
+
+## Common mistake to avoid
+
+Treating sessionization and behavioral grouping as mere labels without linking results to concrete decisions. Without baselines and explicit assumptions, analysis risks being misleading or useless.
+
+## Quiz or checkpoint
+
+1. What defines a session and why is the threshold a business choice?
+2. What is the two-step SQL pattern for sessionization?
+3. How would you extend sessionization to group by state changes?
+4. What common mistake can invalidate conclusions?
+5. What output would you deliver to a non-technical stakeholder?
+
+## Operational summary
+
+Sessionization and behavioral grouping become effective only when they clarify decisions and lead to concrete actions. The framework of problem, model, formalization, example, exercise, and checkpoint helps turn theory into applied practice.
+
+---
+
+*Academic references:* Kaushik (2010), Google Analytics Help (2024), Suthar & Patel (2023).
+
+## Quality check
+
+Before using sessionization in operational decisions, verify completeness, duplicates, timezones, definition changes, and excluded segments. Many analyses fail because the data measures a behavior different from what the team believes.

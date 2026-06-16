@@ -1,0 +1,8 @@
+- [TAGLIATO: rimozione di introduzioni generiche e frasi decorative]
+- [TAGLIATO: eliminazione di ripetizioni e filler]
+- [AGGIUNTO: collegamenti logici per coerenza tra sezioni]
+- [AGGIUNTO: traduzione adattata per naturalezza e tono editoriale]
+- [AGGIUNTO: mantenimento di tutte le sezioni richieste per una lezione completa]
+- [AGGIUNTO: enfasi sull'angolo editoriale della disciplina decisionale sotto incertezza]
+- [TAGLIATO: rimozione di frasi promozionali e generiche]
+- [AGGIUNTO: ristrutturazione per flusso coerente e organico]

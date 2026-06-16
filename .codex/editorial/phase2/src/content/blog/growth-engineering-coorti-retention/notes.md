@@ -1,0 +1,8 @@
+- [TAGLIATO: rimozione di aperture generiche e ripetizioni ridondanti]
+- [TAGLIATO: eliminazione di frasi decorative e affermazioni vaghe]
+- [AGGIUNTO: collegamenti logici per mantenere coerenza e fluidità]
+- [AGGIUNTO: riformulazione per chiarezza e incisività, mantenendo il tono editoriale]
+- [PRESERVATO: tutte le sezioni richieste e le metriche, esempi, checklist e opinioni]
+- [PRESERVATO: struttura MDX valida senza frontmatter]
+- [AGGIUNTO: traduzione adattata in inglese con tono nativo e naturale]
+- [TAGLIATO: eliminazione di ripetizioni e filler non necessari]

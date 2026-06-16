@@ -1,0 +1,10 @@
+- [TAGLIATO:] Rimosso il frontmatter e introduzioni generiche ripetitive.
+- [TAGLIATO:] Eliminati dettagli troppo tecnici o ripetitivi sull'implementazione e codice non essenziale per la comprensione del modello decisionale.
+- [TAGLIATO:] Tolti riferimenti promozionali e descrizioni troppo lunghe di casi aziendali non strettamente necessari.
+- [AGGIUNTO:] Inserito modello concettuale e formalizzazione rigorosa per collegare il tracciamento server-side a decisioni di marketing sotto incertezza.
+- [AGGIUNTO:] Strutturata la lezione con sezioni obbligatorie: problema reale, modello concettuale, formalizzazione, caso studio, lab, errore tipico e quiz.
+- [AGGIUNTO:] Sintetizzato esempi e casi studio per evidenziare il valore decisionale e operativo.
+- [AGGIUNTO:] Evidenziata la disciplina del decision making sotto incertezza come filo conduttore.
+- [AGGIUNTO:] Mantenuto esempi di codice e tabelle solo se funzionali alla comprensione del processo decisionale e della governance dei dati.
+- [AGGIUNTO:] Inserito esercizi con livelli di difficoltà e materiali consigliati per applicare concretamente i concetti.
+- [AGGIUNTO:] Enfatizzato errori comuni e checklist per validare l'applicazione pratica della lezione.

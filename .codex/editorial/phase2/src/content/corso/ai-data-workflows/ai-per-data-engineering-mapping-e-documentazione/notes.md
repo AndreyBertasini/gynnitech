@@ -1,0 +1,10 @@
+- [TAGLIATO] Eliminati i passaggi introduttivi generici e le ripetizioni per concentrare il testo sul flusso decisionale e operativo.
+- [TAGLIATO] Rimosse aperture e chiusure promozionali o vaghe.
+- [AGGIUNTO] Inserite transizioni logiche per collegare i paragrafi e mantenere coerenza narrativa.
+- [AGGIUNTO] Mantenuti e riformulati tabelle e schemi per chiarire i passaggi e le responsabilità.
+- [AGGIUNTO] Strutturazione rigorosa con sezioni obbligatorie per lezioni di corso, come richiesto.
+- [AGGIUNTO] Versione italiana resa più concreta, diretta e con tono editoriale deciso.
+- [AGGIUNTO] Versione inglese adattata in modo naturale, evitando traduzioni letterali e mantenendo chiarezza e scorrevolezza.
+- [TAGLIATO] Eliminati riferimenti decorativi e frasi generiche non funzionali all'argomento centrale.
+- [AGGIUNTO] Quiz e lab mantenuti con etichette esatte per facilitare l'apprendimento strutturato.
+- [AGGIUNTO] Evidenziata la disciplina della decisione sotto incertezza come filo conduttore dell'intero testo.

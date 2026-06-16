@@ -1,0 +1,7 @@
+- [TAGLIATO:] Eliminati i passaggi introduttivi generici e ripetitivi per concentrare il testo su contenuti operativi e decisionali.
+- [TAGLIATO:] Rimosse aperture e chiusure troppo generiche o promozionali.
+- [AGGIUNTO:] Inserite transizioni logiche per collegare sezioni e mantenere il flusso argomentativo coerente.
+- [AGGIUNTO:] Mantenuti tutti i blocchi di codice, tabelle e diagrammi originali per preservare l'integrità didattica.
+- [AGGIUNTO:] Aggiunte sezioni di riepilogo e approfondimento pratico per enfatizzare l'applicazione concreta della pipeline come disciplina decisionale.
+- [AGGIUNTO:] Riformulato il testo in italiano con tono concreto e opinioni editoriali, e in inglese con adattamento nativo e naturale.
+- [AGGIUNTO:] Mantenuti i titoli di sezione richiesti per lezioni di corso, con struttura coerente e completa.

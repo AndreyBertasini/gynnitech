@@ -1,0 +1,9 @@
+- [TAGLIATO:] Introduzione generica e ripetizioni non essenziali.
+- [TAGLIATO:] Spiegazioni troppo dettagliate su concetti già noti (es. dettagli sul modello di Rubin).
+- [TAGLIATO:] Esempi troppo lunghi o ripetitivi senza aggiungere valore operativo.
+- [AGGIUNTO:] Sezioni strutturate secondo l'angolo editoriale "La disciplina di prendere decisioni sotto incertezza" con focus su decisione, modello concettuale e formalizzazione.
+- [AGGIUNTO:] Tabelle e diagrammi mantenuti per chiarezza e rigore.
+- [AGGIUNTO:] Lab con livelli di difficoltà e materiali consigliati per applicare concretamente il concetto.
+- [AGGIUNTO:] Quiz/checkpoint per consolidare l'apprendimento e stimolare riflessione critica.
+- [AGGIUNTO:] Riepilogo operativo per chiudere con un messaggio chiaro e orientato all'azione.
+- [AGGIUNTO:] Eliminazione di digressioni filosofiche e riferimenti bibliografici estesi per mantenere il focus sulla pratica decisionale.

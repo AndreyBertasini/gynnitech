@@ -1,0 +1,10 @@
+- [TAGLIATO:] Eliminati i riferimenti introduttivi generici e ripetitivi, le sezioni di contesto troppo ampie e le digressioni storiche non essenziali.
+- [TAGLIATO:] Rimosse le sezioni di riepilogo storico e riferimenti bibliografici per mantenere il focus operativo.
+- [TAGLIATO:] Eliminati i dettagli meno rilevanti come la lista completa del modulo e i riferimenti a filosofi specifici per concentrare il testo sulla disciplina decisionale.
+- [AGGIUNTO:] Inserito un modello concettuale chiaro e sequenziale per guidare il lettore attraverso il processo decisionale.
+- [AGGIUNTO:] Formalizzazione rigorosa con tabella degli elementi chiave per chiarire la relazione tra dati e decisione.
+- [AGGIUNTO:] Caso studio di Google Flu Trends mantenuto come esempio paradigmatico per illustrare il rischio di confondere associazione con causalità.
+- [AGGIUNTO:] Laboratorio con esercizi a livelli progressivi per applicare concretamente il concetto.
+- [AGGIUNTO:] Sezione dedicata all'errore tipico da evitare, con suggerimenti pratici per non cadere in trappole comuni.
+- [AGGIUNTO:] Quiz/checkpoint per stimolare la riflessione critica e la verifica della comprensione.
+- [AGGIUNTO:] Riepilogo operativo finale per consolidare l'apprendimento e sottolineare l'importanza di collegare concetto, dato e decisione.

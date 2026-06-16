@@ -1,0 +1,12 @@
+- [TAGLIATO:] Rimosso ogni apertura generica e ripetizioni superflue per focalizzare il testo sul metodo di studio.
+- [TAGLIATO:] Eliminati dettagli storici eccessivi non essenziali per la comprensione pratica.
+- [AGGIUNTO:] Inserite transizioni logiche per collegare i paragrafi in modo fluido.
+- [AGGIUNTO:] Mantenute tutte le sezioni richieste con titoli esatti per garantire coerenza editoriale.
+- [AGGIUNTO:] Conservati esempi, ricerche e dati scientifici chiave per supportare il metodo.
+- [AGGIUNTO:] Inclusi i componenti interattivi QuizExercise con domande e spiegazioni.
+- [AGGIUNTO:] Traduzione adattata in inglese con stile nativo e naturale, non letterale.
+- [AGGIUNTO:] Sintesi finale chiara e operativa per facilitare l'applicazione pratica.
+- [AGGIUNTO:] Evidenziati limiti del metodo per un uso consapevole e realistico.
+- [AGGIUNTO:] Inserito lab con livelli di difficoltà e materiali consigliati per esercitarsi.
+- [AGGIUNTO:] Evitato uso di em dash o en dash, rispettando le regole editoriali.
+- [AGGIUNTO:] Versione italiana resa concreta, diretta e con tono autorevole e opinionato.

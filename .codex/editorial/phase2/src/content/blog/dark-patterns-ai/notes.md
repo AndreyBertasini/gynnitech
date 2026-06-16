@@ -1,0 +1,8 @@
+- [TAGLIATO: introduzioni generiche e ripetizioni]
+- [TAGLIATO: enfasi decorativa e frasi promozionali]
+- [AGGIUNTO: collegamenti logici tra sezioni per fluidità]
+- [AGGIUNTO: formulazione più concreta e opinata in italiano]
+- [AGGIUNTO: adattamento nativo e scorrevole in inglese]
+- [MANTENUTO: esempi, liste, domande guida, e struttura delle sezioni]
+- [MANTENUTO: link al percorso GinnyTech per contestualizzare]
+- [RISTRUTTURATO: testo per aderire all'angolo editoriale sulla decisione sotto incertezza]

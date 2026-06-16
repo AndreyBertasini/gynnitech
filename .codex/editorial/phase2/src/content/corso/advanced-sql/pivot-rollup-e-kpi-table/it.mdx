@@ -1,0 +1,164 @@
+# Date-time pitfalls e timezone correctness
+
+Il problema di interpretare correttamente date e orari in analisi dati non è solo tecnico: è una questione di decisione sotto incertezza. Quando un dashboard mostra un calo alle 00:00 UTC, ma team in Europa e America vedono dati diversi, non è un errore di arrotondamento, ma una decisione temporale non esplicitata. Per prendere decisioni affidabili, calendario, timestamp e business day devono parlare la stessa lingua.
+
+## Problema reale
+
+Nel contesto di SQL avanzato, il problema è scrivere query analitiche corrette anche quando grain, finestre, coorti e casi limite complicano la lettura dei dati. Senza una regola chiara su come trattare date e fusi orari, le metriche possono essere fuorvianti. La sfida è trasformare questa complessità in una scelta consapevole, esplicitando assunzioni e controlli.
+
+## Modello concettuale
+
+Per affrontare il problema, serve un modello semplice ma efficace:
+
+| Fase | Cosa chiarire | Output |
+|---|---|---|
+| Domanda | Quale scelta reale deve migliorare? | Decisione da prendere |
+| Misura | Quale segnale osservabile rappresenta il problema? | Metrica o dato sorgente |
+| Controllo | Quale baseline rende il risultato interpretabile? | Confronto credibile |
+| Azione | Che cosa cambia dopo l'analisi? | Prossimo passo operativo |
+
+Questo schema guida ogni approfondimento tecnico verso un fine pratico: migliorare una decisione con dati e controlli espliciti.
+
+## Formalizzazione rigorosa
+
+Per rendere il problema analizzabile, definisci l'unità di lavoro (riga, partizione, finestra, join, coorte o metrica temporale) e collega a una metrica osservabile (correttezza, performance, duplicati, grain, stabilità). Poi dichiara la decisione attesa (query, modello, test SQL o pattern riusabile) e il rischio (scambiare un numero per una prova sufficiente).
+
+| Elemento | Specifica richiesta |
+|---|---|
+| Unità di analisi | riga, partizione, finestra, join, coorte o metrica temporale |
+| Segnale principale | correttezza, performance, duplicati, grain e stabilità del risultato |
+| Baseline | Periodo precedente, gruppo comparabile, benchmark o scenario controfattuale |
+| Decisione | query, modello intermedio, test SQL o pattern riusabile |
+| Rischio | Scambiare un numero disponibile per una prova sufficiente |
+
+## Esempio o caso studio
+
+Considera una giornata commerciale che inizia a orari diversi per utenti, server e business unit. Prima di confrontare KPI giornalieri, il team deve fissare timezone, calendario fiscale, inclusione dei bordi e regole per eventi arrivati in ritardo.
+
+| Evidenza osservata | Lettura prudente | Azione consigliata |
+|---|---|---|
+| Il numero migliora | Potrebbe essere effetto reale o variazione normale | Cercare confronto e segmento |
+| Un segmento cambia più degli altri | La media aggregata nasconde una differenza | Separare coorti o casi d'uso |
+| Il costo cresce insieme al risultato | L'impatto va letto sul margine | Stimare trade-off e sostenibilità |
+
+## Tipi di dato temporali: una mappa minima
+
+Per orientarsi, è utile distinguere tre tipi fondamentali di dati temporali:
+
+| Tipo | Contiene | Quando usarlo |
+|------|----------|---------------|
+| TIMESTAMP / DATETIME | Data + ora + (opzionalmente) timezone | Eventi puntuali con fuso orario noto |
+| DATE | Solo data, nessuna ora | Aggregazioni giornaliere, compleanni, scadenze |
+| INTERVAL | Durata tra due timestamp | Calcolo di delta, scadenze, SLA |
+
+La regola d'oro di Tom Kyte è semplice: salva sempre in UTC e converti in locale solo nel livello di presentazione. Ignorare questa regola porta a errori difficili da diagnosticare.
+
+## Il problema delle timezone: tre insidie classiche
+
+1. **Assumere che il server sia nel tuo fuso**
+
+Il server può essere in UTC o in un fuso diverso. Usare `CURRENT_DATE` senza specificare fuso può restituire date sbagliate. La soluzione è usare sempre `AT TIME ZONE` per esplicitare il fuso.
+
+2. **Confrontare date di fusi diversi**
+
+Se timestamp in colonne diverse hanno fusi diversi, la differenza tra di essi non rappresenta la durata reale. Normalizza tutto in UTC prima di calcolare differenze.
+
+3. **DATE_TRUNC alla mezzanotte sbagliata**
+
+`DATE_TRUNC('day', timestamp)` tronca alla mezzanotte UTC, non locale. Eventi dello stesso giorno locale possono finire in giorni diversi. La soluzione è convertire prima nel fuso locale e poi troncare.
+
+## Generare serie temporali: la date spine
+
+Una pratica fondamentale è la creazione di una **date spine**: una tabella o CTE con tutte le date di un intervallo. Serve a garantire che ogni periodo appaia nel risultato anche se non ha dati, evitando buchi nei grafici che confondono l'interpretazione.
+
+Esempio in PostgreSQL:
+
+```sql
+WITH date_spine AS (
+  SELECT generate_series('2024-01-01'::date, '2024-12-31'::date, '1 day'::interval)::date AS dt
+)
+SELECT ds.dt, COALESCE(SUM(o.amount), 0) AS daily_revenue
+FROM date_spine ds
+LEFT JOIN orders o ON ds.dt = o.order_date::date
+GROUP BY ds.dt
+ORDER BY ds.dt;
+```
+
+Glovo ha usato la date spine per scoprire problemi di supply invisibili senza questa tecnica, dimostrando il valore decisionale del metodo.
+
+## Metriche rolling: finestre temporali scorrevoli
+
+Le metriche rolling come medie mobili e somme cumulate sono essenziali per cogliere trend e anomalie. Le window function con `RANGE` sono indispensabili quando ci sono buchi nella serie temporale.
+
+Esempio rolling 7-day average:
+
+```sql
+SELECT dt, daily_revenue,
+  AVG(daily_revenue) OVER (
+    ORDER BY dt
+    RANGE BETWEEN INTERVAL '6 days' PRECEDING AND CURRENT ROW
+  ) AS rolling_7day_avg
+FROM daily_revenue;
+```
+
+Usare `ROWS` invece di `RANGE` può portare a medie calcolate su righe anziché giorni, distorcendo i risultati quando mancano dati.
+
+## Laboratorio pratico
+
+Dataset: `sensor_readings` con timestamp e temperatura da 50 sensori per 6 mesi, con molti timestamp mancanti.
+
+**Livello base**: crea una date spine oraria per sensore e calcola la temperatura media per ora.
+
+**Livello intermedio**: calcola la rolling average su 24 ore e marca come `alert` le ore in cui la temperatura supera di 3 deviazioni standard la media delle 24 ore precedenti.
+
+**Livello research-grade**: ogni sensore ha una colonna `timezone`. Converti i timestamp nel fuso locale prima di aggregare per giorno.
+
+## Lab / esercizio
+
+### Livello base
+
+Scrivi la decisione che questa lezione dovrebbe migliorare, la metrica principale e il rischio da controllare.
+
+### Livello intermedio
+
+Costruisci una tabella con baseline, segnale, interpretazione prudente e azione consigliata.
+
+### Livello research-grade
+
+Trasforma l'esercizio in un memo decisionale con assunzioni, limiti, criterio di stop e controllo successivo.
+
+### Dataset e materiali consigliati
+
+Usa un export reale, un dataset sintetico o una dashboard gia esistente. Il materiale deve contenere una domanda, una metrica e una scelta da prendere.
+
+## Errore tipico da evitare
+
+Il rischio più grande è usare "date-time pitfalls e timezone correctness" come etichetta senza processo: mostrare grafici senza decisione, metriche senza baseline o conclusioni senza indicare assunzioni. Se non sai quale scelta sbaglieresti se i dati fossero instabili, manca il collegamento tra analisi e azione.
+
+## Quiz o checkpoint
+
+1. Quale decisione concreta dovrebbe migliorare questa lezione?
+2. Quale unità di analisi rende il problema misurabile?
+3. Quale baseline useresti per evitare una lettura ingenua?
+4. Quale errore tipico potrebbe cambiare la conclusione?
+5. Quale output consegneresti a uno stakeholder non tecnico?
+
+## Riepilogo operativo
+
+La disciplina di gestire date, orari e fusi orari in SQL è cruciale per decisioni affidabili. Applicare date spine, conversioni di timezone esplicite e rolling metrics con window function permette di trasformare dati incerti in segnali chiari. La lezione è utile solo se produce una decisione più chiara, non solo terminologia tecnica.
+
+---
+
+<SqlExercise client:visible
+  description={`Raggruppa gli ordini per mese e calcola il revenue mensile. Usa DATE_TRUNC o la funzione substr() per estrarre il mese dalla data_ordine.`}
+  hint="In SQLite, usa strftime('%Y-%m', data_ordine) per estrarre anno-mese, poi SUM(importo) per il revenue."
+  initialQuery={`SELECT data_ordine, importo\nFROM ordini\nORDER BY data_ordine`}
+  solutionQuery={`SELECT strftime('%Y-%m', data_ordine) AS mese,\n  SUM(importo) AS revenue_mensile,\n  COUNT(*) AS num_ordini\nFROM ordini\nGROUP BY mese\nORDER BY mese`}
+/>
+
+<SqlExercise client:visible
+  description={`Trova gli utenti che si sono registrati dopo il 1° febbraio 2025. Filtra per data e conta quanti sono.`}
+  hint="Usa WHERE creato_il > '2025-02-01'. Controlla che il formato data sia YYYY-MM-DD."
+  initialQuery={`SELECT id, nome, creato_il\nFROM utenti\nORDER BY creato_il`}
+  solutionQuery={`SELECT COUNT(*) AS utenti_post_febbraio\nFROM utenti\nWHERE creato_il > '2025-02-01'`}
+/>

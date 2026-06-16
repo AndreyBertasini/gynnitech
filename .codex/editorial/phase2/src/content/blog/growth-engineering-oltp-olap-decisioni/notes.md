@@ -1,0 +1,7 @@
+- [TAGLIATO: introduzioni generiche e ripetizioni sull'importanza del dato]
+- [TAGLIATO: dettagli troppo tecnici o astratti non necessari per il filo argomentativo]
+- [AGGIUNTO: collegamenti logici tra sezioni per fluidità]
+- [AGGIUNTO: enfasi editoriale su errori comuni e checklist per decisioni consapevoli]
+- [AGGIUNTO: conclusione chiara con azione pratica per il team]
+- [MANTENUTO: struttura con sezioni obbligatorie per una lezione coerente]
+- [MANTENUTO: esempi concreti e metriche utili per insegnare la disciplina di prendere decisioni sotto incertezza]

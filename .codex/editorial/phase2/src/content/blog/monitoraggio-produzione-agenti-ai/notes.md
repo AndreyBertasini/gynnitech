@@ -1,0 +1,8 @@
+- [TAGLIATO: introduzioni generiche e ripetizioni]
+- [TAGLIATO: riferimenti promozionali e link a corsi]
+- [AGGIUNTO: collegamenti logici per rendere il testo organico]
+- [AGGIUNTO: enfasi sul tema decisionale sotto incertezza nel monitoraggio]
+- [MANTENUTO: struttura con sezioni chiare e operative]
+- [MANTENUTO: metriche, esempi di drift e alert]
+- [RIFORMULATO: per rendere il testo più concreto e diretto, evitando toni decorativi]
+- [RIMOSSO: frasi di chiusura superflue e ripetitive]

@@ -1,0 +1,9 @@
+- [TAGLIATO:] Introduzioni generiche e ripetizioni non funzionali all'argomento centrale.
+- [TAGLIATO:] Elenchi troppo dettagliati dei singoli moduli, mantenendo solo la sintesi necessaria per orientare.
+- [TAGLIATO:] Passaggi decorativi o enfatici che non aggiungono valore concettuale.
+- [AGGIUNTO:] Collegamenti logici tra sezioni per costruire un discorso coerente sulla disciplina di prendere decisioni sotto incertezza.
+- [AGGIUNTO:] Struttura con sezioni obbligatorie per lezioni di corso, mantenendo il focus su decisioni, rigore e uso consapevole dell'AI.
+- [AGGIUNTO:] Esempio concreto di decisione di studio per introdurre moduli avanzati.
+- [AGGIUNTO:] Lab con livelli di difficoltà e materiali consigliati per esercitare il metodo.
+- [AGGIUNTO:] Quiz per consolidare la comprensione e stimolare l'autovalutazione critica.
+- [AGGIUNTO:] Conclusione che ribadisce l'importanza della mappa come strumento di governo del percorso formativo.

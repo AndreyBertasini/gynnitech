@@ -1,0 +1,8 @@
+- [TAGLIATO: introduzioni generiche e ripetizioni]
+- [TAGLIATO: frasi decorative e enfasi superflua]
+- [TAGLIATO: riferimenti vaghi a strumenti senza spiegazioni]
+- [AGGIUNTO: collegamenti logici tra sezioni per coerenza]
+- [AGGIUNTO: conclusione esplicita e invito all'azione]
+- [AGGIUNTO: checklist e metriche per decisioni sotto incertezza]
+- [AGGIUNTO: traduzione adattata con tono naturale e diretto]
+- [AGGIUNTO: mantenimento di sezioni chiave e struttura editoriale richiesta]

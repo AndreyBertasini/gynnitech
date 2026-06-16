@@ -1,0 +1,11 @@
+- [TAGLIATO:] Eliminati gli elementi introduttivi generici e ripetitivi.
+- [TAGLIATO:] Rimosse aperture e chiusure decorative e promozionali.
+- [TAGLIATO:] Tolte ripetizioni ridondanti su retention e Sean Ellis test.
+- [TAGLIATO:] Eliminati dettagli troppo specifici o troppo tecnici non essenziali per il flusso editoriale.
+- [AGGIUNTO:] Inserite sezioni con titoli standardizzati secondo le regole editoriali per lezioni di corso.
+- [AGGIUNTO:] Rafforzati i collegamenti logici tra sezioni per costruire un organismo coerente.
+- [AGGIUNTO:] Mantenute tabelle e formule essenziali per la comprensione del concetto.
+- [AGGIUNTO:] Sintetizzata la parte di casi studio e esempi per evidenziare il valore strategico.
+- [AGGIUNTO:] Inserito un lab articolato in livelli e un quiz per favorire l'applicazione pratica.
+- [AGGIUNTO:] Riepilogo operativo finale per consolidare la disciplina della decisione sotto incertezza nel product-market fit.
+- [AGGIUNTO:] Versione inglese adattata in stile nativo, non traduzione letterale, con attenzione all'angolo editoriale richiesto.

@@ -1,0 +1,9 @@
+- [TAGLIATO: Eliminati i passaggi introduttivi generici e ripetitivi, mantenendo solo la narrazione concreta di Lego e l'analisi metodologica.
+- [TAGLIATO: Rimosse digressioni superflue e dettagli troppo tecnici non essenziali per la disciplina decisionale sotto incertezza.
+- [TAGLIATO: Tolti riferimenti promozionali e inviti non strettamente necessari.
+- [AGGIUNTO: Inserite transizioni logiche tra sezioni per creare un flusso coerente e organico.
+- [AGGIUNTO: Mantenuti esempi concreti e casi studio per illustrare i metodi.
+- [AGGIUNTO: Strutturata la lezione con sezioni obbligatorie per un corso didattico, mantenendo la validità MDX.
+- [AGGIUNTO: Mantenuti tabelle e diagrammi mermaid per insegnare concetti chiave.
+- [AGGIUNTO: Traduzione adattata in inglese con tono naturale e fluido, non letterale.
+- [AGGIUNTO: Sintetizzati i metodi in modo chiaro e pragmatico, enfatizzando il valore decisionale sotto incertezza.]

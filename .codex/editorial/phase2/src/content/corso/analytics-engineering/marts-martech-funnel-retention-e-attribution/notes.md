@@ -1,0 +1,9 @@
+- [TAGLIATO:] Rimosso il frontmatter e le sezioni introduttive generiche per focalizzare il testo sul processo decisionale e l'applicazione pratica.
+- [TAGLIATO:] Eliminati i dettagli ridondanti e le ripetizioni, mantenendo solo le parti essenziali per comprendere il valore della gestione del cambiamento lento.
+- [AGGIUNTO:] Inserite sezioni strutturate con titoli standard (Problema reale, Modello concettuale, Formalizzazione rigorosa, Esempio o caso studio, Lab / esercizio, Errore tipico da evitare, Quiz o checkpoint) per aderire alle regole editoriali.
+- [AGGIUNTO:] Rafforzato il legame tra la gestione del cambiamento lento e la disciplina della decisione sotto incertezza, sottolineando l'importanza della baseline e del controllo dei rischi.
+- [AGGIUNTO:] Traduzione adattata in inglese con un tono più diretto e pratico, evitando traduzioni letterali e mantenendo la coerenza con l'angolo editoriale.
+- [PRESERVATO:] Tabelle, esempi di codice SQL e spiegazioni tecniche rilevanti per l'apprendimento.
+- [PRESERVATO:] Riferimenti bibliografici e casi reali per contestualizzare il tema.
+- [AGGIUNTO:] Domande di controllo e quiz per stimolare la riflessione critica e la verifica della comprensione.
+- [AGGIUNTO:] Laboratorio con livelli di difficoltà e materiali consigliati per favorire l'applicazione pratica.

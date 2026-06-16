@@ -1,0 +1,8 @@
+- [TAGLIATO: eliminata l'introduzione generica e i passaggi ridondanti per focalizzarsi sul tema della decisione sotto incertezza nel supporto clienti con agenti AI.]
+- [TAGLIATO: rimosse frasi di apertura e chiusura troppo generiche o promozionali.]
+- [AGGIUNTO: inserite transizioni logiche tra sezioni per mantenere coerenza e flusso editoriale.]
+- [AGGIUNTO: mantenute tutte le sezioni con titoli richiesti per un lesson style coerente con l'angolo editoriale.]
+- [AGGIUNTO: traduzione adattata in inglese con tono naturale e fluido, evitando traduzioni letterali.]
+- [TAGLIATO: rimosse ripetizioni e filler non necessari per mantenere un testo concreto e opinionato.]
+- [AGGIUNTO: mantenuti i link e le liste puntate per chiarezza e didattica.]
+- [AGGIUNTO: evidenziato il focus sulla qualità della decisione e sulla misurazione come chiave per l'efficacia degli agenti AI nel customer support.]

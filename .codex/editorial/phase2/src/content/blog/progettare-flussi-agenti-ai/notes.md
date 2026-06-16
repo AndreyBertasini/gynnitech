@@ -1,0 +1,8 @@
+- [TAGLIATO: introduzioni generiche e ripetizioni sul prompt]
+- [TAGLIATO: frasi decorative e enfasi non necessarie]
+- [TAGLIATO: inviti promozionali non strettamente didattici]
+- [AGGIUNTO: collegamenti logici tra sezioni per fluidità]
+- [AGGIUNTO: chiarimenti editoriali per rendere il testo più concreto e critico]
+- [AGGIUNTO: struttura coerente con l'angolo editoriale sulla decisione sotto incertezza]
+- [MANTENUTO: elenchi numerati e punti chiave per insegnare la disciplina di progettare flussi AI]
+- [MANTENUTO: link al percorso GinnyTech come risorsa pratica]

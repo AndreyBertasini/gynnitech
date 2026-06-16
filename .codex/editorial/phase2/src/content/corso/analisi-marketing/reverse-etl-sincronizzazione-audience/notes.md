@@ -1,0 +1,9 @@
+- [TAGLIATO] Removed the original extended technical and architectural explanations, case studies, and SQL code blocks to focus on the editorial angle of decision-making under uncertainty.
+- [TAGLIATO] Cut detailed platform and tool descriptions, as well as lengthy examples like Netflix and Revolut, to maintain coherence with the editorial focus.
+- [AGGIUNTO] Added explicit sections with the exact headings required for course lessons (Problema reale, Modello concettuale, Formalizzazione rigorosa, Esempio o caso studio, Lab / esercizio, Errore tipico da evitare, Quiz o checkpoint).
+- [AGGIUNTO] Transformed technical code blocks into conceptual explanations and tables to emphasize decision-making rather than implementation details.
+- [AGGIUNTO] Included a mermaid diagram illustrating the sequential mental model connecting business question to decision.
+- [AGGIUNTO] Provided concrete operational guidance and a structured lab with progressive difficulty levels to foster practical competence.
+- [AGGIUNTO] Emphasized the importance of linking data signals to decisions and baselines to reduce uncertainty, consistent with the editorial angle.
+- [AGGIUNTO] Ensured the Italian version is concrete, opinionated, and native in style, while the English version is a natural adaptation rather than a literal translation.
+- [AGGIUNTO] Removed all decorative and generic AI-style openings and closings, focusing on substance and editorial coherence.

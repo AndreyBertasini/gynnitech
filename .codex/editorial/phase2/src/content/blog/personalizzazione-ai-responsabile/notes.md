@@ -1,0 +1,8 @@
+- [TAGLIATO: rimozione di aperture generiche e frasi di richiamo non essenziali]
+- [TAGLIATO: eliminazione di ripetizioni e filler]
+- [AGGIUNTO: inserimento di transizioni logiche per collegare i paragrafi e rafforzare il filo argomentativo]
+- [AGGIUNTO: mantenimento di tutte le sezioni con titoli di secondo livello per garantire la struttura richiesta]
+- [AGGIUNTO: traduzione adattata in inglese con registro naturale e fluido, non letterale]
+- [AGGIUNTO: conservazione di elenchi puntati e numerati per chiarezza didattica]
+- [TAGLIATO: rimozione di frasi promozionali e riferimenti non strettamente necessari al tema]
+- [AGGIUNTO: mantenimento del collegamento finale al percorso GinnyTech per continuità editoriale]

@@ -1,0 +1,10 @@
+- [TAGLIATO:] Eliminata l'introduzione generica e ripetitiva, le sezioni decorative e le parti non strettamente funzionali all'argomento decisionale.
+- [TAGLIATO:] Rimosse ripetizioni e spiegazioni troppo filosofiche senza collegamento operativo.
+- [AGGIUNTO:] Inserite sezioni strutturate con i titoli richiesti per una lezione coerente e completa.
+- [AGGIUNTO:] Esplicitato il modello concettuale e la formalizzazione rigorosa per collegare filosofia e pratica decisionale.
+- [AGGIUNTO:] Inserito un caso reale (COMPAS) come esempio operativo di causalità e bias.
+- [AGGIUNTO:] Proposto un lab con livelli di difficoltà e materiali consigliati per esercitarsi.
+- [AGGIUNTO:] Aggiunto errore tipico e quiz per consolidare la comprensione.
+- [AGGIUNTO:] Conclusione e riepilogo operativo per chiudere la lezione con un focus sulla disciplina di decisione sotto incertezza.
+- [AGGIUNTO:] Versione inglese adattata con tono nativo e scorrevolezza, mantenendo struttura e contenuti chiave.
+- [AGGIUNTO:] Conservati tutti i blocchi di codice, tabelle e riferimenti essenziali per l'insegnamento.

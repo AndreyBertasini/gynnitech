@@ -1,0 +1,8 @@
+- [TAGLIATO:] Eliminati i passaggi introduttivi generici e ripetitivi per rendere il testo più diretto e operativo.
+- [TAGLIATO:] Rimosse frasi decorative e spiegazioni troppo generiche non essenziali per la comprensione pratica.
+- [AGGIUNTO:] Inseriti titoli standardizzati per le sezioni di lezione: Problema reale, Modello concettuale, Formalizzazione rigorosa, Esempio o caso studio, Lab / esercizio, Errore tipico da evitare, Quiz o checkpoint.
+- [AGGIUNTO:] Rafforzata l'impostazione editoriale come strumento operativo per decisioni sotto incertezza.
+- [AGGIUNTO:] Mantenuti e valorizzati i diagrammi MDX e le tabelle per insegnare i concetti chiave.
+- [AGGIUNTO:] Chiarezza su livelli di causalità, do-operator e applicazioni pratiche con esempi concreti.
+- [AGGIUNTO:] Inserito un richiamo esplicito al rischio di confondere correlazione e causalità nelle decisioni.
+- [AGGIUNTO:] Sintesi finale con call to action per applicare la lezione in contesti reali e migliorare le decisioni aziendali.

@@ -1,0 +1,10 @@
+- [TAGLIATO:] Eliminati i passaggi introduttivi generici e ripetitivi per focalizzarsi sull'applicazione pratica e operativa.
+- [TAGLIATO:] Rimosse ripetizioni e dettagli superflui che non aggiungevano valore alla comprensione del processo decisionale.
+- [AGGIUNTO:] Inserite sezioni strutturate con titoli obbligatori per una lezione coerente e completa.
+- [AGGIUNTO:] Esplicitato il modello concettuale con diagramma e tabella per chiarire il processo decisionale sotto incertezza.
+- [AGGIUNTO:] Formalizzazione rigorosa con definizioni operative per ogni elemento chiave della decisione.
+- [AGGIUNTO:] Caso studio QuickBite integrato con riferimenti filosofici per mostrare l'applicazione concreta del framework.
+- [AGGIUNTO:] Laboratorio con esercizi a vari livelli e suggerimenti per dataset e materiali.
+- [AGGIUNTO:] Evidenziato errore tipico da evitare e checklist di controllo per garantire decisioni robuste.
+- [AGGIUNTO:] Quiz finale per verificare la comprensione e riepilogo operativo per chiudere la lezione.
+- [AGGIUNTO:] Versione inglese adattata in modo naturale, mantenendo la struttura e i contenuti essenziali, con attenzione al tono e alla chiarezza per un pubblico anglofono.

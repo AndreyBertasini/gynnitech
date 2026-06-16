@@ -1,0 +1,197 @@
+# Testing, refactoring e pattern SQL riusabili
+
+Nel mondo reale, una query mensile può decidere bonus, forecast e priorità prodotto, ma spesso nessuno osa modificarla: troppe CTE anonime, filtri ripetuti, nessun test e nessuna certezza sul significato dei campi. Questa situazione è il punto di partenza per capire perché **testing, refactoring e pattern SQL riusabili** sono indispensabili quando SQL smette di essere uno script personale e diventa un artefatto condiviso.
+
+## Problema reale
+
+Nel dominio dell'advanced SQL, il problema è scrivere query analitiche corrette anche quando grain, finestre, coorti e casi limite diventano complessi. Non si tratta solo di migliorare l'eleganza del codice, ma di garantire che ogni assunzione sia testata, ogni trasformazione abbia un nome chiaro e ogni pattern riusabile riduca il rischio di interpretazioni diverse.
+
+L'obiettivo operativo è chiaro: comprendere il problema analitico e il contesto decisionale; applicare esempi, metriche e controlli a casi reali. Se non si riesce a indicare quale decisione cambia, quale dato si osserva e quale errore si vuole evitare, la competenza non è ancora applicata.
+
+## Modello concettuale
+
+| Fase       | Cosa chiarire                              | Output                  |
+|------------|-------------------------------------------|-------------------------|
+| Domanda    | Quale scelta reale deve migliorare?       | Decisione da prendere    |
+| Misura     | Quale segnale osservabile rappresenta il problema? | Metrica o dato sorgente |
+| Controllo  | Quale baseline rende il risultato interpretabile?  | Confronto credibile     |
+| Azione     | Che cosa cambia dopo l'analisi?            | Prossimo passo operativo |
+
+Questo modello semplice aiuta a mantenere il focus sulla decisione, sul dato, sul controllo e sull'azione. Ogni approfondimento tecnico deve rafforzare almeno uno di questi punti.
+
+## Formalizzazione rigorosa
+
+Per rendere analizzabile il processo, è necessario definire l'unità di lavoro (riga, partizione, finestra, join, coorte o metrica temporale), collegarla a una metrica osservabile (correttezza, performance, duplicati, grain, stabilità), e dichiarare la decisione attesa (query, modello intermedio, test SQL o pattern riusabile).
+
+| Elemento       | Specifica richiesta                                             |
+|----------------|----------------------------------------------------------------|
+| Unità di analisi | riga, partizione, finestra, join, coorte o metrica temporale  |
+| Segnale principale | correttezza, performance, duplicati, grain, stabilità         |
+| Baseline       | Periodo precedente, gruppo comparabile, benchmark o scenario controfattuale |
+| Decisione      | query, modello intermedio, test SQL o pattern riusabile        |
+| Rischio        | Scambiare un numero disponibile per una prova sufficiente      |
+
+La formalizzazione è solida quando un altro analista può riprodurre la logica, criticare le assunzioni e ottenere la stessa decisione partendo dagli stessi dati.
+
+## Testing dei dati: oltre il "la query gira"
+
+Il testing in SQL analitico si articola su tre livelli:
+
+- **Test di integrità** (es. `unique`, `not_null`): garantiscono unicità e assenza di valori nulli in colonne critiche.
+- **Test di logica di business** (es. `accepted_values`, `relationships`): validano regole di dominio, come valori attesi o integrità referenziale.
+- **Test di qualità statistica**: monitorano stabilità e anomalie statistiche nel tempo, come variazioni anomale di volumi o medie.
+
+Esempio di test di integrità:
+
+Ogni `order_id` deve essere unico:
+
+```sql
+SELECT order_id, COUNT(*)
+FROM orders_clean
+GROUP BY order_id
+HAVING COUNT(*) > 1;
+```
+
+Se la query restituisce righe, il test fallisce.
+
+Esempio di test statistico per anomalie di volume:
+
+```sql
+WITH daily_stats AS (
+  SELECT dt, COUNT(*) AS row_count,
+    AVG(COUNT(*)) OVER (ORDER BY dt ROWS BETWEEN 13 PRECEDING AND 1 PRECEDING) AS avg_14d,
+    STDDEV(COUNT(*)) OVER (ORDER BY dt ROWS BETWEEN 13 PRECEDING AND 1 PRECEDING) AS stddev_14d
+  FROM orders_clean
+  GROUP BY dt
+)
+SELECT dt, row_count, avg_14d,
+  CASE WHEN row_count < avg_14d - 2 * stddev_14d THEN 'ALERT: volume anomalo' END AS alert
+FROM daily_stats
+ORDER BY dt DESC
+LIMIT 5;
+```
+
+## Refactoring SQL: estrai, rinomina, riusa
+
+Il refactoring è spesso trascurato perché "è solo una query", ma query analitiche vivono in produzione per mesi o anni, vengono modificate da più persone e accumulano complessità accidentale.
+
+Le tre operazioni fondamentali sono:
+
+1. **Estrai subquery in CTE con nomi parlanti** per rendere la logica esplicita e facilmente modificabile.
+2. **Unisci query duplicate identificando il pattern comune** per evitare duplicazioni e incoerenze.
+3. **Separa logica di business da logica di presentazione** per mantenere chiarezza e riusabilità.
+
+Esempio di refactoring:
+
+Prima:
+
+```sql
+SELECT DATE_TRUNC('month', created_at) AS month,
+  SUM(CASE WHEN status = 'completed' THEN amount ELSE 0 END) AS revenue,
+  COUNT(DISTINCT user_id) AS users
+FROM orders
+WHERE order_type = 'subscription'
+  AND created_at >= '2024-01-01'
+GROUP BY 1;
+```
+
+Dopo:
+
+```sql
+WITH subscription_orders AS (
+  SELECT *
+  FROM orders
+  WHERE order_type = 'subscription'
+    AND created_at >= '2024-01-01'
+),
+monthly_metrics AS (
+  SELECT
+    DATE_TRUNC('month', created_at) AS month,
+    SUM(CASE WHEN status = 'completed' THEN amount ELSE 0 END) AS revenue,
+    COUNT(DISTINCT user_id) AS users
+  FROM subscription_orders
+  GROUP BY 1
+)
+SELECT * FROM monthly_metrics;
+```
+
+## Pattern riusabili in SQL analitico
+
+Alcuni pattern standardizzati aiutano a risolvere problemi ricorrenti:
+
+- **Flag binari per condizioni**: definire flag in modelli intermedi evita ripetizioni e rende il codice più leggibile.
+
+- **Snapshot per confronti temporali**: usare funzioni finestra per confrontare stati attuali e passati.
+
+Esempio di flag binari:
+
+```sql
+WITH users_enriched AS (
+  SELECT *,
+    CASE WHEN last_login > CURRENT_DATE - INTERVAL '30 days' THEN 1 ELSE 0 END AS is_active_30d,
+    CASE WHEN total_orders > 0 THEN 1 ELSE 0 END AS is_converted
+  FROM users
+)
+SELECT COUNT(*) FILTER (WHERE is_active_30d = 1 AND is_converted = 1) AS active_converted
+FROM users_enriched;
+```
+
+## Esempio o caso studio
+
+GitLab ha documentato la propria strategia di data testing nel handbook aziendale. Tutti i modelli dbt hanno test `not_null` e `unique` sulle colonne primarie, test `accepted_values` sugli enum e test di volume con soglie di alert.
+
+Un incidente del 2021 ha mostrato l'importanza dei test statistici: un cambio nello schema API fece arrivare valori in euro invece che in dollari. Il test di volume non rilevò anomalie, ma un analista notò valori più alti del previsto. Da allora, GitLab ha aggiunto test di sanity check statistico per monitorare variazioni settimanali superiori al 10%.
+
+Esempio semplificato del test:
+
+```sql
+WITH weekly_stats AS (
+  SELECT country, DATE_TRUNC('week', close_date) AS week, AVG(amount) AS avg_amount
+  FROM opportunities
+  GROUP BY country, week
+),
+week_over_week AS (
+  SELECT country, week, avg_amount,
+    LAG(avg_amount) OVER (PARTITION BY country ORDER BY week) AS prev_avg,
+    (avg_amount - LAG(avg_amount) OVER (PARTITION BY country ORDER BY week)) / NULLIF(LAG(avg_amount) OVER (PARTITION BY country ORDER BY week), 0) AS pct_change
+  FROM weekly_stats
+)
+SELECT * FROM week_over_week
+WHERE ABS(pct_change) > 0.10;
+```
+
+## Lab / esercizio
+
+### Livello base
+
+Scrivi query di test per `unique(order_id)`, `not_null(customer_id)` e `accepted_values(status, ['pending','completed','cancelled'])`.
+
+### Livello intermedio
+
+Implementa un test che alzi un alert se il numero di ordini di oggi è inferiore del 30% rispetto alla media degli ultimi 7 giorni.
+
+### Livello research-grade
+
+Rifattorizza una query legacy di 80 righe con subquery annidate in CTE con nomi parlanti e scrivi test per ogni CTE intermedia.
+
+### Dataset e materiali consigliati
+
+Usa dati ordini, eventi, sessioni, coorti, revenue e tabelle calendario. Se non disponibili, crea un dataset sintetico con almeno 200 righe, dimensione temporale, segmento e metrica di outcome.
+
+## Errore tipico da evitare
+
+L'errore più comune è usare **testing, refactoring e pattern SQL riusabili** come etichetta anziché processo. Succede quando si mostra un grafico senza decisione, una metrica senza baseline o una conclusione senza indicare quale assunzione potrebbe invalidarla.
+
+La domanda di controllo è: se questo risultato fosse instabile, quale scelta sbaglierei? Se la risposta non è concreta, manca il collegamento tra analisi e azione.
+
+## Quiz o checkpoint
+
+1. Quali sono i tre livelli di testing in SQL analitico e cosa testano?
+2. Quali sono le tre operazioni fondamentali di refactoring SQL?
+3. Come ha scoperto GitLab il bug del cambio valuta e che test ha aggiunto?
+4. Quale unità di analisi rende misurabile un problema?
+5. Quale output consegneresti a uno stakeholder non tecnico?
+
+## Riepilogo operativo
+
+**Testing, refactoring e pattern SQL riusabili** diventano utili solo se producono decisioni più chiare, non se aggiungono solo terminologia. Usare il framework problema, modello, formalizzazione, esempio, lab e checkpoint trasforma la lezione in pratica verificabile.

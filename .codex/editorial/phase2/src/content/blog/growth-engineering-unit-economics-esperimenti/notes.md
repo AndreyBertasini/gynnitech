@@ -1,0 +1,7 @@
+- [TAGLIATO: rimozione di introduzioni generiche e ripetizioni per mantenere il testo focalizzato sulla disciplina decisionale sotto incertezza]
+- [TAGLIATO: eliminazione di frasi decorative e affermazioni vaghe]
+- [AGGIUNTO: collegamenti logici tra sezioni per migliorare la coesione del testo]
+- [AGGIUNTO: mantenimento di esempi concreti e checklist per supportare l'applicazione pratica]
+- [AGGIUNTO: traduzione adattata in inglese con tono naturale e scorrevole, non letterale]
+- [MANTENUTO: struttura con sezioni obbligatorie per le lezioni, come richiesto]
+- [MANTENUTO: tutte le metriche e concetti chiave per insegnare la gestione della crescita sotto incertezza]

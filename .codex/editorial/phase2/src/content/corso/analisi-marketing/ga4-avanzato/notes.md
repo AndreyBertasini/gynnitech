@@ -1,0 +1,7 @@
+- [TAGLIATO: Intro generico e descrizioni lunghe su GA4 e strumenti di esplorazione, BigQuery, segmenti predittivi e casi studio specifici come Netflix e Revolut] per focalizzarsi sulla disciplina decisionale sotto incertezza.
+- [TAGLIATO: Dettagli tecnici e tutorial su GA4 Esplorazioni, BigQuery SQL, esempi di query, e descrizioni di funzionalità specifiche] per mantenere la lezione concentrata sul modello decisionale.
+- [AGGIUNTO: Struttura con sezioni obbligatorie di un corso tecnico: Problema reale, Modello concettuale, Formalizzazione rigorosa, Esempio o caso studio, Lab / esercizio, Errore tipico da evitare, Quiz o checkpoint, Riepilogo operativo] per coerenza editoriale.
+- [AGGIUNTO: Tabelle concise per modello concettuale e formalizzazione rigorosa, esempio di decisione con evidenze e interpretazioni, esercizi con livelli di difficoltà e materiali consigliati] per rendere la lezione operativa e concreta.
+- [AGGIUNTO: Domande di controllo e checklist per stimolare il pensiero critico e la validazione delle analisi] in linea con l'angolo editoriale sulla decisione sotto incertezza.
+- [TAGLIATO: Riferimenti bibliografici e link esterni] per mantenere il focus sul contenuto essenziale e operativo.
+- [AGGIUNTO: Linguaggio diretto, opinioni editoriali sulla disciplina e rischi comuni] per umanizzare e rendere la lezione più incisiva e meno descrittiva.

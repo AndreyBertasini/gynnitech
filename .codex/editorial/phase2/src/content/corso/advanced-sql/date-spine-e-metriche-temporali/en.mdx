@@ -1,0 +1,178 @@
+# Experiments and A/B Analysis in SQL
+
+An experiment might look like a winner after a couple of days, but the effect can fade when new user segments arrive or secondary signals like increased support requests appear. You cannot rely solely on average conversion: your query must preserve randomization, granularity, and include guardrail metrics. This lesson focuses on when a test turns into a product decision.
+
+## Real-world problem
+
+In advanced SQL, the challenge is writing correct analytical queries even when granularity, time windows, cohorts, and edge cases complicate the picture. This is not just theory; it's about improving a concrete choice using data, explicit assumptions, and minimal checks. If you cannot specify what decision changes, what data you observe, and what error you want to avoid, you haven't turned this lesson into applied skill.
+
+## Conceptual model
+
+| Phase     | What to clarify                              | Output                |
+|-----------|---------------------------------------------|-----------------------|
+| Question  | Which real choice needs improvement?        | Decision to make      |
+| Measure   | Which observable signal represents the problem? | Metric or source data |
+| Control   | Which baseline makes the result interpretable? | Credible comparison   |
+| Action    | What changes after the analysis?             | Next operational step |
+
+This simple model keeps focus: every technical detail should strengthen at least one of these points.
+
+## Rigorous formalization
+
+To analyze experiments in SQL, first define the unit of analysis (row, partition, window, join, cohort, or temporal metric). Then link this unit to an observable metric (correctness, performance, duplicates, granularity, stability). Finally, declare the expected decision (query, intermediate model, SQL test, or reusable pattern).
+
+| Element          | Required specification                                                |
+|------------------|----------------------------------------------------------------------|
+| Unit of analysis | row, partition, window, join, cohort, or temporal metric              |
+| Main signal      | correctness, performance, duplicates, granularity, stability          |
+| Baseline         | previous period, comparable group, benchmark, or counterfactual       |
+| Decision         | query, intermediate model, SQL test, or reusable pattern              |
+| Risk             | mistaking an available number for sufficient evidence                 |
+
+Formalization is solid when another analyst can reproduce the logic, critique assumptions, and reach the same decision.
+
+## Data structure of an A/B test
+
+A well-instrumented A/B test produces three key tables:
+
+1. **assignment**: `user_id`, `variant` (A or B), `assignment_time`
+2. **events**: `user_id`, `event_time`, `event_type`, `value`
+3. **users**: `user_id`, `signup_date`, `country`, `device`
+
+The SQL challenge is to calculate per-user metrics, aggregate by variant, and estimate difference with confidence intervals. This is a validation workflow, not just a query.
+
+## Calculating metrics per variant
+
+A common mistake is to compute averages only on users who transacted:
+
+```sql
+SELECT variant, AVG(revenue) AS avg_revenue
+FROM assignments a
+JOIN transactions t ON a.user_id = t.user_id
+WHERE t.txn_date >= a.assignment_time
+GROUP BY variant;
+```
+
+This excludes users with zero transactions, biasing the average. If treatment B reduces the number of transactors but increases average revenue per transactor, this query misleadingly shows an increase.
+
+The correct method calculates per-user revenue including zeros:
+
+```sql
+WITH user_revenue AS (
+  SELECT
+    a.user_id,
+    a.variant,
+    COALESCE(SUM(t.revenue), 0) AS total_revenue
+  FROM assignments a
+  LEFT JOIN transactions t
+    ON a.user_id = t.user_id
+    AND t.txn_date >= a.assignment_time
+    AND t.txn_date < a.assignment_time + INTERVAL '14 days'
+  GROUP BY a.user_id, a.variant
+)
+SELECT
+  variant,
+  COUNT(*) AS users,
+  ROUND(AVG(total_revenue), 4) AS avg_revenue_per_user,
+  ROUND(STDDEV(total_revenue) / SQRT(COUNT(*)), 4) AS se
+FROM user_revenue
+GROUP BY variant;
+```
+
+The `LEFT JOIN` and `COALESCE(..., 0)` ensure every assigned user contributes, even without transactions.
+
+## Calculating confidence intervals in SQL
+
+The 95% confidence interval for the difference between two independent means is:
+
+```
+CI = (avg_B - avg_A) ± 1.96 * sqrt(se_A² + se_B²)
+```
+
+In SQL, you can compute it by joining stats for both variants:
+
+```sql
+WITH stats AS (
+  SELECT
+    variant,
+    COUNT(*) AS n,
+    AVG(total_revenue) AS mean,
+    STDDEV(total_revenue) / SQRT(COUNT(*)) AS se
+  FROM user_revenue
+  GROUP BY variant
+)
+SELECT
+  (SELECT mean FROM stats WHERE variant = 'B') - (SELECT mean FROM stats WHERE variant = 'A') AS lift,
+  (SELECT mean FROM stats WHERE variant = 'B') - (SELECT mean FROM stats WHERE variant = 'A') - 1.96 * SQRT(POWER((SELECT se FROM stats WHERE variant = 'A'), 2) + POWER((SELECT se FROM stats WHERE variant = 'B'), 2)) AS ci_lower,
+  (SELECT mean FROM stats WHERE variant = 'B') - (SELECT mean FROM stats WHERE variant = 'A') + 1.96 * SQRT(POWER((SELECT se FROM stats WHERE variant = 'A'), 2) + POWER((SELECT se FROM stats WHERE variant = 'B'), 2)) AS ci_upper;
+```
+
+If `ci_lower` is positive, we can say with 95% confidence that treatment B has a positive effect. If the interval includes zero, the effect is indistinguishable from zero. If both bounds are negative, B worsens the metric.
+
+## Guardrail metrics: the second validation layer
+
+Guardrail metrics are those that should not degrade when the primary metric improves. For example, revenue per session or time on site. In SQL, they are calculated like the primary metric, but the test is one of non-inferiority: the confidence interval lower bound should not fall below a practically significant negative threshold (e.g., -0.5%).
+
+Example SQL test:
+
+```sql
+SELECT
+  lift,
+  ci_lower,
+  CASE WHEN ci_lower > -0.005 THEN 'guardrail_ok' ELSE 'guardrail_failed' END AS guardrail_status
+FROM diff_stats;
+```
+
+## Real case: Amazon's A/B testing on search
+
+Amazon runs over 10,000 A/B tests annually. A key pattern is the exposure filter: counting only users actually exposed to the treatment. A user assigned to B but never visiting the test page should not be counted.
+
+The exposure filter query is:
+
+```sql
+WITH exposed_users AS (
+  SELECT DISTINCT a.user_id, a.variant
+  FROM assignments a
+  JOIN page_views pv ON a.user_id = pv.user_id
+    AND pv.page = 'search_results'
+    AND pv.view_time >= a.assignment_time
+    AND pv.view_time < a.assignment_time + INTERVAL '14 days'
+)
+SELECT variant, COUNT(*) AS exposed
+FROM exposed_users
+GROUP BY variant;
+```
+
+This filter improves statistical sensitivity by 25-40% by removing noise from unexposed users.
+
+## Lab / exercise
+
+### Basic level
+
+Calculate `avg_clicks_per_user`, `avg_revenue_per_user`, and `conversion_rate` (at least one purchase) per variant, including users with zero events.
+
+### Intermediate level
+
+Extract lift with 95% confidence interval for revenue. Check if the effect is statistically significant.
+
+### Research-grade level
+
+Calculate the metric per variant per test day. Look for a plateau effect: does the difference between variants converge after N days? Use window functions for cumulative revenue.
+
+## Common mistake to avoid
+
+The most frequent error is treating A/B analysis as a label rather than a process. This happens when teams show a chart without a decision, a metric without a baseline, or a conclusion without stating which assumptions might invalidate it.
+
+The control question is: if this result were unstable, what wrong choice would I make? If you cannot answer concretely, the link between analysis and action is missing.
+
+## Quiz or checkpoint
+
+1. Why is the naive query calculating `AVG(revenue)` only on transactors wrong? How to fix it?
+2. What are guardrail metrics and how are they tested in SQL?
+3. Why does Amazon filter for exposed users and what's the benefit?
+4. Which unit of analysis makes the problem measurable?
+5. What output would you deliver to a non-technical stakeholder?
+
+## Operational summary
+
+Experiments and A/B analysis in SQL become useful when they produce clearer decisions, not just terminology. Use the framework of problem, model, formalization, example, lab, and checkpoint to turn the lesson into verifiable practice.

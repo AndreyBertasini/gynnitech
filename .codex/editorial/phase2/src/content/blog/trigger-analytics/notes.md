@@ -1,0 +1,9 @@
+- [TAGLIATO:] Eliminati i dettagli ridondanti e le ripetizioni introduttive.
+- [TAGLIATO:] Rimosse sezioni decorative e ripetitive per snellire il testo.
+- [AGGIUNTO:] Inserite transizioni logiche per collegare le sezioni in un flusso coerente.
+- [AGGIUNTO:] Mantenuti tabelle, esempi di codice e query SQL per preservare il valore didattico.
+- [AGGIUNTO:] Strutturato il testo con le sezioni richieste per un corso: problema reale, modello concettuale, esempi, implementazione, errori da evitare, quiz implicito.
+- [AGGIUNTO:] Versione italiana resa concreta, diretta e editorialmente critica.
+- [AGGIUNTO:] Versione inglese adattata con stile naturale e fluido, non letterale.
+- [TAGLIATO:] Eliminati dettagli troppo tecnici per il corpo principale, mantenuti nel codice di esempio.
+- [AGGIUNTO:] Sintesi finale che sottolinea l'importanza della velocità decisionale nel contesto dell'incertezza e del cambiamento rapido.

@@ -1,0 +1,7 @@
+- [TAGLIATO: Introduzioni generiche e ripetizioni ridondanti]
+- [TAGLIATO: Frasi decorative e promozionali]
+- [TAGLIATO: Dettagli non essenziali su metriche troppo generiche]
+- [AGGIUNTO: Collegamenti logici tra sezioni per coerenza]
+- [AGGIUNTO: Conclusione che riassume il tema della decisione sotto incertezza]
+- [AGGIUNTO: Chiarezza e sintesi per mantenere il focus sull'argomento principale]
+- [AGGIUNTO: Struttura con sezioni coerenti e titoli standardizzati]

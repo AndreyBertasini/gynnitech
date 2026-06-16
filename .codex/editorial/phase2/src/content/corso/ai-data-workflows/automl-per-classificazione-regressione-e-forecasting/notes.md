@@ -1,0 +1,7 @@
+- [TAGLIATO:] Rimosso qualsiasi apertura generica o decorativa non funzionale al flusso argomentativo.
+- [TAGLIATO:] Eliminati passaggi ridondanti o troppo generici che non aggiungevano valore specifico.
+- [AGGIUNTO:] Collegamenti logici tra sezioni per garantire continuità e coerenza nell'organismo editoriale.
+- [AGGIUNTO:] Uniformata la terminologia e la struttura per rispettare la disciplina della decisione sotto incertezza.
+- [AGGIUNTO:] Mantenuti tabelle e componenti didattiche originali per preservare validità MDX e valore formativo.
+- [AGGIUNTO:] Inserito un riepilogo operativo finale che sintetizza la lezione nel contesto della disciplina di decisione sotto incertezza.
+- [AGGIUNTO:] Traduzione adattata in inglese con attenzione a tono concreto e professionale, evitando traduzioni letterali.

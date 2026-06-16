@@ -1,0 +1,10 @@
+- [TAGLIATO:] Rimozione di introduzioni generiche e ripetizioni per concentrare il testo sul flusso decisionale e la disciplina richiesta.
+- [TAGLIATO:] Eliminazione di frasi decorative e promozionali che non aggiungevano valore operativo.
+- [AGGIUNTO:] Collegamenti logici tra sezioni per garantire coerenza e continuità nel discorso.
+- [AGGIUNTO:] Tabelle e framework mantenuti per insegnare chiaramente i passaggi e i controlli necessari.
+- [AGGIUNTO:] Sezioni obbligatorie per una lezione di corso, con titoli esatti e struttura coerente.
+- [AGGIUNTO:] Sintesi finale che sottolinea la necessità di osservabilità e tracciabilità nel workflow agentic AI.
+- [AGGIUNTO:] Versione inglese adattata con tono naturale e focalizzata sull'applicazione pratica e decisionale.
+- [TAGLIATO:] Riferimenti tecnici mantenuti ma senza dettagli superflui, solo link essenziali.
+- [TAGLIATO:] Rimozione di esempi troppo generici o poco concreti, lasciando solo quelli che illustrano bene il modello e il processo.
+- [AGGIUNTO:] Lab con livelli chiari e materiali consigliati per esercitarsi concretamente sul tema.

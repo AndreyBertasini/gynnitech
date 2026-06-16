@@ -1,0 +1,8 @@
+- [TAGLIATO: eliminati i passaggi introduttivi generici e ripetitivi per focalizzare il testo sull'argomento centrale della collaborazione e decisione sotto incertezza]
+- [TAGLIATO: rimosse frasi di apertura e chiusura troppo promozionali o vaghe]
+- [AGGIUNTO: collegamenti logici tra sezioni per garantire fluidità]
+- [AGGIUNTO: enfatizzata la necessità di decisioni chiare e misurabili come disciplina di lavoro]
+- [AGGIUNTO: mantenuti e riformulati i punti chiave per rispettare la struttura editoriale richiesta]
+- [AGGIUNTO: traduzione adattata per essere naturale e incisiva in inglese, non letterale]
+- [MANTENUTO: tutte le liste puntate e numerate, sezioni e paragrafi per insegnare il punto]
+- [RIMOSSO: riferimenti a corsi specifici e link per mantenere coerenza editoriale e focus sul tema decisionale]

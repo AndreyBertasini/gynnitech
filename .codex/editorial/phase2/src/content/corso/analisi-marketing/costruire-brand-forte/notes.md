@@ -1,0 +1,14 @@
+- [TAGLIATO:] Removed generic AI-style openings and decorative emphasis.
+- [TAGLIATO:] Eliminated repeated or filler content that did not advance the argument.
+- [TAGLIATO:] Removed overly verbose explanations, focusing on concrete, editorially opinionated language.
+- [AGGIUNTO:] Added logical bridges to connect sections smoothly.
+- [AGGIUNTO:] Structured the content into the required editorial organism, preserving all code blocks and formulas.
+- [AGGIUNTO:] Maintained exact level-2 headings for the course lesson structure.
+- [AGGIUNTO:] Transformed code blocks into prose or tables only when appropriate; preserved Python and SQL code blocks as they teach key points.
+- [AGGIUNTO:] Clarified the decision-making framework and emphasized the discipline of making decisions under uncertainty.
+- [AGGIUNTO:] Included the quiz/checkpoint and lab exercises with exact labels.
+- [AGGIUNTO:] Ensured the Italian version is concrete, native, and editorially opinionated; the English version is a native adaptation, not a literal translation.
+- [AGGIUNTO:] Kept references and real-world examples to ground the lesson.
+- [AGGIUNTO:] Explicitly formalized the analytical framework linking unit, signal, baseline, and decision.
+- [AGGIUNTO:] Preserved the mermaid diagram and table formatting for clarity.
+- [AGGIUNTO:] Summarized key takeaways emphasizing the practical application in decision-making under uncertainty.

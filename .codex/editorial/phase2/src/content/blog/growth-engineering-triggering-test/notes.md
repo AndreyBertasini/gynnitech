@@ -1,0 +1,8 @@
+- [TAGLIATO: rimozione di introduzioni generiche e ripetizioni non essenziali]
+- [TAGLIATO: eliminazione di frasi decorative e promozionali]
+- [TAGLIATO: rimosso il dettaglio eccessivo su metriche non approfondite]
+- [AGGIUNTO: struttura coerente con sezioni didattiche obbligatorie]
+- [AGGIUNTO: lab con livelli di difficoltà e materiali consigliati]
+- [AGGIUNTO: quiz per consolidare l'apprendimento]
+- [AGGIUNTO: conclusione che lega al tema editoriale della decisione sotto incertezza]
+- [AGGIUNTO: collegamenti logici per fluidità e coerenza editoriale]

@@ -1,0 +1,8 @@
+- [TAGLIATO:] Rimozione di introduzioni generiche, ripetizioni e dettagli non essenziali per mantenere il testo concentrato sulla disciplina decisionale.
+- [TAGLIATO:] Eliminazione di esempi aziendali dettagliati e codice SQL/Python per focalizzarsi su struttura e metodo decisionale.
+- [AGGIUNTO:] Sezioni strutturate secondo l'angolo editoriale richiesto, con titoli standardizzati per lezioni di corso.
+- [AGGIUNTO:] Modello concettuale e formalizzazione rigorosa per collegare teoria e pratica decisionale.
+- [AGGIUNTO:] Lab con livelli di difficoltà e materiali consigliati per favorire l'applicazione operativa.
+- [AGGIUNTO:] Quiz/checkpoint per stimolare la riflessione critica e la verifica della comprensione.
+- [AGGIUNTO:] Riepilogo operativo che sottolinea l'importanza di collegare concetto, dato e decisione per la disciplina del decision-making sotto incertezza.
+- [AGGIUNTO:] Versione inglese adattata in stile nativo, non traduzione letterale, per mantenere naturalezza e chiarezza.

@@ -1,0 +1,12 @@
+- [TAGLIATO:] Removed generic introductory and filler phrases that did not advance the argument.
+- [TAGLIATO:] Omitted duplicated or decorative emphasis and redundant sections.
+- [TAGLIATO:] Removed the "Controllo di qualità" section as it overlapped with lab and error sections.
+- [AGGIUNTO:] Added explicit editorial framing linking Bacon's concepts to decision-making under uncertainty.
+- [AGGIUNTO:] Structured the lesson with the required level-2 headings for clarity and coherence.
+- [AGGIUNTO:] Preserved all tables, code blocks, and examples that concretely illustrate the points.
+- [AGGIUNTO:] Included a concrete real-world case study and a practical lab with multiple levels.
+- [AGGIUNTO:] Added a quiz/checkpoint section to reinforce learning.
+- [AGGIUNTO:] Provided a concise operational summary to close the lesson.
+- [AGGIUNTO:] Maintained references for further reading.
+- [AGGIUNTO:] Ensured Italian version is concrete, opinionated, and native; English version is a native adaptation, not literal translation.
+- [AGGIUNTO:] Ensured all sections required by the editorial angle and course format are present and logically connected.

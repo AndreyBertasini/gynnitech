@@ -1,0 +1,6 @@
+- [TAGLIATO: eliminazione di introduzioni generiche e ripetizioni per concentrare il testo sul concetto di growth loop come disciplina decisionale sotto incertezza]
+- [TAGLIATO: rimozione di riferimenti promozionali diretti e link espliciti al corso per mantenere il focus editoriale]
+- [AGGIUNTO: aggiunta di una conclusione che lega il tema al processo decisionale e alla gestione dell'incertezza]
+- [AGGIUNTO: inserimento di transizioni logiche per collegare le sezioni e rendere il testo un organismo coerente]
+- [AGGIUNTO: mantenimento di tutte le sezioni richieste per un lesson plan, con titoli precisi e contenuti concreti]
+- [AGGIUNTO: adattamento linguistico per un italiano più diretto e un inglese più naturale e fluido]

@@ -1,0 +1,8 @@
+- [TAGLIATO: rimozione di aperture generiche e frasi di circostanza per mantenere la coerenza editoriale]
+- [TAGLIATO: eliminazione di ripetizioni e filler superflui]
+- [AGGIUNTO: collegamenti logici per integrare i concetti nel discorso sul decision making sotto incertezza]
+- [AGGIUNTO: formulazione più diretta e concreta per la versione italiana, con tono editoriale]
+- [AGGIUNTO: adattamento fluido e naturale in inglese, evitando traduzioni letterali]
+- [PRESERVATO: struttura MDX, titoli, liste e punti chiave per insegnare efficacemente]
+- [PRESERVATO: esempi, metriche e checklist essenziali per la pratica]
+- [RISTRUTTURATO: testo in un unico organismo editoriale coerente, eliminando sezioni isolate o troppo generiche]

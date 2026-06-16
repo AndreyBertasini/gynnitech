@@ -1,0 +1,7 @@
+- [TAGLIATO: apertura generica e frasi di circostanza]
+- [TAGLIATO: riferimenti promozionali e link non essenziali]
+- [AGGIUNTO: conclusione che lega il tema alla disciplina di prendere decisioni sotto incertezza]
+- [AGGIUNTO: transizioni logiche tra sezioni per coerenza]
+- [MANTENUTO: tassonomia eventi, esempi pratici, consigli operativi, e focus su misurazioni rilevanti]
+- [ADATTATO: traduzione non letterale ma adattata a stile editoriale inglese naturale]
+- [RISTRUTTURATO: mantenuto sette sezioni principali più conclusione come richiesto]

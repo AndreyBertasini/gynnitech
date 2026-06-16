@@ -1,0 +1,10 @@
+- [TAGLIATO:] Eliminati passaggi ridondanti e frasi generiche di apertura per rendere il testo più diretto e focalizzato.
+- [TAGLIATO:] Rimosse ripetizioni e filler non necessari per mantenere la coerenza editoriale.
+- [AGGIUNTO:] Inserite transizioni logiche tra sezioni per migliorare la fluidità del discorso.
+- [AGGIUNTO:] Rafforzata l'argomentazione sull'importanza del portfolio come prova di competenza attiva, non solo conoscenza teorica.
+- [AGGIUNTO:] Mantenuti e valorizzati esempi pratici e casi studio (Spotify, Netflix, NYC Taxi) per ancorare i concetti alla realtà lavorativa.
+- [AGGIUNTO:] Preservati blocchi di codice, formule e tabelle per insegnare i principi di ingegneria dei dati.
+- [AGGIUNTO:] Strutturato il testo secondo le intestazioni richieste per una lezione coerente e completa.
+- [AGGIUNTO:] Traduzione inglese adattata per un pubblico nativo, mantenendo tono concreto e diretto, non letterale.
+- [AGGIUNTO:] Inserito quiz con domande e spiegazioni per consolidare l'apprendimento.
+- [AGGIUNTO:] Inclusa sezione riepilogativa e riferimenti bibliografici per completezza editoriale.

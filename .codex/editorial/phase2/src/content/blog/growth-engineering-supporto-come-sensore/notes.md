@@ -1,0 +1,8 @@
+- [TAGLIATO: introduzioni generiche e frasi di apertura ridondanti]
+- [TAGLIATO: enfasi decorativa e ripetizioni]
+- [AGGIUNTO: collegamenti logici per fluidità tra sezioni]
+- [AGGIUNTO: traduzione fluida e adattata in inglese, non letterale]
+- [AGGIUNTO: mantenuto struttura con sezioni obbligatorie per un lesson-style post]
+- [TAGLIATO: riferimenti a strumenti o processi non essenziali per la tesi]
+- [AGGIUNTO: chiarimenti concreti e opinioni editoriali espresse in modo netto]
+- [MANTENUTO: esempi pratici, checklist, metriche, errori comuni per insegnare la disciplina decisionale sotto incertezza]

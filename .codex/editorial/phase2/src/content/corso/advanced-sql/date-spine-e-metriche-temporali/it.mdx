@@ -1,0 +1,182 @@
+# Esperimenti e A/B analysis in SQL
+
+Un esperimento può sembrare vincente dopo pochi giorni, ma la situazione può cambiare quando nuovi utenti entrano nel sistema o emergono segnali secondari come un aumento delle richieste di supporto. Non basta guardare la conversione media: la query deve preservare la randomizzazione, la granularità e considerare metriche di guardrail. Questa lezione affronta il momento in cui un test diventa una decisione di prodotto.
+
+## Problema reale
+
+Nel contesto di SQL avanzato, il problema è scrivere query analitiche corrette anche quando la granularità, le finestre temporali, le coorti e i casi limite complicano l'analisi. Non si tratta solo di teoria, ma di migliorare una scelta concreta con dati, assunzioni esplicite e controlli minimi. Se non sai indicare quale decisione cambia, quale dato osservi e quale errore vuoi evitare, la lezione non si è trasformata in competenza applicata.
+
+## Modello concettuale
+
+| Fase      | Cosa chiarire                                  | Output                  |
+|-----------|-----------------------------------------------|-------------------------|
+| Domanda   | Quale scelta reale deve migliorare?           | Decisione da prendere   |
+| Misura    | Quale segnale osservabile rappresenta il problema? | Metrica o dato sorgente |
+| Controllo | Quale baseline rende il risultato interpretabile? | Confronto credibile     |
+| Azione    | Che cosa cambia dopo l'analisi?                | Prossimo passo operativo |
+
+Questo modello semplice aiuta a mantenere il focus: ogni approfondimento tecnico deve rafforzare almeno uno di questi punti.
+
+## Formalizzazione rigorosa
+
+Per analizzare un esperimento in SQL, definisci prima l'unità di analisi (riga, partizione, finestra, join, coorte o metrica temporale). Poi collega questa unità a una metrica osservabile (correttezza, performance, duplicati, granularità, stabilità). Infine, dichiara la decisione attesa (query, modello intermedio, test SQL o pattern riusabile).
+
+| Elemento        | Specifica richiesta                                                    |
+|-----------------|----------------------------------------------------------------------|
+| Unità di analisi | riga, partizione, finestra, join, coorte o metrica temporale          |
+| Segnale principale | correttezza, performance, duplicati, granularità, stabilità          |
+| Baseline        | Periodo precedente, gruppo comparabile, benchmark o scenario controfattuale |
+| Decisione       | query, modello intermedio, test SQL o pattern riusabile               |
+| Rischio         | Scambiare un numero disponibile per una prova sufficiente             |
+
+La formalizzazione è solida quando un altro analista può riprodurre la logica, criticare le assunzioni e ottenere la stessa decisione.
+
+## La struttura dei dati di un A/B test
+
+Un A/B test ben tracciato produce tre tabelle chiave:
+
+1. **assignment**: `user_id`, `variant` (A o B), `assignment_time`
+2. **events**: `user_id`, `event_time`, `event_type`, `value`
+3. **users**: `user_id`, `signup_date`, `country`, `device`
+
+La sfida in SQL è calcolare per ogni metrica il valore per utente, aggregare per variante e stimare la differenza con l'intervallo di confidenza. Non è solo una query, ma un workflow di validazione.
+
+## Calcolo delle metriche per variante
+
+Un errore frequente è usare una query che calcola la media solo sugli utenti che hanno generato transazioni:
+
+```sql
+SELECT variant, AVG(revenue) AS avg_revenue
+FROM assignments a
+JOIN transactions t ON a.user_id = t.user_id
+WHERE t.txn_date >= a.assignment_time
+GROUP BY variant;
+```
+
+Questo esclude gli utenti senza transazioni, distorcendo la media. Se il trattamento riduce il numero di transanti ma aumenta il valore medio di chi transa, la media apparirà più alta, ma è un risultato fuorviante.
+
+Il metodo corretto calcola il valore per utente, includendo gli zeri:
+
+```sql
+WITH user_revenue AS (
+  SELECT
+    a.user_id,
+    a.variant,
+    COALESCE(SUM(t.revenue), 0) AS total_revenue
+  FROM assignments a
+  LEFT JOIN transactions t
+    ON a.user_id = t.user_id
+    AND t.txn_date >= a.assignment_time
+    AND t.txn_date < a.assignment_time + INTERVAL '14 days'
+  GROUP BY a.user_id, a.variant
+)
+SELECT
+  variant,
+  COUNT(*) AS users,
+  ROUND(AVG(total_revenue), 4) AS avg_revenue_per_user,
+  ROUND(STDDEV(total_revenue) / SQRT(COUNT(*)), 4) AS se
+FROM user_revenue
+GROUP BY variant;
+```
+
+La `LEFT JOIN` e `COALESCE(..., 0)` garantiscono che ogni utente assegnato contribuisca, anche senza transazioni.
+
+## Calcolo dell'intervallo di confidenza in SQL
+
+L'intervallo di confidenza al 95% per la differenza tra due medie indipendenti si calcola come:
+
+```
+CI = (avg_B - avg_A) ± 1.96 * sqrt(se_A² + se_B²)
+```
+
+In SQL, si può ottenere unendo i risultati delle due varianti:
+
+```sql
+WITH stats AS (
+  SELECT
+    variant,
+    COUNT(*) AS n,
+    AVG(total_revenue) AS mean,
+    STDDEV(total_revenue) / SQRT(COUNT(*)) AS se
+  FROM user_revenue
+  GROUP BY variant
+)
+SELECT
+  (SELECT mean FROM stats WHERE variant = 'B') - (SELECT mean FROM stats WHERE variant = 'A') AS lift,
+  (SELECT mean FROM stats WHERE variant = 'B') - (SELECT mean FROM stats WHERE variant = 'A') - 1.96 * SQRT(POWER((SELECT se FROM stats WHERE variant = 'A'), 2) + POWER((SELECT se FROM stats WHERE variant = 'B'), 2)) AS ci_lower,
+  (SELECT mean FROM stats WHERE variant = 'B') - (SELECT mean FROM stats WHERE variant = 'A') + 1.96 * SQRT(POWER((SELECT se FROM stats WHERE variant = 'A'), 2) + POWER((SELECT se FROM stats WHERE variant = 'B'), 2)) AS ci_upper;
+```
+
+Se `ci_lower` è positivo, con il 95% di confidenza il trattamento B ha un effetto positivo. Se l'intervallo include zero, l'effetto non è distinguibile da zero. Se entrambi sono negativi, B peggiora la metrica.
+
+## Metriche di guardrail: il secondo livello di validazione
+
+Le metriche di guardrail sono indicatori che non devono peggiorare quando la metrica primaria migliora. Ad esempio, il revenue per sessione o il tempo sul sito. In SQL si calcolano come la metrica primaria, ma il test è di non-inferiorità: l'intervallo di confidenza della differenza non deve scendere sotto una soglia negativa significativa (es. -0.5%).
+
+Esempio di test in SQL:
+
+```sql
+SELECT
+  lift,
+  ci_lower,
+  CASE WHEN ci_lower > -0.005 THEN 'guardrail_ok' ELSE 'guardrail_failed' END AS guardrail_status
+FROM diff_stats;
+```
+
+## Esempio o caso studio
+
+Amazon esegue oltre 10.000 A/B test all'anno. Un pattern chiave è il filtro di esposizione: contare solo gli utenti effettivamente esposti al trattamento. Un utente assegnato a B ma mai esposto alla pagina testata non deve essere incluso.
+
+La query per filtrare gli utenti esposti è:
+
+```sql
+WITH exposed_users AS (
+  SELECT DISTINCT a.user_id, a.variant
+  FROM assignments a
+  JOIN page_views pv ON a.user_id = pv.user_id
+    AND pv.page = 'search_results'
+    AND pv.view_time >= a.assignment_time
+    AND pv.view_time < a.assignment_time + INTERVAL '14 days'
+)
+SELECT variant, COUNT(*) AS exposed
+FROM exposed_users
+GROUP BY variant;
+```
+
+Questo filtro aumenta la sensibilità statistica del 25-40% eliminando rumore da utenti non esposti.
+
+## Lab / esercizio
+
+### Livello base
+
+Calcola `avg_clicks_per_user`, `avg_revenue_per_user` e `conversion_rate` (almeno un acquisto) per variante, includendo gli utenti con zero eventi.
+
+### Livello intermedio
+
+Estrai il lift con intervallo di confidenza al 95% per la metrica revenue. Verifica se l'effetto è statisticamente significativo.
+
+### Livello research-grade
+
+Calcola la metrica per variante per giorno di test. Cerca il plateau effect: la differenza tra varianti converge dopo N giorni? Usa window function per la revenue cumulativa.
+
+### Dataset e materiali consigliati
+
+Usa una dashboard reale, un export CSV, un quaderno di studio o un piccolo dataset sintetico. Il materiale deve contenere almeno una domanda, una metrica osservabile e una decisione da prendere.
+
+## Errore tipico da evitare
+
+Il rischio più comune è usare l'A/B analysis come etichetta, non come processo. Succede quando si mostra un grafico senza decisione, una metrica senza baseline o una conclusione senza indicare quali assunzioni potrebbero invalidarla.
+
+La domanda di controllo è: se questo risultato fosse instabile, quale scelta sbaglierei? Se non sai rispondere, manca il collegamento tra analisi e azione.
+
+## Quiz o checkpoint
+
+1. Perché la query naive che calcola `AVG(revenue)` solo sui transanti è sbagliata? Come correggerla?
+2. Cosa sono le metriche di guardrail e come si testano in SQL?
+3. Perché Amazon filtra per utenti esposti e qual è il vantaggio?
+4. Quale unità di analisi rende il problema misurabile?
+5. Quale output consegneresti a uno stakeholder non tecnico?
+
+## Riepilogo operativo
+
+Esperimenti e A/B analysis in SQL diventano utili quando producono decisioni più chiare, non solo terminologia. Usa il framework problema, modello, formalizzazione, esempio, lab e checkpoint per trasformare la lezione in pratica verificabile.

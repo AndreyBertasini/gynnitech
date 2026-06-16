@@ -1,0 +1,10 @@
+- [TAGLIATO:] Eliminati i passaggi introduttivi generici e ripetitivi che non aggiungevano valore all'argomento centrale.
+- [TAGLIATO:] Rimosse frasi decorative e filler per mantenere un tono concreto e diretto.
+- [AGGIUNTO:] Inserite transizioni logiche tra sezioni per un flusso coerente e organico.
+- [AGGIUNTO:] Mantenuti tutti i blocchi di codice SQL e Python che insegnano il punto pratico della lezione.
+- [AGGIUNTO:] Conservate tabelle di codifica visiva, scelta grafico e errori comuni per supportare la comprensione.
+- [AGGIUNTO:] Strutturata la lezione con sezioni obbligatorie per un corso tecnico avanzato, inclusi lab, errori da evitare e quiz.
+- [AGGIUNTO:] Traduzione inglese adattata per mantenere naturalezza e chiarezza, non letterale.
+- [AGGIUNTO:] Enfasi sul collegamento tra visualizzazione e decisione sotto incertezza, in linea con l'angolo editoriale richiesto.
+- [TAGLIATO:] Eliminati riferimenti superflui a fonti o dettagli non direttamente utili al flusso didattico.
+- [AGGIUNTO:] Sintesi finale che ribadisce il valore della visualizzazione come strumento decisionale, non solo estetico o tecnico.

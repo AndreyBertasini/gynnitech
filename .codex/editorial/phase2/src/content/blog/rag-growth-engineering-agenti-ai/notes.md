@@ -1,0 +1,8 @@
+- [TAGLIATO: eliminati i passaggi introduttivi generici e le ripetizioni superflue per mantenere il focus sulla disciplina decisionale nel contesto RAG]
+- [TAGLIATO: rimosso il richiamo promozionale e le frasi di apertura non essenziali]
+- [AGGIUNTO: collegamenti logici tra sezioni per creare un flusso coerente e organico]
+- [AGGIUNTO: sottolineatura della necessità di misurare le decisioni e non solo l'output finale]
+- [AGGIUNTO: enfasi sul ruolo della governance della conoscenza come parte integrante del processo RAG]
+- [AGGIUNTO: chiarimento sull'importanza di metriche multiple per valutare l'utilità reale delle risposte]
+- [AGGIUNTO: raccomandazioni pratiche per l'implementazione senza complicare il lavoro quotidiano]
+- [AGGIUNTO: conclusione che rimette al centro il fattore umano e la fiducia nel processo decisionale]

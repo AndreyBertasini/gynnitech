@@ -1,0 +1,197 @@
+# Testing, refactoring, and reusable SQL patterns
+
+In practice, a monthly query can determine bonuses, forecasts, and product priorities, yet no one dares to change it: too many anonymous CTEs, repeated filters, no tests, and uncertainty about field meanings. This is where **testing, refactoring, and reusable SQL patterns** become essential as SQL evolves from a personal script into a shared artifact.
+
+## Real-world problem
+
+In advanced SQL, the challenge is to write correct analytical queries even when grains, windows, cohorts, and edge cases grow complex. The goal is not just cleaner code but ensuring every assumption has a test, every transformation a clear name, and every reusable pattern reduces interpretation risks.
+
+The operational objective is to grasp the analytical problem and decision context; apply examples, metrics, and checks to real cases. If you can't specify which decision changes, which data you observe, and which error you want to avoid, the skill isn't yet applied.
+
+## Conceptual model
+
+| Phase       | What to clarify                            | Output                  |
+|-------------|-------------------------------------------|-------------------------|
+| Question    | Which real choice must improve?           | Decision to make        |
+| Measure     | What observable signal represents the problem? | Metric or source data |
+| Control     | Which baseline makes the result interpretable? | Credible comparison    |
+| Action      | What changes after analysis?               | Next operational step   |
+
+This simple model keeps focus on decision, data, control, and action. Every technical detail should strengthen at least one of these points.
+
+## Rigorous formalization
+
+To analyze this process, define the unit of work (row, partition, window, join, cohort, or temporal metric), link it to an observable metric (correctness, performance, duplicates, grain, stability), and declare the expected decision (query, intermediate model, SQL test, or reusable pattern).
+
+| Element         | Required specification                                     |
+|-----------------|------------------------------------------------------------|
+| Unit of analysis | row, partition, window, join, cohort, or temporal metric  |
+| Main signal     | correctness, performance, duplicates, grain, stability    |
+| Baseline        | previous period, comparable group, benchmark, or counterfactual scenario |
+| Decision        | query, intermediate model, SQL test, or reusable pattern  |
+| Risk            | Mistaking an available number for sufficient proof        |
+
+Formalization is solid when another analyst can reproduce the logic, challenge assumptions, and reach the same decision from the same data.
+
+## Data testing: beyond "the query runs"
+
+SQL analytical testing has three levels:
+
+- **Integrity tests** (e.g., `unique`, `not_null`): ensure uniqueness and no nulls in critical columns.
+- **Business logic tests** (e.g., `accepted_values`, `relationships`): validate domain rules like expected values or referential integrity.
+- **Statistical quality tests**: monitor stability and anomalies over time, such as unusual volume or mean changes.
+
+Example integrity test:
+
+Every `order_id` must be unique:
+
+```sql
+SELECT order_id, COUNT(*)
+FROM orders_clean
+GROUP BY order_id
+HAVING COUNT(*) > 1;
+```
+
+If rows are returned, the test fails.
+
+Example statistical anomaly detection:
+
+```sql
+WITH daily_stats AS (
+  SELECT dt, COUNT(*) AS row_count,
+    AVG(COUNT(*)) OVER (ORDER BY dt ROWS BETWEEN 13 PRECEDING AND 1 PRECEDING) AS avg_14d,
+    STDDEV(COUNT(*)) OVER (ORDER BY dt ROWS BETWEEN 13 PRECEDING AND 1 PRECEDING) AS stddev_14d
+  FROM orders_clean
+  GROUP BY dt
+)
+SELECT dt, row_count, avg_14d,
+  CASE WHEN row_count < avg_14d - 2 * stddev_14d THEN 'ALERT: anomalous volume' END AS alert
+FROM daily_stats
+ORDER BY dt DESC
+LIMIT 5;
+```
+
+## SQL refactoring: extract, rename, reuse
+
+Refactoring is often neglected because "it's just a query," but analytical queries live in production for months or years, are modified by multiple people, and accumulate accidental complexity.
+
+The three fundamental refactoring operations are:
+
+1. **Extract subqueries into CTEs with descriptive names** to make logic explicit and easy to modify.
+2. **Unify duplicate queries by identifying common patterns** to avoid duplication and inconsistency.
+3. **Separate business logic from presentation logic** to keep clarity and reusability.
+
+Refactoring example:
+
+Before:
+
+```sql
+SELECT DATE_TRUNC('month', created_at) AS month,
+  SUM(CASE WHEN status = 'completed' THEN amount ELSE 0 END) AS revenue,
+  COUNT(DISTINCT user_id) AS users
+FROM orders
+WHERE order_type = 'subscription'
+  AND created_at >= '2024-01-01'
+GROUP BY 1;
+```
+
+After:
+
+```sql
+WITH subscription_orders AS (
+  SELECT *
+  FROM orders
+  WHERE order_type = 'subscription'
+    AND created_at >= '2024-01-01'
+),
+monthly_metrics AS (
+  SELECT
+    DATE_TRUNC('month', created_at) AS month,
+    SUM(CASE WHEN status = 'completed' THEN amount ELSE 0 END) AS revenue,
+    COUNT(DISTINCT user_id) AS users
+  FROM subscription_orders
+  GROUP BY 1
+)
+SELECT * FROM monthly_metrics;
+```
+
+## Reusable patterns in analytical SQL
+
+Standardized patterns solve recurring problems:
+
+- **Binary flags for conditions**: define flags in intermediate models to avoid repetition and improve readability.
+
+- **Snapshots for temporal comparisons**: use window functions to compare current and previous states.
+
+Example binary flags:
+
+```sql
+WITH users_enriched AS (
+  SELECT *,
+    CASE WHEN last_login > CURRENT_DATE - INTERVAL '30 days' THEN 1 ELSE 0 END AS is_active_30d,
+    CASE WHEN total_orders > 0 THEN 1 ELSE 0 END AS is_converted
+  FROM users
+)
+SELECT COUNT(*) FILTER (WHERE is_active_30d = 1 AND is_converted = 1) AS active_converted
+FROM users_enriched;
+```
+
+## Real case: GitLab and data testing culture
+
+GitLab publicly documents its data testing strategy. All dbt models have `not_null` and `unique` tests on primary keys, `accepted_values` tests on enums, and volume tests with alert thresholds.
+
+A 2021 incident showed the value of statistical tests: a Salesforce API schema change caused `opportunity_amount` to arrive in euros instead of dollars. Volume tests didn't catch it, but an analyst noticed values 15-20% higher than expected. Since then, GitLab added sanity checks monitoring weekly average changes exceeding 10%.
+
+Simplified test example:
+
+```sql
+WITH weekly_stats AS (
+  SELECT country, DATE_TRUNC('week', close_date) AS week, AVG(amount) AS avg_amount
+  FROM opportunities
+  GROUP BY country, week
+),
+week_over_week AS (
+  SELECT country, week, avg_amount,
+    LAG(avg_amount) OVER (PARTITION BY country ORDER BY week) AS prev_avg,
+    (avg_amount - LAG(avg_amount) OVER (PARTITION BY country ORDER BY week)) / NULLIF(LAG(avg_amount) OVER (PARTITION BY country ORDER BY week), 0) AS pct_change
+  FROM weekly_stats
+)
+SELECT * FROM week_over_week
+WHERE ABS(pct_change) > 0.10;
+```
+
+## Lab / exercise
+
+### Basic level
+
+Write test queries for `unique(order_id)`, `not_null(customer_id)`, and `accepted_values(status, ['pending','completed','cancelled'])`.
+
+### Intermediate level
+
+Implement a test that raises an alert if today's order count is below 70% of the average of the last 7 days.
+
+### Research-grade level
+
+Refactor an 80-line legacy query with nested subqueries into CTEs with descriptive names and write tests for each intermediate CTE.
+
+### Recommended datasets and materials
+
+Use order, event, session, cohort, revenue, and calendar tables. If unavailable, create a synthetic dataset with at least 200 rows, a temporal dimension, a segment dimension, and an outcome metric.
+
+## Common mistake to avoid
+
+The most frequent error is treating **testing, refactoring, and reusable SQL patterns** as a label instead of a process. This happens when a team shows a chart without a decision, a metric without a baseline, or a conclusion without stating which assumption might invalidate it.
+
+The control question is: if this result were unstable, which choice would I get wrong? Without a concrete answer, the link between analysis and action is missing.
+
+## Quiz or checkpoint
+
+1. What are the three levels of testing in analytical SQL and what does each test?
+2. What are the three fundamental SQL refactoring operations?
+3. How did GitLab discover the currency bug and what test did they add afterward?
+4. Which unit of analysis makes a problem measurable?
+5. What output would you deliver to a non-technical stakeholder?
+
+## Operational summary
+
+**Testing, refactoring, and reusable SQL patterns** become valuable only when they lead to clearer decisions, not when they just add terminology. Using the problem, model, formalization, example, lab, and checkpoint framework turns the lesson into verifiable practice.

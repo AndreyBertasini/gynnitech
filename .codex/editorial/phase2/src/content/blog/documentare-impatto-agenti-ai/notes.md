@@ -1,0 +1,7 @@
+- [TAGLIATO: apertura generica e frasi di circostanza]
+- [TAGLIATO: ripetizioni e ridondanze]
+- [TAGLIATO: riferimenti promozionali non essenziali]
+- [AGGIUNTO: collegamenti logici per coerenza editoriale]
+- [AGGIUNTO: struttura chiara e sequenze operative]
+- [AGGIUNTO: enfasi su decisioni e contesto per allinearsi all'angolo editoriale]
+- [AGGIUNTO: traduzione adattata per fluidità e naturalezza in inglese]

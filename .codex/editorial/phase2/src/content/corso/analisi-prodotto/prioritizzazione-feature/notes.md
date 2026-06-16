@@ -1,0 +1,8 @@
+- [TAGLIATO: Introduzioni generiche e ripetizioni superflue]
+- [TAGLIATO: Codice Python e SQL dettagliati convertiti in tabelle e descrizioni per migliorare la leggibilità e l'integrazione nel testo]
+- [TAGLIATO: Esempi troppo specifici e dettagli tecnici non essenziali]
+- [AGGIUNTO: Sezioni strutturate con intestazioni obbligatorie per la lezione: Problema reale, Modello concettuale, Formalizzazione rigorosa, Esempio o caso studio, Lab / esercizio, Errore tipico da evitare, Quiz o checkpoint]
+- [AGGIUNTO: Sintesi finale e approfondimenti su framework complementari (Kano, Cost of Delay, Intercom)]
+- [AGGIUNTO: Collegamenti logici tra sezioni per creare un organismo editoriale coerente]
+- [AGGIUNTO: Versione italiana con tono concreto e opinioni editoriali, versione inglese adattata nativamente non letterale]
+- [AGGIUNTO: Eliminazione di decorazioni e filler, mantenendo solo contenuto che muove l'argomento]

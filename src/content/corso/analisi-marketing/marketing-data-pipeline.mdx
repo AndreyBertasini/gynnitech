@@ -17,254 +17,124 @@ prerequisites:
 ---
 # Marketing data pipeline: architettura end-to-end
 
-
-I costi Ads arrivano ogni ora, le revenue dal backend il giorno dopo e le piattaforme cambiano schema senza avviso. Se la pipeline non esplicita freschezza, chiavi e riconciliazioni, il marketing discute numeri diversi nella stessa riunione. **Marketing data pipeline: architettura end-to-end** costruisce la base tecnica della fiducia.
+I dati di marketing arrivano da fonti diverse, con tempi e formati differenti: i costi degli Ads si aggiornano ogni ora, le revenue backend il giorno dopo, e le piattaforme cambiano schema senza preavviso. Senza una pipeline che espliciti freschezza, chiavi e riconciliazioni, il team marketing finisce per discutere numeri discordanti nella stessa riunione. Questa lezione descrive come costruire una pipeline tecnica che garantisca fiducia nei dati.
 
 ## Una scena da cui partire
 
-Leggi questa lezione come architettura di responsabilità: ingestione, normalizzazione, matching, modellazione e serving devono dire quando il dato è completo, quale scarto è accettabile e quale decisione può usare quel dataset.
+Considera la pipeline come un'architettura di responsabilità: ogni fase  -  ingestione, normalizzazione, matching, modellazione e serving  -  deve indicare chiaramente quando il dato è completo, quale margine di errore è accettabile e quali decisioni possono basarsi su quel dataset.
 
-- **Contesto:** Quale sorgente marketing rompe più spesso lo schema o la freschezza?
-- **Metodo:** Quale riconciliazione controlla costi, conversioni e revenue?
-- **Applicazione:** Quale SLA dati prometteresti al team prima di automatizzare report?
+- Quale fonte marketing rompe più spesso lo schema o la freschezza?
+- Quale processo di riconciliazione controlla costi, conversioni e revenue?
+- Quale SLA dati potresti promettere al team prima di automatizzare i report?
 
 ## Architettura di riferimento
 
-```
-┌─────────────────────────────────────────────────┐
-│ FONTI                                            │
-│ Ad Platforms (Google, Meta, LinkedIn, TikTok...)  │
-│ Web Analytics (GA4, Amplitude)                    │
-│ CRM (Salesforce/HubSpot)                          │
-│ Email ESP (Braze/Klaviyo/Customer.io)             │
-│ CDP (Segment/Rudderstack)                         │
-│ Social (organic + paid insights)                  │
-│ Payment (Stripe, Adyen)                           │
-└───────────────┬─────────────────────────────────┘
-                │ ELT (Fivetran/Airbyte/Stitch)
-                ▼
-┌─────────────────────────────────────────────────┐
-│ WAREHOUSE (Snowflake/BigQuery/Redshift)           │
-│                                                   │
-│ staging/: stg_google_ads__*, stg_ga4__events...   │
-│ intermediate/: int_marketing_spend_daily,          │
-│               int_channel_attribution,             │
-│               int_customer_journey                 │
-│ marts/: mrt_marketing__channel_performance,        │
-│         mrt_marketing__campaign_roi                │
-│ activation/: mrt_activation__*                    │
-└───────────────┬─────────────────────────────────┘
-                │ BI (Looker/Tableau/Metabase)
-                │ Reverse ETL (Hightouch/Census)
-                ▼
-┌─────────────────────────────────────────────────┐
-│ CONSUMO                                          │
-│ Dashboard esecutive, Report, Campaign Activation │
-└─────────────────────────────────────────────────┘
-```
+Le fonti dati includono piattaforme Ads (Google, Meta, LinkedIn, TikTok), web analytics (GA4, Amplitude), CRM (Salesforce, HubSpot), ESP email (Braze, Klaviyo), CDP (Segment, Rudderstack), social e sistemi di pagamento (Stripe, Adyen). Questi dati vengono estratti tramite ELT (Fivetran, Airbyte) in un data warehouse (Snowflake, BigQuery), dove si creano layer di staging, intermediate e marts per normalizzare e modellare i dati. Infine, i dati sono consumati da BI (Looker, Tableau) o sistemi di attivazione campagne.
 
 ## Il modello di spend unificato
 
-Il cuore della pipeline è `int_marketing_spend_daily`, che normalizza tutti i dati di spesa in uno schema comune:
-
-```sql
--- models/intermediate/marketing/int_marketing_spend_daily.sql
-SELECT date, 'google_ads' AS channel, campaign_id, campaign_name,
-       cost AS spend, impressions, clicks,
-       COALESCE(conversions, 0) AS conversions
-FROM {{ ref('stg_google_ads__campaign_performance') }}
-
-UNION ALL
-
-SELECT date, 'facebook_ads' AS channel, adset_id AS campaign_id, adset_name,
-       spend, impressions, clicks,
-       COALESCE(purchases, 0) AS conversions
-FROM {{ ref('stg_facebook_ads__ad_performance') }}
-
-UNION ALL
-
-SELECT date, 'linkedin_ads' AS channel, campaign_id, campaign_name,
-       cost_in_local_currency * {{ eur_conversion_rate('date') }} AS spend,
-       impressions, clicks, COALESCE(conversions, 0) AS conversions
-FROM {{ ref('stg_linkedin_ads__campaigns') }}
-
--- + TikTok, Twitter, programmatic, affiliate...
-```
-
-Da questa tabella unificata, qualsiasi analisi cross-canale diventa banale:
-
-```sql
-SELECT channel,
-  DATE_TRUNC('month', date) AS month,
-  SUM(spend) AS total_spend,
-  SUM(conversions) AS total_conversions
-FROM {{ ref('int_marketing_spend_daily') }}
-GROUP BY channel, month;
-```
+Al centro della pipeline c'è la tabella `int_marketing_spend_daily`, che normalizza tutte le spese pubblicitarie in uno schema comune, uniformando nomi di colonne e valute. Questo rende semplici analisi cross-canale e aggregazioni temporali.
 
 ## Normalizzazione delle metriche
 
-Le piattaforme pubblicitarie usano nomenclature diverse per le stesse metriche. La pipeline deve normalizzare:
+Ogni piattaforma usa nomi diversi per metriche simili. La pipeline deve uniformare costi, click, impression e conversioni. Il revenue, non disponibile nativamente nelle piattaforme Ads, richiede integrazione con dati transazionali interni tramite finestre di attribuzione.
 
-| Metrica | Google Ads | Meta Ads | LinkedIn | TikTok |
-|---------|-----------|----------|----------|--------|
-| Costo | `cost` | `spend` | `cost_in_local_currency` | `spend` |
-| Click | `clicks` | `clicks` | `clicks` | `clicks` |
-| Impression | `impressions` | `impressions` | `impressions` | `impressions` |
-| Conversione | `conversions` | `actions` (filtrato per tipo) | `conversions` | `conversions` |
-| Revenue | Non nativo | Non nativo | Non nativo | Non nativo |
+## SLA di freschezza dati
 
-Il revenue richiede integrazione con dati transazionali interni (Stripe, Shopify, CRM) via attribution window.
+Le fonti aggiornano i dati con frequenze e latenze diverse: da pochi minuti (GA4, CRM) a ore o giorni (LinkedIn). La pipeline deve gestire queste differenze e mostrare sempre la data dell'ultimo aggiornamento per garantire trasparenza.
 
-## Data freshness SLA
+## Monitoraggio della pipeline
 
-| Fonte | Frequenza di aggiornamento | Latenza tipica |
-|-------|---------------------------|----------------|
-| Google Ads | Ogni 15 min | 30-60 min |
-| Meta Ads | Oraria | 1-2 ore |
-| LinkedIn | Giornaliera | 6-12 ore |
-| GA4 | Streaming (BigQuery) | &lt;5 min |
-| CRM | CDC / ogni 15 min | 5-15 min |
-
-La pipeline deve gestire questi SLA diversi. Le dashboard mostrano sempre la data dell'ultimo aggiornamento per trasparenza.
-
-## Monitoring della pipeline
-
-```yaml
-# dbt Elementary config per monitorare freschezza
-sources:
-  - name: google_ads
-    freshness:
-      warn_after: {count: 2, period: hour}
-      error_after: {count: 6, period: hour}
-  - name: facebook_ads
-    freshness:
-      warn_after: {count: 4, period: hour}
-      error_after: {count: 12, period: hour}
-```
-
-Alert automatico su Slack se una fonte supera la soglia di freschezza. Integrato con PagerDuty per fonti critiche (es. tracking real-time).
+Configurazioni di monitoraggio (ad esempio con dbt Elementary) controllano la freschezza delle fonti e generano alert automatici su Slack o PagerDuty in caso di ritardi critici.
 
 ## Controllo di qualità
 
-Prima di usare \"marketing data pipeline: architettura end-to-end\ in una decisione, controlla sempre completezza, duplicati, timezone, definizioni cambiate e segmenti esclusi. Molte analisi apparentemente sofisticate falliscono perché il dato di partenza misura un comportamento diverso da quello che il team crede di osservare.
-
+Prima di usare la pipeline per decisioni, verifica completezza, duplicati, timezone, cambi di definizioni e segmenti esclusi. Molti errori nascono da dati che misurano comportamenti diversi da quelli che il team pensa di osservare.
 
 ## Interpretazione per segmenti
 
-La media aggregata è solo il punto di partenza. Segmenta per canale, coorte, piano, paese, device e maturità dell'utente. Se due segmenti si muovono in direzioni opposte, la media non rappresenta nessuno dei due e può portare a una decisione sbagliata.
+La media aggregata è solo un punto di partenza. Segmenta per canale, coorte, piano, paese, device e maturità utente. Se segmenti diversi mostrano andamenti opposti, la media può essere fuorviante e portare a decisioni errate.
 
 ## Problema reale
 
-Nel lavoro su marketing analytics, **Marketing data pipeline: architettura end-to-end** serve a risolvere un problema concreto: trasformare budget, canali, creativita e audience in decisioni misurabili senza confondere volume, attribuzione e incrementalita. La domanda non è se il concetto sia interessante in astratto, ma quale decisione migliora quando lo applichi con dati affidabili e con una soglia di errore esplicita.
-
-Questa lezione va studiata come uno strumento operativo: entro la fine devi saper Comprendere il problema analitico e il contesto decisionale; Applicare esempi, metriche e controlli a casi reali. Se non riesci a collegare il concetto a una scelta reale, la conoscenza resta decorativa e non diventa competenza.
+In marketing analytics, questa pipeline serve a trasformare budget, canali, creatività e audience in decisioni misurabili, evitando confusione tra volume, attribuzione e incrementalità. La domanda chiave è quale decisione migliora grazie a dati affidabili e a una soglia di errore esplicita.
 
 ## Modello concettuale
 
-```mermaid
-flowchart LR
-    A["Domanda di business"]
-    B["Ipotesi misurabile"]
-    C["Dato affidabile"]
-    D["Analisi incrementale"]
-    E["Decisione di budget"]
-    A --> B
-    B --> C
-    C --> D
-    D --> E
-```
-
-Il modello mentale e sequenziale: prima si formula la domanda, poi si traduce in unità osservabili, quindi si valuta la qualità del dato e solo alla fine si decide. Saltare un passaggio produce analisi eleganti ma fragili.
+Il processo è sequenziale: si parte da una domanda di business, si formula un'ipotesi misurabile, si verifica la qualità del dato, si esegue un'analisi incrementale e infine si prende una decisione di budget.
 
 | Passaggio | Domanda guida | Output atteso |
 |---|---|---|
-| Framing | Quale decisione deve cambiare? | Una scelta concreta, non una curiosità |
-| Misura | Quale segnale rappresenta il fenomeno? | Metrica, fonte e granularità |
-| Confronto | Rispetto a quale baseline interpreto il risultato? | Benchmark o controfattuale plausibile |
-| Azione | Che cosa faccio se il segnale supera la soglia? | Decisione, owner e prossimo controllo |
+| Framing | Quale decisione deve cambiare? | Una scelta concreta |
+| Misura | Quale segnale rappresenta il fenomeno? | Metrica, fonte, granularità |
+| Confronto | Rispetto a quale baseline interpreto il risultato? | Benchmark o controfattuale |
+| Azione | Che cosa faccio se il segnale supera la soglia? | Decisione e prossimo controllo |
 
 ## Formalizzazione rigorosa
 
-Formalizza **Marketing data pipeline: architettura end-to-end** come una relazione tra quattro elementi: unità di analisi, segnale, baseline e decisione. Nel contesto di questa lezione l'unità principale e **campagna, coorte, touchpoint o segmento cliente**. Il segnale da osservare deve essere collegato a **margine incrementale, CAC payback, conversion rate corretto, lift o retention generata**, mentre la baseline deve essere scelta tra **periodo precedente, gruppo holdout, mercato comparabile o benchmark storico**.
-
-Una formulazione robusta segue questa logica:
-
-| Elemento | Definizione operativa per questa lezione |
-|---|---|
-| Unità | campagna, coorte, touchpoint o segmento cliente |
-| Segnale | margine incrementale, CAC payback, conversion rate corretto, lift o retention generata |
-| Baseline | periodo precedente, gruppo holdout, mercato comparabile o benchmark storico |
-| Decisione | spostare risorse, cambiare messaggio, fermare una tattica o scalare un esperimento |
-| Rischio | Confondere correlazione, qualità del dato e causalità decisionale |
-
-La regola pratica e semplice: una misura e utile solo se riduce l'incertezza su una decisione specifica. Se non cambia una scelta, e documentazione; se cambia una scelta senza controlli, e rischio.
+La pipeline si formalizza come relazione tra unità di analisi (campagna, coorte, segmento), segnale (margine incrementale, CAC payback, conversion rate corretto), baseline (periodo precedente, gruppo holdout, benchmark storico) e decisione (allocare risorse, cambiare messaggio, fermare tattica). Il rischio è confondere correlazione con causalità.
 
 ## Esempio o caso studio
 
-Un team growth deve decidere se aumentare il budget su un canale che mostra CPA basso ma vendite marginali deboli. La lezione aiuta a separare il segnale utile dal rumore operativo, collegando metrica, modello mentale e decisione economica.
+Un team growth deve decidere se aumentare budget su un canale con CPA basso ma vendite marginali deboli. La pipeline aiuta a separare segnale da rumore, collegando metrica, modello mentale e decisione economica.
 
-Applicando **Marketing data pipeline: architettura end-to-end**, il team costruisce una lettura in tre colonne: cosa sappiamo, cosa assumiamo e quale decisione prendiamo. Questo formato impedisce di presentare un numero come se fosse una conclusione autosufficiente.
-
-| Evidenza | Interpretazione prudente | Decisione conseguente |
+| Evidenza | Interpretazione prudente | Decisione |
 |---|---|---|
-| Segnale positivo ma non isolato | Il fenomeno esiste, ma la causa e ancora incerta | Cercare baseline o holdout |
-| Segmento con risposta diversa | L'effetto medio nasconde eterogeneita | Analizzare coorti o sottogruppi |
-| Costo operativo crescente | Il risultato va valutato sul margine | Applicare soglie economiche |
+| Segnale positivo ma non isolato | Fenomeno esiste, causa incerta | Cercare baseline o holdout |
+| Segmento con risposta diversa | Effetto medio nasconde eterogeneità | Analizzare coorti |
+| Costo operativo crescente | Valutare sul margine | Applicare soglie economiche |
 
 ## Lab / esercizio
 
 ### Livello base
 
-Prendi una decisione reale collegata a **Marketing data pipeline: architettura end-to-end** e scrivi in cinque righe: obiettivo, metrica primaria, baseline, rischio principale e azione prevista. Non usare più di una metrica primaria.
+Scrivi una decisione reale legata alla pipeline: obiettivo, metrica primaria, baseline, rischio e azione prevista, usando una sola metrica.
 
 ### Livello intermedio
 
-Costruisci una tabella con almeno tre segmenti o scenari. Per ciascuno indica segnale, possibile spiegazione alternativa e controllo necessario prima di decidere.
+Costruisci una tabella con almeno tre segmenti, indicando segnale, spiegazione alternativa e controllo necessario.
 
 ### Livello research-grade
 
-Disegna un piano di validazione: ipotesi, dati necessari, criterio di esclusione, soglia decisionale e controllo post-decisione. Specifica anche che cosa ti farebbe cambiare idea.
+Disegna un piano di validazione: ipotesi, dati, esclusioni, soglia decisionale e controllo post-decisione. Specifica cosa ti farebbe cambiare idea.
 
 ### Dataset e materiali consigliati
 
-Usa export campagne, costi media, eventi web o app, CRM, transazioni, survey brand e log di consenso. Se non hai dati reali, crea un dataset sintetico con 200-500 righe e almeno una colonna temporale, una colonna segmento, una metrica di outcome e una variabile di esposizione.
+Usa export campagne, costi media, eventi web/app, CRM, transazioni, survey brand e log consenso. Se non hai dati reali, crea un dataset sintetico con almeno 200 righe e colonne temporali, segmenti, outcome ed esposizione.
 
 ## Errore tipico da evitare
 
-L'errore più frequente e trattare **Marketing data pipeline: architettura end-to-end** come una definizione da ricordare invece che come un protocollo decisionale. In pratica succede quando si presenta una metrica senza baseline, un grafico senza ipotesi, o una raccomandazione senza costo dell'errore.
+Trattare la pipeline come una definizione da ricordare invece che un protocollo decisionale. Presentare metriche senza baseline, grafici senza ipotesi o raccomandazioni senza costo dell'errore porta a decisioni fragili.
 
-Un controllo utile è chiedersi: "se questo risultato fosse falso o instabile, quale decisione sbaglierei?". Se la risposta non è chiara, la lezione non è ancora stata applicata davvero.
+Un controllo utile: chiedersi "se questo risultato fosse falso, quale decisione sbaglierei?". Se la risposta non è chiara, la pipeline non è stata applicata davvero.
 
 ## Quiz o checkpoint
 
-1. Qual è la decisione concreta che questa lezione dovrebbe migliorare?
+1. Quale decisione concreta migliora questa pipeline?
 2. Quale baseline rende interpretabile il risultato?
-3. Quale assunzione, se sbagliata, cambierebbe la conclusione?
-4. Quale controllo minimo useresti prima di presentare la raccomandazione?
+3. Quale assunzione, se sbagliata, cambia la conclusione?
+4. Quale controllo minimo useresti prima di raccomandare?
 
 ## Riepilogo operativo
 
-**Marketing data pipeline: architettura end-to-end** e una competenza utile quando collega concetto, dato e decisione. Studiala partendo da un problema reale, formalizza il segnale, cerca una baseline credibile, costruisci un esempio e chiudi con un controllo pratico. Categoria: Tecnico. Difficoltà: advanced. Tempo stimato: 22 min.
+La pipeline è utile quando collega concetto, dato e decisione. Studiala partendo da un problema reale, formalizza il segnale, cerca una baseline credibile, costruisci un esempio e chiudi con un controllo pratico.
 
 ## Approfondimento di pratica
 
-Per consolidare **Marketing data pipeline: architettura end-to-end**, trattala come una piccola prova di lavoro dentro una review marketing con budget, canali, tracking e marginalita da riconciliare. Non basta dire di aver capito la lezione: devi produrre un memo che collega canale, metrica, segmento, costo e raccomandazione. Questo passaggio serve a rendere la conoscenza trasferibile, perché obbliga a separare contesto, misura, azione e limite.
+Trattala come una prova di lavoro in una review marketing con budget, canali, tracking e marginalità da riconciliare. Devi produrre un memo che collega canale, metrica, segmento, costo e raccomandazione, separando contesto, misura, azione e limite.
 
 ### Esempio operativo
 
-Parti da una domanda semplice: quale scelta diventerebbe migliore se applicassi bene questa lezione? Nel modulo analisi marketing, la risposta deve sempre collegare un problema reale a un output osservabile. Se stai studiando una lezione di tipo Tecnico, costruisci un esempio con tre righe: il contesto in cui nasce la domanda, il dato o il modello che useresti per leggerla, e la decisione che prenderesti dopo aver controllato i rischi.
-
-Un esempio valido non deve essere grande. Può essere una tabella con una baseline e due segmenti, una query che verifica una definizione, un disegno di esperimento, un controllo su un modello o un memo di dieci righe. La qualità non dipende dalla complessità tecnica, ma dalla tracciabilità del ragionamento: chi legge deve capire perché hai scelto quella metrica, quale alternativa hai scartato e quale evidenza ti farebbe cambiare idea.
+Parti da una domanda semplice: quale scelta migliorerebbe applicando la pipeline? Costruisci un esempio con contesto, dato/modello e decisione dopo controllo rischi. La qualità si misura dalla tracciabilità del ragionamento.
 
 ### Checkpoint di lavoro
 
-- Scrivi la decisione che questa lezione dovrebbe migliorare, usando un verbo operativo: allocare, fermare, correggere, lanciare, misurare, priorizzare o investigare.
-- Definisci il segnale principale e almeno un guardrail. Il segnale dice dove guardi; il guardrail evita che una scelta localmente buona rovini il sistema.
-- Aggiungi una baseline. Senza baseline non sai se il numero e alto, basso, stabile, anomalo o solo raccontato male.
-- Esplicita il rischio più probabile: scambiare correlazione di campagna per impatto incrementale o decisione di budget. Scrivilo prima della raccomandazione, non dopo.
-- Chiudi con un output consegnabile: dashboard, query, schema, memo, esperimento, notebook o checklist. Deve essere qualcosa che un reviewer possa aprire e criticare.
+- Scrivi la decisione da migliorare con un verbo operativo (allocare, fermare, correggere...)
+- Definisci segnale e almeno un guardrail
+- Aggiungi una baseline
+- Esplicita il rischio più probabile
+- Chiudi con un output consegnabile (dashboard, query, memo...)
 
 ### Riepilogo di padronanza
 
-Hai davvero assimilato **Marketing data pipeline: architettura end-to-end** quando riesci a usarla in tre modi: spiegare il concetto senza gergo inutile, applicarlo a un caso piccolo ma realistico, e difendere una raccomandazione includendo limiti e prossimi controlli. Se manca uno di questi tre elementi, torna al modello concettuale e riduci l'ambizione dell'esempio. Meglio una prova piccola ma rigorosa di un grande progetto che non rende verificabile la decisione.
+Hai assimilato la pipeline quando riesci a spiegarla senza gergo, applicarla a un caso realistico e difendere una raccomandazione con limiti e controlli. Se manca un elemento, torna al modello concettuale e riduci l'ambizione dell'esempio.

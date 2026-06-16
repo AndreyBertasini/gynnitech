@@ -1,0 +1,8 @@
+- [TAGLIATO:] Eliminati i passaggi introduttivi generici e ripetitivi per mantenere il testo focalizzato sulla disciplina decisionale.
+- [TAGLIATO:] Rimosse aperture e chiusure promozionali e filler non necessari.
+- [AGGIUNTO:] Inserite transizioni logiche per collegare le sezioni in un flusso coerente.
+- [AGGIUNTO:] Mantenuti tutti i blocchi di codice, tabelle e diagrammi utili all'apprendimento.
+- [AGGIUNTO:] Strutturata la lezione con sezioni obbligatorie per un corso tecnico, includendo problema reale, modello, formalizzazione, esempio, esercizio, errori da evitare, quiz e riepilogo.
+- [AGGIUNTO:] Versione italiana resa concreta e opinionata, con un linguaggio diretto e operativo.
+- [AGGIUNTO:] Versione inglese adattata in modo naturale, evitando traduzioni letterali e mantenendo chiarezza e rigore.
+- [AGGIUNTO:] Evidenziata la disciplina di decision making sotto incertezza attraverso la formalizzazione e i controlli di qualità.

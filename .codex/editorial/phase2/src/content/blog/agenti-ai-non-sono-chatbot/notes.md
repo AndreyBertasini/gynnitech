@@ -1,0 +1,7 @@
+- [TAGLIATO: rimozione di introduzioni generiche e ripetizioni]
+- [TAGLIATO: eliminazione di frasi decorative e promozionali]
+- [AGGIUNTO: collegamenti logici tra sezioni per coerenza editoriale]
+- [AGGIUNTO: riformulazione per chiarezza e concretezza, mantenendo la struttura originale]
+- [AGGIUNTO: mantenimento di esempi e checklist essenziali per l'apprendimento]
+- [AGGIUNTO: divisione in sezioni con titoli precisi per facilitare la lettura e l'applicazione pratica]
+- [AGGIUNTO: enfasi sulla disciplina decisionale sotto incertezza, coerente con l'angolo editoriale]

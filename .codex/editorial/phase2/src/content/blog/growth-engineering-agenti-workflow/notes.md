@@ -1,0 +1,8 @@
+- [TAGLIATO: introduzioni generiche e ripetizioni sul valore dell'AI]
+- [TAGLIATO: frasi di apertura troppo generiche e promozionali]
+- [TAGLIATO: dettagli non essenziali su tool e dashboard]
+- [AGGIUNTO: collegamenti logici per fluidità tra sezioni]
+- [AGGIUNTO: enfasi editoriale sulla disciplina di decision making sotto incertezza]
+- [AGGIUNTO: chiarimenti su metriche e loro ruolo nel processo decisionale]
+- [AGGIUNTO: checklist precisa per evitare implementazioni premature]
+- [AGGIUNTO: conclusione che sottolinea la necessità di integrare AI in processi controllati]

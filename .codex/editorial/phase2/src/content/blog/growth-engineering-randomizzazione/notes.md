@@ -1,0 +1,8 @@
+- [TAGLIATO: Introduzione generica e ripetizioni sulla crescita come sistema]
+- [TAGLIATO: Frasi enfatiche non necessarie]
+- [TAGLIATO: Dettagli troppo tecnici senza contesto]
+- [AGGIUNTO: Struttura didattica con sezioni obbligatorie per le lezioni]
+- [AGGIUNTO: Esercizi e checklist per applicare i concetti]
+- [AGGIUNTO: Conclusione che lega il tema al contesto AI e al ruolo futuro del growth engineer]
+- [AGGIUNTO: Domande di checkpoint per stimolare riflessione critica]
+- [AGGIUNTO: Chiarezza su errori comuni e metriche da monitorare]

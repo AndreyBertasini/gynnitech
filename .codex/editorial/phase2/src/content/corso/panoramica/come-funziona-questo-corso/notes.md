@@ -1,0 +1,8 @@
+- [TAGLIATO:] Rimosso il tono generico e ripetitivo delle introduzioni e spiegazioni non essenziali.
+- [TAGLIATO:] Eliminati passaggi decorativi e ripetizioni di concetti già espressi.
+- [AGGIUNTO:] Inseriti ponti logici tra sezioni per garantire coerenza e fluidità.
+- [AGGIUNTO:] Organizzato il contenuto in sezioni obbligatorie per un corso, mantenendo la struttura e i dettagli tecnici originali.
+- [AGGIUNTO:] Traduzione adattata in inglese con un registro professionale e diretto, non letterale.
+- [PRESERVATO:] Tutti i blocchi di codice, tabelle, componenti e quiz originali per mantenere la validità MDX e la completezza didattica.
+- [AGGIUNTO:] Etichettatura precisa per il lab/esercizio con i livelli base, intermedio e research-grade e materiali consigliati.
+- [AGGIUNTO:] Titolo e introduzione più incisivi per sottolineare l'importanza della disciplina del decision making sotto incertezza.

@@ -1,0 +1,6 @@
+- [TAGLIATO: rimozione di introduzioni generiche e ripetizioni]
+- [TAGLIATO: eliminazione di frasi decorative e promozionali]
+- [AGGIUNTO: collegamenti logici per fluidità tra sezioni]
+- [AGGIUNTO: traduzione adattata e resa più naturale in inglese]
+- [AGGIUNTO: mantenimento di tutte le sezioni richieste e struttura coerente]
+- [AGGIUNTO: conservazione di esempi, checklist e metriche per supportare la disciplina decisionale sotto incertezza]

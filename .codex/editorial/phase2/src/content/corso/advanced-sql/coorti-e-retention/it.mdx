@@ -1,0 +1,194 @@
+import { SqlExercise } from '../../../components/SqlExercise';
+
+# Attribution queries e path analytics
+
+Nel mondo del marketing digitale, attribuire correttamente una vendita a un canale è una sfida che spesso si riduce a una negoziazione politica se non si definisce una regola esplicita. Paid social, email e brand possono tutti rivendicare lo stesso acquisto, ma senza una logica trasparente e condivisa, il budget rischia di essere allocato in modo arbitrario.
+
+## Problema reale
+
+Come giustificare perché un canale riceve credito e un altro no? Non si tratta di trovare il modello perfetto, ma di costruire una logica che renda visibili le ipotesi, i limiti e le conseguenze sul budget. Quale decisione di budget si vuole supportare? Quale finestra temporale rende il credito difendibile? Come presentare un modello con limiti espliciti senza indebolirlo?
+
+## Modello concettuale
+
+| Fase | Cosa chiarire | Output |
+|---|---|---|
+| Domanda | Quale scelta reale deve migliorare? | Decisione da prendere |
+| Misura | Quale segnale osservabile rappresenta il problema? | Metrica o dato sorgente |
+| Controllo | Quale baseline rende il risultato interpretabile? | Confronto credibile |
+| Azione | Che cosa cambia dopo l'analisi? | Prossimo passo operativo |
+
+Questo schema semplice aiuta a mantenere il focus sulle decisioni concrete, evitando di perdersi in tecnicismi astratti.
+
+## Formalizzazione rigorosa
+
+Per rendere l'analisi riproducibile e critica, definisci l'unità di lavoro (riga, partizione, finestra, join, coorte o metrica temporale), collega questa unità a una metrica osservabile (correttezza, performance, duplicati, grain e stabilità del risultato) e dichiara la decisione attesa (query, modello intermedio, test SQL o pattern riusabile).
+
+| Elemento | Specifica richiesta |
+|---|---|
+| Unità di analisi | riga, partizione, finestra, join, coorte o metrica temporale |
+| Segnale principale | correttezza, performance, duplicati, grain e stabilità del risultato |
+| Baseline | Periodo precedente, gruppo comparabile, benchmark o scenario controfattuale |
+| Decisione | query, modello intermedio, test SQL o pattern riusabile |
+| Rischio | Scambiare un numero disponibile per una prova sufficiente |
+
+## I modelli di attribuzione in SQL
+
+Quattro modelli classici sono implementabili in SQL con complessità crescente:
+
+| Modello | Distribuzione del credito | Complessità SQL |
+|---------|---------------------------|-----------------|
+| Last-click | 100% all'ultimo touchpoint | Semplice: `FIRST_VALUE` ordinato in ordine decrescente |
+| First-click | 100% al primo touchpoint | Semplice: `FIRST_VALUE` ordinato in ordine crescente |
+| Linear | Equamente diviso tra tutti i touchpoint | Media complessità: conta touchpoint per conversione |
+| Time decay | Peso maggiore ai touchpoint più recenti | Complesso: pesi esponenziali con window functions |
+
+**Last-click in SQL:**
+
+```sql
+SELECT conversion_id, user_id, channel,
+  FIRST_VALUE(channel) OVER (
+    PARTITION BY conversion_id ORDER BY touch_time DESC
+    ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING
+  ) AS last_touch_channel
+FROM touchpoints;
+```
+
+**First-click in SQL:**
+
+```sql
+SELECT conversion_id, user_id, channel,
+  FIRST_VALUE(channel) OVER (
+    PARTITION BY conversion_id ORDER BY touch_time ASC
+    ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING
+  ) AS first_touch_channel
+FROM touchpoints;
+```
+
+**Linear attribution in SQL:**
+
+```sql
+WITH touchpoint_counts AS (
+  SELECT *,
+    COUNT(*) OVER (PARTITION BY conversion_id) AS total_touches,
+    1.0 / COUNT(*) OVER (PARTITION BY conversion_id) AS weight
+  FROM touchpoints
+)
+SELECT channel,
+  SUM(conversion_value * weight) AS attributed_revenue
+FROM touchpoint_counts
+GROUP BY channel;
+```
+
+**Time decay in SQL:**
+
+```sql
+WITH ordered_touches AS (
+  SELECT *,
+    ROW_NUMBER() OVER (PARTITION BY conversion_id ORDER BY touch_time DESC) AS recency_rank,
+    COUNT(*) OVER (PARTITION BY conversion_id) AS total_touches
+  FROM touchpoints
+),
+time_decay_weights AS (
+  SELECT *,
+    POWER(0.5, recency_rank - 1) AS raw_weight,
+    SUM(POWER(0.5, recency_rank - 1)) OVER (PARTITION BY conversion_id) AS total_weight
+  FROM ordered_touches
+)
+SELECT channel,
+  SUM(conversion_value * raw_weight / total_weight) AS attributed_revenue
+FROM time_decay_weights
+GROUP BY channel;
+```
+
+Il modello time decay è particolarmente adatto per prodotti con un lungo percorso di maturazione, dove l'ultimo click riflette una decisione consolidata.
+
+## Esempio o caso studio
+
+Booking.com, con un budget di marketing digitale di oltre 4 miliardi di dollari, ha superato i modelli a regola fissa adottando un modello basato sul valore di Shapley. Questo metodo assegna credito a ogni canale in base al contributo marginale medio in tutte le combinazioni possibili, offrendo una visione più equa e realistica.
+
+Una versione semplificata in SQL calcola il tasso di conversione per ogni combinazione di canali e attribuisce i delta:
+
+```sql
+WITH channel_combos AS (
+  SELECT user_id, conversion_id,
+    STRING_AGG(DISTINCT channel, ', ' ORDER BY channel) AS channel_set,
+    COUNT(DISTINCT channel) AS num_channels,
+    MAX(conversion_value) AS value
+  FROM touchpoints
+  GROUP BY user_id, conversion_id
+),
+conversion_rates AS (
+  SELECT channel_set, num_channels,
+    COUNT(*) AS total_users,
+    SUM(CASE WHEN value > 0 THEN 1 ELSE 0 END) AS converters,
+    SUM(value) AS total_value
+  FROM channel_combos
+  GROUP BY channel_set, num_channels
+)
+SELECT * FROM conversion_rates
+ORDER BY num_channels, total_value DESC;
+```
+
+Il passaggio a questo modello ha ridistribuito il budget marketing e migliorato il ritorno sull'investimento.
+
+## Path analytics: dalle conversioni ai percorsi
+
+Mentre l'attribuzione risponde a "quale canale ha contribuito?", il path analytics indaga "quale percorso ha portato alla conversione?" considerando l'ordine e la sequenza dei touchpoint.
+
+Ecco come estrarre i percorsi più frequenti:
+
+```sql
+WITH user_paths AS (
+  SELECT
+    user_id,
+    conversion_id,
+    STRING_AGG(channel, ' → ' ORDER BY touch_time) AS channel_path,
+    COUNT(*) AS path_length
+  FROM touchpoints
+  GROUP BY user_id, conversion_id
+)
+SELECT
+  channel_path,
+  COUNT(*) AS conversions,
+  ROUND(COUNT(*) * 100.0 / SUM(COUNT(*)) OVER (), 1) AS pct_of_total
+FROM user_paths
+GROUP BY channel_path
+ORDER BY conversions DESC
+LIMIT 10;
+```
+
+Tipicamente, percorsi come "Google Search → Direct" o "Facebook Ad → Google Search" emergono come i più comuni, offrendo insight preziosi per ottimizzare la strategia.
+
+## Lab / esercizio
+
+Dataset: 5.000 conversioni con 15.000 touchpoint su 5 canali (`google_ads`, `facebook_ads`, `email`, `organic_search`, `direct`). Ogni conversione ha un `conversion_value`.
+
+**Livello base:** Calcola il revenue attribuito a ciascun canale con last-click, first-click e lineare. Osserva le differenze nella distribuzione del credito.
+
+**Livello intermedio:** Estrai i 3 percorsi più comuni verso la conversione. Identifica se esiste un percorso dominante.
+
+**Livello research-grade:** Modifica il modello time decay per considerare solo i touchpoint negli ultimi 7 giorni prima della conversione, assegnando peso zero ai touchpoint più vecchi.
+
+### Dataset e materiali consigliati
+
+Usa una dashboard reale, un export CSV, un quaderno di studio o un piccolo dataset sintetico. Il materiale deve contenere almeno una domanda, una metrica osservabile e una decisione da prendere.
+
+## Errore tipico da evitare
+
+Usare attribution queries e path analytics come etichette vuote senza collegarle a decisioni concrete è l'errore più comune. Presentare grafici senza una decisione chiara, metriche senza baseline o conclusioni senza indicare le assunzioni rischia di produrre analisi inutili o fuorvianti.
+
+La domanda chiave è: se il risultato fosse instabile, quale scelta sbaglierei? Se non si risponde concretamente, manca il legame tra analisi e azione.
+
+## Quiz o checkpoint
+
+1. Quali sono i quattro modelli classici di attribuzione e in quali scenari si preferiscono?
+2. In cosa differisce il path analytics dall'attribuzione e perché entrambi sono necessari?
+3. Perché Booking.com ha scelto il modello basato sul valore di Shapley?
+4. Quale unità di analisi è fondamentale per misurare correttamente il problema?
+5. Quale errore tipico può compromettere la validità delle conclusioni?
+
+## Riepilogo operativo
+
+Attribution queries e path analytics diventano strumenti decisionali efficaci solo se producono decisioni più chiare e non semplici termini tecnici. Il percorso da seguire è: identificare il problema reale, costruire un modello concettuale, formalizzare rigorosamente, analizzare esempi concreti, esercitarsi con dati reali e verificare la comprensione con checkpoint mirati.
+
+Questa disciplina è essenziale per prendere decisioni informate in condizioni di incertezza, trasformando dati complessi in azioni concrete.

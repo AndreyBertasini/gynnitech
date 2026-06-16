@@ -1,0 +1,8 @@
+- [TAGLIATO: Introduzioni generiche e ripetizioni sull'uso dell'AI come generatore di idee]
+- [TAGLIATO: Frasi decorative e filler]
+- [TAGLIATO: Inviti promozionali non essenziali]
+- [AGGIUNTO: Collegamenti logici tra sezioni per migliorare la coerenza]
+- [AGGIUNTO: Chiarezza e concretezza nelle indicazioni operative]
+- [AGGIUNTO: Struttura editoriale con sezioni obbligatorie per un lesson-style approfondito]
+- [AGGIUNTO: Enfasi sulla disciplina e sulla misurazione come chiave per decisioni efficaci sotto incertezza]
+- [AGGIUNTO: Semplificazione di elenchi e passaggi per una lettura più fluida e incisiva]

@@ -1,0 +1,144 @@
+import { SqlExercise } from '../../../components/SqlExercise';
+
+# Cohort analysis in SQL
+
+## Problema reale
+
+Spesso si osservano picchi nelle nuove iscrizioni, ma non è chiaro se quegli utenti restano attivi o se il picco è solo un effetto temporaneo, magari dovuto a una campagna marketing rumorosa. Guardare solo il totale degli utenti attivi nasconde queste dinamiche. L'analisi di coorte serve a separare gruppi di utenti in base al momento di ingresso, per osservare come si comportano nel tempo e valutare la retention reale.
+
+## Modello concettuale
+
+L'analisi di coorte si basa su una matrice che mette in relazione:
+
+- Le coorti, cioè gruppi di utenti definiti dal momento in cui hanno compiuto una certa azione per la prima volta (es. mese di registrazione);
+- I periodi di osservazione successivi (es. mese 0, mese 1, ...);
+- Le metriche di interesse (es. percentuale di utenti ancora attivi).
+
+Questa struttura permette di rispondere a domande come: stiamo migliorando la retention nel tempo? I nuovi utenti restano più a lungo di quelli di sei mesi fa? L'ultima modifica al prodotto ha cambiato il comportamento a lungo termine?
+
+| Fase     | Cosa chiarire                                   | Output                  |
+|----------|------------------------------------------------|-------------------------|
+| Domanda  | Quale scelta reale deve migliorare?            | Decisione da prendere    |
+| Misura   | Quale segnale rappresenta il problema?         | Metrica o dato sorgente |
+| Controllo| Quale baseline rende il risultato interpretabile? | Confronto credibile     |
+| Azione   | Che cosa cambia dopo l'analisi?                 | Prossimo passo operativo |
+
+## Formalizzazione rigorosa
+
+Per rendere l'analisi riproducibile e solida, è necessario definire con precisione:
+
+- L'unità di analisi (riga, partizione, finestra, join, coorte o metrica temporale);
+- Il segnale principale (correttezza, performance, duplicati, grain e stabilità del risultato);
+- La baseline di confronto (periodo precedente, gruppo comparabile, benchmark o scenario controfattuale);
+- La decisione attesa (query, modello intermedio, test SQL o pattern riusabile);
+- I rischi, come scambiare un numero disponibile per una prova sufficiente.
+
+| Elemento       | Specifica richiesta                                              |
+|----------------|-----------------------------------------------------------------|
+| Unità di analisi| riga, partizione, finestra, join, coorte o metrica temporale    |
+| Segnale        | correttezza, performance, duplicati, grain e stabilità del risultato |
+| Baseline       | Periodo precedente, gruppo comparabile, benchmark o scenario controfattuale |
+| Decisione      | query, modello intermedio, test SQL o pattern riusabile         |
+| Rischio        | Scambiare un numero disponibile per una prova sufficiente       |
+
+## Costruzione della matrice di coorte in SQL
+
+Partendo da una tabella `user_activity` con `user_id`, `signup_date` e `activity_date`, vogliamo calcolare la retention mensile. La strategia è:
+
+1. Assegnare ogni utente alla propria coorte, definita come il mese di iscrizione.
+2. Calcolare per ogni utente e mese di attività il numero di periodo rispetto al mese di iscrizione.
+3. Calcolare la percentuale di utenti attivi per ogni coorte e periodo.
+
+Ecco i passaggi chiave:
+
+- Definizione delle coorti e delle attività mensili:
+
+```sql
+WITH user_cohorts AS (
+  SELECT user_id, DATE_TRUNC('month', signup_date) AS cohort_month
+  FROM users
+),
+activity_by_month AS (
+  SELECT DISTINCT uc.cohort_month, uc.user_id, DATE_TRUNC('month', a.activity_date) AS activity_month
+  FROM user_cohorts uc
+  JOIN user_activity a ON uc.user_id = a.user_id
+)
+```
+
+- Calcolo del numero di periodo (0 = mese di iscrizione):
+
+```sql
+cohort_activity AS (
+  SELECT cohort_month, user_id, activity_month,
+    (EXTRACT(YEAR FROM activity_month) * 12 + EXTRACT(MONTH FROM activity_month))
+    - (EXTRACT(YEAR FROM cohort_month) * 12 + EXTRACT(MONTH FROM cohort_month)) AS period_number
+  FROM activity_by_month
+)
+```
+
+- Calcolo della retention e pivot della matrice:
+
+```sql
+cohort_size AS (
+  SELECT cohort_month, COUNT(DISTINCT user_id) AS num_users
+  FROM user_cohorts
+  GROUP BY cohort_month
+),
+cohort_retention AS (
+  SELECT ca.cohort_month, ca.period_number, COUNT(DISTINCT ca.user_id) AS active_users,
+    cs.num_users AS cohort_size,
+    ROUND(COUNT(DISTINCT ca.user_id) * 100.0 / cs.num_users, 1) AS retention_pct
+  FROM cohort_activity ca
+  JOIN cohort_size cs ON ca.cohort_month = cs.cohort_month
+  GROUP BY ca.cohort_month, ca.period_number, cs.num_users
+)
+SELECT cohort_month,
+  MAX(CASE WHEN period_number = 0 THEN retention_pct END) AS month_0,
+  MAX(CASE WHEN period_number = 1 THEN retention_pct END) AS month_1,
+  MAX(CASE WHEN period_number = 2 THEN retention_pct END) AS month_2,
+  MAX(CASE WHEN period_number = 3 THEN retention_pct END) AS month_3
+FROM cohort_retention
+GROUP BY cohort_month
+ORDER BY cohort_month;
+```
+
+## Esempio o caso studio
+
+Peloton durante la pandemia vide un boom di iscrizioni, ma l'analisi di coorte rivelò che le coorti nate nel picco pandemico avevano retention a 12 mesi molto più bassa rispetto a quelle pre-pandemiche. Questo segnale permise di riorientare il marketing verso utenti con maggiore propensione a restare attivi, migliorando la sostenibilità del business.
+
+## Errori tipici da evitare
+
+- Confondere coorte e periodo, mescolando utenti di diverse età e perdendo trend importanti.
+- Usare denominatori errati per la retention, ad esempio utenti attivi nel periodo precedente anziché utenti iscritti.
+- Non gestire correttamente utenti iscritti a fine mese, che possono mostrare retention falsamente bassa.
+- Ignorare la stagionalità, confrontando coorti con pattern naturali diversi senza correzioni.
+
+## Lab / esercizio
+
+### Livello base
+Scrivi una query che calcoli la retention settimanale per coorti definite settimanalmente.
+
+### Livello intermedio
+Per la coorte più recente, calcola la curva di retention completa e identifica il punto di flesso usando funzioni finestra come LAG.
+
+### Livello research-grade
+Segmenta ogni coorte in quintili in base all'attività nel mese 0 e confronta la retention a 3 mesi per ciascun quintile.
+
+### Dataset e materiali consigliati
+Usa dati di ordini, eventi, sessioni, coorti e revenue, o crea un dataset sintetico con dimensione temporale, segmenti e metriche di outcome.
+
+## Errore tipico da evitare
+
+L'errore piu comune e trattare il risultato come una verita generale invece che come evidenza condizionata. Prima di agire, controlla baseline, assunzioni e costo dell'errore.
+
+## Quiz o checkpoint
+
+1. Qual è la differenza tra coorte e segmento?
+2. Quali sono i tre passaggi essenziali per costruire una query di coorte?
+3. Perché le coorti di fine mese mostrano retention bassa nel primo periodo?
+4. Quale errore comune può invalidare un'analisi di coorte?
+5. Come spiegheresti a uno stakeholder non tecnico i risultati di una coorte?
+
+## Riepilogo operativo
+
+L'analisi di coorte in SQL è uno strumento potente per prendere decisioni informate sotto incertezza, separando gruppi di utenti per momento di ingresso e osservandone il comportamento nel tempo. La sua efficacia dipende dalla chiarezza delle assunzioni, dalla corretta definizione delle coorti e dalla capacità di collegare i risultati a decisioni concrete.

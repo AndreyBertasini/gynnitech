@@ -1,0 +1,8 @@
+- [TAGLIATO: introduzioni generiche e ripetizioni]
+- [TAGLIATO: frasi decorative e enfasi non necessarie]
+- [TAGLIATO: dettagli troppo tecnici o prolissi che non aggiungevano valore]
+- [AGGIUNTO: struttura coerente con sezioni didattiche richieste]
+- [AGGIUNTO: quiz/checkpoint per riflettere sulle decisioni]
+- [AGGIUNTO: lab con livelli di difficoltà e materiali consigliati]
+- [AGGIUNTO: conclusione che lega al tema decisionale sotto incertezza]
+- [AGGIUNTO: collegamenti logici per fluidità e coerenza editoriale]

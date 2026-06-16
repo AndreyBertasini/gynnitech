@@ -1,0 +1,8 @@
+- [TAGLIATO: rimozione di introduzioni generiche e ripetizioni]
+- [TAGLIATO: eliminazione di frasi decorative e filler]
+- [AGGIUNTO: titoli di sezione standardizzati per lezioni]
+- [AGGIUNTO: lab con livelli di difficoltà e materiali consigliati]
+- [AGGIUNTO: conclusione e call to action più nette]
+- [AGGIUNTO: collegamenti logici per coerenza e fluidità]
+- [MANTENUTO: esempi pratici, checklist, errori tipici, metriche e quiz]
+- [MANTENUTO: struttura MDX valida con componenti e formattazione]

@@ -1,0 +1,11 @@
+- [TAGLIATO:] Rimosso il frontmatter e le ripetizioni generiche o decorative.
+- [TAGLIATO:] Eliminati passaggi introduttivi vaghi e frasi di apertura non strettamente funzionali.
+- [TAGLIATO:] Rimosse sezioni ridondanti e filler che non contribuiscono all'argomentazione.
+- [AGGIUNTO:] Inserite transizioni logiche per garantire coerenza tra sezioni.
+- [AGGIUNTO:] Strutturazione rigorosa con sezioni obbligatorie per lezioni di corso, mantenendo la validità MDX.
+- [AGGIUNTO:] Traduzione adattata in inglese con stile nativo e fluido, non letterale.
+- [AGGIUNTO:] Mantenuti tutti i blocchi di codice, tabelle e riferimenti utili all'apprendimento.
+- [AGGIUNTO:] Enfasi editoriale più decisa e concreta in italiano, con tono operativo e critico.
+- [AGGIUNTO:] Inserite etichette esatte per lab, errori tipici, quiz e riepilogo come da istruzioni.
+- [AGGIUNTO:] Conservati riferimenti bibliografici e link utili per approfondimenti.
+- [AGGIUNTO:] Evidenziata la centralità del metodo scientifico come disciplina decisionale, non solo teorica.

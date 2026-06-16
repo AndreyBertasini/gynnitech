@@ -1,0 +1,8 @@
+- [TAGLIATO: apertura generica e frasi di circostanza]
+- [TAGLIATO: ripetizioni e affermazioni troppo generiche]
+- [AGGIUNTO: collegamenti logici tra sezioni per coerenza editoriale]
+- [AGGIUNTO: enfasi su decision making sotto incertezza come filo conduttore]
+- [AGGIUNTO: mantenimento di esempi concreti e suggerimenti pratici]
+- [AGGIUNTO: struttura coerente con sezioni richieste per un lesson-style article]
+- [TAGLIATO: inviti promozionali non essenziali e riferimenti troppo specifici a strumenti senza contesto]
+- [AGGIUNTO: conclusione riflessiva che richiama la disciplina della decisione sotto incertezza]

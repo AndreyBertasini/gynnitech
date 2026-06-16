@@ -1,0 +1,13 @@
+- [TAGLIATO:] Introduzioni generiche e ripetizioni non necessarie.
+- [TAGLIATO:] Aperture decorative e frasi promozionali.
+- [TAGLIATO:] Parti ridondanti o troppo verbose.
+- [AGGIUNTO:] Collegamenti logici per integrare sezioni in un flusso coerente.
+- [AGGIUNTO:] Struttura con sezioni obbligatorie per una lezione completa.
+- [PRESERVATO:] Codice SQL e Python utile per insegnare il concetto.
+- [AGGIUNTO:] Tabelle per modello concettuale e formalizzazione.
+- [AGGIUNTO:] Caso studio Netflix e Stripe per concretezza.
+- [AGGIUNTO:] Esercizi con livelli e dataset consigliati.
+- [AGGIUNTO:] Quiz finale per consolidare la comprensione.
+- [AGGIUNTO:] Riepilogo operativo per chiudere la lezione.
+- [MODIFICATO:] Linguaggio reso più diretto, concreto e opinionato.
+- [MODIFICATO:] Versione inglese adattata per fluidità e naturalezza, non traduzione letterale.

@@ -1,0 +1,8 @@
+- [TAGLIATO: ripetizioni e introduzioni generiche]
+- [TAGLIATO: frasi decorative e filler]
+- [AGGIUNTO: collegamenti logici tra sezioni per coerenza]
+- [AGGIUNTO: enfasi editoriale su importanza del modello dati come disciplina di decisione sotto incertezza]
+- [AGGIUNTO: struttura con sezioni precise per favorire apprendimento e chiarezza]
+- [MANTENUTO: esempi concreti e checklist operative]
+- [MANTENUTO: link al percorso GinnyTech per continuità formativa]
+- [MANTENUTO: mantenimento di validità MDX e componenti URL]

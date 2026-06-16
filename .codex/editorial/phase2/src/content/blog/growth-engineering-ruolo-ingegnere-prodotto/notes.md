@@ -1,0 +1,8 @@
+- [TAGLIATO: rimozione di aperture generiche e ripetizioni]
+- [TAGLIATO: eliminazione di frasi decorative e promozionali]
+- [AGGIUNTO: collegamenti logici tra sezioni per fluidità]
+- [AGGIUNTO: enfasi sul ruolo del growth engineer come progettista di sistemi di apprendimento]
+- [AGGIUNTO: mantenimento di esempi concreti e checklist operative]
+- [AGGIUNTO: traduzione adattata per naturalezza e chiarezza in inglese]
+- [TAGLIATO: rimozione di formulazioni vaghe e filler]
+- [AGGIUNTO: mantenimento delle metriche chiave e delle sezioni richieste per un corso strutturato]

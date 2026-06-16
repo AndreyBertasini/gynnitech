@@ -1,0 +1,319 @@
+# Cohort Analysis and Behavioral Cohorts
+
+New signups increase, but some cohorts stay active after a week while others vanish immediately. **Cohort analysis and behavioral cohorts** help separate signup date, initial behavior, and long-term value, preventing growth from being mistaken for product health without evidence.
+
+## Starting Point
+
+This lesson helps distinguish volume from quality. Cohorts become useful when they reveal which initial behaviors predict retention, expansion, or churn.
+
+- **Context:** What decision makes this concept useful?
+- **Method:** What team or metric conflicts do you need to anticipate?
+- **Application:** How would you explain this in a meeting?
+
+## Why Demographic Segmentation Falls Short
+
+Demographic segmentation assumes similar people behave similarly, but in digital products this often fails.
+
+Three users of a fitness app:
+
+- Marco, 28, Milan, Android: runs 5 km every morning, uses the app to track routes, activates premium after 3 days.
+- Giulia, 28, Milan, Android: opened the app twice, never completed a workout, disappeared after one week.
+- Ahmed, 52, Cairo, web browser: runs 8 km every other day, uses app for weekly stats, premium after 10 days.
+
+Marco and Giulia are demographic twins, but behaviorally Marco and Ahmed are closer. Segmenting only by demographics mixes power users and dormant users, creating noise.
+
+| Approach | Grouping Variable | Example | Answers |
+|----------|-------------------|---------|---------|
+| Demographic | Who the user is | Age, country, device | "Do iOS users spend more than Android?" |
+| Behavioral | What the user does | Frequency, features used | "Do power users have 3x LTV?" |
+| Temporal cohort | When they started | Signup month | "Is retention improving over time?" |
+
+Behavioral cohorts answer the key question: **how do users behave and evolve over time?**
+
+## Temporal vs Behavioral Cohorts
+
+Classic cohort analysis groups users by signup week and measures retention over time:
+
+```sql
+SELECT
+  DATE_TRUNC('week', signup_date) AS cohort_week,
+  COUNT(DISTINCT user_id) AS cohort_size,
+  ROUND(COUNT(DISTINCT CASE WHEN week_1_active THEN user_id END) * 100.0 / COUNT(*), 1) AS week1_retention,
+  ROUND(COUNT(DISTINCT CASE WHEN week_2_active THEN user_id END) * 100.0 / COUNT(*), 1) AS week2_retention,
+  ROUND(COUNT(DISTINCT CASE WHEN week_4_active THEN user_id END) * 100.0 / COUNT(*), 1) AS week4_retention,
+  ROUND(COUNT(DISTINCT CASE WHEN week_12_active THEN user_id END) * 100.0 / COUNT(*), 1) AS week12_retention
+FROM user_cohorts
+GROUP BY cohort_week
+ORDER BY cohort_week;
+```
+
+This answers "is retention improving with new releases?" but not "why do some users stay and others leave?"
+
+Behavioral cohorts group users by actions taken, not signup date, answering "which behavior patterns define a successful user?"
+
+## Building Behavioral Cohorts in SQL
+
+Segment users along four dimensions:
+
+1. Frequency: active days in last 30
+2. Breadth: distinct features used
+3. Depth: total activity volume
+4. Key signals: critical actions (purchase, invite, create)
+
+```sql
+WITH user_behavior_30d AS (
+  SELECT
+    user_id,
+    COUNT(DISTINCT DATE(event_time)) AS active_days,
+    COUNT(*) AS total_events,
+    COUNT(DISTINCT event_type) AS unique_event_types,
+    MAX(CASE WHEN event_type = 'purchase' THEN 1 ELSE 0 END) AS has_purchased,
+    MAX(CASE WHEN event_type = 'invite' THEN 1 ELSE 0 END) AS has_invited,
+    MAX(CASE WHEN event_type = 'create_project' THEN 1 ELSE 0 END) AS has_created,
+    AVG(session_duration_seconds) AS avg_session_secs
+  FROM events
+  WHERE event_time >= CURRENT_DATE - INTERVAL '30 days'
+    AND user_id IS NOT NULL
+  GROUP BY user_id
+)
+SELECT
+  user_id,
+  CASE
+    WHEN active_days >= 20 AND has_purchased = 1 AND has_invited = 1 THEN 'champion'
+    WHEN active_days >= 20 THEN 'power_user'
+    WHEN active_days >= 10 THEN 'regular'
+    WHEN active_days >= 3 THEN 'casual'
+    WHEN active_days >= 1 THEN 'dormant'
+    ELSE 'dead'
+  END AS behavior_segment,
+  active_days,
+  total_events,
+  unique_event_types,
+  has_purchased,
+  has_invited,
+  ROUND(avg_session_secs, 0) AS avg_session_secs
+FROM user_behavior_30d;
+```
+
+Segments and product actions:
+
+| Segment | Characteristic | Product Action |
+|---------|----------------|----------------|
+| Champion | Uses, pays, invites | Nurturing, community |
+| Power User | Daily, all features | Retention, upsell |
+| Regular | Multiple times/week | Deepening: discover features |
+| Casual | 3-9 days/month | Activation: push habit |
+| Dormant | 1-2 days/month | Re-engagement: notifications |
+| Dead | No activity | Win-back or disinvestment |
+
+The value lies in tracking movement between segments.
+
+## Behavioral Transition Matrix
+
+Users change segments: dormant can become regular, power users can decay. The transition matrix shows where users move month to month:
+
+```sql
+WITH current_month AS (
+  SELECT user_id, behavior_segment AS current_segment
+  FROM user_behavior_monthly
+  WHERE month_key = '2025-01'
+),
+previous_month AS (
+  SELECT user_id, behavior_segment AS previous_segment
+  FROM user_behavior_monthly
+  WHERE month_key = '2024-12'
+)
+SELECT
+  COALESCE(p.previous_segment, 'new') AS from_segment,
+  c.current_segment AS to_segment,
+  COUNT(*) AS users,
+  ROUND(COUNT(*) * 100.0 / SUM(COUNT(*)) OVER (PARTITION BY COALESCE(p.previous_segment, 'new')), 1) AS pct
+FROM current_month c
+LEFT JOIN previous_month p ON c.user_id = p.user_id
+GROUP BY COALESCE(p.previous_segment, 'new'), c.current_segment
+ORDER BY from_segment, to_segment;
+```
+
+Key signals:
+
+- Power user decay rate: if above 15% monthly, product has issues
+- Dormant resurrection rate: if below 5%, re-engagement fails
+- Deepening rate casual → regular: long-term growth engine
+
+### Netflix Case
+
+In 2012 Netflix found 22% of power users decayed to regular in 2 months because binge-watchers finished preferred content. Introducing predictive personalization cut decay to 9% in 6 months, boosting retention and revenue.
+
+## Behavioral Lifecycle Framework
+
+The behavioral lifecycle maps usage trajectory:
+
+```
+New User ──activation──▶ Activated ──deepening──▶ Engaged ───power──▶ Power User
+                            │                       │                    │
+                            ▼                       ▼                    ▼
+                         Dormant ◀────decay────────┘                    │
+                            │                                            │
+                            │              re-engagement                 │
+                            └────────────────────────────────────────────┘
+                            │
+                            ▼
+                         Churned (60+ days inactive)
+```
+
+Each transition has a metric and an owner:
+
+| Transition | Metric | Owner | B2C Benchmark |
+|------------|--------|-------|---------------|
+| New → Activated | Activation rate | Growth | 20-40% |
+| Activated → Engaged | Deepening rate | Feature team | 30-50% |
+| Engaged → Power | Power conversion | Core product | 10-25% |
+| Any → Dormant | Decay rate | Retention | 5-15% monthly |
+| Dormant → Active | Resurrection rate | CRM | 3-8% monthly |
+
+Product teams should track these to pinpoint where value is lost.
+
+## Behavioral Cohorts in Code: Advanced Python Analysis
+
+When patterns are unknown, unsupervised clustering reveals natural segments:
+
+- Build behavioral features (active days, events, event types, key actions)
+- Standardize and apply K-Means
+- Label clusters based on centroids
+
+This avoids forcing segments and uses the elbow method to find the optimal cluster count.
+
+## Real Case: Behavioral Cohorts at Spotify
+
+Spotify identified six segments based on listening volume, artist diversity, playlist creation, and social sharing.
+
+The most valuable segment wasn't highest volume but high diversity and creation: users who explore and curate playlists. Their LTV was 2.3x passive listeners.
+
+This shifted product strategy to encourage playlist creation within first 10 minutes, making early creation a North Star metric.
+
+## Retention by Behavioral Cohort
+
+Crossing behavioral cohorts with temporal retention shows users with high initial engagement retain 3-5x better than low engagement users.
+
+```sql
+WITH user_first_month_behavior AS (
+  SELECT u.user_id,
+    COUNT(DISTINCT DATE(e.event_time)) AS first_month_active_days,
+    COUNT(DISTINCT e.event_type) AS first_month_event_types
+  FROM users u
+  JOIN events e ON u.user_id = e.user_id
+    AND e.event_time BETWEEN u.signup_date AND u.signup_date + INTERVAL '30 days'
+  GROUP BY u.user_id
+),
+user_monthly_activity AS (
+  SELECT u.user_id,
+    DATE_TRUNC('month', u.signup_date) AS signup_cohort,
+    DATE_TRUNC('month', e.event_time) AS activity_month,
+    (DATE_TRUNC('month', e.event_time) - DATE_TRUNC('month', u.signup_date)) / INTERVAL '1 month' AS month_number
+  FROM users u
+  JOIN events e ON u.user_id = e.user_id
+)
+SELECT
+  CASE
+    WHEN f.first_month_active_days >= 20 THEN 'high_engagement'
+    WHEN f.first_month_active_days >= 10 THEN 'medium'
+    WHEN f.first_month_active_days >= 3 THEN 'low'
+    ELSE 'minimal'
+  END AS initial_behavior_segment,
+  a.month_number,
+  COUNT(DISTINCT a.user_id) AS retained_users
+FROM user_monthly_activity a
+JOIN user_first_month_behavior f ON a.user_id = f.user_id
+WHERE a.signup_cohort >= '2024-01-01'
+GROUP BY initial_behavior_segment, a.month_number
+ORDER BY initial_behavior_segment, a.month_number;
+```
+
+This confirms retention is built upstream during onboarding.
+
+## When Behavioral Cohorts Fail
+
+Three limitations:
+
+1. Require sufficient behavioral data volume (5-10 events per active user).
+2. Are retrospective: classify users after behavior emerges.
+3. Ignore intent: same behavior may mask opposite motivations.
+
+Always validate with qualitative data (NPS, interviews, support tickets).
+
+## References
+
+- Croll & Yoskovitz, *Lean Analytics*, chapter 7
+- McClure, Pirate Metrics AARRR
+- Chen, *The Cold Start Problem*
+- Amplitude, *The Behavioral Cohorts Playbook*
+- Kohavi et al., *Trustworthy Online Controlled Experiments*, chapter 5
+
+## Summary
+
+Behavioral cohorts shift analysis from "who the user is" to "what the user does." The transition matrix reveals where users are lost or gained. The lifecycle framework assigns ownership and targets for each transition. Combining temporal and behavioral cohorts reveals if retention improves broadly or only among already engaged users.
+
+Next, we'll use these segments to personalize A/B tests and measure feature effects by user category.
+
+## Real Problem
+
+In product analytics, cohort and behavioral cohort analysis helps identify where the product creates real value versus apparent activity. It's not isolated theory but a tool to improve concrete decisions with data, explicit assumptions, and controls.
+
+## Conceptual Model
+
+| Phase | Clarify | Output |
+|-------|---------|--------|
+| Question | Which real choice to improve? | Decision to make |
+| Measure | Which observable signal represents the problem? | Metric or data |
+| Control | Which baseline makes results interpretable? | Credible comparison |
+| Action | What changes after analysis? | Next operational step |
+
+## Rigorous Formalization
+
+Define unit of work (user, cohort, event, feature), metric (activation, retention, churn, value), baseline (previous period, comparable group), expected decision (diagnosis, experiment, prioritization, UX intervention), and risks (confusing availability with evidence).
+
+## Example or Case Study
+
+A cohort completing setup on day one retains double at 30 days compared to those who delay. This turns correlation into product hypothesis: make setup clearer or more guided.
+
+| Evidence | Cautious interpretation | Recommended action |
+|----------|------------------------|--------------------|
+| Number improves | Could be real effect or noise | Seek comparison and segment |
+| One segment changes more | Aggregate average hides difference | Separate cohorts or use cases |
+| Cost rises with result | Impact must be read on margin | Estimate trade-offs and sustainability |
+
+## Lab / Exercise
+
+### Basic
+
+Write a one-page summary: decision supported, primary metric, baseline, main risk, and action if signal confirmed.
+
+### Intermediate
+
+Build a table with three segments or scenarios. For each, state what changes, plausible alternative explanation, and control before recommending action.
+
+### Research-grade
+
+Prepare a decision memo: hypothesis, required data, exclusion criteria, quality controls, decision threshold, residual risk, and monitoring plan.
+
+### Recommended datasets and materials
+
+Use product events, funnels, sessions, surveys, CRM, support tickets, and experiments. If no real data, create synthetic dataset with at least 200 rows, temporal dimension, segment dimension, and outcome metric.
+
+## Common Pitfall
+
+Using cohort analysis as a label instead of a process. Showing charts without decisions, metrics without baselines, or conclusions without assumptions.
+
+Control question: if this result were unstable, what wrong choice would I make? If you can't answer, the link between analysis and action is missing.
+
+## Quiz or Checkpoint
+
+1. Which concrete decision should this lesson improve?
+2. Which unit of analysis makes the problem measurable?
+3. Which baseline avoids naive interpretation?
+4. Which common error could change the conclusion?
+5. What output would you deliver to a non-technical stakeholder?
+
+## Operational Summary
+
+Cohort and behavioral cohort analysis is useful only when it leads to clearer decisions, not just jargon. Use the problem, model, formalization, example, lab, and checkpoint framework to turn the lesson into actionable practice.

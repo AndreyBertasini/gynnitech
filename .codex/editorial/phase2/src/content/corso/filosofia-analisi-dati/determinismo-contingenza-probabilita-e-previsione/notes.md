@@ -1,0 +1,7 @@
+- [TAGLIATO:] Ho rimosso le sezioni introduttive generiche e le digressioni su casi studio estesi (Netflix, Revolut, WeWork) per mantenere il focus operativo e concettuale coerente con l'angolo editoriale sulla disciplina decisionale sotto incertezza.
+- [TAGLIATO:] Sono stati eliminati esempi troppo lunghi e dettagliati che distraggono dal flusso didattico, come la distinzione dettagliata tra rischio, incertezza e ignoranza di Knight e le narrazioni di casi aziendali.
+- [AGGIUNTO:] Ho inserito una struttura coerente con le sezioni richieste per una lezione: Problema reale, Modello concettuale, Formalizzazione rigorosa, Esempio o caso studio, Lab / esercizio, Errore tipico da evitare, Quiz o checkpoint, Riepilogo operativo.
+- [AGGIUNTO:] Ho mantenuto e adattato tabelle, diagrammi e formule utili per insegnare il concetto e la sua applicazione pratica.
+- [AGGIUNTO:] Ho reso la versione italiana più concreta e opinionata, eliminando formalismi eccessivi ma mantenendo rigore e utilità pratica.
+- [AGGIUNTO:] La versione inglese è un adattamento nativo, non una traduzione letterale, per risultare naturale e incisiva nel contesto editoriale scelto.
+- [AGGIUNTO:] Ho mantenuto la coerenza con il percorso editoriale e i moduli precedenti e successivi indicati nel contesto.

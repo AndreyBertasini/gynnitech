@@ -1,0 +1,8 @@
+- [TAGLIATO: eliminati i passaggi introduttivi generici e ripetitivi per mantenere il testo focalizzato sulla disciplina della memoria negli agenti AI come decision making sotto incertezza]
+- [TAGLIATO: rimosse frasi troppo generiche e promozionali]
+- [AGGIUNTO: collegamenti logici tra sezioni per mantenere coerenza e fluidità]
+- [AGGIUNTO: enfasi sulle implicazioni di fiducia e controllo come parte della disciplina decisionale]
+- [AGGIUNTO: mantenuto struttura con sezioni obbligatorie per un corso, adattando il testo originale di blog]
+- [AGGIUNTO: traduzione adattata in inglese con stile nativo e concreto, non letterale]
+- [TAGLIATO: rimosse frasi di chiusura promozionali non essenziali, mantenuto solo il collegamento al percorso GinnyTech]
+- [AGGIUNTO: mantenuti esempi concreti e regole pratiche per decisioni sotto incertezza]

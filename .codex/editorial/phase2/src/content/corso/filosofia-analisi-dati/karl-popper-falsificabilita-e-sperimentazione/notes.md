@@ -1,0 +1,7 @@
+- [TAGLIATO:] Rimozione di introduzioni generiche e ripetizioni ridondanti.
+- [TAGLIATO:] Eliminazione di dettagli non strettamente necessari come riferimenti bibliografici estesi e note di controllo qualità troppo specifiche.
+- [AGGIUNTO:] Inserimento di una struttura coerente con sezioni obbligatorie per una lezione (Problema reale, Modello concettuale, Formalizzazione rigorosa, Esempio o caso studio, Lab / esercizio, Errore tipico da evitare, Quiz o checkpoint, Riepilogo operativo).
+- [AGGIUNTO:] Chiarezza e concretezza nell'italiano, con un tono editoriale deciso e pratico.
+- [AGGIUNTO:] Adattamento in inglese non letterale ma naturale, mantenendo la precisione tecnica e l'approccio didattico.
+- [AGGIUNTO:] Mantenimento di tabelle, diagrammi e esempi chiave per l'apprendimento.
+- [AGGIUNTO:] Semplificazione e focalizzazione sul valore operativo di Popper per decisioni sotto incertezza.

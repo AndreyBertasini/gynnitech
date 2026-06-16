@@ -1,0 +1,8 @@
+- [TAGLIATO] Eliminati i passaggi introduttivi generici e ripetitivi per concentrare il testo sul problema operativo e sul modello concettuale.
+- [TAGLIATO] Rimosse aperture enfatiche e frasi di riempimento non essenziali.
+- [AGGIUNTO] Inserite transizioni logiche per collegare i vari paragrafi e sezioni, mantenendo la coerenza del discorso.
+- [AGGIUNTO] Mantenuti tabelle e dettagli tecnici fondamentali per insegnare il punto.
+- [AGGIUNTO] Strutturata la lezione con le sezioni richieste per un corso: Problema reale, Modello concettuale, Formalizzazione rigorosa, Esempio o caso studio, Lab / esercizio, Errore tipico da evitare, Quiz o checkpoint.
+- [AGGIUNTO] Traduzione adattata in inglese, non letterale, con tono naturale e professionale.
+- [TAGLIATO] Eliminati riferimenti decorativi e ripetizioni di concetti già espressi.
+- [AGGIUNTO] Conclusione chiara e operativa per sottolineare la disciplina della decisione sotto incertezza.

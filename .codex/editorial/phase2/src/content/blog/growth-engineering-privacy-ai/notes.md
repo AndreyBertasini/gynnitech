@@ -1,0 +1,8 @@
+- [TAGLIATO: rimozione di aperture generiche e frasi di circostanza]
+- [TAGLIATO: eliminazione di ripetizioni e ridondanze]
+- [TAGLIATO: tolti dettagli non essenziali per la tesi centrale]
+- [AGGIUNTO: collegamenti logici tra sezioni per fluidità]
+- [AGGIUNTO: titoli di sezione coerenti con l'angolo editoriale]
+- [AGGIUNTO: traduzione adattata per naturalezza e chiarezza in inglese]
+- [AGGIUNTO: mantenimento di esempi concreti e checklist operative]
+- [AGGIUNTO: enfasi sull'importanza di decisioni sotto incertezza e misurazione consapevole]

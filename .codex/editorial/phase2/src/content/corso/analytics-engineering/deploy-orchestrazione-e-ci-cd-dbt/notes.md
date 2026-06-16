@@ -1,0 +1,11 @@
+- [TAGLIATO:] Introduzioni generiche e ripetizioni non essenziali.
+- [TAGLIATO:] Aperture decorative e frasi promozionali.
+- [TAGLIATO:] Dettagli troppo tecnici o esempi ripetitivi non necessari per il filo argomentativo.
+- [AGGIUNTO:] Struttura coerente con sezioni obbligatorie per una lezione su decisione sotto incertezza.
+- [AGGIUNTO:] Collegamenti logici tra concetti per evidenziare il passaggio da dati a decisioni operative.
+- [AGGIUNTO:] Tabelle e snippet SQL mantenuti per insegnare il pattern di modello activation.
+- [AGGIUNTO:] Esempi concreti e casi reali integrati con il modello concettuale e la formalizzazione.
+- [AGGIUNTO:] Lab con livelli di difficoltà e materiali consigliati per esercitarsi con Reverse ETL.
+- [AGGIUNTO:] Checklist e controllo di qualità per evitare errori comuni.
+- [AGGIUNTO:] Quiz finale per verificare la comprensione e l'applicazione pratica.
+- [AGGIUNTO:] Riepilogo operativo che sottolinea l'importanza di decisioni chiare e collegamento tra analisi e azione.

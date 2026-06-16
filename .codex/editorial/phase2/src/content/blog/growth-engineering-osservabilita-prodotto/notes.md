@@ -1,0 +1,7 @@
+- [TAGLIATO: rimozione di introduzioni generiche e ripetizioni per rendere il testo più diretto e concreto]
+- [TAGLIATO: eliminazione di frasi decorative e promozionali]
+- [AGGIUNTO: collegamenti logici per integrare i paragrafi in un discorso coerente]
+- [AGGIUNTO: mantenimento di tutte le sezioni richieste con titoli esatti per una lezione strutturata]
+- [AGGIUNTO: traduzione adattata in inglese con tono naturale e fluido, non letterale]
+- [TAGLIATO: rimozione di frasi che non contribuiscono direttamente all'argomentazione o all'azione]
+- [AGGIUNTO: conclusione chiara e invito all'azione per chiudere il discorso]

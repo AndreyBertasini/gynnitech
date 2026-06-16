@@ -1,0 +1,8 @@
+- [TAGLIATO] Rimosse aperture generiche e ripetizioni superflue per concentrare il testo su contenuto operativo e decisionale.
+- [TAGLIATO] Eliminati riferimenti decorativi e frasi di marketing.
+- [AGGIUNTO] Inseriti collegamenti logici tra sezioni per fluidità e coerenza.
+- [AGGIUNTO] Mantenuti tabelle e schemi essenziali per insegnare il metodo.
+- [AGGIUNTO] Traduzione adattata in inglese con stile naturale e concreto, non letterale.
+- [AGGIUNTO] Mantenuti tutte le sezioni richieste per la lezione, con titoli esatti.
+- [AGGIUNTO] Rafforzata enfasi sulla disciplina del controllo e della decisione sotto incertezza.
+- [AGGIUNTO] Inserito richiamo esplicito al tema editoriale: la disciplina di prendere decisioni sotto incertezza.

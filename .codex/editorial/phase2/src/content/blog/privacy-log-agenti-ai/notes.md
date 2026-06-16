@@ -1,0 +1,8 @@
+- [TAGLIATO: Introduzioni generiche e ripetizioni ridondanti]
+- [TAGLIATO: Aperture promozionali e frasi decorative]
+- [AGGIUNTO: Collegamenti logici per coerenza tra sezioni]
+- [AGGIUNTO: Chiarezza e concretezza nell'esposizione per entrambi i testi]
+- [MANTENUTO: Struttura con sezioni chiare e titoli di livello 2]
+- [MANTENUTO: Contenuti tecnici e raccomandazioni operative]
+- [TAGLIATO: Riferimenti a percorsi formativi non essenziali per il discorso]
+- [AGGIUNTO: Conclusione che sottolinea la maturità progettuale come equilibrio tra osservabilità e privacy]

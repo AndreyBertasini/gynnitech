@@ -35,6 +35,7 @@ const batchLimit = Number(process.env.TRANSLATION_BATCH_LIMIT ?? 0);
 const concurrency = Math.max(1, Number(process.env.TRANSLATION_CONCURRENCY ?? 3));
 const maxRetries = Number(process.env.TRANSLATION_MAX_RETRIES ?? 6);
 const force = process.env.TRANSLATION_FORCE === '1';
+const generateMissingTranslations = process.env.TRANSLATION_GENERATE_MISSING === '1';
 const translateCodeBlocks = process.env.TRANSLATE_CODE_BLOCKS !== '0';
 const redirects = redirectEntries as Array<[string, string]>;
 
@@ -754,7 +755,7 @@ const requestTranslation = async (items: TranslationItem[], attempt = 1): Promis
           {
             role: 'system',
             content:
-              'You are a professional Italian-to-English localization engine for a technical education website about MarTech, analytics engineering, data engineering, statistics, SQL, Python, Kafka, ClickHouse, product analytics, and marketing analytics. Translate only user-visible text into fluent English. Preserve brand names, URLs, code identifiers, numbers, acronyms, and technical product names. If an item is a code block, SQL block, Python block, terminal block, Mermaid diagram, or ASCII diagram, preserve executable syntax, indentation, punctuation, identifiers, variable names, function names, table names, URLs, and commands exactly; translate only natural-language comments, prose labels, explanatory strings, and diagram labels when appropriate. Keep the original meaning and tone. Return only a valid JSON object shaped as {"translations":{"id":"translated text"}}.',
+              'You are a professional Italian-to-English editorial localization engine for a technical education website about MarTech, analytics engineering, data engineering, statistics, SQL, Python, Kafka, ClickHouse, product analytics, and marketing analytics. Adapt user-visible Italian into fluent native English, not literal translated prose. Preserve the argument, technical meaning, examples, brand names, URLs, code identifiers, numbers, acronyms, and product names. If an item is a code block, SQL block, Python block, terminal block, Mermaid diagram, or ASCII diagram, preserve executable syntax, indentation, punctuation, identifiers, variable names, function names, table names, URLs, and commands exactly; adapt only natural-language comments, prose labels, explanatory strings, and diagram labels when appropriate. Avoid formulaic AI phrasing, inflated claims, and stiff translation rhythm. Keep the editorial voice concrete and direct. Return only a valid JSON object shaped as {"translations":{"id":"translated text"}}.',
           },
           {
             role: 'user',
@@ -924,7 +925,14 @@ const main = async () => {
   console.log(`[translate:static] ${strings.size} unique strings found, ${missingItems.length} missing`);
 
   if (missingItems.length > 0) {
-    await translateMissing(cache, missingItems);
+    if (generateMissingTranslations) {
+      await translateMissing(cache, missingItems);
+    } else {
+      console.warn(
+        `[translate:static] skipping ${missingItems.length} missing translation(s); `
+          + 'set TRANSLATION_GENERATE_MISSING=1 with OPENAI_API_KEY only when you explicitly want to refresh the cache.',
+      );
+    }
   }
 
   await generateEnglishPages(htmlFiles, cache);

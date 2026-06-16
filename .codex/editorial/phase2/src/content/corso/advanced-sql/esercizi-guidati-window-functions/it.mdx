@@ -1,0 +1,193 @@
+# Sessionization e raggruppamento comportamentale
+
+Un utente apre l'app alle 8:02, torna alle 8:37, clicca tre prodotti e poi scompare fino al pomeriggio. Nel log ci sono solo eventi ordinati nel tempo, ma per il prodotto quei blocchi diventano sessioni, intenzioni e segnali di attrito. Sessionization e raggruppamento comportamentale serve a costruire questo livello intermedio senza inventare storie che i dati non supportano.
+
+## Problema reale
+
+Nel dominio dell'analisi avanzata con SQL, il problema è trasformare eventi grezzi in unità analitiche stabili e significative. La scelta di cosa definire come sessione, quale soglia temporale adottare e come raggruppare i comportamenti influisce direttamente su metriche chiave come conversioni, retention e diagnosi di esperienza utente. La soglia temporale è una scelta di business, non tecnica: deve riflettere il comportamento reale che vogliamo catturare.
+
+## Modello concettuale
+
+| Fase      | Cosa chiarire                                | Output                     |
+|-----------|----------------------------------------------|----------------------------|
+| Domanda   | Quale decisione reale vogliamo migliorare?  | Decisione da prendere       |
+| Misura    | Quale segnale osservabile rappresenta il problema? | Metrica o dato sorgente    |
+| Controllo | Quale baseline rende il risultato interpretabile? | Confronto credibile        |
+| Azione    | Che cosa cambia dopo l'analisi?               | Prossimo passo operativo   |
+
+Questo modello semplice guida ogni approfondimento tecnico, che deve rafforzare almeno uno di questi punti.
+
+## Formalizzazione rigorosa
+
+Per rendere analizzabile la sessionizzazione e il raggruppamento comportamentale, serve definire con precisione:
+
+| Elemento         | Specifica richiesta                                                |
+|------------------|-------------------------------------------------------------------|
+| Unità di analisi | Riga, partizione, finestra, join, coorte o metrica temporale      |
+| Segnale principale | Correttezza, performance, duplicati, grain e stabilità del risultato |
+| Baseline         | Periodo precedente, gruppo comparabile, benchmark o scenario controfattuale |
+| Decisione        | Query, modello intermedio, test SQL o pattern riusabile           |
+| Rischio          | Scambiare un numero disponibile per una prova sufficiente         |
+
+La formalizzazione è solida quando un altro analista può riprodurre la logica e ottenere la stessa decisione partendo dagli stessi dati.
+
+## Esempio o caso studio
+
+Gli eventi utente arrivano come righe isolate, ma la decisione richiede sessioni e sequenze raggruppate. La sessionizzazione consiste nel definire soglia di inattività, ordinamento, identità e confini della sessione prima di interpretare conversione o engagement.
+
+### Pattern SQL per sessionizzazione
+
+**Passaggio 1: Identificare l'inizio di una nuova sessione**
+
+```sql
+WITH events_with_gap AS (
+  SELECT
+    user_id,
+    event_time,
+    event_type,
+    LAG(event_time) OVER (PARTITION BY user_id ORDER BY event_time) AS prev_event_time,
+    CASE
+      WHEN LAG(event_time) OVER (PARTITION BY user_id ORDER BY event_time) IS NULL THEN 1
+      WHEN EXTRACT(EPOCH FROM (event_time - LAG(event_time) OVER (PARTITION BY user_id ORDER BY event_time))) > 1800 THEN 1
+      ELSE 0
+    END AS is_new_session
+  FROM raw_events
+)
+```
+
+**Passaggio 2: Assegnare un numero cumulativo di sessione**
+
+```sql
+events_with_session AS (
+  SELECT *,
+    SUM(is_new_session) OVER (PARTITION BY user_id ORDER BY event_time ROWS UNBOUNDED PRECEDING) AS session_number
+  FROM events_with_gap
+)
+SELECT
+  user_id,
+  session_number,
+  MIN(event_time) AS session_start,
+  MAX(event_time) AS session_end,
+  COUNT(*) AS events_in_session,
+  EXTRACT(EPOCH FROM (MAX(event_time) - MIN(event_time))) AS session_duration_s
+FROM events_with_session
+GROUP BY user_id, session_number;
+```
+
+Il `session_number` è un contatore cumulativo che parte da 1 per ogni utente e si incrementa ad ogni nuova sessione.
+
+### Estensione al raggruppamento comportamentale
+
+Oltre al gap temporale, spesso serve raggruppare eventi per cambi di stato o pattern sequenziali. Ad esempio, in una tabella di sensori IoT che misurano temperatura ogni minuto, vogliamo raggruppare gli episodi di surriscaldamento (temperature consecutive sopra 30°C).
+
+```sql
+WITH temp_flagged AS (
+  SELECT
+    sensor_id,
+    measured_at,
+    temperature,
+    CASE WHEN temperature > 30 THEN 0 ELSE 1 END AS state,
+    LAG(CASE WHEN temperature > 30 THEN 0 ELSE 1 END) OVER (PARTITION BY sensor_id ORDER BY measured_at) AS prev_state
+  FROM sensor_readings
+),
+state_changes AS (
+  SELECT *,
+    CASE WHEN state != prev_state OR prev_state IS NULL THEN 1 ELSE 0 END AS is_new_episode
+  FROM temp_flagged
+)
+SELECT
+  sensor_id,
+  SUM(is_new_episode) OVER (PARTITION BY sensor_id ORDER BY measured_at ROWS UNBOUNDED PRECEDING) AS episode_id,
+  MIN(measured_at) AS episode_start,
+  MAX(measured_at) AS episode_end,
+  MAX(temperature) AS peak_temp
+FROM state_changes
+WHERE state = 0  -- solo episodi di surriscaldamento
+GROUP BY sensor_id, episode_id
+HAVING COUNT(*) >= 5;  -- almeno 5 minuti consecutivi
+```
+
+Questo pattern è identico alla sessionizzazione, ma il trigger è un cambio di stato logico, non un gap temporale.
+
+## Caso reale: Tesla e l'analisi delle sessioni di guida
+
+Tesla raccoglie dati da milioni di veicoli connessi, generando enormi volumi di eventi telemetrici. Per il team Autopilot, la sessionizzazione serve a raggruppare eventi in "viaggi" distinti. La definizione di viaggio è complessa: un fermo a un semaforo di 2 minuti non interrompe il viaggio, ma una sosta in area di servizio di 15 minuti può farlo, a seconda dello stato del motore e della posizione.
+
+La query concettuale:
+
+```sql
+WITH vehicle_events AS (
+  SELECT
+    vin,
+    event_time,
+    gear,          -- 'P', 'D', 'R', 'N'
+    speed,
+    lat, lon,
+    LAG(gear) OVER (PARTITION BY vin ORDER BY event_time) AS prev_gear,
+    LAG(lat) OVER (PARTITION BY vin ORDER BY event_time) AS prev_lat,
+    LAG(lon) OVER (PARTITION BY vin ORDER BY event_time) AS prev_lon
+  FROM telemetry
+),
+trip_starts AS (
+  SELECT *,
+    CASE
+      WHEN prev_gear IS NULL THEN 1
+      WHEN prev_gear = 'P' AND gear = 'D'
+        AND haversine(prev_lat, prev_lon, lat, lon) > 0.1
+        THEN 1
+      ELSE 0
+    END AS is_new_trip
+  FROM vehicle_events
+)
+SELECT vin,
+  SUM(is_new_trip) OVER (PARTITION BY vin ORDER BY event_time ROWS UNBOUNDED PRECEDING) AS trip_id,
+  COUNT(*) AS events,
+  MAX(speed) AS max_speed,
+  MAX(event_time) - MIN(event_time) AS duration
+FROM trip_starts
+GROUP BY vin, trip_id;
+```
+
+Questo approccio ha permesso a Tesla di ridurre drasticamente i costi computazionali spostando la sessionizzazione lato server in batch.
+
+## Lab / esercizio
+
+### Livello base
+
+Scrivi la query di sessionizzazione con soglia di 30 minuti su un dataset clickstream.
+
+### Livello intermedio
+
+Estendi la sessionizzazione aggiungendo la condizione che una sessione termina anche se l'utente raggiunge la pagina `thank_you`.
+
+### Livello research-grade
+
+Attribuisci ogni sessione al canale del primo evento usando `FIRST_VALUE`.
+
+### Dataset e materiali consigliati
+
+Usa dati di clickstream, ordini, sessioni, coorti e tabelle temporali. Se non hai dati reali, crea un dataset sintetico con almeno 200 righe.
+
+## Errore tipico da evitare
+
+Usare sessionization e behavioral grouping come etichetta senza collegare i risultati a una decisione concreta. Senza baseline e senza indicare quale assunzione potrebbe invalidare il risultato, l'analisi rischia di essere inutile o fuorviante.
+
+## Quiz o checkpoint
+
+1. Cosa definisce una sessione e perché la soglia è una scelta di business?
+2. Qual è il pattern SQL a due passaggi per la sessionizzazione?
+3. Come estenderesti la sessionizzazione per raggruppare per cambi di stato?
+4. Quale errore tipico può invalidare una conclusione?
+5. Quale output consegneresti a uno stakeholder non tecnico?
+
+## Riepilogo operativo
+
+Sessionization e behavioral grouping diventano strumenti efficaci solo se producono decisioni più chiare e azioni concrete. Il framework problema, modello, formalizzazione, esempio, esercizio e checkpoint aiuta a trasformare la teoria in pratica applicata.
+
+---
+
+*Riferimenti accademici:* Kaushik (2010), Google Analytics Help (2024), Suthar & Patel (2023).
+
+## Controllo di qualità
+
+Prima di usare sessionization in decisioni operative, verifica completezza, duplicati, timezone, definizioni cambiate e segmenti esclusi. Molte analisi falliscono perché il dato misura un comportamento diverso da quello che il team crede di osservare.

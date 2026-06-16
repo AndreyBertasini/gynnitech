@@ -1,0 +1,7 @@
+- [TAGLIATO: apertura generica e frasi introduttive ridondanti]
+- [TAGLIATO: ripetizioni e spiegazioni troppo enfatiche]
+- [AGGIUNTO: collegamenti logici tra sezioni per coerenza]
+- [AGGIUNTO: conclusione esplicita per chiudere il discorso]
+- [MANTENUTO: struttura con sezioni precise e codice implicito trasformato in elenchi]
+- [MANTENUTO: esempi concreti e livelli di intervento umano]
+- [MANTENUTO: focus sull'idea di decisione sotto incertezza e controllo bilanciato]

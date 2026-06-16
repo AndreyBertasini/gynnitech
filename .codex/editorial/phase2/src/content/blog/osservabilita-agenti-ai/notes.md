@@ -1,0 +1,6 @@
+- [TAGLIATO: Eliminato il riferimento al percorso GinnyTech e link, per mantenere il focus sull'argomento centrale della disciplina decisionale sotto incertezza.]
+- [TAGLIATO: Rimosse aperture generiche e ripetizioni per rendere il testo più diretto e concreto.]
+- [AGGIUNTO: Inserite connessioni logiche tra sezioni per creare un flusso coerente e organico.]
+- [AGGIUNTO: Mantenuti esempi concreti e liste di eventi per spiegare chiaramente cosa tracciare e perché.]
+- [AGGIUNTO: Rafforzata la riflessione finale sull'importanza della trasparenza e della responsabilità nelle decisioni automatizzate.]
+- [AGGIUNTO: Strutturato il testo in sezioni con titoli coerenti con l'angolo editoriale "La disciplina di prendere decisioni sotto incertezza".]

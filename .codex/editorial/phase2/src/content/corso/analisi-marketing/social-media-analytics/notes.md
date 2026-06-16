@@ -1,0 +1,12 @@
+- [TAGLIATO:] Eliminati i dettagli troppo descrittivi o ripetitivi sull'importanza dei like e reach, mantenendo solo la parte funzionale al processo decisionale.
+- [TAGLIATO:] Rimosse introduzioni generiche e ripetizioni di concetti già espressi nel modello concettuale e formalizzazione.
+- [TAGLIATO:] Tolti i dettagli superflui di codice SQL e spiegazioni troppo tecniche, mantenendo solo l'esempio concettuale e la sua funzione.
+- [TAGLIATO:] Eliminati i dettagli di piattaforme specifiche o tool non essenziali per la comprensione del processo decisionale.
+- [AGGIUNTO:] Inseriti chiari titoli di sezione coerenti con la struttura richiesta, per facilitare la lettura e l'applicazione pratica.
+- [AGGIUNTO:] Riorganizzato il testo per seguire un flusso logico: problema reale, modello, formalizzazione, esempio, esercitazione, errori, quiz, riepilogo.
+- [AGGIUNTO:] Mantenuto esempi di casi studio per illustrare l'applicazione pratica e rafforzare il legame con decisioni reali.
+- [AGGIUNTO:] Inserito codice Python per sentiment analysis come esempio pratico di trasformazione dati in insight.
+- [AGGIUNTO:] Traduzione adattata in inglese con tono editoriale, evitando traduzioni letterali e mantenendo chiarezza e concretezza.
+- [AGGIUNTO:] Conservati i componenti didattici richiesti (quiz, lab con livelli, modello concettuale in mermaid) per rispettare la struttura del corso.
+- [AGGIUNTO:] Evidenziato l'angolo editoriale sulla disciplina di prendere decisioni sotto incertezza, enfatizzando il ruolo della baseline e del controllo.
+- [AGGIUNTO:] Sintetizzato e reso più incisivo il messaggio chiave su come social media analytics sia uno strumento decisionale, non solo descrittivo.

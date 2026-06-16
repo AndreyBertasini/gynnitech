@@ -1,0 +1,11 @@
+- [TAGLIATO:] Removed introductory and promotional filler to focus on the discipline of decision-making under uncertainty.
+- [TAGLIATO:] Removed repeated command lists and Jinja patterns that do not directly support the editorial angle.
+- [TAGLIATO:] Removed detailed materialization matrix and deployment flow as operational specifics.
+- [TAGLIATO:] Removed anti-pattern list and quick labs focused on dbt commands.
+- [AGGIUNTO:] Added explicit sections following the required headings: Problema reale, Modello concettuale, Formalizzazione rigorosa, Esempio o caso studio, Lab / esercizio, Errore tipico da evitare, Quiz o checkpoint.
+- [AGGIUNTO:] Structured the content to emphasize the process of making decisions with data, including risks and controls.
+- [AGGIUNTO:] Provided a conceptual framework linking decision, measure, control, and action.
+- [AGGIUNTO:] Included a practical example and lab exercises to ground the theory.
+- [AGGIUNTO:] Added a quiz/checkpoint to reinforce learning and self-assessment.
+- [AGGIUNTO:] Ensured Italian version is concrete and opinionated, English version is a native adaptation focusing on clarity and applicability.
+- [AGGIUNTO:] Maintained MDX validity and preserved tables and lists that support the argument.

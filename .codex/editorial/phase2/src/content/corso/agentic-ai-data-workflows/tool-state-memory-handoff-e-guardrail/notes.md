@@ -1,0 +1,8 @@
+- [TAGLIATO: Aperture generiche e frasi di marketing non essenziali]
+- [TAGLIATO: Ripetizioni e ridondanze superflue]
+- [AGGIUNTO: Collegamenti logici tra sezioni per coerenza]
+- [AGGIUNTO: Chiarezza e concretezza nelle spiegazioni]
+- [AGGIUNTO: Struttura coerente con il tema della decisione sotto incertezza]
+- [PRESERVATO: Tabelle, esempi, checklist e riferimenti tecnici]
+- [PRESERVATO: Struttura con sezioni obbligatorie per la lezione]
+- [ADATTATO: Versione inglese come adattamento naturale, non traduzione letterale]

@@ -1,0 +1,8 @@
+- [TAGLIATO] Eliminati gli elementi introduttivi generici e ripetitivi per concentrare il testo sulla disciplina della decisione sotto incertezza.
+- [TAGLIATO] Rimosse frasi di apertura e chiusura ridondanti per mantenere un flusso editoriale coerente.
+- [AGGIUNTO] Inserite transizioni logiche per collegare i paragrafi e mantenere la coerenza tematica.
+- [AGGIUNTO] Mantenuti tutti i blocchi tabellari e le componenti didattiche per preservare la validità MDX e la completezza formativa.
+- [AGGIUNTO] Traduzione adattata in inglese con attenzione a un registro naturale e concreto, evitando traduzioni letterali.
+- [AGGIUNTO] Strutturazione in sezioni obbligatorie per lezioni di corso, con titoli esatti e contenuti coerenti con l'angolo editoriale scelto.
+- [TAGLIATO] Eliminati riferimenti promozionali o vaghi, mantenendo solo riferimenti tecnici essenziali e pertinenti.
+- [AGGIUNTO] Rafforzata l'enfasi sulla trasparenza, tracciabilità e responsabilità umana nel processo decisionale assistito da AI.

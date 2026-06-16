@@ -1,0 +1,9 @@
+- [TAGLIATO:] Introduzioni generiche e ripetizioni sull'importanza epistemologica per concentrarsi su contenuti operativi e concreti.
+- [TAGLIATO:] Sezioni ridondanti come la piramide DIKW e dettagli troppo teorici senza collegamento diretto alla decisione.
+- [TAGLIATO:] Passaggi decorativi e ripetizioni su contesto e controllo qualità.
+- [AGGIUNTO:] Struttura coerente con sette sezioni chiave richieste per una lezione: Problema reale, Modello concettuale, Formalizzazione rigorosa, Esempio o caso studio, Lab / esercizio, Errore tipico da evitare, Quiz o checkpoint.
+- [AGGIUNTO:] Chiarezza e concretezza nella definizione degli elementi del modello e nella formalizzazione epistemologica.
+- [AGGIUNTO:] Lab con livelli di difficoltà e materiali consigliati per esercitarsi in modo progressivo.
+- [AGGIUNTO:] Quiz finale per consolidare l'apprendimento e stimolare la riflessione critica.
+- [AGGIUNTO:] Riepilogo operativo finale per sottolineare l'importanza pratica dell'epistemologia dei dati nel processo decisionale.
+- [AGGIUNTO:] Traduzione inglese adattata per mantenere naturalezza e coerenza con l'angolo editoriale scelto, evitando traduzioni letterali e mantenendo il focus su decisioni sotto incertezza.

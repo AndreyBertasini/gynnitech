@@ -1,0 +1,8 @@
+- [TAGLIATO:] Introduzioni generiche e ripetizioni sul tema della causalità e strumenti moderni.
+- [TAGLIATO:] Tabelle e sezioni non essenziali per la struttura editoriale coerente, come le tre ondate dell'analisi dati e la checklist generica.
+- [TAGLIATO:] Esempi di Netflix e codice SQL/Python troppo specifici per il focus disciplinare sulla decisione sotto incertezza.
+- [AGGIUNTO:] Struttura didattica rigorosa con sezioni obbligatorie (Problema reale, Modello concettuale, Formalizzazione rigorosa, Esempio o caso studio, Lab / esercizio, Errore tipico da evitare, Quiz o checkpoint).
+- [AGGIUNTO:] Linguaggio più concreto e orientato all'applicazione, con tono editoriale deciso e focalizzato sulla disciplina della decisione sotto incertezza.
+- [AGGIUNTO:] Chiarezza e sintesi per mantenere la lezione coerente e autonoma, eliminando digressioni non funzionali.
+- [AGGIUNTO:] Tabelle e diagrammi mantenuti solo se essenziali al modello concettuale e formalizzazione.
+- [AGGIUNTO:] Traduzione inglese adattata per fluidità e naturalezza, non letterale.

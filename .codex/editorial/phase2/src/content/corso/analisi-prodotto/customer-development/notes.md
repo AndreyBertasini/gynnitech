@@ -1,0 +1,9 @@
+- [TAGLIATO:] Rimosso il frontmatter e introduzioni generiche o ripetitive.
+- [TAGLIATO:] Eliminati passaggi decorativi e ripetizioni inutili.
+- [AGGIUNTO:] Inserite sezioni con titoli standardizzati per una lezione coerente: Problema reale, Modello concettuale, Formalizzazione rigorosa, Esempio o caso studio, Lab / esercizio, Errore tipico da evitare, Quiz o checkpoint.
+- [AGGIUNTO:] Rafforzato il collegamento logico tra sezioni per costruire un discorso organico.
+- [AGGIUNTO:] Mantenuti tabelle e contenuti tecnici per preservare la didattica.
+- [AGGIUNTO:] Versione italiana resa più concreta e opinabile, evitando formule eccessivamente formali.
+- [AGGIUNTO:] Versione inglese adattata per fluidità e naturalezza, non traduzione letterale.
+- [TAGLIATO:] Rimosse frasi promozionali e riferimenti troppo generici.
+- [AGGIUNTO:] Inserito richiamo esplicito alla disciplina di decision making sotto incertezza, implicito nel testo.

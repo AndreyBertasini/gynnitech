@@ -1,0 +1,7 @@
+- [TAGLIATO: rimozione di introduzioni generiche e ripetizioni ridondanti]
+- [TAGLIATO: eliminazione di frasi decorative e promozionali]
+- [AGGIUNTO: collegamenti logici per mantenere la coerenza del discorso]
+- [AGGIUNTO: mantenimento delle sezioni con titoli specifici per rispettare la struttura richiesta]
+- [AGGIUNTO: traduzione adattata in inglese con tono naturale e fluido]
+- [TAGLIATO: rimozione di dettagli troppo generici o non rilevanti per il focus decisionale]
+- [AGGIUNTO: enfatizzazione dell'importanza della memoria selettiva come disciplina decisionale sotto incertezza]

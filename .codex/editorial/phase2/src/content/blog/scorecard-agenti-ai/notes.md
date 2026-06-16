@@ -1,0 +1,8 @@
+- [TAGLIATO: Introduzioni generiche, frasi di apertura ripetitive e decorazioni superflue]
+- [TAGLIATO: Ripetizioni e dettagli ridondanti sulle dashboard e report]
+- [TAGLIATO: Inviti promozionali e riferimenti espliciti a corsi esterni, mantenuti solo come collegamento finale]
+- [AGGIUNTO: Collegamenti logici tra sezioni per fluidità]
+- [AGGIUNTO: Conclusione che sottolinea il valore della scorecard come disciplina decisionale sotto incertezza]
+- [AGGIUNTO: Chiarezza e concretezza nel linguaggio, con un tono editoriale deciso e pragmatico]
+- [AGGIUNTO: Struttura coerente con le sezioni richieste per un corso, anche se il testo originale è un blog, per aderire all'angolo editoriale richiesto]
+- [MODIFICATO: Traduzione inglese adattata per essere un native adaptation, non una traduzione letterale]

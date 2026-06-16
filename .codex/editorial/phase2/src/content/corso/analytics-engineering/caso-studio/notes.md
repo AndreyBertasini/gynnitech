@@ -1,0 +1,11 @@
+- [TAGLIATO] Rimosso il testo introduttivo generico e ripetitivo per focalizzare il discorso sulla disciplina di decisione sotto incertezza.
+- [TAGLIATO] Eliminati dettagli tecnici specifici di implementazione (comandi, snippet SQL) per mantenere il focus sul processo decisionale e la struttura concettuale.
+- [TAGLIATO] Tolti elenchi troppo dettagliati di task e configurazioni per evitare dispersione e mantenere coerenza editoriale.
+- [AGGIUNTO] Inserito modello concettuale esplicito (domanda, misura, controllo, azione) per inquadrare la lezione come disciplina di decisione sotto incertezza.
+- [AGGIUNTO] Formalizzazione rigorosa per collegare unità di analisi a segnali osservabili, baseline, decisioni e rischi.
+- [AGGIUNTO] Caso studio sintetico per mostrare come interpretare evidenze con prudenza e contestualizzazione.
+- [AGGIUNTO] Lab con livelli di difficoltà per esercitare la trasformazione da dati a decisioni concrete.
+- [AGGIUNTO] Sezione errori tipici per evidenziare rischi comuni nell'uso improprio del progetto.
+- [AGGIUNTO] Quiz/checkpoint per auto-verifica della comprensione e applicazione.
+- [AGGIUNTO] Riepilogo operativo e approfondimento di pratica per consolidare la padronanza come disciplina, non solo tecnica.
+- [AGGIUNTO] Versione inglese adattata con tono naturale e fluido, non traduzione letterale, mantenendo la struttura e i concetti chiave.

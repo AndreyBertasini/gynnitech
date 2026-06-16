@@ -1,0 +1,8 @@
+- [TAGLIATO:] Introduzioni generiche e ripetizioni non essenziali.
+- [TAGLIATO:] Tabelle e spiegazioni ridondanti sulle definizioni di fairness, mantenendo solo il necessario per il contesto etico.
+- [TAGLIATO:] Alcuni dettagli troppo specifici o aneddotici che non aggiungevano valore diretto alla disciplina decisionale sotto incertezza.
+- [AGGIUNTO:] Chiarezza e rigore nel modello concettuale e formalizzazione per legare etica, dati e decisione.
+- [AGGIUNTO:] Struttura coerente con le sezioni richieste per una lezione operativa e concreta.
+- [AGGIUNTO:] Esempio reale sintetizzato per mostrare l'applicazione pratica del concetto.
+- [AGGIUNTO:] Laboratorio con livelli di difficoltà e materiali consigliati per favorire l'apprendimento attivo.
+- [AGGIUNTO:] Errori tipici e checkpoint per consolidare la comprensione e l'applicazione pratica.

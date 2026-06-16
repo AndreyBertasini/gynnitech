@@ -1,0 +1,8 @@
+- [TAGLIATO: Introduzioni generiche e ripetizioni superflue]
+- [TAGLIATO: Esempi troppo dettagliati o aneddoti non essenziali]
+- [TAGLIATO: Sezioni promozionali o riferimenti interni non rilevanti per la coerenza]
+- [AGGIUNTO: Sezioni con struttura didattica chiara e coerente con l'angolo editoriale]
+- [AGGIUNTO: Collegamenti logici tra sezioni per creare un discorso organico]
+- [AGGIUNTO: Lab con livelli di difficoltà e materiali consigliati]
+- [AGGIUNTO: Quiz per consolidare l'apprendimento]
+- [AGGIUNTO: Conclusione che sottolinea l'importanza del metodo nel decision making sotto incertezza]

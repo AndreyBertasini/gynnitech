@@ -1,0 +1,9 @@
+- [TAGLIATO:] Rimozione di introduzioni generiche e ripetizioni non necessarie per migliorare la coerenza editoriale.
+- [TAGLIATO:] Eliminazione di dettagli eccessivamente tecnici o esempi ridondanti che non aggiungevano valore diretto al messaggio centrale.
+- [AGGIUNTO:] Inserimento di transizioni logiche tra sezioni per costruire un discorso coerente e fluido.
+- [AGGIUNTO:] Strutturazione esplicita con sezioni richieste (Problema reale, Modello concettuale, Formalizzazione rigorosa, ecc.) per aderire al formato didattico e all'angolo editoriale.
+- [AGGIUNTO:] Sintesi e riformulazione di esempi e casi studio per evidenziare il legame tra test, contratti e decisioni operative.
+- [AGGIUNTO:] Chiarezza e concretezza nelle sezioni di lab ed esercizi, con indicazioni precise sui livelli e materiali.
+- [AGGIUNTO:] Enfasi sul collegamento tra dati, assunzioni, test e decisioni per rispettare l'angolo editoriale "La disciplina di prendere decisioni sotto incertezza".
+- [AGGIUNTO:] Mantenimento di tabelle e snippet YAML/SQL essenziali per insegnare i concetti chiave senza appesantire il testo.
+- [AGGIUNTO:] Domande di quiz finali per stimolare la riflessione critica e l'applicazione pratica.

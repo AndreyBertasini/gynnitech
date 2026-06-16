@@ -1,0 +1,8 @@
+- [TAGLIATO: Introduzione generica e ripetizioni sul concetto di paradigma e scienza normale/rivoluzionaria per concentrare il testo sulla disciplina decisionale sotto incertezza.]
+- [TAGLIATO: Esempi troppo dettagliati e storici per privilegiare un approccio operativo e decisionale.]
+- [TAGLIATO: Sezioni decorative o ripetitive che non aggiungevano valore concreto alla lezione.]
+- [AGGIUNTO: Struttura coerente con i titoli richiesti per un corso: Problema reale, Modello concettuale, Formalizzazione rigorosa, Esempio o caso studio, Lab / esercizio, Errore tipico da evitare, Quiz o checkpoint, Riepilogo operativo.]
+- [AGGIUNTO: Tabelle e diagrammi mantenuti e integrati per chiarire il processo decisionale.]
+- [AGGIUNTO: Linguaggio più diretto e orientato all'applicazione pratica, con focus su come Kuhn aiuta a prendere decisioni migliori sotto incertezza.]
+- [AGGIUNTO: Quiz e checklist per facilitare l'auto-verifica della comprensione e applicazione.]
+- [AGGIUNTO: Eliminazione di frontmatter e rispetto delle regole di validità MDX.]

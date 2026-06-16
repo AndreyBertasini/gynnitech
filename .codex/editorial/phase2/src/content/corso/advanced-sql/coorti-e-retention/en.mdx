@@ -1,0 +1,190 @@
+import { SqlExercise } from '../../../components/SqlExercise';
+
+# Attribution queries and path analytics
+
+In digital marketing, assigning credit for a sale to a channel often becomes a political negotiation without explicit rules. Paid social, email, and brand channels can all claim the same purchase, but without clear logic, budget allocation risks being arbitrary.
+
+## Real-world problem
+
+How do you justify why one channel gets credit and another does not? The goal is not to find the perfect model but to build a logic that makes assumptions, limitations, and budget consequences visible. What budget decision is this attribution supporting? What time window makes the credit defensible? How do you present a model with explicit limits without weakening it?
+
+## Conceptual model
+
+| Step | What to clarify | Output |
+|---|---|---|
+| Question | What real choice needs improvement? | Decision to make |
+| Measure | What observable signal represents the problem? | Metric or raw data |
+| Control | What baseline makes the result interpretable? | Credible comparison |
+| Action | What changes after the analysis? | Next operational step |
+
+This simple framework keeps focus on concrete decisions, avoiding getting lost in abstract technicalities.
+
+## Rigorous formalization
+
+To make the analysis reproducible and critiquable, define the unit of work (row, partition, window, join, cohort, or time metric), link it to an observable metric (accuracy, performance, duplicates, grain, and result stability), and declare the expected decision (query, intermediate model, SQL test, or reusable pattern).
+
+| Element | Required specification |
+|---|---|
+| Unit of analysis | row, partition, window, join, cohort, or time metric |
+| Main signal | accuracy, performance, duplicates, grain, and result stability |
+| Baseline | prior period, comparable group, benchmark, or counterfactual scenario |
+| Decision | query, intermediate model, SQL test, or reusable pattern |
+| Risk | mistaking an available number for sufficient evidence |
+
+## Attribution models in SQL
+
+Four classic models can be implemented in SQL with increasing complexity:
+
+| Model | Credit distribution | SQL complexity |
+|---------|--------------------|-----------------|
+| Last-click | 100% to last touchpoint | Simple: `FIRST_VALUE` ordered descending |
+| First-click | 100% to first touchpoint | Simple: `FIRST_VALUE` ordered ascending |
+| Linear | Equally divided among all touchpoints | Medium: count touchpoints per conversion |
+| Time decay | More weight to recent touchpoints | Complex: exponential weights with window functions |
+
+**Last-click in SQL:**
+
+```sql
+SELECT conversion_id, user_id, channel,
+  FIRST_VALUE(channel) OVER (
+    PARTITION BY conversion_id ORDER BY touch_time DESC
+    ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING
+  ) AS last_touch_channel
+FROM touchpoints;
+```
+
+**First-click in SQL:**
+
+```sql
+SELECT conversion_id, user_id, channel,
+  FIRST_VALUE(channel) OVER (
+    PARTITION BY conversion_id ORDER BY touch_time ASC
+    ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING
+  ) AS first_touch_channel
+FROM touchpoints;
+```
+
+**Linear attribution in SQL:**
+
+```sql
+WITH touchpoint_counts AS (
+  SELECT *,
+    COUNT(*) OVER (PARTITION BY conversion_id) AS total_touches,
+    1.0 / COUNT(*) OVER (PARTITION BY conversion_id) AS weight
+  FROM touchpoints
+)
+SELECT channel,
+  SUM(conversion_value * weight) AS attributed_revenue
+FROM touchpoint_counts
+GROUP BY channel;
+```
+
+**Time decay in SQL:**
+
+```sql
+WITH ordered_touches AS (
+  SELECT *,
+    ROW_NUMBER() OVER (PARTITION BY conversion_id ORDER BY touch_time DESC) AS recency_rank,
+    COUNT(*) OVER (PARTITION BY conversion_id) AS total_touches
+  FROM touchpoints
+),
+time_decay_weights AS (
+  SELECT *,
+    POWER(0.5, recency_rank - 1) AS raw_weight,
+    SUM(POWER(0.5, recency_rank - 1)) OVER (PARTITION BY conversion_id) AS total_weight
+  FROM ordered_touches
+)
+SELECT channel,
+  SUM(conversion_value * raw_weight / total_weight) AS attributed_revenue
+FROM time_decay_weights
+GROUP BY channel;
+```
+
+The time decay model suits products with long consideration paths, where the last click reflects a consolidated decision.
+
+## Example or case study
+
+Booking.com, spending over $4 billion annually on digital marketing, moved beyond fixed-rule models by adopting a Shapley value-based approach. This method assigns credit to each channel based on its average marginal contribution across all possible channel combinations, offering a fairer and more realistic view.
+
+A simplified SQL version calculates conversion rates per channel combination and attributes deltas:
+
+```sql
+WITH channel_combos AS (
+  SELECT user_id, conversion_id,
+    STRING_AGG(DISTINCT channel, ', ' ORDER BY channel) AS channel_set,
+    COUNT(DISTINCT channel) AS num_channels,
+    MAX(conversion_value) AS value
+  FROM touchpoints
+  GROUP BY user_id, conversion_id
+),
+conversion_rates AS (
+  SELECT channel_set, num_channels,
+    COUNT(*) AS total_users,
+    SUM(CASE WHEN value > 0 THEN 1 ELSE 0 END) AS converters,
+    SUM(value) AS total_value
+  FROM channel_combos
+  GROUP BY channel_set, num_channels
+)
+SELECT * FROM conversion_rates
+ORDER BY num_channels, total_value DESC;
+```
+
+Switching to this model redistributed marketing budget and improved return on ad spend.
+
+## Path analytics: from conversions to journeys
+
+Attribution answers "which channel contributed?" Path analytics answers "which journey led to conversion?" by considering the order and sequence of touchpoints.
+
+Extracting the most frequent paths:
+
+```sql
+WITH user_paths AS (
+  SELECT
+    user_id,
+    conversion_id,
+    STRING_AGG(channel, ' → ' ORDER BY touch_time) AS channel_path,
+    COUNT(*) AS path_length
+  FROM touchpoints
+  GROUP BY user_id, conversion_id
+)
+SELECT
+  channel_path,
+  COUNT(*) AS conversions,
+  ROUND(COUNT(*) * 100.0 / SUM(COUNT(*)) OVER (), 1) AS pct_of_total
+FROM user_paths
+GROUP BY channel_path
+ORDER BY conversions DESC
+LIMIT 10;
+```
+
+Common paths like "Google Search → Direct" or "Facebook Ad → Google Search" provide valuable insights for strategy optimization.
+
+## Lab / exercise
+
+Dataset: 5,000 conversions with 15,000 touchpoints across 5 channels (`google_ads`, `facebook_ads`, `email`, `organic_search`, `direct`). Each conversion has a `conversion_value`.
+
+**Level 1:** Calculate revenue attributed to each channel with last-click, first-click, and linear models. Observe differences in credit distribution.
+
+**Level 2:** Extract the top 3 most common conversion paths. Identify if a dominant path exists.
+
+**Level 3:** Modify the time decay model to consider only touchpoints within 7 days before conversion, assigning zero weight to older touchpoints.
+
+## Common mistake to avoid
+
+Using attribution queries and path analytics as empty labels without linking them to concrete decisions is the most frequent error. Presenting charts without a clear decision, metrics without baselines, or conclusions without stating assumptions leads to useless or misleading analysis.
+
+The key question is: if this result were unstable, what wrong decision would I make? Without a concrete answer, the link between analysis and action is missing.
+
+## Quiz or checkpoint
+
+1. What are the four classic attribution models and when are they preferred?
+2. How does path analytics differ from attribution and why are both necessary?
+3. Why did Booking.com choose the Shapley value model?
+4. What unit of analysis is essential to measure the problem correctly?
+5. What common mistake can undermine the validity of conclusions?
+
+## Operational summary
+
+Attribution queries and path analytics become effective decision tools only when they produce clearer decisions rather than just technical jargon. The path to follow is: identify the real problem, build a conceptual model, rigorously formalize, analyze concrete examples, practice with real data, and verify understanding with targeted checkpoints.
+
+This discipline is crucial to making informed decisions under uncertainty, turning complex data into actionable insights.

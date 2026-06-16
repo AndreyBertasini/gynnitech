@@ -1,0 +1,8 @@
+- [TAGLIATO: rimozione di introduzioni generiche e ripetizioni]
+- [TAGLIATO: eliminazione di frasi decorative e promozionali]
+- [AGGIUNTO: collegamenti logici per integrare i paragrafi in un flusso coerente]
+- [AGGIUNTO: conclusione esplicita per chiudere il discorso]
+- [MANTENUTO: struttura con sezioni chiare e titoli richiesti]
+- [MANTENUTO: esempi concreti e dettagli di misurazione per supportare la disciplina di decisione sotto incertezza]
+- [MANTENUTO: tono editoriale opinato e diretto in italiano, adattamento naturale in inglese]
+- [RIMOSSO: riferimenti a percorsi esterni non essenziali per il focus editoriale]

@@ -1,0 +1,10 @@
+- [TAGLIATO:] Eliminati i passaggi introduttivi generici e ripetitivi per concentrare il testo su un flusso coerente e operativo.
+- [TAGLIATO:] Rimosse ripetizioni e spiegazioni troppo generiche o decorative.
+- [AGGIUNTO:] Inserite sezioni standard di corso con titoli obbligatori come Problema reale, Modello concettuale, Formalizzazione rigorosa, Esempio o caso studio, Lab / esercizio, Errore tipico da evitare, Quiz o checkpoint.
+- [AGGIUNTO:] Rafforzato il legame con la disciplina del decision making sotto incertezza, esplicitando come applicare le quattro cause per migliorare le decisioni.
+- [AGGIUNTO:] Inserito modello mentale e tabella di passaggi per decisioni robuste.
+- [AGGIUNTO:] Tradotto e adattato il contenuto in inglese con un tono nativo e focalizzato sull'editorial angle.
+- [AGGIUNTO:] Mantenuti esempi concreti come il churn SaaS e il caso Netflix per illustrare il framework.
+- [AGGIUNTO:] Inserite sezioni di esercizi con livelli di difficoltà e materiali consigliati per un uso pratico.
+- [AGGIUNTO:] Inserito quiz/checkpoint per consolidare l'apprendimento.
+- [AGGIUNTO:] Conclusione con riepilogo operativo per chiudere la lezione come organismo coerente e utile.

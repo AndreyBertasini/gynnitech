@@ -1,0 +1,9 @@
+- [TAGLIATO:] Introduzioni generiche e ripetizioni sul ruolo dell'AI nel lavoro dati.
+- [TAGLIATO:] Tabelle e paragrafi ridondanti che non aggiungevano sostanza al modello operativo.
+- [TAGLIATO:] Elenchi troppo lunghi e ripetitivi su proprietà generali dell'AI.
+- [AGGIUNTO:] Collegamenti logici tra sezioni per creare un flusso coerente.
+- [AGGIUNTO:] Struttura editoriale con sezioni obbligatorie per una lezione didattica completa.
+- [AGGIUNTO:] Sintesi e chiarimenti per evitare fraintendimenti e sottolineare la disciplina necessaria.
+- [AGGIUNTO:] Domande di verifica per stimolare riflessione e auto-valutazione.
+- [AGGIUNTO:] Indicazioni pratiche per esercizi e livelli di approfondimento.
+- [AGGIUNTO:] Evitata traduzione letterale, preferendo adattamento naturale e concreto in entrambe le lingue.

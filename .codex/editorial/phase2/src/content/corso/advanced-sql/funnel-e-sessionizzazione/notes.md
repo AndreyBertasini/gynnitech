@@ -1,0 +1,8 @@
+- [TAGLIATO:] Introduzioni generiche e ripetizioni sul contesto e vantaggi generali dei dati semi-strutturati.
+- [TAGLIATO:] Tabelle di confronto dialetti SQL e dettagli di sintassi specifica, mantenuti solo nei casi esemplificativi.
+- [TAGLIATO:] Codici SQL molto dettagliati e ripetitivi, ridotti a esempi essenziali per illustrare il concetto di unnesting e navigazione JSON.
+- [TAGLIATO:] Descrizioni di tool esterni e casi aziendali troppo estesi (es. Segment) per mantenere focus sulla disciplina decisionale.
+- [AGGIUNTO:] Sezioni strutturate secondo il modello decisionale: problema reale, modello concettuale, formalizzazione rigorosa, esempio, lab, errore tipico, quiz, riepilogo.
+- [AGGIUNTO:] Focus esplicito sul legame tra analisi di dati semi-strutturati e decisioni sotto incertezza.
+- [AGGIUNTO:] Domande di controllo e checklist per stimolare riflessione critica e applicazione pratica.
+- [AGGIUNTO:] Linguaggio più diretto, editoriale e concreto, evitando formalismi eccessivi o descrizioni puramente tecniche.

@@ -1,0 +1,8 @@
+- [TAGLIATO: rimozione di introduzioni generiche e ripetizioni]
+- [TAGLIATO: eliminazione di frasi decorative e filler]
+- [AGGIUNTO: collegamenti logici per mantenere la coerenza]
+- [AGGIUNTO: mantenimento di tutte le sezioni richieste per una lezione]
+- [AGGIUNTO: traduzione adattata e naturalizzata per la versione inglese]
+- [AGGIUNTO: mantenimento di esempi, checklist e metriche per supportare la tesi]
+- [TAGLIATO: rimozione di riferimenti a tool o dashboard non necessari]
+- [AGGIUNTO: enfasi sul processo decisionale sotto incertezza come filo conduttore]

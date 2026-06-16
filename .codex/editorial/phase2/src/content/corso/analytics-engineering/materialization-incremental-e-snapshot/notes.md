@@ -1,0 +1,10 @@
+- [TAGLIATO:] Rimozione di introduzioni generiche e ripetizioni superflue.
+- [TAGLIATO:] Eliminazione di dettagli troppo tecnici o di esempio non essenziali per il filo argomentativo.
+- [TAGLIATO:] Rimosse sezioni decorative e riferimenti promozionali.
+- [AGGIUNTO:] Inserimento di un modello concettuale e formalizzazione rigorosa per collegare la tecnica a decisioni reali.
+- [AGGIUNTO:] Struttura chiara con sezioni obbligatorie per un corso tecnico avanzato.
+- [AGGIUNTO:] Tabelle e sintassi SQL mantenute e spiegate in modo conciso.
+- [AGGIUNTO:] Caso reale di Zapier integrato come esempio concreto di applicazione e impatto economico.
+- [AGGIUNTO:] Lab con livelli di difficoltà e materiali consigliati per esercitarsi.
+- [AGGIUNTO:] Quiz finale per verificare la comprensione e applicazione.
+- [AGGIUNTO:] Riepilogo operativo per chiudere la lezione con un focus sull'applicazione pratica.

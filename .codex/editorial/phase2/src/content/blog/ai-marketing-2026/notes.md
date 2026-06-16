@@ -1,0 +1,8 @@
+- [TAGLIATO: Eliminati i passaggi introduttivi generici e ripetitivi per mantenere il focus sulla disciplina decisionale sotto incertezza]
+- [TAGLIATO: Rimosse ripetizioni e dettagli superflui nei casi studio e nelle spiegazioni tecniche]
+- [AGGIUNTO: Inserite transizioni logiche per collegare le sezioni e mantenere il discorso coerente]
+- [AGGIUNTO: Strutturazione in sezioni chiare con titoli standard per facilitare la lettura e comprensione]
+- [AGGIUNTO: Sintesi finale che ribadisce il tema dell'AI come amplificatore delle capacità umane nel marketing]
+- [PRESERVATO: Codice e tabelle didattiche per mantenere la validità MDX e l'apprendimento concreto]
+- [ADATTATO: Versione inglese non letterale ma adattata per fluidità e naturalezza native]
+- [MANTENUTO: Componenti didattiche come esempi, casi studio, e tabelle comparative per arricchire il contenuto]

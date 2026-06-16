@@ -1,0 +1,8 @@
+- [TAGLIATO: rimozione di introduzioni generiche e ripetizioni per rendere il testo più diretto e focalizzato]
+- [TAGLIATO: eliminazione di frasi decorative e ripetizioni sul tema della crescita]
+- [AGGIUNTO: collegamenti logici tra sezioni per garantire coerenza editoriale]
+- [AGGIUNTO: traduzione adattata e non letterale per mantenere tono naturale e fluido in inglese]
+- [AGGIUNTO: mantenimento di tutte le sezioni richieste per una lezione strutturata secondo l'angolo editoriale]
+- [AGGIUNTO: mantenimento di esempi concreti e checklist per facilitare l'applicazione pratica]
+- [AGGIUNTO: riformulazione dell'opinione finale per sottolineare la disciplina decisionale sotto incertezza]
+- [AGGIUNTO: mantenimento di tutte le metriche e concetti chiave come MDE, potenza, costo opportunità, ecc.]

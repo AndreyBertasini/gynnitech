@@ -1,0 +1,10 @@
+- [TAGLIATO:] Rimosse introduzioni generiche e ripetizioni non essenziali per concentrare il testo sul tema della decisione sotto incertezza.
+- [TAGLIATO:] Eliminati dettagli storici e liste di lezioni per evitare dispersione e mantenere il focus operativo.
+- [AGGIUNTO:] Inseriti titoli standardizzati per lezioni di corso, inclusi sezioni specifiche come Problema reale, Modello concettuale, Formalizzazione rigorosa, Esempio o caso studio, Lab / esercizio, Errore tipico da evitare, Quiz o checkpoint, e Riepilogo operativo.
+- [AGGIUNTO:] Rafforzato il legame tra filosofia e pratica decisionale, sottolineando l'importanza di esplicitare assunzioni e baseline.
+- [AGGIUNTO:] Mantenute tabelle e diagrammi utili per la comprensione del modello e della formalizzazione.
+- [AGGIUNTO:] Traduzione adattata in inglese con tono nativo e scorrevole, non letterale.
+- [AGGIUNTO:] Inserito un esempio concreto per illustrare l'applicazione pratica dell'indice.
+- [AGGIUNTO:] Definite chiaramente le attività di laboratorio con livelli di difficoltà e materiali consigliati.
+- [AGGIUNTO:] Evidenziati errori comuni e suggeriti controlli critici per evitare decisioni sbagliate.
+- [AGGIUNTO:] Strutturato il contenuto come un organismo editoriale coerente e completo, in linea con l'angolo editoriale scelto.

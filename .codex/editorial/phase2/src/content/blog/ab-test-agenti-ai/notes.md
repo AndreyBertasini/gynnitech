@@ -1,0 +1,7 @@
+- [TAGLIATO: introduzioni generiche e frasi di apertura ridondanti]
+- [TAGLIATO: enfasi decorative e ripetizioni]
+- [AGGIUNTO: transizioni logiche per collegare i paragrafi]
+- [AGGIUNTO: conclusione che riassume il valore dell'A/B test per agenti AI come disciplina decisionale]
+- [MANTENUTO: esempi concreti di metriche e triggering]
+- [MANTENUTO: struttura con sezioni chiare e titoli espliciti]
+- [ADATTATO: linguaggio per essere più diretto e opinabile in italiano, più fluido e naturale in inglese]

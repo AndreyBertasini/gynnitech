@@ -1,0 +1,7 @@
+- [TAGLIATO:] Rimozione di introduzioni generiche e ripetizioni.
+- [TAGLIATO:] Eliminazione di dettagli superflui e frasi decorative.
+- [AGGIUNTO:] Inserimento di transizioni logiche per collegare le sezioni in un discorso coerente.
+- [AGGIUNTO:] Strutturazione rigorosa con sezioni obbligatorie per una lezione di corso.
+- [AGGIUNTO:] Mantenimento di esempi, tabelle e YAML per illustrare concetti chiave.
+- [AGGIUNTO:] Chiarezza e concretezza sia nella versione italiana che inglese, con adattamento culturale e linguistico.
+- [AGGIUNTO:] Sintesi finale con riferimenti e quiz per consolidare l'apprendimento.

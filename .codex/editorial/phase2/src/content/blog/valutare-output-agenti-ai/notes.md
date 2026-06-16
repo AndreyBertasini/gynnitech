@@ -1,0 +1,8 @@
+- [TAGLIATO: rimozione di introduzioni generiche e ripetizioni per mantenere il testo conciso e focalizzato sulla disciplina decisionale sotto incertezza]
+- [TAGLIATO: eliminazione di frasi decorative e promozionali]
+- [AGGIUNTO: collegamenti logici tra sezioni per creare un discorso coerente e fluido]
+- [AGGIUNTO: conclusione esplicita per chiudere il ragionamento]
+- [AGGIUNTO: mantenimento di tutti i criteri, livelli di errore, e suggerimenti pratici per valutare output agenti AI]
+- [AGGIUNTO: adattamento in inglese con tono naturale e scorrevole, evitando traduzioni letterali]
+- [TAGLIATO: rimozione di riferimenti a strumenti specifici non essenziali per il discorso]
+- [AGGIUNTO: enfasi sulla disciplina di prendere decisioni sotto incertezza come filo conduttore]

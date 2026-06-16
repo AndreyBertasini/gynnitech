@@ -1,0 +1,11 @@
+- [TAGLIATO:] Removed introductory filler and repeated explanations to maintain focus and coherence.
+- [TAGLIATO:] Omitted decorative language and non-essential storytelling that did not advance the argument.
+- [TAGLIATO:] Removed redundant mentions of tools and unrelated motivational content.
+- [AGGIUNTO:] Added explicit section headings matching the course lesson structure: Problema reale, Modello concettuale, Formalizzazione rigorosa, Esempio o caso studio, Lab / esercizio, Errore tipico da evitare, Quiz o checkpoint.
+- [AGGIUNTO:] Included the four-step translation chain as a clear conceptual model.
+- [AGGIUNTO:] Incorporated the ShopDirect case study as a concrete example illustrating the framework.
+- [AGGIUNTO:] Provided a lab section with progressive difficulty levels and recommended datasets.
+- [AGGIUNTO:] Emphasized the importance of the four-line template as a contract with stakeholders.
+- [AGGIUNTO:] Preserved the original quiz component with questions and explanations to reinforce learning.
+- [AGGIUNTO:] Strengthened the editorial angle on decision-making discipline under uncertainty by focusing on question formulation and its impact on actionable insights.
+- [AGGIUNTO:] Ensured both Italian and English versions are native, concrete, and aligned with the editorial angle, avoiding literal translation and maintaining editorial voice.
