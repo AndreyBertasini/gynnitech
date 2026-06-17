@@ -21,13 +21,15 @@ learningObjectives:
 ---
 # EXPLAIN, ottimizzazione e tuning delle performance
 
-Il lunedì mattina il dashboard impiega dodici minuti, il PM chiede un filtro in più, e il costo del warehouse cresce senza che la query diventi più stabile. Prima di riscrivere tutto, serve capire cosa sta succedendo davvero nel motore di database. Questa lezione parte dal query plan, non dall'intuizione.
+Lunedì mattina, il dashboard impiega dodici minuti a caricare, il PM chiede un filtro in più e il costo del warehouse continua a salire senza che la query diventi più stabile. La tentazione è riscrivere tutto da capo. Prima però conviene capire cosa sta facendo davvero il motore di database, e per quello si parte dal query plan, non dall'intuizione.
 
-## Problema reale
+## Il problema che si vuole risolvere
 
-Nel contesto di query analitiche complesse, spesso il problema è scrivere query corrette e performanti anche quando grain, finestre, coorti e casi limite complicano la logica. Il tuning non è un esercizio accademico, ma un processo per migliorare decisioni reali con dati affidabili e azioni concrete.
+Con le query analitiche complesse la difficoltà è doppia: scriverle corrette e tenerle veloci, anche quando grain, finestre, coorti e casi limite complicano la logica. Il tuning non è un esercizio accademico per far girare i numeri più in fretta. È il modo di rendere affidabili le decisioni che da quei numeri dipendono, con dati su cui ci si può appoggiare e azioni concrete da prendere.
 
-## Modello concettuale
+## Come ragionare prima di intervenire
+
+Conviene tenere a mente uno schema semplice che lega la domanda al dato, il dato al controllo e il controllo all'azione. Ogni intervento tecnico, dall'aggiunta di un indice alla riscrittura di un join, ha senso solo se rafforza almeno uno di questi passaggi.
 
 | Fase     | Cosa chiarire                                  | Output                  |
 |----------|------------------------------------------------|-------------------------|
@@ -36,11 +38,9 @@ Nel contesto di query analitiche complesse, spesso il problema è scrivere query
 | Controllo| Quale baseline rende il risultato interpretabile? | Confronto credibile     |
 | Azione   | Che cosa cambia dopo l'analisi?                  | Prossimo passo operativo|
 
-Questo modello semplice guida l'analisi: ogni intervento tecnico deve rafforzare almeno uno di questi punti.
+## Lo schema operativo
 
-## Formalizzazione rigorosa
-
-Per affrontare EXPLAIN e tuning, definisci prima l'unità di lavoro (riga, partizione, finestra, join, coorte o metrica temporale), poi il segnale principale (correttezza, performance, duplicati, grain, stabilità), la baseline (periodo precedente, gruppo comparabile, benchmark), la decisione attesa (query, modello, test, pattern riusabile) e il rischio (confondere un numero con una prova).
+Prima di toccare EXPLAIN conviene fissare alcuni punti. L'unità di lavoro va dichiarata, che si tratti di righe, partizioni, finestre, join, coorti o metriche temporali. Va scelto il segnale principale tra correttezza, performance, presenza di duplicati, grain e stabilità. Serve una baseline, di solito il periodo precedente, un gruppo comparabile o un benchmark. Va detto cosa ci si aspetta di produrre, sia esso una query, un modello, un test o un pattern riusabile. E va riconosciuto il rischio, che resta sempre lo stesso: confondere un numero con una prova.
 
 | Elemento       | Specifica richiesta                                             |
 |----------------|----------------------------------------------------------------|
@@ -50,11 +50,11 @@ Per affrontare EXPLAIN e tuning, definisci prima l'unità di lavoro (riga, parti
 | Decisione      | query, modello intermedio, test SQL o pattern riusabile         |
 | Rischio        | scambiare un numero disponibile per una prova sufficiente       |
 
-La formalizzazione è solida quando un altro analista può riprodurre la logica e ottenere la stessa decisione.
+Lo schema regge quando un altro analista può riprodurre la logica e arrivare alla stessa decisione.
 
 ## Leggere EXPLAIN: anatomia di un query plan
 
-EXPLAIN mostra cosa fa il database con la query, rivelando scansioni, join, aggregazioni e filtri. Le operazioni più comuni sono:
+EXPLAIN mostra cosa fa il database con la query: quali scansioni esegue, come unisce le tabelle, dove aggrega e dove filtra. Vale la pena conoscere le operazioni più ricorrenti e sapere quando devono far suonare un campanello.
 
 | Operazione       | Significato                         | Allarme se...                                  |
 |------------------|-----------------------------------|-----------------------------------------------|
@@ -77,78 +77,36 @@ WHERE c.country = 'IT'
 GROUP BY c.name;
 ```
 
-L'output mostra due Seq Scan, un Hash Join e un HashAggregate in memoria. Il problema è la lettura completa di `orders` (1.2M righe). Aggiungendo un indice su `orders(customer_id, order_date)`, la Seq Scan diventa Index Only Scan, riducendo il tempo del 70%.
+L'output mostra due Seq Scan, un Hash Join e un HashAggregate in memoria. Il collo di bottiglia è la lettura completa di `orders`, che conta 1.2M righe. Aggiungendo un indice su `orders(customer_id, order_date)`, la Seq Scan diventa Index Only Scan e il tempo cala del 70%.
 
-## Strategie di ottimizzazione: gerarchia di interventi
+## Strategie di ottimizzazione: una gerarchia di interventi
 
-1. Riduci il volume di dati letto filtrando presto (WHERE su colonne indicizzate o partizionate).
-2. Riduci il lavoro di JOIN con anti-join, semi-join o pre-aggregazioni.
-3. Usa indici compositi e parziali che coprano le colonne richieste.
-4. Configura la memoria per sort e hash join (work_mem, join_buffer_size).
+Gli interventi non hanno tutti lo stesso peso, e conviene affrontarli in ordine. Il primo guadagno arriva quasi sempre riducendo il volume di dati letto, cioè filtrando presto con `WHERE` su colonne indicizzate o partizionate. Poi si alleggerisce il lavoro di join, usando anti-join, semi-join o pre-aggregazioni dove la logica lo permette. A seguire vengono gli indici compositi e parziali, scelti in modo che coprano le colonne effettivamente richieste. Solo alla fine si mette mano alla memoria per sort e hash join, attraverso parametri come `work_mem` e `join_buffer_size`. Saltare l'ordine, partendo dai parametri di memoria su una query che legge tutto, di solito sposta poco.
 
 ## ClickHouse: un paradigma diverso
 
-ClickHouse è column-oriented, memorizza ogni colonna separatamente. Questo permette di leggere solo le colonne necessarie, accelerando le query analitiche su grandi dataset.
+ClickHouse è column-oriented e memorizza ogni colonna separatamente. Questo gli permette di leggere solo le colonne che servono, ed è il motivo per cui regge bene le query analitiche su grandi dataset.
 
-Ottimizzazioni specifiche:
-- **ORDER BY della tabella:** indice primario per saltare blocchi inutili.
-- **Codec di compressione:** riducono spazio e accelerano decompressione.
-- **Materialized columns:** colonne calcolate all'INSERT per espressioni costose.
-- **Projection:** mini-tabelle ordinate diversamente per query frequenti.
+Le leve di ottimizzazione qui sono altre. L'`ORDER BY` della tabella funziona da indice primario e consente di saltare i blocchi inutili. I codec di compressione riducono lo spazio occupato e accelerano la decompressione. Le materialized column spostano all'INSERT il calcolo delle espressioni costose, così non vanno rifatte a ogni query. Le projection, infine, sono mini-tabelle ordinate in modo diverso e pensate per le query più frequenti.
 
 ### Caso reale: Cloudflare
 
-Cloudflare ha ridotto da 45 a 0.8 secondi una query di aggregazione con una materialized column che calcola il paese dall'IP al momento dell'INSERT, evitando calcoli ripetuti in query.
+Cloudflare ha portato una query di aggregazione da 45 a 0.8 secondi con una sola mossa: una materialized column che calcola il paese a partire dall'IP al momento dell'INSERT, evitando di rifare quel calcolo a ogni interrogazione.
 
-## Laboratorio pratico
+## Esercizio
 
-Dataset: `orders` (5M righe), `customers` (500K righe).
+Per allenarsi serve un dataset realistico: una tabella `orders` da 5M righe e una `customers` da 500K righe vanno benissimo. Si comincia eseguendo `EXPLAIN ANALYZE` su una query con join e aggregazione e individuando il collo di bottiglia. Poi si aggiunge un indice mirato e si verifica quanto cambia il piano. Infine si riscrive la query usando un anti-join o una pre-aggregazione, confrontando i due piani per capire dove è andato il guadagno.
 
-- **Livello base:** esegui `EXPLAIN ANALYZE` su una query con join e aggregazione, individua il collo di bottiglia.
-- **Livello intermedio:** aggiungi un indice e verifica il miglioramento.
-- **Livello avanzato:** riscrivi la query usando anti-join o pre-aggregazione, confronta i piani.
-
-## Lab / esercizio
-
-### Livello base
-
-Scrivi la decisione che questa lezione dovrebbe migliorare, la metrica principale e il rischio da controllare.
-
-### Livello intermedio
-
-Costruisci una tabella con baseline, segnale, interpretazione prudente e azione consigliata.
-
-### Livello research-grade
-
-Trasforma l'esercizio in un memo decisionale con assunzioni, limiti, criterio di stop e controllo successivo.
-
-### Dataset e materiali consigliati
-
-Usa un export reale, un dataset sintetico o una dashboard gia esistente. Il materiale deve contenere una domanda, una metrica e una scelta da prendere.
+Vale la pena chiudere l'esercizio con un passaggio decisionale, non solo tecnico. Scrivi quale decisione concreta questa analisi dovrebbe migliorare, qual è la metrica principale e quale rischio va tenuto sotto controllo. Poi costruisci una piccola tabella che metta in fila baseline, segnale osservato, interpretazione prudente e azione consigliata. Chi vuole spingersi oltre può trasformare il tutto in un memo decisionale, con assunzioni esplicite, limiti, criterio di stop e controllo successivo. Come materiale vanno bene un export reale, un dataset sintetico o una dashboard già esistente, purché contengano una domanda, una metrica e una scelta da prendere.
 
 ## Errore tipico da evitare
 
-Usare EXPLAIN e tuning come etichetta senza processo: mostrare grafici senza decisione, metriche senza baseline o conclusioni senza assumere rischi. Se non sai quale scelta sbaglieresti se i dati fossero instabili, manca il collegamento tra analisi e azione.
+L'errore ricorrente è usare EXPLAIN e tuning come etichetta invece che come processo: mostrare grafici senza una decisione collegata, metriche senza baseline, conclusioni senza riconoscere i rischi. C'è una domanda che smaschera subito il problema: se i dati fossero instabili, quale scelta sbaglieresti? Se non sai rispondere, il legame tra analisi e azione non c'è ancora, e nessuna ottimizzazione lo crea al posto tuo.
 
-## Quiz
+## Domande di controllo
 
-1. Quando è accettabile una Seq Scan? Quando è un problema?
-2. Qual è la gerarchia di ottimizzazione SQL?
-3. Perché ClickHouse è più veloce per query analitiche su poche colonne?
-4. Cosa sono le materialized columns?
-5. Come si traduce un piano EXPLAIN in una decisione concreta?
-
-## Quiz o checkpoint
-
-1. Quale decisione concreta dovrebbe migliorare questa lezione?
-2. Quale baseline rende interpretabile il risultato?
-3. Quale assunzione cambierebbe la conclusione se fosse falsa?
-4. Quale controllo minimo serve prima di presentare la raccomandazione?
+Per fissare le idee, prova a rispondere a queste domande. Quando una Seq Scan è accettabile e quando invece è un problema? Qual è la gerarchia con cui affrontare l'ottimizzazione di una query SQL? Perché ClickHouse è più veloce sulle query analitiche che toccano poche colonne? Cosa sono le materialized column e quale costo spostano? E, la domanda che lega tutto, come si traduce un piano EXPLAIN in una decisione concreta da presentare a chi non legge query?
 
 ## Riepilogo operativo
 
-EXPLAIN, ottimizzazione e tuning diventano strumenti decisionali solo se producono scelte chiare e azioni concrete. La disciplina consiste nel collegare dati, modelli e decisioni in un processo ripetibile e trasparente.
-
-## Esempio o caso studio
-
-Applica il modello a una decisione reale: quale scelta deve cambiare, quale evidenza hai, quali assunzioni stai facendo e quale rischio rimane aperto. Se il caso non rende visibile questo passaggio, non e ancora pronto per essere automatizzato.
+EXPLAIN, ottimizzazione e tuning diventano strumenti decisionali solo quando producono scelte chiare e azioni concrete, non quando si fermano al grafico più veloce. La disciplina sta nel collegare dati, modelli e decisioni in un processo che un'altra persona può ripetere e contestare. Applica questo metodo a una decisione reale: chiediti quale scelta deve cambiare, quale evidenza hai in mano, quali assunzioni stai facendo e quale rischio resta aperto. Se il caso non rende visibile questo passaggio, non è ancora pronto per essere automatizzato.
