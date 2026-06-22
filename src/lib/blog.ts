@@ -10,14 +10,6 @@ export interface BlogPost {
 export const blogPosts: BlogPost[] = [
   {
     id: '1',
-    title: 'Trigger Analytics: Quando i dati ti avvisano',
-    description: 'Come impostare un sistema che notifica automaticamente anomalie o opportunità basate sui cambiamenti delle metriche chiave.',
-    category: 'Analisi Tecnica',
-    date: '12 Febbraio 2026',
-    slug: 'trigger-analytics'
-  },
-  {
-    id: '2',
     title: 'Analisi dei Cluster per la Segmentazione Clienti',
     description: 'Smetti di trattare tutti i clienti allo stesso modo. Scopri come identificare i segmenti più redditizi con il machine learning.',
     category: 'Data Science',
@@ -25,7 +17,7 @@ export const blogPosts: BlogPost[] = [
     slug: 'cluster-analysis'
   },
   {
-    id: '3',
+    id: '2',
     title: 'Le Trappole Analitiche più Comuni',
     description: 'Correlazione non è causalità, bias di sopravvivenza e altri errori che ogni marketing manager commette almeno una volta.',
     category: 'Best Practices',
@@ -33,7 +25,7 @@ export const blogPosts: BlogPost[] = [
     slug: 'analytic-traps'
   },
   {
-    id: '4',
+    id: '3',
     title: 'Unit Economics: Dove stai perdendo budget?',
     description: 'Come calcolare LTV e CAC correttamente per capire la vera profittabilità delle tue campagne di acquisizione.',
     category: 'Strategia',
@@ -41,7 +33,7 @@ export const blogPosts: BlogPost[] = [
     slug: 'unit-economics'
   },
   {
-    id: '5',
+    id: '4',
     title: 'HADI Cycles: Il segreto della crescita rapida',
     description: 'Hypothesis, Action, Data, Insight. Come applicare il metodo scientifico al marketing per iterare velocemente.',
     category: 'Framework',
@@ -49,7 +41,7 @@ export const blogPosts: BlogPost[] = [
     slug: 'hadi-cycles'
   },
   {
-    id: '6',
+    id: '5',
     title: 'NPS è una "Vanity Metric"?',
     description: 'Analisi critica del Net Promoter Score. Quando è utile, quando è fuorviante e quali alternative considerare.',
     category: 'Metriche',
@@ -59,7 +51,6 @@ export const blogPosts: BlogPost[] = [
 ];
 
 export async function getBlogPosts(): Promise<BlogPost[]> {
-  // Simulating async fetch if we were calling an API
   return new Promise((resolve) => {
     setTimeout(() => resolve(blogPosts), 100);
   });
