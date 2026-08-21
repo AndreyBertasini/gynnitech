@@ -1,5 +1,10 @@
 import { z } from "astro/zod";
 
+export const faqSchemaEntry = z.object({
+    question: z.string(),
+    answer: z.string(),
+});
+
 export const blogSchema = z.object({
     title: z.string(),
     description: z.string(),
@@ -8,6 +13,7 @@ export const blogSchema = z.object({
     category: z.string(),
     author: z.string().default('Andrii Dyshkantiuk'),
     image: z.string().optional(),
+    faqSchema: z.array(faqSchemaEntry).optional(),
 });
 
 export const corsoSchema = z.object({
