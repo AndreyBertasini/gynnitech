@@ -24,11 +24,11 @@ export const collections = {
     }),
 
     blog: defineCollection({
-        loader: glob({ pattern: "**/*.{md,mdx}", base: "./src/content/blog", retainBody: false }),
+        loader: glob({ pattern: "**/*.{md,mdx}", base: "./src/content/blog", retainBody: true }),
         schema: blogSchema,
     }),
     blogEn: defineCollection({
-        loader: glob({ pattern: "**/*.{md,mdx}", base: "./src/content/blog-en", retainBody: false }),
+        loader: glob({ pattern: "**/*.{md,mdx}", base: "./src/content/blog-en", retainBody: true }),
         schema: blogSchema,
     }),
     corso: defineCollection({
