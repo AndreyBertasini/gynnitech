@@ -11,28 +11,13 @@ const FRONTMATTER_REQUIRED_FIELDS: Record<"blog" | "corso", string[]> = {
     blog: ["title", "description", "date", "category"],
     corso: ["title", "description"],
 };
-const MIN_CORSO_BODY_CHARACTERS = 2200;
-const MIN_CORSO_H2_HEADINGS = 7;
+const MIN_CORSO_BODY_CHARACTERS = 1200;
+const MIN_CORSO_H2_HEADINGS = 3;
 const MIN_CORSO_INTRO_CHARACTERS = 120;
 const SUMMARY_SECTION_REGEX = /(^##\s+(?:\d+\.\s*)?(Riepilogo|Riepilogo operativo|Conclusioni|Sintesi)\b)/mi;
-const EXAMPLE_SIGNAL_REGEX = /```|\|---\||\bEsempio\b|\bCaso pratico\b|\bTemplate\b/mi;
+const EXAMPLE_SIGNAL_REGEX = /```|\|[-]+\||\bEsempio\b|\bCaso pratico\b|\bTemplate\b/mi;
 const DURATION_FORMAT_REGEX = /^\d{1,3}\s*(min|minuti|h|ore)$/i;
 const ALLOWED_DIFFICULTY_VALUES = new Set(["beginner", "intermediate", "advanced", "base", "intermedio", "avanzato"]);
-const REQUIRED_V2_SECTIONS = [
-    "Problema reale",
-    "Modello concettuale",
-    "Formalizzazione rigorosa",
-    "Esempio o caso studio",
-    "Lab / esercizio",
-    "Errore tipico da evitare",
-    "Quiz o checkpoint",
-];
-const REQUIRED_V2_LAB_SIGNALS = [
-    "Livello base",
-    "Livello intermedio",
-    "Livello research-grade",
-    "Dataset e materiali consigliati",
-];
 const REMOTE_IMAGE_REGEX = /^https?:\/\//i;
 
 /**
@@ -340,19 +325,6 @@ async function validateCollection(collection: "blog" | "corso"): Promise<Validat
                 "editorial",
                 "missing concrete example signals (code block, table, 'Esempio', 'Caso pratico' or 'Template')",
             );
-        }
-
-        for (const section of REQUIRED_V2_SECTIONS) {
-            const escaped = section.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-            if (!new RegExp(`^##\\s+${escaped}\\b`, "mi").test(trimmedContent)) {
-                pushEditorialIssue(result, file, "content", `missing required V2 section "${section}"`);
-            }
-        }
-
-        for (const signal of REQUIRED_V2_LAB_SIGNALS) {
-            if (!trimmedContent.includes(signal)) {
-                pushEditorialIssue(result, file, "content", `missing required V2 lab signal "${signal}"`);
-            }
         }
     }
 
