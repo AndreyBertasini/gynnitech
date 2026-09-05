@@ -6,7 +6,7 @@ description: >-
   formalizzazione rigorosa, caso applicato, lab a 3 livelli e checkpoint finale.
 module: "Modulo 14: Advanced SQL for Analytical Systems"
 order: 12
-category: Tecnico
+category: Decisione
 headerImage: /course-headers/advanced-sql-anomalie-pareto-e-segmentazione-ginnytech-ad.webp
 headerImageAlt: >-
   Anomalie, Pareto e Segmentazione con SQL - immagine ufficiale della lezione su
@@ -16,94 +16,289 @@ duration: 18 min
 prerequisites:
   - advanced-sql/pivot-rollup-e-kpi-table
 learningObjectives:
-  - Leggere un query plan per diagnosticare query lente
-  - Applicare tecniche di ottimizzazione e performance tuning
-  - Usare analisi di Pareto e segmentazione per prioritizzare gli interventi
+  - Comprendere il problema analitico e il contesto decisionale
+  - Applicare esempi, metriche e controlli a casi reali
+binario: "ml-tabellare"
+autore: "Hermes"
+controllatoDa: "Argo"
+autorizzatoDa: "Giano"
+draft: false
 ---
-# EXPLAIN, ottimizzazione e tuning delle performance
+# Anomalie, Pareto e segmentazione: trovare i pochi che contano con SQL
+Binario di questa lezione: **ml-tabellare**.
 
-Lunedì mattina, il dashboard impiega dodici minuti a caricare, il PM chiede un filtro in più e il costo del warehouse continua a salire senza che la query diventi più stabile. La tentazione è riscrivere tutto da capo. Prima però conviene capire cosa sta facendo davvero il motore di database, e per quello si parte dal query plan, non dall'intuizione.
+## Cosa significa
+La segmentazione guidata da Pareto separa i pochi clienti e prodotti che spiegano la quota dominante del margine dal resto della base.
 
-## Il problema che si vuole risolvere
+## Come si calcola
+1. Calcola la distribuzione della spesa per cliente per decili e verifica che l ultimo decile pesi in modo anomalo sul totale.
+2. Costruisci una baseline mobile per prodotto e segnala come anomalie solo gli scarti ampi e persistenti rispetto alla storia recente.
+3. Ordina i clienti per margine decrescente, accumula le quote e leggi quanti servono per coprire l ottanta per cento del totale.
+4. Segmenta su dimensioni comportamentali con soglie mediane versionate e assegna a ogni segmento una azione con criterio di arresto.
+5. Misura ogni azione contro un gruppo di controllo tenuto fuori dall intervento.
 
-Con le query analitiche complesse la difficoltà è doppia: scriverle corrette e tenerle veloci, anche quando grain, finestre, coorti e casi limite complicano la logica. Il tuning non è un esercizio accademico per far girare i numeri più in fretta. È il modo di rendere affidabili le decisioni che da quei numeri dipendono, con dati su cui ci si può appoggiare e azioni concrete da prendere.
-
-## Come ragionare prima di intervenire
-
-Conviene tenere a mente uno schema semplice che lega la domanda al dato, il dato al controllo e il controllo all'azione. Ogni intervento tecnico, dall'aggiunta di un indice alla riscrittura di un join, ha senso solo se rafforza almeno uno di questi passaggi.
-
-| Fase     | Cosa chiarire                                  | Output                  |
-|----------|------------------------------------------------|-------------------------|
-| Domanda  | Quale scelta reale deve migliorare?             | Decisione da prendere   |
-| Misura   | Quale segnale osservabile rappresenta il problema? | Metrica o dato sorgente |
-| Controllo| Quale baseline rende il risultato interpretabile? | Confronto credibile     |
-| Azione   | Che cosa cambia dopo l'analisi?                  | Prossimo passo operativo|
-
-## Lo schema operativo
-
-Prima di toccare EXPLAIN conviene fissare alcuni punti. L'unità di lavoro va dichiarata, che si tratti di righe, partizioni, finestre, join, coorti o metriche temporali. Va scelto il segnale principale tra correttezza, performance, presenza di duplicati, grain e stabilità. Serve una baseline, di solito il periodo precedente, un gruppo comparabile o un benchmark. Va detto cosa ci si aspetta di produrre, sia esso una query, un modello, un test o un pattern riusabile. E va riconosciuto il rischio, che resta sempre lo stesso: confondere un numero con una prova.
-
-| Elemento       | Specifica richiesta                                             |
-|----------------|----------------------------------------------------------------|
-| Unità di analisi| riga, partizione, finestra, join, coorte o metrica temporale    |
-| Segnale        | correttezza, performance, duplicati, grain, stabilità           |
-| Baseline       | periodo precedente, gruppo comparabile, benchmark o controfattuale |
-| Decisione      | query, modello intermedio, test SQL o pattern riusabile         |
-| Rischio        | scambiare un numero disponibile per una prova sufficiente       |
-
-Lo schema regge quando un altro analista può riprodurre la logica e arrivare alla stessa decisione.
-
-## Leggere EXPLAIN: anatomia di un query plan
-
-EXPLAIN mostra cosa fa il database con la query: quali scansioni esegue, come unisce le tabelle, dove aggrega e dove filtra. Vale la pena conoscere le operazioni più ricorrenti e sapere quando devono far suonare un campanello.
-
-| Operazione       | Significato                         | Allarme se...                                  |
-|------------------|-----------------------------------|-----------------------------------------------|
-| Seq Scan / Full Scan | Legge tutta la tabella          | Solo su tabelle piccole o quando serve tutto  |
-| Index Scan       | Usa un indice per trovare righe   | Buono se selettivo                            |
-| Index Only Scan  | L'indice copre tutte le colonne   | Ottimo, nessun accesso alla tabella           |
-| Hash Join        | Costruisce una hash table in memoria | OK se la tabella inner è piccola; allarme se grande |
-| Nested Loop      | Per ogni riga di A cerca in B     | Allarme se B è grande e senza indice          |
-| Sort             | Ordina dati (GROUP BY, ORDER BY)  | Allarme se sort su disco (memoria insufficiente) |
-
-### Caso reale in PostgreSQL
+## Quando pochi clienti spiegano quasi tutto il fatturato
+Quasi ogni base clienti obbedisce a una concentrazione spietata dove pochi elementi pesano piu di tutti gli altri messi insieme. Il primo passo in SQL e guardare la distribuzione prima di qualsiasi aggregato furbo. Una query per decili di spesa dice in dieci righe quello che un indicatore medio non dira mai. Se i decili risultano quasi piatti non c e concentrazione da sfruttare e forzare una segmentazione produce gruppi arbitrari.
 
 ```sql
-EXPLAIN ANALYZE
-SELECT c.name, COUNT(o.id)
-FROM customers c
-JOIN orders o ON c.id = o.customer_id
-WHERE c.country = 'IT'
-  AND o.order_date >= '2024-01-01'
-GROUP BY c.name;
+-- Distribuzione della spesa per cliente: dieci righe che valgono più di un KPI medio
+WITH spesa_cliente AS (
+    SELECT
+        customer_id,
+        SUM(amount) AS spesa_totale -- spesa cumulata del cliente nel periodo
+    FROM orders
+    WHERE order_date >= '2024-01-01' -- finestra di analisi fissa, mai dimenticarla
+      AND status = 'completed'       -- solo ordini effettivi, niente rimborsati
+    GROUP BY customer_id
+)
+SELECT
+    NTILE(10) OVER (ORDER BY spesa_totale) AS decile, -- 1 = chi spende meno, 10 = top spender
+    COUNT(*) AS n_clienti,
+    ROUND(AVG(spesa_totale), 2) AS spesa_media,
+    ROUND(SUM(spesa_totale), 2) AS spesa_complessiva
+FROM spesa_cliente
+GROUP BY decile
+ORDER BY decile;
 ```
 
-L'output mostra due Seq Scan, un Hash Join e un HashAggregate in memoria. Il collo di bottiglia è la lettura completa di `orders`, che conta 1.2M righe. Aggiungendo un indice su `orders(customer_id, order_date)`, la Seq Scan diventa Index Only Scan e il tempo cala del 70%.
+Su dati reali il decile piu alto pesa tipicamente tra il quaranta e il settanta per cento del totale. Il controllo onesto sulla forma della distribuzione viene sempre prima della tecnica.
 
-## Strategie di ottimizzazione: una gerarchia di interventi
+## Trovare le anomalie senza farsi ingannare dal rumore
+Un ordine molto grande su uno storico di ordini piccoli e una anomalia mentre un picco di vendite a dicembre e stagionalita. La distinzione passa per una baseline esplicita con confronto tra osservazione e atteso per stesso cliente o prodotto o periodo. Il metodo piu robusto in SQL puro confronta il fatturato del mese con la media degli ultimi mesi escludendo il mese stesso dal calcolo. In questo modo l anomalia non contamina il suo stesso termine di paragone.
 
-Gli interventi non hanno tutti lo stesso peso, e conviene affrontarli in ordine. Il primo guadagno arriva quasi sempre riducendo il volume di dati letto, cioè filtrando presto con `WHERE` su colonne indicizzate o partizionate. Poi si alleggerisce il lavoro di join, usando anti-join, semi-join o pre-aggregazioni dove la logica lo permette. A seguire vengono gli indici compositi e parziali, scelti in modo che coprano le colonne effettivamente richieste. Solo alla fine si mette mano alla memoria per sort e hash join, attraverso parametri come `work_mem` e `join_buffer_size`. Saltare l'ordine, partendo dai parametri di memoria su una query che legge tutto, di solito sposta poco.
+```sql
+-- Z-score mensile per prodotto: scarto dalla media mobile dei 6 mesi precedenti
+WITH mensile AS (
+    SELECT
+        product_id,
+        DATE_TRUNC('month', order_date) AS mese, -- granularità mensile
+        SUM(amount) AS ricavo -- segnale osservato
+    FROM orders
+    WHERE status = 'completed'
+    GROUP BY product_id, DATE_TRUNC('month', order_date)
+),
+con_baseline AS (
+    SELECT
+        product_id,
+        mese,
+        ricavo,
+        -- media e deviazione sui 6 mesi precedenti, mese corrente escluso
+        AVG(ricavo) OVER (
+            PARTITION BY product_id ORDER BY mese
+            ROWS BETWEEN 7 PRECEDING AND 1 PRECEDING
+        ) AS media_6m,
+        STDDEV(ricavo) OVER (
+            PARTITION BY product_id ORDER BY mese
+            ROWS BETWEEN 7 PRECEDING AND 1 PRECEDING
+        ) AS sigma_6m
+    FROM mensile
+)
+SELECT
+    product_id,
+    mese,
+    ricavo,
+    -- z-score: quanti sigma sopra o sotto la baseline; |z| > 3 merita indagine
+    (ricavo - media_6m) / NULLIF(sigma_6m, 0) AS z_score
+FROM con_baseline
+WHERE media_6m IS NOT NULL -- servono almeno mesi di storia prima di giudicare
+ORDER BY ABS((ricavo - media_6m) / NULLIF(sigma_6m, 0)) DESC NULLS LAST;
+```
 
-## ClickHouse: un paradigma diverso
+Con pochi dati storici la deviazione standard e instabile e un singolo mese folle puo nascondere se stesso. Per serie corte o rumorose conviene la mediana con scarto mediano molto meno sensibile agli estremi e calcolabile con funzione di percentile continuo.
 
-ClickHouse è column-oriented e memorizza ogni colonna separatamente. Questo gli permette di leggere solo le colonne che servono, ed è il motivo per cui regge bene le query analitiche su grandi dataset.
+## La curva di Pareto in SQL con cumulata e soglia dell ottanta per cento
+Dire che vale la regola ottanta venti senza misurarla e folklore. La verifica richiede la curva cumulata con clienti ordinati per contributo decrescente e accumulo delle quote fino alla soglia. Due window function bastano e il risultato e un numero difendibile in riunione. Il dettaglio che cambia tutto e usare il margine invece del fatturato perche i top spender per fatturato includono spesso clienti con molti resi e molta assistenza.
 
-Le leve di ottimizzazione qui sono altre. L'`ORDER BY` della tabella funziona da indice primario e consente di saltare i blocchi inutili. I codec di compressione riducono lo spazio occupato e accelerano la decompressione. Le materialized column spostano all'INSERT il calcolo delle espressioni costose, così non vanno rifatte a ogni query. Le projection, infine, sono mini-tabelle ordinate in modo diverso e pensate per le query più frequenti.
+```sql
+-- Curva di Pareto: quanti clienti servono per l'80% del margine?
+WITH margine_cliente AS (
+    SELECT
+        customer_id,
+        SUM(amount - cost) AS margine -- il margine, non il fatturato: i resi contano
+    FROM orders
+    WHERE status = 'completed'
+      AND order_date >= '2024-01-01'
+    GROUP BY customer_id
+),
+ordinati AS (
+    SELECT
+        customer_id,
+        margine,
+        -- quota di ciascuno sul totale generale
+        margine / SUM(margine) OVER () AS quota,
+        ROW_NUMBER() OVER (ORDER BY margine DESC) AS posizione
+    FROM margine_cliente
+),
+cumulata AS (
+    SELECT
+        customer_id,
+        margine,
+        quota,
+        posizione,
+        -- cumulata: somma delle quote dal primo fino a questo cliente
+        SUM(quota) OVER (ORDER BY margine DESC) AS quota_cumulata
+    FROM ordinati
+)
+SELECT
+    -- percentuale di clienti che copre l'80% del margine: il vero numero di Pareto
+    MIN(posizione) * 100.0 / (SELECT COUNT(*) FROM margine_cliente) AS pct_clienti_per_80
+FROM cumulata
+WHERE quota_cumulata >= 0.8;
+```
 
-### Caso reale: Cloudflare
+Con molti clienti piccoli e identici l ordinamento tra pari balla a ogni esecuzione. Per report stabili conviene raggruppare per fasce di margine oppure fissare un ordinamento secondario deterministico su identificativo cliente.
 
-Cloudflare ha portato una query di aggregazione da 45 a 0.8 secondi con una sola mossa: una materialized column che calcola il paese a partire dall'IP al momento dell'INSERT, evitando di rifare quel calcolo a ogni interrogazione.
+## Segmentare i clienti in modo che regga alla prova dei dati
+Una segmentazione utile assegna ogni cliente a un solo segmento con azioni diverse per gruppo e con regole ripetibili da un collega sugli stessi dati. Le segmentazioni a regole con soglie esplicite su poche dimensioni sono meno eleganti dei cluster automatici e molto piu governabili. La regola d oro e segmentare su dimensioni indipendenti dalla metrica che si vuole muovere per evitare tautologie. Dimensioni buone sono frequenza d ordine e ampiezza del catalogo con leve operative distinte per quadrante.
 
-## Esercizio
+```sql
+-- Segmentazione comportamentale: frequenza x ampiezza catalogo, 4 quadranti azionabili
+WITH comportamento AS (
+    SELECT
+        customer_id,
+        COUNT(DISTINCT order_id) AS n_ordini, -- frequenza: quante volte torna
+        COUNT(DISTINCT product_id) AS ampiezza, -- ampiezza: quanto esplora il catalogo
+        SUM(amount) AS spesa
+    FROM orders
+    WHERE status = 'completed'
+      AND order_date >= '2024-01-01'
+    GROUP BY customer_id
+),
+soglie AS (
+    -- mediane come soglie: robuste agli estremi, ricalcolabili ogni periodo
+    SELECT
+        PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY n_ordini) AS med_ordini,
+        PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY ampiezza) AS med_ampiezza
+    FROM comportamento
+)
+SELECT
+    c.customer_id,
+    CASE
+        WHEN c.n_ordini >= s.med_ordini AND c.ampiezza >= s.med_ampiezza
+            THEN 'esploratori_fedeli' -- comprano spesso e variano: candidati a upsell
+        WHEN c.n_ordini >= s.med_ordini AND c.ampiezza < s.med_ampiezza
+            THEN 'abitudinari' -- stesso prodotto ogni volta: candidati ad abbonamento
+        WHEN c.n_ordini < s.med_ordini AND c.ampiezza >= s.med_ampiezza
+            THEN 'occasionali_curiosi' -- raro ma vario: da riattivare con promo mirate
+        ELSE 'marginali' -- raro e monotono: non investire oltre il marketing di base
+    END AS segmento,
+    c.spesa
+FROM comportamento c CROSS JOIN soglie s;
+```
 
-Per allenarsi serve un dataset realistico: una tabella `orders` da 5M righe e una `customers` da 500K righe vanno benissimo. Si comincia eseguendo `EXPLAIN ANALYZE` su una query con join e aggregazione e individuando il collo di bottiglia. Poi si aggiunge un indice mirato e si verifica quanto cambia il piano. Infine si riscrive la query usando un anti-join o una pre-aggregazione, confrontando i due piani per capire dove è andato il guadagno.
+Le mediane come soglie rendono i quadranti bilanciati ma vanno ricalcolate e versionate a ogni periodo. Salvare soglie e regole in una tabella di configurazione con data di validita trasforma la segmentazione da script usa e getta a sistema.
 
-Vale la pena chiudere l'esercizio con un passaggio decisionale, non solo tecnico. Scrivi quale decisione concreta questa analisi dovrebbe migliorare, qual è la metrica principale e quale rischio va tenuto sotto controllo. Poi costruisci una piccola tabella che metta in fila baseline, segnale osservato, interpretazione prudente e azione consigliata. Chi vuole spingersi oltre può trasformare il tutto in un memo decisionale, con assunzioni esplicite, limiti, criterio di stop e controllo successivo. Come materiale vanno bene un export reale, un dataset sintetico o una dashboard già esistente, purché contengano una domanda, una metrica e una scelta da prendere.
+## Il modello RFM con le window function
+Il modello RFM resta la segmentazione piu collaudata del commercio con recency e frequency e monetary. Tre dimensioni e cinque punteggi ciascuna si compattano in gruppi operativi come campioni e fedeli e a rischio e persi e nuovi. Ogni dimensione punta a una azione con riattivazione per recency bassa e premi per frequency alta e gestione dedicata per monetary alto. L implementazione pulita usa quintili separati per dimensione con accortezza di invertire la recency.
 
-## L'errore da evitare
+```sql
+-- Punteggi RFM 1-5 per cliente: NTILE separato su ciascuna dimensione
+WITH rfm_base AS (
+    SELECT
+        customer_id,
+        CURRENT_DATE - MAX(order_date) AS recency_gg, -- giorni dall'ultimo ordine
+        COUNT(DISTINCT order_id) AS frequency,        -- quante volte ha comprato
+        SUM(amount) AS monetary                        -- quanto ha speso in totale
+    FROM orders
+    WHERE status = 'completed'
+      AND order_date >= CURRENT_DATE - INTERVAL '12 months' -- finestra mobile di 12 mesi
+    GROUP BY customer_id
+),
+rfm_score AS (
+    SELECT
+        customer_id,
+        recency_gg, frequency, monetary,
+        -- recency invertita: ordine DESC sui giorni, chi ha comprato ieri prende 5
+        NTILE(5) OVER (ORDER BY recency_gg DESC) AS r,
+        NTILE(5) OVER (ORDER BY frequency) AS f,
+        NTILE(5) OVER (ORDER BY monetary) AS m
+    FROM rfm_base
+)
+SELECT
+    customer_id, recency_gg, frequency, monetary,
+    r, f, m,
+    CASE
+        WHEN r >= 4 AND f >= 4 AND m >= 4 THEN 'campioni' -- tutto alto: coccolare e trattenere
+        WHEN r <= 2 AND f >= 4 THEN 'a_rischio' -- compravano spesso, spariti: riattivare subito
+        WHEN r <= 2 AND f <= 2 THEN 'persi' -- andati da tempo e mai fedeli: ultimo tentativo
+        WHEN r >= 4 AND f <= 2 THEN 'nuovi' -- arrivati da poco: onboarding e secondo acquisto
+        ELSE 'regolari' -- il resto: comunicazione standard, niente sprechi
+    END AS segmento_rfm
+FROM rfm_score;
+```
 
-L'errore ricorrente è usare EXPLAIN e tuning come etichetta invece che come processo: mostrare grafici senza una decisione collegata, metriche senza baseline, conclusioni senza riconoscere i rischi. C'è una domanda che smaschera subito il problema: se i dati fossero instabili, quale scelta sbaglieresti? Se non sai rispondere, il legame tra analisi e azione non c'è ancora, e nessuna ottimizzazione lo crea al posto tuo.
+Con molti pareggi sulla frequency i quintili assegnano gruppi in modo arbitrario tra pari. Con distribuzioni molto discrete sono piu oneste soglie fisse documentate. Il modello fotografa il passato e va sempre incrociato con i dati di canale prima di agire con sconti.
 
-## Riepilogo operativo
+## Dalla segmentazione alla decisione operativa
+Un segmento senza azione assegnata resta un esercizio di tassonomia. Il formato che funziona lega ogni gruppo a leva e responsabile e metrica di successo misurabile con la stessa query che ha creato i segmenti. Il criterio di arresto va dichiarato in anticipo con soglia di riattivazione e numero massimo di campagne. La misurazione richiede un gruppo di controllo tenuto fuori dall azione altrimenti ogni miglioramento viene attribuito alla campagna anche se sarebbe avvenuto comunque.
 
-EXPLAIN, ottimizzazione e tuning diventano strumenti decisionali solo quando producono scelte chiare e azioni concrete, non quando si fermano al grafico più veloce. La disciplina sta nel collegare dati, modelli e decisioni in un processo che un'altra persona può ripetere e contestare. Applica questo metodo a una decisione reale: chiediti quale scelta deve cambiare, quale evidenza hai in mano, quali assunzioni stai facendo e quale rischio resta aperto. Se il caso non rende visibile questo passaggio, non è ancora pronto per essere automatizzato.
+```sql
+-- Lettura dell'effetto campagna: trattati contro controllo sullo stesso segmento
+SELECT
+    gruppo, -- 'trattati' oppure 'controllo', assegnato a caso prima dell'invio
+    COUNT(*) AS n_clienti,
+    -- tasso di riacquisto nel mese successivo alla campagna
+    COUNT(*) FILTER (WHERE ha_riacquistato) * 1.0 / COUNT(*) AS tasso_riacquisto
+FROM campagna_riattivazione
+WHERE segmento = 'a_rischio'
+GROUP BY gruppo;
+```
+
+Se il controllo converte quasi quanto i trattati il buono sta premiando chi avrebbe ricomprato comunque. La differenza tra i due tassi moltiplicata per il margine medio e il vero rendimento dell iniziativa.
+
+## I casi in cui Pareto e segmenti raccontano bugie
+La concentrazione misurata su un anno puo dissolversi su tre anni per rotazione dei top clienti e scadenze di contratti e ordini straordinari isolati. Prima di investire conviene verificare che sia piu o meno lo stesso venti per cento di sei mesi fa con misura di sovrapposizione tra liste top. Segmentare descrive e non spiega perche la direzione causale resta indimostrata senza test. Sotto i cento o duecento individui per gruppo i tassi oscillano per puro caso e vanno letti con intervalli di confidenza oppure accorpando i segmenti piccoli. Se il gestionale archivia solo ordini sopra soglia la coda bassa e mutilata e la concentrazione appare piu estrema del reale.
+
+## Mettere il controllo in produzione
+Anomalie e segmenti valgono di piu quando girano ogni mattina invece di vivere in un notebook eseguito a mano una volta al trimestre. L architettura minima e una vista o tabella materializzata che ricalcola punteggi e segmenti piu una query di sorveglianza che scrive le eccezioni in una tabella di alert. La soglia di allerta deve richiedere persistenza su due periodi consecutivi e pesare per impatto economico con soglia di materialita in euro. Ogni riga di alert riceve un esito tra vero positivo e falso allarme e causa nota e la distribuzione degli esiti guida la taratura trimestrale.
+
+```sql
+-- Sorveglianza giornaliera: anomalie persistenti e materialmente rilevanti
+WITH giornaliero AS (
+    SELECT
+        product_id,
+        CURRENT_DATE - 1 AS giorno, -- ieri: ultimo giorno completo disponibile
+        SUM(amount) AS ricavo
+    FROM orders
+    WHERE order_date = CURRENT_DATE - 1
+      AND status = 'completed'
+    GROUP BY product_id
+),
+baseline AS (
+    SELECT
+        product_id,
+        AVG(ricavo_g) AS media_30g, -- media mobile 30 giorni come atteso
+        STDDEV(ricavo_g) AS sigma_30g
+    FROM (
+        SELECT product_id, DATE_TRUNC('day', order_date) AS d, SUM(amount) AS ricavo_g
+        FROM orders
+        WHERE order_date BETWEEN CURRENT_DATE - 31 AND CURRENT_DATE - 1
+          AND status = 'completed'
+        GROUP BY product_id, DATE_TRUNC('day', order_date)
+    ) s
+    GROUP BY product_id
+)
+-- scrive solo i casi che meritano occhi umani: scarto grande E soldi veri
+INSERT INTO alert_anomalie (giorno, product_id, ricavo, z_score, scarto_euro)
+SELECT
+    g.giorno,
+    g.product_id,
+    g.ricavo,
+    (g.ricavo - b.media_30g) / NULLIF(b.sigma_30g, 0) AS z_score,
+    g.ricavo - b.media_30g AS scarto_euro
+FROM giornaliero g
+JOIN baseline b USING (product_id)
+WHERE ABS((g.ricavo - b.media_30g) / NULLIF(b.sigma_30g, 0)) > 3 -- scarto statisticamente raro
+  AND ABS(g.ricavo - b.media_30g) > 500; -- ...e superiore a 500 euro: materialità
+```
+
+Verdetto: per le anomalie usa lo scarto dalla media mobile con mese corrente escluso e passa alla mediana con scarto mediano su serie corte, mentre per Pareto ordina sempre per margine netto e non per fatturato.
+
+## Esempio verificato
+Vilfredo Pareto osservo nel 1896 che circa l ottanta per cento delle terre italiane apparteneva a circa il venti per cento della popolazione. La stessa asimmetria ricomparve nei decenni successivi in redditi e ricavi per cliente e resi per prodotto. La lezione operativa e identica a quella della query per decili con pochi elementi che spiegano la quota dominante del totale. Chi misura la cumulata sul margine netto trova i veri pochi che contano invece di inseguire medie che nascondono la distribuzione.
+
+## Verifica
+1. Perche la cumulata di Pareto va calcolata sul margine netto e non sul fatturato lordo?
+2. Quando lo scarto dalla media mobile segnala una anomalia e quando invece e solo stagionalita?
+3. Quale denominatore rende confrontabili i decili di spesa tra periodi diversi?
+4. Perche la segmentazione deve usare dimensioni indipendenti dalla metrica che vuoi muovere?

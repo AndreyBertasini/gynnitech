@@ -16,159 +16,189 @@ duration: 22 min
 prerequisites:
   - advanced-sql/esercizi-guidati-window-functions
 learningObjectives:
-  - Costruire date spine e metriche temporali per esperimenti in SQL
-  - Preservare randomizzazione e granularità nelle query di A/B test
-  - Calcolare metriche di guardrail senza distorcere il confronto
+  - Comprendere il problema analitico e il contesto decisionale
+  - Applicare esempi, metriche e controlli a casi reali
+binario: "ml-tabellare"
+autore: "Hermes"
+controllatoDa: "Argo"
+autorizzatoDa: "Giano"
+draft: false
 ---
-# Esperimenti e A/B analysis in SQL
+# Date spine e metriche temporali in SQL
+Binario di questa lezione: **ml-tabellare**.
 
-Un esperimento può sembrare vincente dopo pochi giorni e poi cambiare segno quando entrano nuovi utenti o quando emergono segnali secondari, come un aumento delle richieste di supporto. Guardare la conversione media non basta: la query deve preservare la randomizzazione e la granularità, e tenere conto delle metriche di guardrail. Qui affrontiamo il momento in cui un test smette di essere un numero e diventa una decisione di prodotto.
+## Cosa significa
+La date spine impone una riga per ogni giorno del periodo cosi che zeri reali e assenze restano distinguibili in ogni metrica temporale.
 
-## Il problema da risolvere
+## Come si calcola
+1. Genera una colonna di date consecutive con la sintassi del tuo dialetto e con estremi pari alla finestra di analisi.
+2. Aggrega i fatti alla stessa granularita della spina prima di agganciarli per evitare moltiplicazioni di righe.
+3. Aggancia i fatti con join esterna guidata dalla spina e riempi con zero solo conteggi e importi mai prezzi e tassi.
+4. Calcola medie mobili e totali rolling con finestra per righe su serie densificata e confronta l anno precedente con scarto fisso.
+5. Filtra solo sulla colonna della spina e materializza la serie quando la stessa logica compare in piu query.
 
-Con SQL avanzato il nodo è scrivere query corrette anche quando granularità, finestre temporali, coorti e casi limite complicano l'analisi. Non è teoria: serve a migliorare una scelta concreta con dati, assunzioni esplicite e controlli minimi. Se non sai indicare quale decisione cambia, quale dato osservi e quale errore vuoi evitare, la lezione non si è ancora trasformata in competenza applicata.
-
-## Come ragionare su un esperimento
-
-Uno schema essenziale tiene il focus dove serve: ogni approfondimento tecnico deve rafforzare almeno una di queste quattro fasi.
-
-| Fase      | Cosa chiarire                                  | Output                  |
-|-----------|-----------------------------------------------|-------------------------|
-| Domanda   | Quale scelta reale deve migliorare?           | Decisione da prendere   |
-| Misura    | Quale segnale osservabile rappresenta il problema? | Metrica o dato sorgente |
-| Controllo | Quale baseline rende il risultato interpretabile? | Confronto credibile     |
-| Azione    | Che cosa cambia dopo l'analisi?                | Prossimo passo operativo |
-
-## Rendere l'analisi riproducibile
-
-Per analizzare un esperimento in SQL definisci prima l'unità di analisi (riga, partizione, finestra, join, coorte o metrica temporale), poi collegala a una metrica osservabile (correttezza, performance, duplicati, granularità, stabilità) e infine dichiara la decisione attesa, che sia una query, un modello intermedio, un test SQL o un pattern riusabile.
-
-| Elemento        | Specifica richiesta                                                    |
-|-----------------|----------------------------------------------------------------------|
-| Unità di analisi | riga, partizione, finestra, join, coorte o metrica temporale          |
-| Segnale principale | correttezza, performance, duplicati, granularità, stabilità          |
-| Baseline        | Periodo precedente, gruppo comparabile, benchmark o scenario controfattuale |
-| Decisione       | query, modello intermedio, test SQL o pattern riusabile               |
-| Rischio         | Scambiare un numero disponibile per una prova sufficiente             |
-
-La formalizzazione regge quando un altro analista può riprodurre la logica, criticare le assunzioni e arrivare alla stessa decisione.
-
-## La struttura dei dati di un A/B test
-
-Un A/B test ben tracciato produce tre tabelle chiave. La tabella `assignment` lega ogni `user_id` alla `variant` (A o B) e all'`assignment_time`. La tabella `events` registra `user_id`, `event_time`, `event_type` e `value`. La tabella `users` descrive l'utente con `signup_date`, `country` e `device`.
-
-La sfida in SQL è calcolare per ogni metrica il valore per utente, aggregarlo per variante e stimare la differenza con il suo intervallo di confidenza. Non è una singola query, ma un workflow di validazione.
-
-## Calcolo delle metriche per variante
-
-Un errore frequente è calcolare la media solo sugli utenti che hanno generato transazioni:
+## Perche raggruppare per data racconta una storia a buchi
+Una tabella con due ordini il tre marzo e uno il sei marzo produce una query spontanea con due sole righe. Il quattro e il cinque e il sette marzo non esistono nell output. Per un report tabellare e quasi accettabile mentre per un grafico e una trappola perche la libreria unisce i punti esistenti. Per i calcoli e peggio perche una media mobile su righe sparse divide per i giorni presenti invece che per sette e gonfia il risultato proprio nei periodi fiacchi.
 
 ```sql
-SELECT variant, AVG(revenue) AS avg_revenue
-FROM assignments a
-JOIN transactions t ON a.user_id = t.user_id
-WHERE t.txn_date >= a.assignment_time
-GROUP BY variant;
+-- Ricavo giornaliero: semplice, ma i giorni vuoti spariscono
+SELECT
+  DATE(creato_il) AS giorno,      -- tronca il timestamp al giorno
+  SUM(importo) AS ricavo          -- somma degli ordini del giorno
+FROM ordini
+WHERE creato_il >= DATE '2026-03-01'
+  AND creato_il < DATE '2026-03-08'
+GROUP BY 1
+ORDER BY 1;
 ```
 
-Questa query esclude gli utenti senza transazioni e distorce la media. Se il trattamento riduce il numero di transanti ma alza il valore medio di chi transa, la media apparirà più alta pur essendo un risultato fuorviante.
+Lo stesso buco si apre con conteggi distinti per giorno e con troncamenti settimanali con settimane parziali ai bordi. Il punto concettuale e uno solo perche in SQL le righe mancanti non sono zeri ma assenze. Finche non esiste una riga per ogni giorno nessuna aggregazione distingue zero vendite da giorno non considerato.
 
-Il metodo corretto calcola il valore per utente includendo gli zeri:
+## Costruire una colonna di date consecutive su ogni dialetto
+Una date spine e una tabella con una riga per ogni giorno dell intervallo analizzato. Il modo di generarla cambia per dialetto ma il risultato e identico con una sola colonna giorno. Gli estremi devono coincidere con la finestra di analisi da entrambi i lati. La granularita va decisa prima perche mescolare granularita diverse produce duplicati silenziosi. Per analisi ricorrenti conviene una tabella calendario persistente con attributi di settimana e festivita e mese fiscale.
 
 ```sql
-WITH user_revenue AS (
+-- PostgreSQL e DuckDB: generate_series, la via più leggibile
+SELECT giorno::DATE AS giorno
+FROM generate_series(DATE '2026-03-01', DATE '2026-03-31', INTERVAL '1 day') AS giorno;
+```
+
+```sql
+-- BigQuery: generazione di array poi esploso in righe
+SELECT d AS giorno
+FROM UNNEST(
+  GENERATE_DATE_ARRAY(DATE '2026-03-01', DATE '2026-03-31', INTERVAL 1 DAY)
+) AS d;
+```
+
+```sql
+-- Snowflake e Databricks: tabella di sistema con indice di riga
+SELECT DATEADD(DAY, SEQ4(), DATE '2026-03-01') AS giorno
+FROM TABLE(GENERATOR(ROWCOUNT => 31));
+```
+
+## Densificare la serie con la join che riempie i vuoti
+Con la spina pronta il pattern e sempre lo stesso con spina a sinistra e fatti a destra e trasformazione delle assenze in zeri dove ha senso. Aggregare i fatti per giorno prima della join evita di moltiplicare le righe quando un giorno ha molti ordini. Partire dai fatti con join inversa funziona ma rende la query illeggibile appena si aggiunge una seconda metrica.
+
+```sql
+-- Ricavo giornaliero densificato: ogni giorno compare, anche a zero
+WITH spine AS (
+  -- una riga per giorno di marzo 2026
+  SELECT giorno::DATE AS giorno
+  FROM generate_series(DATE '2026-03-01', DATE '2026-03-31', INTERVAL '1 day') AS giorno
+),
+vendite AS (
+  -- aggrega gli ordini per giorno prima della join: meno righe da agganciare
+  SELECT DATE(creato_il) AS giorno, SUM(importo) AS ricavo
+  FROM ordini
+  WHERE creato_il >= DATE '2026-03-01'
+    AND creato_il < DATE '2026-04-01'
+  GROUP BY 1
+)
+SELECT
+  s.giorno,
+  COALESCE(v.ricavo, 0) AS ricavo   -- giorno senza ordini: zero, non assenza
+FROM spine AS s
+LEFT JOIN vendite AS v
+  ON v.giorno = s.giorno
+ORDER BY s.giorno;
+```
+
+| Variante | Cosa succede ai giorni vuoti | Quando usarla |
+|---|---|---|
+| `INNER JOIN` tra spine e fatti | Spariscono di nuovo | Mai, vanifica la spine |
+| `LEFT JOIN` + `COALESCE(..., 0)` | Diventano zeri | Ricavi, conteggi, quantità |
+| `LEFT JOIN` senza `COALESCE` | Restano `NULL` | Prezzi e tassi, dove lo zero sarebbe falso |
+
+La terza riga della tabella e la piu importante perche densificare non significa sempre mettere zero. Per una metrica intensiva come prezzo medio il valore di un giorno senza osservazioni resta sconosciuto e scriverci zero corrompe le medie successive.
+
+## Medie mobili e totali rolling con le window function
+La media mobile su serie densificata usa una finestra per righe ordinata per giorno. Con una riga per giorno la finestra di sette righe copre esattamente sette giorni di calendario. Sui dati sparsi coprirebbe invece le ultime righe esistenti anche su tre settimane e la media resterebbe alta pure con vendite ferme da giorni. I primi giorni della serie hanno finestra parziale e vanno filtrati oppure segnalati come transitori. Per totali cumulati da inizio anno la finestra con inizio non limitato resta piu economica di una autojoin.
+
+```sql
+-- Media mobile a 7 giorni e totale rolling a 28 giorni sul ricavo densificato
+WITH giornaliero AS (
+  -- la CTE densificata del paragrafo precedente: un giorno, una riga
+  SELECT s.giorno, COALESCE(v.ricavo, 0) AS ricavo
+  FROM spine AS s
+  LEFT JOIN vendite AS v ON v.giorno = s.giorno
+)
+SELECT
+  giorno,
+  ricavo,
+  AVG(ricavo) OVER (
+    ORDER BY giorno
+    ROWS BETWEEN 6 PRECEDING AND CURRENT ROW  -- finestra di 7 righe: oggi + 6 giorni prima
+  ) AS media_mobile_7g,
+  SUM(ricavo) OVER (
+    ORDER BY giorno
+    ROWS BETWEEN 27 PRECEDING AND CURRENT ROW -- totale degli ultimi 28 giorni
+  ) AS totale_rolling_28g
+FROM giornaliero
+ORDER BY giorno;
+```
+
+## Confronti con l anno precedente senza autojoin contorte
+La variazione anno su anno con scarto fisso evita una autojoin sulla data meno un anno. Lo scarto pari a cinquantadue settimane allinea il giorno della settimana e risulta piu stabile dello scarto di trecentosessantacinque giorni che sfasa weekend e festivita. Per metriche mensili l equivalente e lo scarto di dodici periodi su serie mensile. La protezione contro divisione per zero resta obbligatoria per i nuovi segmenti.
+
+```sql
+-- Ricavo giornaliero contro stesso giorno dell'anno prima e variazione percentuale
+SELECT
+  giorno,
+  ricavo,
+  LAG(ricavo, 364) OVER (ORDER BY giorno) AS ricavo_anno_prima,
+  -- 364 = 52 settimane: allinea il giorno della settimana, più stabile del 365
+  CASE
+    WHEN LAG(ricavo, 364) OVER (ORDER BY giorno) = 0 THEN NULL  -- evita la divisione per zero
+    ELSE (ricavo - LAG(ricavo, 364) OVER (ORDER BY giorno))
+       / LAG(ricavo, 364) OVER (ORDER BY giorno)
+  END AS variazione_yoy
+FROM giornaliero
+ORDER BY giorno;
+```
+
+## Candele giornaliere quando servono davvero
+Aperto e massimo e minimo e chiuso riassumono una serie intraday con primo e ultimo prezzo piu estremi toccati. Servono in tesoreria e monitoraggio prezzi dove la volatilita dentro il giorno conta quanto il livello. In SQL si ottengono con aggregazione per giorno piu numerazione ordinata per orario. Il trucco con massimo condizionato estrae un valore posizionale dentro un raggruppamento perche esiste una sola prima riga per giorno.
+
+```sql
+-- Candela giornaliera dei prezzi: primo, massimo, minimo e ultimo prezzo del giorno
+WITH prezzi_ordinati AS (
   SELECT
-    a.user_id,
-    a.variant,
-    COALESCE(SUM(t.revenue), 0) AS total_revenue
-  FROM assignments a
-  LEFT JOIN transactions t
-    ON a.user_id = t.user_id
-    AND t.txn_date >= a.assignment_time
-    AND t.txn_date < a.assignment_time + INTERVAL '14 days'
-  GROUP BY a.user_id, a.variant
+    DATE(ts) AS giorno,          -- giorno di calendario della quotazione
+    prezzo,                     -- prezzo rilevato in quel momento
+    ROW_NUMBER() OVER (PARTITION BY DATE(ts) ORDER BY ts) AS rn_asc,
+    -- numero di riga dal mattino: 1 = prima quotazione = apertura
+    ROW_NUMBER() OVER (PARTITION BY DATE(ts) ORDER BY ts DESC) AS rn_desc
+    -- numero di riga dalla sera: 1 = ultima quotazione = chiusura
+  FROM quotazioni
+  WHERE ts >= TIMESTAMP '2026-03-01 00:00:00'
+    AND ts < TIMESTAMP '2026-04-01 00:00:00'
 )
 SELECT
-  variant,
-  COUNT(*) AS users,
-  ROUND(AVG(total_revenue), 4) AS avg_revenue_per_user,
-  ROUND(STDDEV(total_revenue) / SQRT(COUNT(*)), 4) AS se
-FROM user_revenue
-GROUP BY variant;
+  giorno,
+  MAX(CASE WHEN rn_asc = 1 THEN prezzo END) AS apertura,   -- primo prezzo del giorno
+  MAX(prezzo) AS massimo,                                  -- estremo superiore
+  MIN(prezzo) AS minimo,                                   -- estremo inferiore
+  MAX(CASE WHEN rn_desc = 1 THEN prezzo END) AS chiusura   -- ultimo prezzo del giorno
+FROM prezzi_ordinati
+GROUP BY giorno
+ORDER BY giorno;
 ```
 
-La `LEFT JOIN` e `COALESCE(..., 0)` fanno in modo che ogni utente assegnato contribuisca, anche senza transazioni.
+Apertura e chiusura hanno senso solo con ordinamento temporale totale e criteri secondari a parita di timestamp. Se i giorni senza quotazioni devono comparire la spina torna in gioco con join esterna ricordando che per i prezzi l assenza resta valore mancante e mai zero.
 
-## Calcolo dell'intervallo di confidenza in SQL
+## Quanto costa una spina e come tenerla sotto controllo
+Una spina giornaliera su tre anni sono circa millecento righe e non e mai un problema. I costi nascono con granularita fine incrociata con dimensioni ad alta cardinalita come giorni per prodotto per magazzino. Tre regole tengono i costi in ordine con generazione del solo intervallo che serve e densificazione dopo aver aggregato e materializzazione della serie per report ricorrenti. La clausola di filtro sui fatti deve restare dentro il passaggio dei fatti prima della join. Filtrare dopo la join esterna sul risultato trasforma silenziosamente la join esterna in join interna per tutte le righe a zero.
 
-L'intervallo di confidenza al 95% per la differenza tra due medie indipendenti si calcola così:
+## Quando la date spine e la scelta sbagliata
+La spina aggiunge righe senza informazione quando l analisi riguarda solo giorni con attivita come tassi per giorno di campagna. Se la metrica e gia una fotografia periodica come saldi di fine mese la serie e completa per costruzione. Per finestre lunghe a granularita fine conviene preaggregare prima di densificare oppure densificare solo l ultimo tratto mobile mostrato dal report. Per confronti tra coorti con compleanno diverso serve una spina di interi da zero a N giorni dall evento origine e non una spina di date di calendario.
+Verdetto: usa righe per finestra temporale su serie densificata e mai su dati sparsi, con scarto di cinquantadue settimane per confronti annuali su dati settimanali.
 
-```
-CI = (avg_B - avg_A) ± 1.96 * sqrt(se_A² + se_B²)
-```
+## Esempio verificato
+La Johns Hopkins University e Our World in Data dal 2020 pubblicarono i contagi giornalieri con media mobile a sette giorni per levigare ritardi di notifica e crolli festivi. La media a sette giorni rese leggibili picchi e inversioni che i dati grezzi giornalieri nascondevano tra oscillazioni spurie. Le dashboard dichiararono in modo esplicito finestra e riempimento dei giorni mancanti. Il caso mostra perche la densificazione con spina e finestra per righe divenne lo standard per ogni serie epidemiologica e finanziaria successiva.
 
-In SQL lo si ottiene unendo i risultati delle due varianti:
-
-```sql
-WITH stats AS (
-  SELECT
-    variant,
-    COUNT(*) AS n,
-    AVG(total_revenue) AS mean,
-    STDDEV(total_revenue) / SQRT(COUNT(*)) AS se
-  FROM user_revenue
-  GROUP BY variant
-)
-SELECT
-  (SELECT mean FROM stats WHERE variant = 'B') - (SELECT mean FROM stats WHERE variant = 'A') AS lift,
-  (SELECT mean FROM stats WHERE variant = 'B') - (SELECT mean FROM stats WHERE variant = 'A') - 1.96 * SQRT(POWER((SELECT se FROM stats WHERE variant = 'A'), 2) + POWER((SELECT se FROM stats WHERE variant = 'B'), 2)) AS ci_lower,
-  (SELECT mean FROM stats WHERE variant = 'B') - (SELECT mean FROM stats WHERE variant = 'A') + 1.96 * SQRT(POWER((SELECT se FROM stats WHERE variant = 'A'), 2) + POWER((SELECT se FROM stats WHERE variant = 'B'), 2)) AS ci_upper;
-```
-
-Quando `ci_lower` è positivo, con il 95% di confidenza il trattamento B ha un effetto positivo. Se l'intervallo include zero, l'effetto non è distinguibile da zero. Se entrambi gli estremi sono negativi, B peggiora la metrica.
-
-## Le metriche di guardrail
-
-Le metriche di guardrail sono indicatori che non devono peggiorare quando la metrica primaria migliora, per esempio il revenue per sessione o il tempo sul sito. In SQL si calcolano come la metrica primaria, ma il test è di non-inferiorità: l'intervallo di confidenza della differenza non deve scendere sotto una soglia negativa significativa, per esempio -0.5%.
-
-```sql
-SELECT
-  lift,
-  ci_lower,
-  CASE WHEN ci_lower > -0.005 THEN 'guardrail_ok' ELSE 'guardrail_failed' END AS guardrail_status
-FROM diff_stats;
-```
-
-## Un caso applicato: Amazon
-
-Amazon esegue oltre 10.000 A/B test all'anno, e uno dei suoi pattern chiave è il filtro di esposizione: contare solo gli utenti effettivamente esposti al trattamento. Un utente assegnato a B ma mai arrivato sulla pagina testata non va incluso.
-
-```sql
-WITH exposed_users AS (
-  SELECT DISTINCT a.user_id, a.variant
-  FROM assignments a
-  JOIN page_views pv ON a.user_id = pv.user_id
-    AND pv.page = 'search_results'
-    AND pv.view_time >= a.assignment_time
-    AND pv.view_time < a.assignment_time + INTERVAL '14 days'
-)
-SELECT variant, COUNT(*) AS exposed
-FROM exposed_users
-GROUP BY variant;
-```
-
-Questo filtro aumenta la sensibilità statistica del 25-40% perché elimina il rumore degli utenti mai esposti.
-
-## Esercitarsi sui dati
-
-Per allenarsi serve un dataset di esperimento, e va bene anche una dashboard reale, un export CSV o un piccolo dataset sintetico, purché contenga una domanda, una metrica osservabile e una decisione. Un primo esercizio consiste nel calcolare per variante `avg_clicks_per_user`, `avg_revenue_per_user` e `conversion_rate` (almeno un acquisto), includendo gli utenti con zero eventi. Da lì si passa a estrarre il lift con intervallo di confidenza al 95% sulla revenue, verificando se l'effetto è statisticamente significativo. L'esercizio più impegnativo è calcolare la metrica per variante giorno per giorno e cercare il plateau effect, cioè capire se la differenza tra varianti converge dopo un certo numero di giorni, usando una window function per la revenue cumulativa.
-
-## L'errore tipico da evitare
-
-Il rischio più comune è trattare l'A/B analysis come un'etichetta invece che come un processo. Succede quando si mostra un grafico senza decisione, una metrica senza baseline o una conclusione che non dichiara quali assunzioni potrebbero invalidarla. La domanda di controllo è: se questo risultato fosse instabile, quale scelta sbaglierei? Se non sai rispondere, manca il collegamento tra analisi e azione.
-
-Per verificare di avere capito, prova a spiegare perché la query naive che calcola `AVG(revenue)` solo sui transanti è sbagliata e come correggerla, cosa sono le metriche di guardrail e come si testano in SQL, perché Amazon filtra per utenti esposti e che vantaggio ne ricava, quale unità di analisi rende il problema misurabile e quale output consegneresti a uno stakeholder non tecnico.
-
-## Riepilogo operativo
-
-Esperimenti e A/B analysis in SQL servono quando producono decisioni più chiare, non quando aggiungono terminologia. Usa lo stesso percorso ogni volta: problema, schema di ragionamento, formalizzazione, esempio, esercizio e controllo della comprensione, così la lezione diventa pratica verificabile.
+## Verifica
+1. Perche una media mobile su dati sparsi gonfia il risultato nei periodi fiacchi?
+2. Quando un giorno vuoto deve diventare zero e quando deve restare valore mancante?
+3. Perche lo scarto di cinquantadue settimane stabilizza il confronto annuale su dati settimanali?
+4. Quale filtro trasforma per errore una join esterna con spina in una join interna?

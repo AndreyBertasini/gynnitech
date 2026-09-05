@@ -1,9 +1,9 @@
 ---
 title: Attribution queries e path analytics
 description: >-
-  I modelli di attribuzione classici (last-click, first-click, lineare, time
-  decay) e il path analytics implementati in SQL, con il caso Booking.com e il
-  valore di Shapley.
+  Attribution queries e path analytics. Lezione core del modulo Advanced SQL for
+  Analytical Systems con problema reale, modello concettuale, formalizzazione
+  rigorosa, caso applicato, lab a 3 livelli e checkpoint finale.
 module: "Modulo 14: Advanced SQL for Analytical Systems"
 order: 9
 category: Decisione
@@ -16,172 +16,297 @@ duration: 18 min
 prerequisites:
   - advanced-sql/date-spine-e-metriche-temporali
 learningObjectives:
-  - Implementare in SQL i quattro modelli di attribuzione classici
-  - Distinguere attribuzione da path analytics e scegliere l'approccio giusto
-  - Leggere un caso reale (Booking.com) e tradurlo in query operative
+  - Comprendere il problema analitico e il contesto decisionale
+  - Applicare esempi, metriche e controlli a casi reali
+binario: "ml-tabellare"
+autore: "Hermes"
+controllatoDa: "Argo"
+autorizzatoDa: "Giano"
+draft: false
 ---
+import { SqlExercise } from '../../../components/SqlExercise';
 
 # Attribution queries e path analytics
+Binario di questa lezione: **ml-tabellare**.
 
-Attribuire una vendita al canale giusto è una delle decisioni più contese del marketing digitale, e quando manca una regola esplicita la discussione scivola quasi sempre sul piano politico. Paid social, email e brand possono rivendicare lo stesso acquisto, e senza una logica trasparente e condivisa il budget finisce per essere allocato in modo arbitrario. Questa lezione mostra come scrivere in SQL i modelli che rendono difendibile quella scelta.
+## Cosa significa
+Attribution e path analytics separano generazioni di utenti e percorsi di contatto per assegnare il merito della conversione senza farsi ingannare dalle medie aggregate.
 
-## Perché l'attribuzione finisce in una discussione politica
+## Come si calcola
+1. Assegna ogni utente a una coorte stabile con data di attivazione calcolata una volta sola su evento di ingresso esplicito.
+2. Calcola la retention a scadenze fisse con denominatore fisso alla nascita e sole coorti con finestra completa.
+3. Assegna il credito di conversione con modello dichiarato tra ultimo tocco e primo tocco e lineare e decadimento temporale.
+4. Estrai le sequenze ordinate di contatto e confronta convertiti e non convertiti con soglia minima di volume.
+5. Verifica che la somma dei crediti torni col ricavo vero e che ogni utente appartenga a una sola coorte.
 
-La domanda non è quale canale meriti il credito, ma come giustificare che un canale lo riceva e un altro no. Non serve trovare il modello perfetto: serve una logica che renda visibili le ipotesi, i limiti e le conseguenze sul budget. Prima di scrivere una query conviene fissare tre punti. Quale decisione di budget vuoi supportare. Quale finestra temporale rende il credito difendibile. Come presentare un modello con limiti espliciti senza per questo indebolirlo agli occhi di chi deve decidere.
-
-## Come ragionare sul credito
-
-Uno schema essenziale tiene il lavoro ancorato alle decisioni concrete invece che ai tecnicismi. Ogni analisi parte da una domanda, individua la misura che la rappresenta, sceglie un controllo che la renda interpretabile e si chiude con un'azione.
-
-| Fase | Cosa chiarire | Output |
-|---|---|---|
-| Domanda | Quale scelta reale deve migliorare? | Decisione da prendere |
-| Misura | Quale segnale osservabile rappresenta il problema? | Metrica o dato sorgente |
-| Controllo | Quale baseline rende il risultato interpretabile? | Confronto credibile |
-| Azione | Che cosa cambia dopo l'analisi? | Prossimo passo operativo |
-
-## Rendere l'analisi riproducibile
-
-Perché un'altra persona possa riprodurre e criticare l'analisi, definisci l'unità di lavoro (riga, partizione, finestra, join, coorte o metrica temporale), collegala a una metrica osservabile (correttezza, performance, duplicati, grain e stabilità del risultato) e dichiara la decisione attesa, che sia una query, un modello intermedio, un test SQL o un pattern riusabile.
-
-| Elemento | Specifica richiesta |
-|---|---|
-| Unità di analisi | riga, partizione, finestra, join, coorte o metrica temporale |
-| Segnale principale | correttezza, performance, duplicati, grain e stabilità del risultato |
-| Baseline | Periodo precedente, gruppo comparabile, benchmark o scenario controfattuale |
-| Decisione | query, modello intermedio, test SQL o pattern riusabile |
-| Rischio | Scambiare un numero disponibile per una prova sufficiente |
-
-## I modelli di attribuzione in SQL
-
-Quattro modelli classici si implementano in SQL con complessità crescente.
-
-| Modello | Distribuzione del credito | Complessità SQL |
-|---------|---------------------------|-----------------|
-| Last-click | 100% all'ultimo touchpoint | Semplice: `FIRST_VALUE` ordinato in ordine decrescente |
-| First-click | 100% al primo touchpoint | Semplice: `FIRST_VALUE` ordinato in ordine crescente |
-| Linear | Equamente diviso tra tutti i touchpoint | Media complessità: conta touchpoint per conversione |
-| Time decay | Peso maggiore ai touchpoint più recenti | Complesso: pesi esponenziali con window functions |
-
-Il last-click assegna tutto il credito all'ultimo contatto:
+## Perche le medie aggregate mentono sulle coorti
+Un prodotto in abbonamento puo mostrare utenti attivi in crescita mentre la coorte piu vecchia perde oltre meta degli utenti in sessanta giorni. Il totale cresce perche l acquisizione copre l emorragia e non perche il prodotto trattiene meglio. La coorte fissa l origine condivisa e cambia il denominatore di ogni metrica successiva. In SQL la distinzione passa da un passaggio che calcola la data di attivazione una volta sola e poi non la tocca piu.
 
 ```sql
-SELECT conversion_id, user_id, channel,
-  FIRST_VALUE(channel) OVER (
-    PARTITION BY conversion_id ORDER BY touch_time DESC
-    ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING
-  ) AS last_touch_channel
-FROM touchpoints;
-```
-
-Il first-click fa l'opposto, premiando il contatto che ha aperto il percorso:
-
-```sql
-SELECT conversion_id, user_id, channel,
-  FIRST_VALUE(channel) OVER (
-    PARTITION BY conversion_id ORDER BY touch_time ASC
-    ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING
-  ) AS first_touch_channel
-FROM touchpoints;
-```
-
-Il modello lineare divide il credito in parti uguali tra tutti i touchpoint della conversione:
-
-```sql
-WITH touchpoint_counts AS (
-  SELECT *,
-    COUNT(*) OVER (PARTITION BY conversion_id) AS total_touches,
-    1.0 / COUNT(*) OVER (PARTITION BY conversion_id) AS weight
-  FROM touchpoints
-)
-SELECT channel,
-  SUM(conversion_value * weight) AS attributed_revenue
-FROM touchpoint_counts
-GROUP BY channel;
-```
-
-Il time decay pesa di più i contatti recenti tramite pesi esponenziali:
-
-```sql
-WITH ordered_touches AS (
-  SELECT *,
-    ROW_NUMBER() OVER (PARTITION BY conversion_id ORDER BY touch_time DESC) AS recency_rank,
-    COUNT(*) OVER (PARTITION BY conversion_id) AS total_touches
-  FROM touchpoints
-),
-time_decay_weights AS (
-  SELECT *,
-    POWER(0.5, recency_rank - 1) AS raw_weight,
-    SUM(POWER(0.5, recency_rank - 1)) OVER (PARTITION BY conversion_id) AS total_weight
-  FROM ordered_touches
-)
-SELECT channel,
-  SUM(conversion_value * raw_weight / total_weight) AS attributed_revenue
-FROM time_decay_weights
-GROUP BY channel;
-```
-
-Il time decay si adatta bene ai prodotti con un lungo percorso di maturazione, dove l'ultimo click riflette una decisione ormai consolidata.
-
-## Un caso applicato: Booking.com
-
-Booking.com, con un budget di marketing digitale di oltre 4 miliardi di dollari, ha abbandonato i modelli a regola fissa per uno basato sul valore di Shapley. Il metodo assegna il credito a ciascun canale in base al suo contributo marginale medio su tutte le combinazioni possibili, e in questo modo distribuisce il merito in modo più equo.
-
-Una versione semplificata in SQL calcola il tasso di conversione per ogni combinazione di canali e ne attribuisce i delta:
-
-```sql
-WITH channel_combos AS (
-  SELECT user_id, conversion_id,
-    STRING_AGG(DISTINCT channel, ', ' ORDER BY channel) AS channel_set,
-    COUNT(DISTINCT channel) AS num_channels,
-    MAX(conversion_value) AS value
-  FROM touchpoints
-  GROUP BY user_id, conversion_id
-),
-conversion_rates AS (
-  SELECT channel_set, num_channels,
-    COUNT(*) AS total_users,
-    SUM(CASE WHEN value > 0 THEN 1 ELSE 0 END) AS converters,
-    SUM(value) AS total_value
-  FROM channel_combos
-  GROUP BY channel_set, num_channels
-)
-SELECT * FROM conversion_rates
-ORDER BY num_channels, total_value DESC;
-```
-
-Il passaggio a questo modello ha ridistribuito il budget e migliorato il ritorno sull'investimento.
-
-## Dalle conversioni ai percorsi
-
-L'attribuzione risponde a quale canale abbia contribuito, mentre il path analytics indaga quale percorso abbia portato alla conversione, tenendo conto dell'ordine e della sequenza dei touchpoint. Per estrarre i percorsi più frequenti:
-
-```sql
-WITH user_paths AS (
+-- Una riga per utente: l'origine della coorte non si ricalcola mai
+WITH coorte AS (
   SELECT
     user_id,
-    conversion_id,
-    STRING_AGG(channel, ' → ' ORDER BY touch_time) AS channel_path,
-    COUNT(*) AS path_length
-  FROM touchpoints
-  GROUP BY user_id, conversion_id
+    DATE_TRUNC('month', MIN(event_date)) AS mese_coorte, -- origine condivisa
+    MIN(event_date) AS data_attivazione
+  FROM eventi
+  WHERE tipo_evento = 'attivazione' -- solo l'evento che definisce l'ingresso
+  GROUP BY user_id
+)
+SELECT mese_coorte, COUNT(*) AS utenti
+FROM coorte
+GROUP BY mese_coorte
+ORDER BY mese_coorte;
+```
+
+Il filtro sul tipo di evento di ingresso va concordato con chi legge i numeri perche definisce la coorte. Usare il minimo su tutti gli eventi senza filtro sposta l origine e assegna coorti sbagliate. Centralizzare l assegnazione in una vista condivisa evita che tre dashboard definiscano la coorte in tre modi diversi.
+
+## Come definire la coorte giusta in SQL
+Le coorti comportamentali raggruppano per cio che l utente ha fatto e non solo per quando e arrivato. Chi completa l onboarding contro chi si ferma e chi compra da mobile contro desktop vivono esperienze diverse. La struttura non cambia con passaggio che assegna una etichetta stabile per utente.
+
+```sql
+-- Coorte comportamentale: l'etichetta dipende dal primo canale osservato
+WITH primo_contatto AS (
+  SELECT
+    user_id,
+    -- il primo canale visto definisce il gruppo di appartenenza
+    FIRST_VALUE(canale) OVER (
+      PARTITION BY user_id ORDER BY event_date ASC
+      ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING
+    ) AS canale_ingresso,
+    MIN(event_date) AS data_attivazione
+  FROM eventi
+  WHERE tipo_evento = 'attivazione'
+  GROUP BY user_id, canale, event_date
+)
+SELECT canale_ingresso, COUNT(*) AS utenti
+FROM (SELECT DISTINCT user_id, canale_ingresso FROM primo_contatto) s
+GROUP BY canale_ingresso;
+```
+
+La granularita temporale e un compromesso esplicito tra dettaglio e stabilita. Coorti giornaliere con poche decine di attivazioni producono tassi ballerini mentre coorti mensili nascondono eventi dentro il mese. La regola pratica parte dal mese e scende alla settimana solo sopra qualche migliaio di utenti. La coorte mobile che ricalcola l appartenenza a ogni periodo serve per segmentare il comportamento corrente e non per misurare la retention.
+
+## La retention a scadenze fisse senza barare sul denominatore
+La retention conta i membri della coorte attivi nel periodo diviso la dimensione originaria sempre fissa e mai ricalcolata. L errore piu diffuso include utenti che non hanno ancora avuto il tempo di tornare e deprime il tasso per costruzione. La correzione filtra le sole coorti mature con finestra completa. La join esterna mantiene nel denominatore anche chi non e mai tornato mentre la join interna gonfia il tasso anche di dieci o venti punti.
+
+```sql
+-- Retention a 30 giorni: solo coorti con finestra di osservazione completa
+WITH coorte AS (
+  SELECT user_id, MIN(event_date) AS data_attivazione
+  FROM eventi
+  WHERE tipo_evento = 'attivazione'
+  GROUP BY user_id
+),
+retention_30 AS (
+  SELECT
+    c.user_id,
+    c.data_attivazione,
+    -- 1 se esiste almeno un evento nella finestra giorno 1-30
+    MAX(CASE
+      WHEN e.event_date > c.data_attivazione
+       AND e.event_date <= c.data_attivazione + INTERVAL '30 days'
+      THEN 1 ELSE 0
+    END) AS ritenuto
+  FROM coorte c
+  LEFT JOIN eventi e ON e.user_id = c.user_id
+  GROUP BY c.user_id, c.data_attivazione
 )
 SELECT
-  channel_path,
-  COUNT(*) AS conversions,
-  ROUND(COUNT(*) * 100.0 / SUM(COUNT(*)) OVER (), 1) AS pct_of_total
-FROM user_paths
-GROUP BY channel_path
-ORDER BY conversions DESC
+  DATE_TRUNC('month', data_attivazione) AS mese_coorte,
+  COUNT(*) AS utenti,
+  -- solo coorti la cui finestra di 30 giorni è già chiusa
+  SUM(CASE WHEN data_attivazione <= CURRENT_DATE - INTERVAL '30 days'
+    THEN ritenuto ELSE 0 END)::float
+  / NULLIF(SUM(CASE WHEN data_attivazione <= CURRENT_DATE - INTERVAL '30 days'
+    THEN 1 ELSE 0 END), 0) AS retention_30
+FROM retention_30
+GROUP BY 1
+ORDER BY 1;
+```
+
+La retention puntuale su un giorno esatto e severa e adatta a prodotti quotidiani mentre quella per finestra su almeno una attivita e stabile e adatta a prodotti settimanali. A parita di dati i due numeri differiscono anche di trenta punti e la scelta va sempre dichiarata.
+
+## Le curve di retention che si leggono davvero
+Una singola percentuale a trenta giorni dice poco mentre la curva a uno e sette e quattordici e trenta e sessanta e novanta giorni dice quasi tutto. Un crollo precoce poi piatto indica onboarding debole mentre un declino lento senza stabilizzazione indica valore non continuato. La query tipica unisce la coorte a una spina di scadenze e aggrega per coorte e scadenza con sole coorti mature per ciascuna scadenza.
+
+```sql
+-- Tabella di coorte: una riga per coorte, una colonna per scadenza
+WITH coorte AS (
+  SELECT user_id, MIN(event_date) AS data_attivazione
+  FROM eventi
+  WHERE tipo_evento = 'attivazione'
+  GROUP BY user_id
+),
+scadenze AS (
+  -- spine di offset in giorni: il calendario dei controlli
+  SELECT * FROM (VALUES (1), (7), (14), (30), (60), (90)) AS t(giorno)
+),
+base AS (
+  SELECT
+    DATE_TRUNC('month', c.data_attivazione) AS mese_coorte,
+    s.giorno,
+    COUNT(DISTINCT c.user_id) AS denominatore,
+    -- membri della coorte con almeno un evento entro la scadenza
+    COUNT(DISTINCT CASE
+      WHEN e.event_date > c.data_attivazione
+       AND e.event_date <= c.data_attivazione + (s.giorno || ' days')::interval
+      THEN e.user_id
+    END) AS ritenuti
+  FROM coorte c
+  CROSS JOIN scadenze s
+  LEFT JOIN eventi e ON e.user_id = c.user_id
+  -- solo coorti mature per ciascuna scadenza
+  WHERE c.data_attivazione <= CURRENT_DATE - (s.giorno || ' days')::interval
+  GROUP BY 1, 2
+)
+SELECT mese_coorte, giorno, ritenuti::float / NULLIF(denominatore, 0) AS retention
+FROM base
+ORDER BY mese_coorte, giorno;
+```
+
+La lettura per riga mostra l invecchiamento di una coorte mentre quella per colonna mostra il miglioramento tra generazioni. La diagonale temporale rivela shock esterni quando tutte le coorti perdono utenti nella stessa settimana di calendario.
+
+| Forma della curva | Diagnosi probabile | Dove intervenire |
+|---|---|---|
+| Crollo giorno 1-7, poi piatta | Onboarding debole | Primi passi, attivazione, email di benvenuto |
+| Declino lento e continuo | Valore non continuato | Feature di ritorno, abitudini, notifiche |
+| Tutte le coorti cadono nello stesso mese di calendario | Shock esterno | Outage, prezzi, stagionalità, concorrenza |
+| Coorti recenti sistematicamente peggiori | Acquisizione diluita | Qualità del traffico, targeting, sconti aggressivi |
+
+## I modelli di attribuzione scritti come query difendibili
+Davanti a una conversione preceduta da piu contatti serve una regola di credito dichiarata. Non esiste il modello giusto in assoluto ma solo quello le cui ipotesi reggono alla domanda sul budget. L ultimo tocco assegna tutto al contatto finale con ordinamento discendente mentre il primo tocco premia chi apre i percorsi. Il lineare divide in parti uguali tra tutti i tocchi mentre il decadimento temporale pesa di piu i contatti recenti con pesi che si dimezzano a ritroso e normalizzazione che conserva il valore reale.
+
+```sql
+-- Last-click: tutto il merito all'ultimo punto di contatto
+SELECT
+  conversion_id,
+  FIRST_VALUE(canale) OVER (
+    PARTITION BY conversion_id ORDER BY istante_contatto DESC
+    ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING
+  ) AS canale_accredito
+FROM punti_contatto;
+```
+
+```sql
+-- Modello lineare: il valore si divide in parti uguali
+WITH pesi AS (
+  SELECT *,
+    -- ogni tocco vale uno fratto il numero di tocchi
+    1.0 / COUNT(*) OVER (PARTITION BY conversion_id) AS peso
+  FROM punti_contatto
+)
+SELECT canale, SUM(valore_conversione * peso) AS ricavo_attribuito
+FROM pesi
+GROUP BY canale;
+```
+
+```sql
+-- Time decay: i contatti recenti pesano il doppio dei precedenti
+WITH ordinati AS (
+  SELECT *,
+    ROW_NUMBER() OVER (
+      PARTITION BY conversion_id ORDER BY istante_contatto DESC
+    ) AS rango_recenza -- 1 = ultimo tocco prima dell'acquisto
+  FROM punti_contatto
+),
+con_pesi AS (
+  SELECT *,
+    POWER(0.5, rango_recenza - 1) AS peso_grezzo,
+    SUM(POWER(0.5, rango_recenza - 1))
+      OVER (PARTITION BY conversion_id) AS peso_totale
+  FROM ordinati
+)
+SELECT canale,
+  SUM(valore_conversione * peso_grezzo / peso_totale) AS ricavo_attribuito
+FROM con_pesi
+GROUP BY canale;
+```
+
+Prima di adottare un modello conviene calcolarne tre in parallelo sulla stessa tabella. Se ultimo tocco e lineare assegnano allo stesso canale quote molto diverse la decisione dipende piu dal modello che dai dati e va discussa apertamente. Oltre pochi canali il calcolo equo dei contributi marginali esce da SQL e passa a strumenti esterni ma anche la tabella grezza delle combinazioni mostra quali accoppiate convertono davvero.
+
+```sql
+-- Base per Shapley semplificato: tasso di conversione per combinazione
+WITH combo AS (
+  SELECT user_id, conversion_id,
+    STRING_AGG(DISTINCT canale, ',' ORDER BY canale) AS insieme_canali,
+    MAX(valore_conversione) AS valore
+  FROM punti_contatto
+  GROUP BY user_id, conversion_id
+)
+SELECT insieme_canali,
+  COUNT(*) AS utenti,
+  SUM(CASE WHEN valore > 0 THEN 1 ELSE 0 END)::float / COUNT(*) AS tasso_conv,
+  SUM(valore) AS valore_totale
+FROM combo
+GROUP BY insieme_canali
+ORDER BY valore_totale DESC;
+```
+
+## Dai crediti ai percorsi con le sequenze che convertono
+L attribuzione dice quanto vale ciascun canale mentre l analisi dei percorsi chiede quali sequenze portano alla conversione tenendo conto dell ordine. L estrazione dei percorsi frequenti aggrega stringhe ordinate per istante. Il risultato tipico e concentrato con pochi percorsi che coprono meta delle conversioni. La coda di sequenze rare sotto qualche decina di casi va trattata con sospetto perche quasi sempre riflette fortuna e non segnale.
+
+```sql
+-- I dieci percorsi di conversione più frequenti
+WITH percorsi AS (
+  SELECT user_id, conversion_id,
+    -- la sequenza ordinata per istante è il percorso
+    STRING_AGG(canale, ' → ' ORDER BY istante_contatto) AS percorso,
+    COUNT(*) AS lunghezza
+  FROM punti_contatto
+  GROUP BY user_id, conversion_id
+)
+SELECT percorso,
+  COUNT(*) AS conversioni,
+  ROUND(COUNT(*) * 100.0 / SUM(COUNT(*)) OVER (), 1) AS pct_totale
+FROM percorsi
+GROUP BY percorso
+ORDER BY conversioni DESC
 LIMIT 10;
 ```
 
-In genere emergono percorsi come "Google Search → Direct" o "Facebook Ad → Google Search", e sapere quali sono i più battuti aiuta a capire dove conviene intervenire sulla strategia.
+Il passo successivo confronta i percorsi dei convertiti con quelli dei non convertiti. Una sequenza frequentissima in entrambi i gruppi non distingue nulla mentre una sequenza rara con tasso di conversione multiplo della media merita indagine con soglia minima di volume prima di spostare budget.
 
-## Quando l'attribuzione diventa un'etichetta vuota
+## Quando coorti e attribuzione e percorsi si rompono
+Il bias di sopravvivenza nasce quando la coorte usa informazioni future e seleziona retrospettivamente i migliori. La definizione puo usare solo informazioni disponibili all istante di origine. La finestra di attribuzione va calibrata sul ciclo di acquisto reale con giorni per consegne rapide e settimane per commercio elettronico e mesi per vendite complesse. La cannibalizzazione tra canali resta invisibile ai modelli a regole fisse perche intercettano domanda esistente invece di crearne di nuova e richiede esperimenti con spegnimento controllato. La granularita eccessiva dei percorsi moltiplica le sequenze fino a rendere ogni percorso unico e per questo conviene restare su cinque o sei etichette robuste.
 
-L'errore più comune è usare attribution queries e path analytics come etichette vuote, senza collegarle a decisioni concrete. Presentare grafici senza una decisione chiara, metriche senza baseline o conclusioni senza dichiarare le assunzioni produce analisi inutili o fuorvianti. La domanda di controllo è semplice: se il risultato fosse instabile, quale scelta sbaglierei? Se non sai rispondere in concreto, manca il legame tra analisi e azione.
+```sql
+-- Finestra di attribuzione parametrizzata: solo tocchi recenti contano
+WITH finestra AS (
+  SELECT *,
+    -- azzera il peso dei tocchi fuori finestra prima di normalizzare
+    CASE WHEN istante_contatto >= istante_conversione - INTERVAL '7 days'
+      THEN POWER(0.5, rango_recenza - 1) ELSE 0 END AS peso_finestra
+  FROM ordinati
+)
+SELECT canale, SUM(valore_conversione * peso_finestra
+  / NULLIF(SUM(peso_finestra) OVER (PARTITION BY conversion_id), 0))
+FROM finestra
+GROUP BY canale;
+```
 
-## Conclusioni
+## Mettere tutto in produzione senza perdere fiducia nei numeri
+Il passaggio in produzione stratifica i dati in viste per eventi grezzi e coorti stabili e tabelle di retention e crediti per canale. Ogni strato dipende solo da quello sotto e ridefinire la coorte in un solo punto propaga la correzione ovunque. I controlli non negoziabili impongono conservazione dei crediti sul ricavo vero e retention mai sopra uno e appartenenza a una sola coorte e nessuna conversione senza percorso.
 
-Attribution queries e path analytics diventano strumenti decisionali solo quando producono scelte più chiare e non restano termini tecnici. Il percorso resta lo stesso: identificare il problema reale, costruire uno schema di ragionamento, rendere l'analisi riproducibile, studiare un caso concreto e controllare la comprensione. È questa disciplina a trasformare dati complessi in decisioni difendibili in condizioni di incertezza.
+```sql
+-- Test di conservazione: il credito totale deve tornare col ricavo vero
+SELECT
+  SUM(ricavo_attribuito) AS totale_attribuito,
+  (SELECT SUM(valore_conversione) FROM conversioni) AS ricavo_vero,
+  ABS(SUM(ricavo_attribuito)
+    - (SELECT SUM(valore_conversione) FROM conversioni))
+    / (SELECT SUM(valore_conversione) FROM conversioni) AS scarto_relativo
+FROM mart_attribuzione;
+-- scarto_relativo sopra 0.001 significa pesi non normalizzati o join duplicate
+```
+
+Sul piano operativo conviene ricalcolare in modo incrementale solo utenti nuovi e finestre appena chiuse invece di ricostruire anni di storia ogni notte. I parametri che cambiano le decisioni come finestra e definizione di attivo e granularita vanno esposti come variabili documentate. Una buona prassi fissa soglie prima di guardare i dati con doppio modello concorde per spostare budget e lift con volume minimo per intervenire sui percorsi.
+Verdetto: usa ultimo tocco per chiusure e primo tocco per scoperta e decadimento temporale come compromesso operativo, ma sposta budget solo quando due modelli concordano.
+
+## Esempio verificato
+Procter e Gamble nel 2017 taglio circa 200 milioni di dollari di spesa pubblicitaria digitale senza registrare cali di vendite. Il caso mostro che gran parte dei contatti attribuiti dai report intercettava domanda esistente invece di crearne di nuova. La lezione per l attribuzione e diretta perche ultimo tocco e modelli a regole fisse sovrastimano i canali di chiusura. Solo esperimenti con spegnimento controllato e confronto contro gruppi non esposti misurano l incremento reale.
+
+## Verifica
+1. Perche la join interna tra coorte ed eventi gonfia la retention rispetto alla join esterna?
+2. Quando una coorte va esclusa dal calcolo per finestra di osservazione incompleta?
+3. Quale modello di attribuzione premia la chiusura e quale premia la scoperta?
+4. Perche la somma dei crediti deve tornare col ricavo vero entro una tolleranza stretta?

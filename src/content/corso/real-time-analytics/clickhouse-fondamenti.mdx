@@ -13,81 +13,51 @@ duration: 22 min
 prerequisites:
   - real-time-analytics/streaming
 learningObjectives:
-  - Spiegare come colonne, compressione e MergeTree lavorano insieme
-  - Applicare partizioni e ordine fisico per query veloci
-  - Scegliere ClickHouse per analisi su miliardi di righe
+  - Comprendere il problema analitico e il contesto decisionale
+  - Applicare esempi, metriche e controlli a casi reali
+binario: "ml-tabellare"
+autore: "Hermes"
+controllatoDa: "Argo"
+autorizzatoDa: "Giano"
+draft: false
 ---
 # ClickHouse: fondamenti e architettura
 
-Un team apre una dashboard su miliardi di righe e pretende una risposta in secondi, non in minuti. ClickHouse rende possibile questo scenario solo se capisci perché colonne, compressione, MergeTree, partizioni e ordine fisico lavorano insieme. Questa lezione traduce la promessa di velocità in vincoli concreti di modellazione, perché il punto non è accumulare definizioni ma capire quale decisione cambia quando il dato diventa più affidabile.
+Binario di questa lezione: **ml-tabellare**.
 
-## Il problema da risolvere
+## Cosa significa
+ClickHouse è un database colonnare che legge solo le colonne interrogate per restituire aggregazioni su miliardi di righe in tempi interattivi.
 
-Conoscere ClickHouse in astratto non basta. Il problema è decidere cosa fare quando il team ha dati incompleti, metriche ambigue o vincoli tecnici che rendono fragile la lettura del fenomeno. Conviene leggere la lezione come se dovessi spiegare perché una query è veloce o lenta senza nasconderti dietro il nome del database. Ogni scelta fisica, dall'`ORDER BY` alla granularità delle partizioni, va collegata ai pattern di lettura, alla cardinalità e al costo di manutenzione.
+## Come si calcola
+1. Identifica le query analitiche dominanti e le colonne che leggono davvero.
+2. Scegli il motore MergeTree e definisci partizionamento per tempo a granularità mensile.
+3. Ordina fisicamente con ORDER BY sulle chiavi di filtro più selettive.
+4. Carica con insert in batch e misura latenza e compressione per colonna.
+5. Verifica che ogni query tocchi solo partizioni e colonne necessarie prima della produzione.
 
 ## Row-oriented e column-oriented
+I sistemi tradizionali come PostgreSQL, MySQL o SQL Server sono row-oriented. Quando salvi una riga in una tabella `ordini` con `id_ordine`, `id_utente`, `importo` e `data_transazione`, tutti i valori vanno scritti in modo contiguo su disco. Questa disposizione è ottimale per carichi transazionali dove recuperi, inserisci o aggiorni intere righe, e la query `SELECT * FROM ordini WHERE id_ordine = 12345` resta efficientissima. Il mondo analytics pone domande diverse: raramente serve un singolo ordine, servono importo medio dell'ultimo mese o primi dieci utenti per spesa totale. In un sistema row-oriented il calcolo di `AVG(importo)` legge l'intera tabella con tutte le colonne anche se ne serve una sola, e su miliardi di righe lo spreco di I/O diventa il collo di bottiglia. ClickHouse memorizza per colonna e legge solo le colonne richieste.
 
-Per capire la rivoluzione di ClickHouse conviene prima confrontare le due filosofie dominanti nello storage dei dati. I sistemi tradizionali come PostgreSQL, MySQL o SQL Server sono *row-oriented*. Quando si salva una riga in una tabella `ordini`, contenente `id_ordine`, `id_utente`, `importo` e `data_transazione`, tutti questi valori vengono scritti consecutivamente su disco. Questa disposizione è ottimale per i carichi transazionali (OLTP), dove l'operazione tipica è recuperare, inserire o aggiornare un'intera riga. La query `SELECT * FROM ordini WHERE id_ordine = 12345` è efficientissima: il sistema localizza l'inizio della riga sul disco e legge un blocco contiguo di dati per ottenere tutte le informazioni.
+Verdetto: usa ClickHouse per scansioni analitiche su molte righe e poche colonne, tieni il row-oriented per transazioni puntuali su intere righe.
 
-Il mondo dell'analytics pone domande radicalmente diverse. Raramente ci interessa un singolo ordine. Vogliamo sapere qual è l'importo medio degli ordini nell'ultimo mese, oppure quali sono i dieci utenti con la spesa totale più alta. In un sistema row-oriented, per calcolare `AVG(importo)`, il database deve leggere dal disco l'intera tabella, caricando in memoria ogni colonna di ogni riga anche se serve solo la colonna `importo`. Su una tabella con miliardi di righe e decine di colonne, questo spreco di I/O è la principale causa di lentezza. ClickHouse memorizza invece i dati per colonna, così una query analitica legge solo le colonne che le servono.
+## MergeTree e ordine fisico
+La velocità di ClickHouse dipende da ordine fisico, compressione e partizioni, non dal nome del database. Ogni scelta fisica va collegata a pattern di lettura, cardinalità e costo di manutenzione. La chiave `ORDER BY` decide l'ordine su disco e quindi quali query saltano intere parti senza leggerle. Le partizioni per tempo isolano i dati recenti da quelli storici e rendono le scadenze gestibili. Gli insert in batch evitano troppe piccole parti che rallentano merge e query.
 
-## Come impostare il lavoro
+## Lab
+**Base:** scrivi in cinque righe quale decisione deve migliorare con ClickHouse, con metrica, unità di analisi, baseline e rischio principale legato a modellazione fisica.
 
-Conviene procedere per passaggi, dove ognuno rende più chiaro il costo di una decisione sbagliata.
+**Intermedio:** costruisci una tabella con segnale osservato su lentezza query, interpretazione prudente su ordine e partizioni, controllo con profilo di lettura e azione consigliata, con almeno un caso dove il segnale non basta.
 
-| Passaggio | Domanda da fare | Output atteso |
-|---|---|---|
-| Decisione | Che cosa cambia se modelliamo bene la tabella? | Scelta esplicita |
-| Segnale | Quale dato osservabile riduce l'incertezza? | Metrica o evento |
-| Baseline | Rispetto a cosa interpretiamo il risultato? | Confronto credibile |
-| Vincolo | Che cosa può falsare la lettura? | Assunzione da dichiarare |
-| Azione | Quale passo operativo segue? | Raccomandazione controllabile |
-
-In un progetto reale ClickHouse non vive isolato. È parte di un sistema più ampio fatto di decisioni, dati disponibili, vincoli tecnici, incentivi organizzativi e qualità dell'esecuzione. La prima domanda non è "quale metrica calcolo?" ma quale decisione dovrà essere presa grazie a questa analisi. Una dashboard o una query hanno valore solo se riducono incertezza decisionale; se non cambiano una scelta, sono documentazione o teatro analitico.
-
-## Formalizzare la decisione
-
-Formalizza la lezione come una relazione tra decisione, evidenza e rischio.
-
-| Elemento | Definizione operativa | Controllo minimo |
-|---|---|---|
-| Unità di analisi | Oggetto su cui misuri il fenomeno | Utente, account, evento, ordine o periodo |
-| Variabile osservata | Segnale che rappresenta il comportamento | Definizione stabile e tracciabile |
-| Baseline | Stato contro cui confronti il segnale | Periodo, segmento, controllo o benchmark |
-| Soglia decisionale | Punto in cui cambia l'azione | Criterio scritto prima della lettura |
-| Rischio residuo | Errore che può restare dopo l'analisi | Sensitivity check o revisione qualitativa |
-
-La formalizzazione non complica la lezione. Rende visibili le assunzioni, così uno stakeholder può discutere il criterio decisionale invece di fidarsi del risultato per autorità.
-
-## Come leggere i segnali
-
-Immagina un team che deve usare ClickHouse per decidere se cambiare una pipeline, una metrica o una dashboard. La domanda non è quale sia la definizione corretta, ma quale scelta diventa meno rischiosa se l'analisi è fatta bene.
-
-| Situazione | Lettura prudente | Decisione |
-|---|---|---|
-| Il dato migliora ma la baseline è debole | Il segnale potrebbe dipendere dal campione | Rafforzare il confronto prima di scalare |
-| La metrica cambia in un solo segmento | L'effetto medio nasconde eterogeneità | Separare coorti o casi d'uso |
-| Il costo operativo aumenta | Il beneficio va valutato sul margine | Applicare una soglia economica esplicita |
-| Il sistema produce numeri incoerenti | La fiducia nel dato è parte della decisione | Correggere ownership e controlli |
-
-## Traccia operativa
-
-La lezione mantiene il punto pratico: usare ClickHouse per collegare domanda, dato, baseline e decisione. La tabella seguente riassume i controlli da tenere sempre presenti.
-
-| Area | Controllo da mantenere |
-|---|---|
-| Domanda | Quale scelta deve cambiare dopo l'analisi |
-| Dato | Quale evento, tabella o metrica rende osservabile il problema |
-| Qualità | Quale errore di raccolta, modellazione o interpretazione può alterare il risultato |
-| Baseline | Quale confronto impedisce una lettura isolata |
-| Azione | Quale raccomandazione diventa più difendibile |
-
-Usa questa traccia insieme agli esercizi: se un esempio, una formula o un frammento tecnico non chiarisce almeno una di queste aree, va trattato come dettaglio secondario.
+**Research-grade:** trasforma il lavoro in un memo con assunzioni su cardinalità e pattern di lettura, criteri di esclusione, soglia di intervento su latenza, controllo di sensitività e monitoraggio dopo la decisione.
 
 ## Errore tipico
+L'errore tipico è usare ClickHouse come etichetta invece che come criterio di scelta, con numeri senza decisione, baseline e rischio residuo. La domanda di controllo resta semplice: se questo risultato fosse instabile, quale scelta sbaglierei.
 
-L'errore tipico è usare ClickHouse come etichetta tecnica invece che come criterio di scelta. Succede quando il team presenta un numero senza dire quale decisione cambia, quale baseline lo rende interpretabile e quale rischio resta aperto. In quel caso il dato sembra preciso ma non guida l'azione. La domanda di controllo è semplice: se questo risultato fosse instabile, quale scelta sbaglierei?
+## Esempio verificato
+Yandex sviluppa ClickHouse per interrogare i log di Yandex.Metrica e lo rilascia open source nel 2016. Il motore nasce per aggregazioni interattive su miliardi di eventi con tabelle partizionate per tempo e lettura per sole colonne necessarie. La documentazione lega ogni scelta fisica a quella scala: insert in batch, parti ordinate e query che evitano letture inutili. Da qui deriva il criterio operativo: modella per le letture dominanti e misura sempre quali partizioni e colonne ogni query tocca davvero.
 
-## Riepilogo
-
-ClickHouse è uno strumento decisionale, non un argomento da manuale. Lo storage column-oriented spiega perché le query analitiche sono veloci, ma il valore nasce solo quando colleghi problema, dati, metrica, segmentazione e azione. La forma corretta della lezione resta fatta di decisione, segnale, baseline, rischio e azione; tutto il resto serve solo se rende più affidabile uno di questi passaggi.
+## Verifica
+1. Quando conviene lo storage colonnare rispetto al row-oriented?
+2. Quale chiave ORDER BY sceglieresti per le tue query dominanti?
+3. Come verifichi che una query legga solo partizioni e colonne necessarie?
+4. Quale errore di modellazione rende lenta una dashboard su miliardi di righe?

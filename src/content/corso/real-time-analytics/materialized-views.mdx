@@ -5,6 +5,7 @@ description: >-
 module: "Modulo 12: Real-Time Analytics & ClickHouse Systems"
 order: 6
 category: Tecnico
+  Materialized Views - immagine ufficiale della lezione su GinnyTech
 headerImage: /course-headers/real-time-analytics-materialized-views-ginnytech-ad-v3.webp
 headerImageAlt: >-
   Materialized Views e Continuous Aggregates - immagine ufficiale della lezione su GinnyTech, creata da AD
@@ -13,22 +14,29 @@ duration: 22 min
 prerequisites:
   - real-time-analytics/dashboards
 learningObjectives:
-  - Materializzare aggregazioni con ritardo accettabile
-  - Applicare Continuous Aggregates e regole di refresh
-  - Scegliere cosa materializzare e con quali costi
+  - Comprendere il problema analitico e il contesto decisionale
+  - Applicare esempi, metriche e controlli a casi reali
+binario: "ml-tabellare"
+autore: "Hermes"
+controllatoDa: "Argo"
+autorizzatoDa: "Giano"
+draft: false
 ---
 # Materialized Views e Continuous Aggregates
 
-La stessa query di aggregazione viene lanciata centinaia di volte al giorno e ogni run ricalcola lavoro già noto. La domanda diventa: quale parte del risultato può essere materializzata, con quale ritardo accettabile e con quali regole di correzione? Le materialized views affrontano il trade-off tra risposta rapida e verità aggiornata, e vanno lette come una scelta operativa più che come un argomento da manuale.
+Binario di questa lezione: **ml-tabellare**.
 
-## Il trade-off di fondo: velocità contro freschezza
+## Cosa significa
+Le materialized view pre-aggregano gli eventi in strati per minuto e per ora così le dashboard leggono solo l'ultimo strato in tempi interattivi.
 
-Una vista materializzata è una query il cui risultato viene salvato su disco e aggiornato secondo una regola, invece di essere ricalcolato a ogni richiesta. Il vantaggio è evidente: la dashboard legge un risultato già pronto e risponde in millisecondi anche su miliardi di eventi. Il costo è altrettanto evidente: il risultato non è mai perfettamente aggiornato, e la regola di aggiornamento va progettata, monitorata e corretta.
+## Come si calcola
+1. Elenca le query più frequenti e la granularità minima che le rende utili.
+2. Costruisci il primo strato di aggregazione al minuto direttamente dallo stream.
+3. Deriva strati orari con deduplicazione utenti solo dove serve precisione.
+4. Dichiara come tratti eventi tardivi e cambi di definizione prima della go-live.
+5. Fai leggere le dashboard solo dall'ultimo strato e misura latenza e freschezza.
 
-Una vista materializzata è utile solo quando rende espliciti i compromessi che propone: cosa è pre-calcolato, quando si aggiorna, come gestisce dati in ritardo e cosa succede se la definizione cambia. Se il team non sa rispondere a queste quattro domande, la vista materializzata non è uno strumento: è un numero che sembra vero.
-
-## La catena di aggregazione a strati
-
+## Catena di aggregazione a strati
 Un funnel di conversione in tempo reale mostra bene il pattern. Gli eventi grezzi entrano da Kafka, una prima materialized view aggrega al minuto, una seconda aggrega all'ora deduplicando gli utenti, e la dashboard legge solo l'ultimo strato.
 
 ```
@@ -45,7 +53,6 @@ Dashboard: leggi da MV_funnel_hourly
 ```
 
 Il primo livello aggrega al minuto:
-
 ```sql
 CREATE MATERIALIZED VIEW mv_events_per_minute
 ENGINE = SummingMergeTree()
@@ -56,7 +63,6 @@ FROM kafka_events GROUP BY event_time, event_type;
 ```
 
 Il secondo aggrega all'ora con deduplicazione utenti:
-
 ```sql
 CREATE MATERIALIZED VIEW mv_funnel_hourly
 ENGINE = AggregatingMergeTree()
@@ -69,41 +75,30 @@ JOIN funnel_definitions USING (event_type)
 GROUP BY hour, funnel_step;
 ```
 
-La dashboard legge da `mv_funnel_hourly` con `uniqMerge(unique_users_state)`, con risultato in &lt;100ms su qualsiasi volume. Nota la scelta degli engine: SummingMergeTree per i conteggi, AggregatingMergeTree per le funzioni di stato come uniqState, che permettono di deduplicare gli utenti in modo incrementale senza ricalcolare tutto. La catena a strati è il pattern chiave: ogni livello riduce il volume, e la dashboard non tocca mai i dati grezzi.
+La dashboard legge da `mv_funnel_hourly` con `uniqMerge(unique_users_state)`, con risultato in &lt;100ms su qualsiasi volume.
 
 ## Rettifiche tardive: i late-arriving events
+In un sistema reale gli eventi possono arrivare in ritardo per dispositivi offline o latenza di rete. Se hai già emesso l'aggregazione per un minuto e dopo arriva un evento con tempo precedente, hai tre strade. Puoi ignorarlo e accettare errore minimo con massima semplicità. Puoi riemettere con retraction su sistemi esterni come Flink o Kafka Streams, perché ClickHouse non supporta update nativi in vista. Oppure puoi correggere in differita su tabella separata con merge orario, accettando errore temporaneo per velocità.
 
-In un sistema reale gli eventi possono arrivare in ritardo, per un dispositivo offline o per latenza di rete. Se hai già emesso l'aggregazione per il minuto 10:00 e alle 10:03 arriva un evento con event_time 10:00, cosa fai? Hai tre strade.
+Verdetto: ignora i ritardi dove un errore sotto l'uno per cento è accettabile, correggi in differita per reporting critici e usa retraction esterne solo dove serve precisione immediata.
 
-Puoi ignorarlo (at-least-once): l'evento tardivo è perso, è semplice ma inaccurato. Puoi riemettere: la materialized view emette un UPDATE all'aggregazione precedente, ma ClickHouse non supporta UPDATE nativi in MV, quindi devi appoggiarti a un sistema esterno come Flink o Kafka Streams con retraction. Oppure puoi correggere in differita: scrivi l'evento tardivo su una tabella separata e ogni ora fai un merge corretto, accettando un errore temporaneo in cambio della velocità.
+## Lab
+**Base:** scrivi in una pagina decisione da supportare, metrica primaria, baseline, rischio principale e azione se il segnale è confermato su viste aggregate.
 
-La scelta dipende dal requisito di accuratezza rispetto alla latenza. Per dashboard operative, ignorare è spesso accettabile (errore &lt;1%). Per reporting finanziario, conviene la correzione differita. La regola professionale è dichiarare la politica in anticipo: quale errore massimo accettiamo, per quanto tempo, e come lo correggiamo. Una dashboard che non dichiara la politica dei late events non è in ritardo: è in errore, e nessuno lo sa.
+**Intermedio:** costruisci una tabella con tre segmenti o periodi, cosa cambia, spiegazione alternativa e controllo prima di raccomandare un'azione su funnel live.
 
-## Che cosa materializzare: la scelta che decide tutto
+**Research-grade:** prepara un memo con ipotesi, dati richiesti, esclusioni, controlli di qualità, soglia decisionale, rischio residuo e monitoraggio su stream eventi e log applicativi o sintetico con tempo, segmento e outcome.
 
-La domanda più importante non è "come si crea una materialized view", ma "quale parte del risultato merita di essere materializzata". Il criterio è economico: materializza ciò che viene letto spesso, calcolato su molti dati, e che cambia lentamente. Non materializzare ciò che è raro, piccolo o volatile.
+## Errore tipico da evitare
+L'errore più comune è usare le viste come etichetta invece che come processo, con grafici senza decisione e metriche senza baseline. A livello tecnico evita medie globali premature che nascondono segmenti opposti, tracking con duplicati e timezone incoerenti e scambi tra correlazione e causalità. Ogni analisi porta definizione esplicita, confronto per segmento e verifica contro periodo precedente o controllo.
 
-| Criterio | Materializza | Non materializzare |
-|---|---|---|
-| Frequenza di lettura | Query lanciate centinaia di volte al giorno | Query una tantum |
-| Volume di base | Aggregazioni su miliardi di eventi | Filtri su poche righe |
-| Volatilità | Metriche che cambiano per minuto/ora | Dati che cambiano una volta al mese |
-| Costo del ricalcolo | Join costosi, deduplicazioni pesanti | Count semplici su tabelle piccole |
+Riferimenti: ClickHouse (2024), Materialized Views su clickhouse.com/docs; Akidau e colleghi (2015), The Dataflow Model su VLDB 2015.
 
-Il costo nascosto è la manutenzione: ogni vista materializzata è un pezzo di logica duplicata che va aggiornata quando la definizione cambia. Dieci viste mal progettate costano più di una query lenta. La disciplina è tenere il numero di viste basso, documentare la regola di refresh e la politica dei late events per ciascuna, e monitorare il ritardo di aggiornamento come si monitora una metrica di produzione.
+## Esempio verificato
+Akidau e colleghi pubblicano nel 2015 il Dataflow Model su VLDB per unificare batch e streaming con finestre, watermark ed eventi tardivi. Il modello introduce retraction e correzione differita come primitive esplicite per aggregazioni continue. ClickHouse riprende lo stesso compromesso con viste a strati e motori aggreganti che privilegiano velocità con correzioni pianificate. Il criterio resta quello: pre-aggrega per le letture dominanti e dichiara prima come tratti ritardi e ridefinizioni.
 
-## L'errore da evitare
-
-L'errore più comune è usare le materialized views come etichetta invece che come processo. Succede quando il team mostra un grafico senza decisione, una metrica senza baseline o una conclusione senza indicare quale assunzione potrebbe invalidarla. Il primo errore tecnico è lavorare su dati aggregati troppo presto, perché una media globale può nascondere due segmenti che si muovono in direzioni opposte. Il secondo è non controllare la qualità del dato: eventi duplicati, tracking incompleto, timezone incoerenti e cambi di definizione producono conclusioni false. Il terzo è confondere correlazione e causalità: se gli utenti che usano una feature convertono di più, non significa che la feature causi conversione, potrebbero usarla perché già più motivati.
-
-C'è poi l'errore specifico delle viste materializzate: fidarsi del numero perché "è materializzato". Una vista materializzata non è più vera di una query live: è più veloce. La freschezza è un compromesso, non un dettaglio, e il compromesso va dichiarato. Se la dashboard mostra un numero di ieri senza dirlo, la decisione che prendi su quel numero è già sbagliata prima di iniziare.
-
-## Riepilogo
-
-Le materialized views vanno trattate come strumento decisionale, non come argomento da manuale. Il valore nasce quando colleghi problema, dati, metrica, segmentazione e azione. Una buona analisi non termina con "il numero è salito" o "il numero è sceso". Termina con una frase operativa: quale decisione prendiamo, con quale livello di confidenza e quale metrica useremo per sapere se avevamo ragione.
-
-La catena a strati — eventi grezzi, aggregazione al minuto, aggregazione all'ora, dashboard — è il pattern che tiene insieme velocità e verità: ogni livello dichiara il suo ritardo, e la dashboard sa esattamente che cosa sta leggendo. La politica dei late events, la scelta di che cosa materializzare e il monitoraggio del ritardo sono i tre controlli che separano una vista materializzata ben gestita da un numero che sembra vero. Tutto il resto serve solo se rende più affidabile uno di questi passaggi.
-
-*Riferimenti:*
-- ClickHouse. (2024). "Materialized Views." *clickhouse.com/docs.*
-- Akidau, T. et al. (2015). "The Dataflow Model." *VLDB 2015.*
+## Verifica
+1. Quale granularità pre-aggreghi al primo strato e perché?
+2. Quando usi deduplicazione utenti e quando basta un conteggio?
+3. Come tratti eventi tardivi senza rompere le dashboard?
+4. Quale ORDER BY rende veloce la lettura dell'ultimo strato?

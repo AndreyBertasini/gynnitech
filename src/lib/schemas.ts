@@ -19,6 +19,11 @@ export const blogSchema = z.object({
 export const corsoSchema = z.object({
     title: z.string(),
     description: z.string(),
+    binario: z.enum(['ml-tabellare', 'sistemi-llm']).optional(),
+    draft: z.boolean().optional(),
+    autore: z.string().optional(),
+    controllatoDa: z.string().optional(),
+    autorizzatoDa: z.string().optional(),
     module: z.string().optional(),
     order: z.number().optional(),
     category: z.string().optional(),

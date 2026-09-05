@@ -13,17 +13,30 @@ duration: 22 min
 prerequisites:
   - kafka-streaming/kafka-producers-consumers
 learningObjectives:
-  - Integrare database, SaaS e sistemi operativi con Kafka Connect
-  - Configurare connector standardizzati senza microservizi ad hoc
-  - Gestire errori e riavvii dei connector in produzione
+  - Comprendere il problema analitico e il contesto decisionale
+  - Applicare esempi, metriche e controlli a casi reali
+binario: "ml-tabellare"
+autore: "Hermes"
+controllatoDa: "Argo"
+autorizzatoDa: "Giano"
+draft: false
 ---
-`import pandas as pd`
-
 # Kafka Connect: integrazione senza codice
+Binario di questa lezione: **ml-tabellare**.
 
-Prima o poi un team deve portare dentro Kafka i dati che vivono in un database, in un SaaS o in un sistema operativo, e la tentazione è scrivere un microservizio diverso per ogni fonte. Kafka Connect promette di evitarlo offrendo un'integrazione standardizzata e configurabile. La promessa "senza codice" però va presa con cautela: il valore reale dipende da come gestisci configurazione, offset, errori e osservabilità. Questa lezione mostra dove finisce il no code e dove comincia l'ingegneria vera.
+## Cosa significa
+Kafka Connect è un runtime dichiarativo che sposta l'integrazione da codice duplicato a connector configurati, osservabili e recuperabili.
+
+## Come si calcola
+1. Scegli il connector source o sink adatto alla sorgente e alla destinazione.
+2. Configura converter, transform leggere e topic di destinazione.
+3. Attiva la dead letter queue con tolleranza agli errori su ogni sink.
+4. Calibra `tasks.max` sul throughput reale e sulle partizioni disponibili.
+5. Monitora lag e tasso di errore con soglie di escalation esplicite.
 
 ## Il problema che Connect risolve
+
+Prima o poi un team deve portare dentro Kafka i dati che vivono in un database, in un SaaS o in un sistema operativo, e la tentazione è scrivere un microservizio diverso per ogni fonte. Kafka Connect promette di evitarlo offrendo un'integrazione standardizzata e configurabile. La promessa "senza codice" però va presa con cautela: il valore reale dipende da come gestisci configurazione, offset, errori e osservabilità. Questa lezione mostra dove finisce il no code e dove comincia l'ingegneria vera.
 
 Senza Connect, ogni nuova sorgente richiede un consumer o un producer scritto a mano, con la sua logica di retry, di gestione errori e di tracciamento degli offset. Moltiplica questo per dieci sistemi e ottieni dieci pezzi di codice quasi identici da mantenere, ognuno con i suoi bug. Connect sposta quel lavoro in una configurazione dichiarativa eseguita da un runtime già pronto.
 
@@ -77,92 +90,7 @@ Le single message transform vanno bene per operazioni semplici come rinominare u
 
 La prima domanda non è "quale connector uso" ma "quale decisione dovrà migliorare grazie a questa integrazione". Una pipeline ha valore se riduce l'incertezza di una scelta concreta, non se aggiunge un'altra freccia tra due riquadri in un diagramma. Conviene definire in modo esplicito l'unità di lavoro (il topic, l'evento, lo schema, il connector stesso), il segnale che osservi (lag, throughput, tasso di errore, compatibilità dello schema) e la baseline rispetto a cui leggi quel segnale.
 
-Un modo ordinato di procedere segue questa sequenza:
-
-1. definire il problema di integrazione in linguaggio di business;
-2. identificare l'unità corretta, che sia evento, record o tabella sorgente;
-3. controllare se il connector cattura davvero il fenomeno o solo una parte;
-4. costruire una metrica di salute interpretabile, tipicamente lag e tasso di errore;
-5. segmentare per fonte e per tipo di evento, perché un problema può nascondersi in un solo canale;
-6. trasformare il risultato in una raccomandazione verificabile.
-
-## Un caso di scelta
-
-Un team vuole sincronizzare gli eventi del CRM e gli ordini nel data lake usando connector già esistenti. Prima di procedere conviene controllare il mapping degli schemi, la gestione degli errori, il throughput atteso, la gestione delle credenziali e la possibilità di replay. Un'integrazione che sembra "semplice" può diventare il punto meno governato dell'intera piattaforma proprio perché nessuno la considera codice da presidiare.
-
-La lettura dei segnali segue la solita prudenza. Se una metrica migliora, potrebbe essere un effetto reale o una normale oscillazione, e conviene cercare un confronto e un segmento. Se un solo segmento si muove più degli altri, la media aggregata sta nascondendo una differenza, quindi vanno separate le coorti. Se il costo cresce insieme al risultato, l'impatto va valutato sul margine.
-
-## Esempio SQL: una vista di controllo
-
-Il pattern seguente è generico ma eseguibile sulla maggior parte dei warehouse moderni. Serve a costruire una base analitica con metrica, segmento e finestra temporale, così da confrontare periodi e gruppi senza riscrivere ogni volta la logica.
-
-```sql
-WITH base_events AS (
-  SELECT
-    user_id,
-    account_id,
-    event_type,
-    event_time,
-    DATE_TRUNC('week', event_time) AS week,
-    source,
-    device_type
-  FROM events
-  WHERE event_time >= CURRENT_DATE - INTERVAL '180 days'
-    AND user_id IS NOT NULL
-),
-weekly_user_metrics AS (
-  SELECT
-    week,
-    user_id,
-    COALESCE(source, 'unknown') AS source,
-    COALESCE(device_type, 'unknown') AS device_type,
-    COUNT(*) AS total_events,
-    COUNT(DISTINCT DATE(event_time)) AS active_days,
-    COUNT(DISTINCT event_type) AS event_diversity,
-    MAX(CASE WHEN event_type IN ('purchase', 'subscribe', 'activation') THEN 1 ELSE 0 END) AS reached_key_outcome
-  FROM base_events
-  GROUP BY week, user_id, source, device_type
-)
-SELECT
-  week,
-  source,
-  device_type,
-  COUNT(DISTINCT user_id) AS users,
-  ROUND(AVG(active_days), 2) AS avg_active_days,
-  ROUND(AVG(event_diversity), 2) AS avg_event_diversity,
-  ROUND(AVG(reached_key_outcome) * 100, 2) AS key_outcome_rate
-FROM weekly_user_metrics
-GROUP BY week, source, device_type
-ORDER BY week, source, device_type;
-```
-
-La query non dà la risposta finale. Crea una superficie di osservazione fatta di trend, segmenti e differenze tra canali, da cui formulare ipotesi più precise sulla salute dell'integrazione.
-
-## Esempio Python: stabilità e anomalie
-
-Una metrica utile deve essere abbastanza stabile da orientare le decisioni e abbastanza sensibile da segnalare cambiamenti reali. In Python possiamo controllare le variazioni anomale settimana su settimana, utile per accorgersi quando un connector inizia a degradare.
-
-```python
-
-# df contiene: week, segment, users, key_outcome_rate
-# key_outcome_rate espresso in percentuale, es. 12.4
-
-df = df.sort_values(['segment', 'week']).copy()
-df['previous_rate'] = df.groupby('segment')['key_outcome_rate'].shift(1)
-df['wow_change_pp'] = df['key_outcome_rate'] - df['previous_rate']
-df['rolling_mean'] = df.groupby('segment')['key_outcome_rate'].transform(
-    lambda s: s.rolling(4, min_periods=2).mean()
-)
-df['rolling_std'] = df.groupby('segment')['key_outcome_rate'].transform(
-    lambda s: s.rolling(4, min_periods=2).std()
-)
-df['z_score'] = (df['key_outcome_rate'] - df['rolling_mean']) / df['rolling_std']
-
-anomalies = df[df['z_score'].abs() >= 2].sort_values('z_score')
-print(anomalies[['week', 'segment', 'key_outcome_rate', 'wow_change_pp', 'z_score']])
-```
-
-Il valore è pratico: il controllo evita di reagire a ogni rumore casuale e segnala solo le variazioni che meritano un'indagine. Lo stesso meccanismo può alimentare alert sul lag, review settimanali e retrospettive sulle pipeline.
+Prima di procedere con un connector esistente conviene controllare il mapping degli schemi, la gestione degli errori, il throughput atteso, la gestione delle credenziali e la possibilità di replay. Un'integrazione che sembra semplice può diventare il punto meno governato dell'intera piattaforma proprio perché nessuno la considera codice da presidiare.
 
 ## Errori comuni
 
@@ -170,10 +98,17 @@ Il primo errore è trattare il "no code" come "no engineering" e non presidiare 
 
 Per ridurre questi rischi conviene mantenere almeno tre controlli minimi: una definizione esplicita della metrica di salute, un confronto per fonte e una verifica contro un periodo precedente. E soprattutto una dead letter queue su ogni sink, perché senza un posto dove far cadere gli errori, prima o poi sarà l'intera pipeline a cadere.
 
-## Riepilogo
-
-Kafka Connect va trattato come uno strumento decisionale, non come una scorciatoia per evitare di scrivere codice. Il valore nasce quando colleghi problema, dati, metrica e azione, e quando progetti l'integrazione perché fallisca in modo visibile e recuperabile. Una buona pipeline non si misura dal fatto che oggi funziona, ma dalla chiarezza con cui ti dice quando smette di funzionare e cosa farne.
+Verdetto: usa i connector per source e sink standard con dead letter queue sempre attiva, limita le transform ai ritocchi senza stato e sposta ogni logica con stato su Kafka Streams o Flink.
 
 *Riferimenti:*
 - Confluent. (2024). "Kafka Connect Documentation." *docs.confluent.io.*
 - ClickHouse. (2024). "Kafka Connect Sink." *clickhouse.com/docs.*
+
+## Esempio verificato
+Debezium è diventato il source connector di riferimento per portare il change data capture da PostgreSQL e MySQL dentro Kafka senza producer scritti a mano. Sul lato opposto, il sink verso ClickHouse documentato da ClickHouse mostra il pattern speculare: consumo continuo dal topic e scrittura analitica con dead letter queue per i record invalidi. Confluent, fondata nel 2014 dagli autori di Kafka, ha fatto di questo runtime dichiarativo uno strato standard della piattaforma. Il filo comune è la lezione del modulo: l'integrazione è affidabile quando fallisce in modo visibile e recuperabile.
+
+## Verifica
+1. Quale sistema esterno colleghi e usi un source o un sink connector?
+2. Dove finiscono i record invalidi e chi li ispeziona?
+3. Quale trasformazione fai dentro Connect e perché non richiede stato?
+4. Quale metrica di lag o errore ti dice che il connector sta degradando?

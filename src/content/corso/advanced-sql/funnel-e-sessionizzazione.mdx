@@ -6,7 +6,7 @@ description: >-
   formalizzazione rigorosa, caso applicato, lab a 3 livelli e checkpoint finale.
 module: "Modulo 14: Advanced SQL for Analytical Systems"
 order: 10
-category: Tecnico
+category: Decisione
 headerImage: /course-headers/advanced-sql-funnel-e-sessionizzazione-ginnytech-ad.webp
 headerImageAlt: >-
   Funnel, Sessionizzazione e Percorsi Utente - immagine ufficiale della lezione
@@ -16,80 +16,301 @@ duration: 18 min
 prerequisites:
   - advanced-sql/coorti-e-retention
 learningObjectives:
-  - Analizzare dati JSON, array e semi-structured in SQL
-  - Estrarre proprietà annidate da eventi e ordini complessi
-  - Applicare pattern di parsing a dati non relazionali
+  - Comprendere il problema analitico e il contesto decisionale
+  - Applicare esempi, metriche e controlli a casi reali
+binario: "ml-tabellare"
+autore: "Hermes"
+controllatoDa: "Argo"
+autorizzatoDa: "Giano"
+draft: false
 ---
-import { SqlExercise } from '../../../components/SqlExercise';
 
-# JSON, array e semi-structured analytics
+# Funnel e sessionizzazione in SQL
 
-I dati che arrivano alle query analitiche non hanno più la forma ordinata della tabella relazionale classica. Un ordine porta dentro di sé un array di prodotti, un evento porta un oggetto di proprietà, una risposta API porta JSON annidato su più livelli. Lavorare con questo materiale è una scelta, non solo un esercizio di sintassi: decidi quale campo estrai, come interpreti i valori opzionali e a quale rischio ti esponi quando il formato cambia sotto i tuoi piedi.
+Binario di questa lezione: **ml-tabellare**.
 
-## Quando il dato non è una tabella
+## Cosa significa
 
-Le query analitiche raramente partono da tabelle pulite. Il formato è semi-strutturato: JSON, array, oggetti che contengono altri oggetti. Il problema concreto è scrivere query affidabili quando i campi sono opzionali, quando la granularità non è ovvia e quando la struttura non è garantita riga per riga. Qui la difficoltà non è tecnica in senso stretto. È capire quali dati usare, come leggerli e quali errori evitare prima di portare un numero davanti a una decisione.
+Questa lezione mostra come trasformare timestamp grezzi in sessioni con soglia di inattività e come calcolare funnel stretti e conversioni con finestra di attribuzione dichiarata.
 
-## Una mappa per orientarsi
+## Come si calcola
 
-Prima di estrarre qualunque campo serve fissare quattro punti, perché un valore staccato dal contesto non significa nulla.
+1. Fissa la tabella eventi con `user_id`, `event_name` ed `event_time` in `timestamptz` e deduplica su tripla prima di ogni finestra.
+2. Calcola il gap dal precedente con `LAG` per utente in ordine di tempo e apri una nuova sessione quando il gap supera la soglia o è nullo.
+3. Numera le sessioni con somma cumulata del flag di apertura e aggrega una riga per sessione con inizio, fine e conteggio eventi.
+4. Mappa ogni evento a numero di passo e calcola il passo più profondo raggiunto in ordine per il funnel stretto oppure usa aggregazioni con `FILTER` per il funnel lasco.
+5. Attribuisci le conversioni tra visite con self join temporale entro finestra dichiarata e quadra ingressi, uscite e transizioni prima di pubblicare il tasso.
 
-| Fase | Cosa chiarire | Output |
-|---|---|---|
-| Domanda | Quale scelta reale deve migliorare? | Decisione da prendere |
-| Misura | Quale segnale osservabile rappresenta il problema? | Metrica o dato sorgente |
-| Controllo | Quale baseline rende il risultato interpretabile? | Confronto credibile |
-| Azione | Che cosa cambia dopo l'analisi? | Prossimo passo operativo |
+Un funnel racconta quanti utenti attraversano una sequenza di passi — vista prodotto, aggiunta al carrello, checkout, pagamento — e dove si perdono per strada. La sessionizzazione risponde a una domanda più a monte: cosa conta come una singola visita, quando tutto quello che hai è una lista di timestamp? Senza una definizione esplicita di sessione, ogni tasso di conversione è un numero appeso al nulla, perché il denominatore cambia senza che nessuno se ne accorga. In questa pagina costruiamo entrambi in SQL puro, con pattern che reggono su tabelle eventi reali: orari che arrivano in disordine, utenti che tornano dopo mesi, qualche evento che manca del tutto. Il dialetto di riferimento è PostgreSQL, ma quasi tutto gira anche altrove con ritocchi minimi.
 
-È lo stesso ciclo che separa un dato grezzo da un insight su cui qualcuno può agire.
-
-## Definire l'unità di analisi
-
-Con i dati semi-strutturati il primo passo è dichiarare l'unità di analisi. Può essere una riga, una partizione, una finestra temporale, un join o una coorte. Solo dopo scegli il segnale da osservare, che sia correttezza, performance, presenza di duplicati, granularità o stabilità del risultato. Infine fissi la baseline di confronto e la decisione che ti aspetti di prendere.
-
-| Elemento | Specifica richiesta |
-|---|---|
-| Unità di analisi | riga, partizione, finestra, join, coorte o metrica temporale |
-| Segnale principale | correttezza, performance, duplicati, granularità e stabilità |
-| Baseline | periodo precedente, gruppo comparabile, benchmark o scenario controfattuale |
-| Decisione | query, modello intermedio, test SQL o pattern riusabile |
-| Rischio | scambiare un numero disponibile per una prova sufficiente |
-
-Definito questo, l'analisi diventa riproducibile e le sue assunzioni restano discutibili invece di sparire dentro la query.
-
-## Esplodere un array di ordini
-
-Considera un ordine Deliveroo che contiene un array di `items`. L'ordine è una riga sola, ma per analizzare i singoli prodotti serve esplodere l'array in righe separate. In PostgreSQL il pattern è questo:
+Lavoreremo su una tabella `events` che vale la pena fissare subito, perché ogni query dell'articolo la usa:
 
 ```sql
-SELECT
-  o.order_id,
-  o.order_time,
-  item->>'name' AS item_name,
-  (item->>'quantity')::int AS quantity,
-  (item->>'price')::numeric AS price
-FROM orders o
-CROSS JOIN LATERAL jsonb_array_elements(o.items) AS item;
+-- Tabella eventi: una riga per azione utente, mai aggregata a monte
+-- event_time è timestamptz: i fusi orari mescolati sono la prima fonte di funnel sbagliati
+CREATE TABLE events (
+  user_id    bigint,       -- utente o visitatore loggato
+  event_name text,         -- 'view_item', 'add_to_cart', 'checkout', 'purchase', ...
+  event_time timestamptz,  -- quando è successo, con fuso
+  session_id text          -- spesso NULL a monte: lo ricostruiamo noi
+);
 ```
 
-Con questa trasformazione è emerso che il 12% degli item più ordinati generava il 56% del fatturato. Senza l'unnesting lo stesso risultato avrebbe richiesto un ETL molto più pesante.
+## Perché i funnel mentono più spesso delle query che li calcolano
 
-## Costruire l'analisi a tre profondità
+Il calcolo di un funnel sembra aritmetica elementare: conti chi fa il passo 1, conti chi fa anche il 2, dividi. Il problema è che ogni parola di quella frase nasconde una decisione. "Chi fa il passo 2" significa entro quanto tempo dal passo 1? Nella stessa sessione, entro 24 ore, entro 30 giorni, senza alcun limite? Cambiando solo la finestra, lo stesso dataset passa da un tasso del 18% a uno del 41%, ed entrambe le query sono sintatticamente corrette. La differenza è semantica, e va scritta prima del `SELECT`, non scoperta dopo.
 
-Parti da una scheda sintetica della lezione: la decisione che supporti, la metrica principale, la baseline, il rischio e l'azione da prendere se il segnale viene confermato. Questo fissa il legame tra il dato e la scelta prima ancora di scrivere SQL.
+La seconda ambiguità riguarda l'ordine. Un funnel stretto richiede la sequenza esatta A → B → C; uno lasco accetta chi ha fatto A, B e C in qualunque ordine. Per un checkout e-commerce la sequenza conta: nessuno paga prima di aver visto un prodotto, e se i dati dicono il contrario c'è un bug di tracciamento, non un utente creativo. Per un funnel editoriale — homepage, articolo, newsletter — l'ordine è molto meno informativo, e imporlo taglia fuori percorsi legittimi. La scelta tra stretto e lasco non è tecnica, è una tesi sul comportamento che stai misurando.
 
-Da lì sali di un livello. Costruisci una tabella con tre segmenti o periodi e, per ciascuno, scrivi cosa cambia, una spiegazione alternativa plausibile e quale controllo useresti prima di raccomandare un'azione. Le spiegazioni alternative servono a non scambiare il rumore per un effetto.
+Poi c'è il denominatore. Il tasso di conversione è una frazione, e le frazioni hanno due leve: $conv = N(convertiti) / N(entrati)$. Quasi tutti guardano il numeratore e danno per scontato il denominatore. Ma "entrati" chi sono: tutti i visitatori, solo chi ha visto almeno un prodotto, solo le sessioni con almeno due eventi? Un bot che rimbalza sulla homepage in mezzo secondo entra nel denominatore? Ogni risposta sposta il tasso di punti percentuali, e nessuna è neutra. La regola operativa è una sola: ogni funnel pubblicato deve dichiarare denominatore, finestra temporale e regola d'ordine in una riga, altrimenti non è confrontabile con niente — nemmeno con se stesso il mese dopo.
 
-Il passo più ambizioso è un memo decisionale completo: ipotesi, dati necessari, criteri di esclusione, controlli di qualità, soglia decisionale, rischio residuo e piano di monitoraggio. Per gli esercizi usa dati di ordini, eventi, sessioni, coorti, revenue e tabelle temporali. Se non ne hai, genera un dataset sintetico di almeno 200 righe con una dimensione temporale, una di segmento e una metrica di outcome.
+## Dalla lista di timestamp alle sessioni: la soglia di inattività
 
-## L'errore che svuota l'analisi
+La sessionizzazione time-based è la convenzione più diffusa: una sessione è una sequenza di eventi dello stesso utente dove ogni evento dista dal precedente meno di una soglia — tipicamente 30 minuti. Superata la soglia, si apre una sessione nuova. È una convenzione, non una legge fisica: 30 minuti funzionano per un e-commerce, sono assurdi per un tool B2B dove l'utente tiene la scheda aperta tutto il giorno. Il valore va scelto guardando la distribuzione dei gap tra eventi consecutivi, non copiato da un blog.
 
-Il rischio più comune è trattare i dati semi-strutturati come un'etichetta invece che come un processo. Capita quando si mostra un grafico senza una decisione collegata, una metrica senza baseline o una conclusione che nasconde le assunzioni critiche. La domanda da farsi è semplice: se il risultato fosse instabile, quale decisione sbaglierei? Se non riesci a rispondere in concreto, manca proprio il ponte tra analisi e azione.
+Il mattone di base è `LAG()`: per ogni evento, l'orario dell'evento precedente dello stesso utente.
 
-## Verifica di comprensione
+```sql
+-- Per ogni evento, quanto tempo è passato dal precedente dello stesso utente
+SELECT
+  user_id,
+  event_time,
+  -- LAG apre una finestra per utente, ordinata nel tempo
+  LAG(event_time) OVER (PARTITION BY user_id ORDER BY event_time) AS prev_time,
+  event_time - LAG(event_time) OVER (
+    PARTITION BY user_id ORDER BY event_time
+  ) AS gap  -- intervallo: NULL per il primo evento dell'utente
+FROM events;
+```
 
-Per controllare se la lezione è entrata, prova a rispondere a queste domande. Qual è la decisione concreta che questo lavoro aiuta a migliorare? Quale unità di analisi rende il problema misurabile? Quale baseline evita una lettura ingenua dei dati? Quale errore tipico può invalidare la conclusione? E come sintetizzeresti il risultato per uno stakeholder che non conosce SQL?
+Il `NULL` sulla prima riga di ogni utente non è un errore da rattoppare: è il segnale "nuova sessione". La query successiva lo usa esattamente così — ogni riga dove il gap supera la soglia (o è `NULL`) apre una sessione:
 
-## Riepilogo operativo
+```sql
+-- Flag di apertura sessione: 1 dove inizia una visita nuova
+WITH gaps AS (
+  SELECT
+    user_id, event_name, event_time,
+    event_time - LAG(event_time) OVER (
+      PARTITION BY user_id ORDER BY event_time
+    ) AS gap
+  FROM events
+)
+SELECT
+  user_id, event_name, event_time,
+  -- gap IS NULL = primo evento mai visto per l'utente
+  CASE WHEN gap IS NULL OR gap > interval '30 minutes'
+       THEN 1 ELSE 0 END AS is_new_session
+FROM gaps;
+```
 
-I dati semi-strutturati sono ovunque perché sono flessibili, ma quella flessibilità va disciplinata per arrivare a decisioni affidabili. Estrarre campi JSON, esplodere array e attraversare oggetti annidati sono tecniche di base. Da sole, senza un modello concettuale e un'unità di analisi dichiarata, producono rumore più che insight. Il ciclo decisione, dato, controllo, azione è quello che ti tiene in controllo quando la struttura del dato non è garantita.
+Due dettagli che in produzione mordono. Primo: gli eventi contemporanei. Se due eventi hanno lo stesso `event_time`, l'ordinamento è indeterminato e due esecuzioni possono sessionizzare diversamente. Aggiungi un tiebreaker stabile — un id monotonico se esiste — all'`ORDER BY` della finestra. Secondo: la soglia va parametrizzata in una CTE (`params AS (SELECT interval '30 minutes' AS timeout)`), non sparsa in cinque punti della query, o il giorno in cui il prodotto chiede "e con 15 minuti?" rifarai tutto a mano.
+
+## Islands-and-gaps senza paura: numerare le sessioni
+
+Il flag `is_new_session` dice dove iniziano le sessioni, ma non dà loro un nome. Il passaggio da flag a identificativo è il classico pattern islands-and-gaps: una somma cumulata del flag, partizionata per utente, produce un numero di sessione crescente.
+
+```sql
+-- Dal flag all'id di sessione con una somma cumulata
+WITH gaps AS (
+  SELECT
+    user_id, event_name, event_time,
+    event_time - LAG(event_time) OVER (
+      PARTITION BY user_id ORDER BY event_time, event_id
+    ) AS gap
+  FROM events
+),
+flagged AS (
+  SELECT
+    user_id, event_name, event_time,
+    CASE WHEN gap IS NULL OR gap > interval '30 minutes'
+         THEN 1 ELSE 0 END AS is_new_session
+  FROM gaps
+)
+SELECT
+  user_id, event_name, event_time,
+  -- la cumulata del flag numera le sessioni 1, 2, 3... per utente
+  SUM(is_new_session) OVER (
+    PARTITION BY user_id ORDER BY event_time, event_id
+  ) AS session_seq
+FROM flagged;
+```
+
+Nota `event_id` nell'`ORDER BY`: è il tiebreaker del paragrafo precedente, e deve essere identico in tutte le finestre della query, altrimenti flag e numerazione possono divergere silenziosamente. Una volta numerate, le sessioni diventano una dimensione analizzabile: durata, numero di eventi, rimbalzo.
+
+```sql
+-- Una riga per sessione: durata, ampiezza, rimbalzo
+WITH sessioned AS ( /* la query precedente */ )
+SELECT
+  user_id,
+  session_seq,
+  MIN(event_time) AS session_start,
+  MAX(event_time) AS session_end,
+  MAX(event_time) - MIN(event_time) AS duration,
+  COUNT(*) AS n_events,
+  -- sessione di un solo evento = rimbalzo
+  (COUNT(*) = 1)::int AS is_bounce
+FROM sessioned
+GROUP BY user_id, session_seq;
+```
+
+Questa tabella — una riga per sessione — è il denominatore onesto di cui parlava il primo paragrafo: da qui in poi i tassi si calcolano sulle sessioni, non sugli eventi grezzi. Quando questo metodo non funziona? Quando il concetto stesso di "visita" non esiste: app mobile sempre aperte in background, dispositivi condivisi, utenti anonimi dietro NAT. Lì la sessione time-based produce frammenti senza senso, e serve una definizione basata su intento (una sequenza di task) o niente sessioni affatto.
+
+## Il primo funnel onesto: passi in sequenza
+
+Con le sessioni numerate, il funnel stretto diventa una domanda precisa: per ogni sessione, qual è il passo più avanzato raggiunto rispettando l'ordine? Il trucco è mappare ogni evento a un numero di passo e prendere il massimo prefisso continuo. Se la sessione ha visto passi 1, 2, 4 ma non 3, il funnel stretto si ferma a 2: il passo 4 fuori sequenza non conta, e segnalarlo a parte è spesso più interessante del tasso stesso.
+
+```sql
+-- Funnel stretto view_item -> add_to_cart -> checkout -> purchase, per sessione
+WITH sessioned AS (
+  -- la sessionizzazione del paragrafo precedente
+  SELECT user_id, event_name, event_time, session_seq FROM flagged_numbered
+),
+stepped AS (
+  SELECT
+    user_id, session_seq, event_name, event_time,
+    -- mappa evento -> numero di passo; eventi fuori funnel = NULL
+    CASE event_name
+      WHEN 'view_item'   THEN 1
+      WHEN 'add_to_cart' THEN 2
+      WHEN 'checkout'    THEN 3
+      WHEN 'purchase'    THEN 4
+    END AS step
+  FROM sessioned
+),
+ordered AS (
+  SELECT
+    user_id, session_seq, step, event_time,
+    -- il passo massimo visto finora nella sessione, in ordine di tempo
+    MAX(step) OVER (
+      PARTITION BY user_id, session_seq ORDER BY event_time, event_id
+    ) AS max_step_so_far
+  FROM stepped
+  WHERE step IS NOT NULL  -- gli eventi fuori funnel non avanzano né rompono
+)
+SELECT
+  user_id, session_seq,
+  MAX(max_step_so_far) AS deepest_step  -- passo più profondo raggiunto in ordine
+FROM ordered
+GROUP BY user_id, session_seq;
+```
+
+Da qui il report è una semplice aggregazione: quante sessioni hanno raggiunto almeno il passo $k$, per ogni $k$. Il tasso passo-passo è $r_k = S_k / S_{k-1}$, dove $S_k$ conta le sessioni arrivate almeno al passo $k$; il tasso end-to-end è $S_4 / S_1$. Su 10.000 sessioni con $S = (10000, 3200, 1400, 900)$, i tassi sono 32%, 44%, 64% — e il collo di bottiglia è il passaggio vista → carrello, non il checkout come spesso si presume guardando i totali.
+
+| Passo | Sessioni arrivate | Tasso sul passo precedente |
+|---|---|---|
+| 1 — vista prodotto | 10.000 | — (denominatore) |
+| 2 — carrello | 3.200 | 32% |
+| 3 — checkout | 1.400 | 44% |
+| 4 — acquisto | 900 | 64% |
+
+Il funnel lasco — "ha fatto tutti i passi in qualunque ordine" — si calcola invece con aggregazioni condizionate, senza finestre:
+
+```sql
+-- Funnel lasco: basta aver fatto ogni passo almeno una volta nella sessione
+SELECT
+  user_id, session_seq,
+  COUNT(*) FILTER (WHERE event_name = 'view_item')   > 0 AS did_view,
+  COUNT(*) FILTER (WHERE event_name = 'add_to_cart') > 0 AS did_cart,
+  COUNT(*) FILTER (WHERE event_name = 'purchase')    > 0 AS did_buy
+FROM sessioned
+GROUP BY user_id, session_seq;
+```
+
+La differenza tra i due conteggi è diagnostica: se il lasco supera lo stretto del 20%, una fetta consistente di utenti percorre il funnel fuori ordine — magari rientra dal carrello salvato giorni dopo — e forzare la sequenza significa misurare male il prodotto.
+
+## Conversioni vincolate nel tempo e finestre di attribuzione
+
+Il funnel per sessione risponde a "cosa succede dentro una visita", ma molte conversioni maturano tra visite: vedi un prodotto lunedì, lo compri giovedì. Qui serve una finestra di attribuzione esplicita — entro $W$ dal passo iniziale — e il pattern è un self-join temporale: per ogni passo 1, cerco il primo passo 2 successivo entro $W$.
+
+```sql
+-- Per ogni vista prodotto, il primo acquisto entro 7 giorni
+WITH views AS (
+  SELECT user_id, event_time AS view_time
+  FROM events WHERE event_name = 'view_item'
+),
+buys AS (
+  SELECT user_id, event_time AS buy_time
+  FROM events WHERE event_name = 'purchase'
+)
+SELECT
+  v.user_id,
+  v.view_time,
+  -- primo acquisto successivo alla vista, se cade nella finestra
+  MIN(b.buy_time) FILTER (
+    WHERE b.buy_time > v.view_time
+      AND b.buy_time <= v.view_time + interval '7 days'
+  ) AS attributed_buy
+FROM views v
+LEFT JOIN buys b ON b.user_id = v.user_id
+GROUP BY v.user_id, v.view_time;
+```
+
+Il `LEFT JOIN` con `FILTER` invece del `WHERE` è la riga che decide se la query è corretta: filtrare nel `WHERE` trasformerebbe il join in inner e cancellerebbe le viste non convertite — esattamente il denominatore. Il tasso a 7 giorni è poi $conv_7 = N(viste\;con\;attributed\_buy) / N(viste)$. Allargando $W$ da 1 a 7 a 30 giorni il tasso cresce per costruzione; pubblicare il numero senza $W$ è come pubblicare una velocità senza unità di misura.
+
+Il self-join ha un costo quadratico potenziale: per utenti iperattivi con migliaia di eventi, il prodotto cartesiano per utente esplode. Due difese standard: restringere il join con la condizione temporale direttamente nella `ON` (`AND b.buy_time <= v.buy_time + interval '7 days'`), così il planner può lavorare per intervalli, e pre-aggregare al primo evento utile per utente-giorno prima di joinare. Se il motore supporta `MATCH_RECOGNIZE` (Oracle, Snowflake, Trino recente), la stessa logica si esprime in modo più leggibile e spesso più veloce; in Postgres il self-join resta la via maestra.
+
+## Quando gli utenti saltano i passi: leggere i percorsi reali
+
+I funnel dicono dove gli utenti escono, non dove vanno. Per capirlo serve l'analisi dei percorsi: la distribuzione delle sequenze effettive, incluse quelle che il funnel disegna come "abbandoni". Il mattone è di nuovo `LEAD()`: per ogni evento, qual è il successivo nella stessa sessione?
+
+```sql
+-- Transizioni osservate: da ogni evento al successivo nella sessione
+WITH sessioned AS (
+  SELECT user_id, event_name, event_time, session_seq FROM flagged_numbered
+),
+chained AS (
+  SELECT
+    event_name AS from_step,
+    -- evento successivo nella stessa sessione, NULL se è l'ultimo
+    LEAD(event_name) OVER (
+      PARTITION BY user_id, session_seq ORDER BY event_time, event_id
+    ) AS to_step
+  FROM sessioned
+)
+SELECT
+  from_step,
+  to_step,
+  COUNT(*) AS n_transitions,
+  -- quota sul totale delle uscite da from_step: dove va davvero la gente
+  ROUND(100.0 * COUNT(*) / SUM(COUNT(*)) OVER (PARTITION BY from_step), 1)
+    AS pct_of_exits
+FROM chained
+GROUP BY from_step, to_step
+ORDER BY from_step, n_transitions DESC;
+```
+
+Questa matrice di transizione risponde a domande che il funnel non può porre: dopo `add_to_cart`, quanti tornano a `view_item` (confronto tra prodotti, comportamento sano) e quanti escono del tutto? Se il 35% va carrello → vista → carrello → checkout, il percorso "pulito" del funnel è una minoranza e ottimizzare solo quello significa ottimizzare per pochi. Un'applicazione immediata: gli eventi `to_step IS NULL` sono le uscite reali, passo per passo — molto più informative del generico "abbandono".
+
+Il limite va dichiarato: con decine di tipi evento, le sequenze distinte esplodono in combinatoria e la coda lunga è rumore. In pratica si raggruppano gli eventi minori in un bucket `other` prima di concatenare, e si analizzano le prime 20-50 sequenze per copertura. Oltre quella soglia, il percorso va trattato statisticamente (catene di Markov del primo ordine sulla matrice sopra), non elencato.
+
+## Prestazioni e trappole su tabelle eventi grandi
+
+Le query di questo articolo sono tutte `PARTITION BY user_id`, e su tabelle da centinaia di milioni di righe questo è il punto dove si vince o si perde. La prima regola è non sessionizzare mai l'intera storia: filtra il periodo prima delle finestre, mai dopo, così l'ordinamento lavora su una frazione dei dati. La seconda è materializzare: la sessionizzazione è deterministica a parità di soglia, quindi calcolala una volta in una tabella incrementale (`session_events` con `user_id, session_seq, ...`) e costruisci funnel e percorsi sopra quella. Ricalcolarla in ogni report è il modo più costoso di ottenere sempre lo stesso risultato.
+
+Le trappole dati, in ordine di frequenza reale. Fusi orari: se `event_time` è `timestamp without time zone` alimentato da client in fusi diversi, le sessioni a cavallo della mezzanotte si spezzano e i gap diventano assurdi; normalizza in `timestamptz` a monte e non fidarti mai di timestamp ingenui. Eventi duplicati: retry di rete e double-fire del tracking gonfiano i conteggi — una deduplica su `(user_id, event_name, event_time)` prima di tutto il resto costa poco e salva molto. Bot e traffico interno: filtrali con una blocklist esplicita e documentata, perché ogni scelta di esclusione sposta il denominatore e deve essere riproducibile. Utenti anonimi con id che ruotano: la sessionizzazione per utente diventa frammentazione per utente, e l'unico onesto è sessionizzare per chiave anonima (cookie, `session_id` nativo se c'è) dichiarando il limite.
+
+| Trappola | Sintomo | Difesa |
+|---|---|---|
+| Fusi mescolati | Sessioni spezzate a mezzanotte | `timestamptz` ovunque, a monte |
+| Eventi duplicati | Tassi gonfiati, transizioni A → A | Deduplica su tripla prima delle finestre |
+| Bot nel denominatore | Conversioni basse e piatte | Blocklist esplicita e versionata |
+| Soglia copiata | Sessioni frammentate o fuse | Sceglila dalla distribuzione dei gap |
+
+## Come leggere un funnel senza farsi ingannare
+
+Un funnel ben calcolato si legge in tre mosse. Prima: guarda i tassi passo-passo, non l'end-to-end — il collo di bottiglia è il passo con $r_k$ minimo, ed è lì che ogni punto recuperato vale di più in assoluto. Seconda: segmenta prima di concludere. Lo stesso funnel per traffico organico e a pagamento, per mobile e desktop, per nuovi e ricorrenti racconta storie diverse; il tasso aggregato è una media ponderata dal mix, e se il mix cambia nel tempo il tasso si muove senza che nessun percorso sia cambiato — il classico paradosso di Simpson applicato al prodotto. Terza: diffida dei movimenti senza meccanismo. Un +3 punti sul checkout nella stessa settimana del redesign è un'ipotesi, non una prova; la prova richiede coorti comparabili o un esperimento, e il funnel da solo non la fornisce.
+
+Vale anche il controllo più umile e più trascurato: la quadratura. La somma delle sessioni per passo più quelle uscite deve tornare al totale delle sessioni entrate; le transizioni in uscita da un passo devono sommare al 100%. Se non torna, c'è un filtro messo nel posto sbagliato — quasi sempre un `WHERE` che doveva essere un `FILTER`, o eventi `NULL` mangiati da un join. E quando presenti il risultato, la riga di contesto non è facoltativa: denominatore, finestra, regola d'ordine, soglia di sessione, esclusioni. Cinque informazioni, una riga. È la differenza tra un numero che orienta una decisione e uno che decora una slide.
+
+Verdetto: usa il funnel stretto con ordine imposto per checkout e pagamenti, il funnel lasco con `FILTER` per percorsi editoriali, sessioni a 30 minuti solo dopo aver guardato la distribuzione dei gap e finestra di attribuzione sempre dichiarata accanto al tasso.
+
+## Esempio verificato
+
+Google Analytics 4, rilasciato nell ottobre 2020, mantiene a 30 minuti il timeout predefinito che chiude una sessione dopo 30 minuti di inattività. La regola è la stessa sessionizzazione time based descritta nella lezione con `LAG` e somma cumulata del flag di apertura. Con 10000 sessioni e passi pari a 10000 viste, 3200 carrelli, 1400 checkout e 900 acquisti, i tassi passo passo risultano 32 percento, 44 percento e 64 percento. Senza soglia, denominatore e finestra dichiarati, lo stesso dataset passa dal 18 percento al 41 percento solo cambiando definizione.
+
+## Verifica
+
+1. Quando apri una nuova sessione con `LAG` e soglia di inattività e come tratti il primo evento con gap nullo?
+2. Quale denominatore rende confrontabile il tasso di conversione tra due passi del funnel stretto?
+3. Perché un filtro nel `WHERE` dopo `LEFT JOIN` cancella il denominatore nelle conversioni con finestra di attribuzione?
+4. Quando il funnel lasco supera lo stretto del 20 percento cosa indica sui percorsi reali degli utenti?

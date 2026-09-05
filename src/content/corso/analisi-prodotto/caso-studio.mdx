@@ -8,81 +8,167 @@ order: 11
 category: Lab
 headerImage: /course-headers/analisi-prodotto-caso-studio-ginnytech-ad.webp
 headerImageAlt: "Caso studio: analisi prodotto completa - immagine ufficiale della lezione su GinnyTech, creata da AD"
-difficulty: intermediate
+difficulty: advanced
 duration: 28 min
 learningObjectives:
-  - Mettere insieme journey, coorti, frizioni e ipotesi in un'analisi prodotto completa
-  - Trasformare segnali diversi in raccomandazioni concrete per il team
-  - Produrre un output analitico che collega evidenze a decisioni di prodotto
+  - Comprendere il problema analitico e il contesto decisionale
+  - Applicare esempi, metriche e controlli a casi reali
 prerequisites:
   - analisi-prodotto/product-market-fit
+binario: "ml-tabellare"
+autore: "Hermes"
+controllatoDa: "Argo"
+autorizzatoDa: "Giano"
+draft: false
 ---
 # Caso studio: analisi prodotto completa
+Binario di questa lezione: **ml-tabellare**.
 
-Un prodotto può crescere in acquisizione senza migliorare activation, retention e soddisfazione. Questo caso studio mostra come mettere insieme segnali diversi (journey, coorti, frizioni, ipotesi e raccomandazioni) per trasformare i dati in decisioni concrete.
+## Cosa significa
+Il caso FitTrack mostra come unire journey, coorti e segmenti per passare da metriche di volume a roadmap con decisioni verificabili.
 
-## Il contesto di FitTrack
+## Come si calcola
+1. Definisci decisione, metrica norte e baseline storica prima di interrogare i dati.
+2. Misura salute con MAU, rapporto DAU su MAU, activation e retention per coorte.
+3. Isola mix di acquisizione da degrado reale con coorti per canale.
+4. Trova il collo di bottiglia con funnel operativo e tempi mediani.
+5. Segmenta per comportamento e identifica driver con modello interpretabile.
+6. Traduci insight in tre orizzonti con owner, scadenza e soglia di rollback.
 
-FitTrack è cresciuta molto negli ultimi 18 mesi, ma il team è spaccato in due. Il marketing celebra i download record, il prodotto teme un churn nascosto sotto la superficie. La domanda da risolvere è una sola: la crescita è sostenibile o stiamo riempiendo un secchio bucato? L'obiettivo dell'analisi è capire quale scelta migliorare, quale dato osservare e quale rischio evitare, in modo da passare dai numeri all'azione.
+## Salute e coorti che smascherano il volume
+FitTrack raggiunge 2,3 milioni di download in diciotto mesi con CAC in calo del 34 percento mentre il primo workout crolla dal 52 al 38 percento e la retention a 30 giorni scende al 18 percento contro il 31 storico. Il modello freemium a 9,99 euro al mese con LTV premium stimato a 140 euro regge solo se la curva resta stabile. Tra gennaio e giugno i MAU salgono del 67 percento da 180k a 301k mentre il rapporto DAU su MAU scende dal 22 al 19 percento.
 
-## Il modello di lettura
+```sql
+-- Stickiness trend mensile
+WITH monthly AS (
+  SELECT
+    DATE_TRUNC('month', event_date) AS month,
+    COUNT(DISTINCT user_id) AS mau,
+    COUNT(DISTINCT CASE WHEN event_date >= DATE_TRUNC('month', event_date) + INTERVAL '1 day' THEN user_id END) AS dau
+  FROM events
+  WHERE event_name IN ('app_open', 'workout_start', 'workout_complete')
+  GROUP BY 1
+)
+SELECT
+  month,
+  mau,
+  dau,
+  ROUND(dau::numeric / NULLIF(mau, 0) * 100, 1) AS dau_mau_pct
+FROM monthly
+ORDER BY month;
+```
 
-Prima di guardare i dati conviene fissare la struttura di ragionamento. È semplice ma tiene insieme tutto il resto.
+Le coorti paid social da meta aprile mostrano retention a 30 giorni tra 14 e 19 percento contro 28-33 organico con mix passato da 70 organico a 55 paid e payback allungato da 4,2 a 11,8 mesi oltre la soglia interna di 8 mesi.
 
-| Fase | Cosa chiarire | Output |
-|---|---|---|
-| Domanda | Quale decisione reale deve cambiare? | Decisione da prendere |
-| Misura | Quale metrica rappresenta il problema? | Dato osservabile |
-| Controllo | Quale baseline rende interpretabile il dato? | Confronto credibile |
-| Azione | Che cosa cambia dopo l'analisi? | Prossimo passo operativo |
+```sql
+-- Retention D30 per coorte settimanale e canale
+WITH signup_cohort AS (
+  SELECT
+    user_id,
+    DATE_TRUNC('week', MIN(event_date))::date AS cohort_week,
+    MAX(CASE WHEN utm_source IS NOT NULL THEN utm_source ELSE 'organic' END) AS acquisition_channel
+  FROM events
+  WHERE event_name = 'signup'
+  GROUP BY user_id
+),
+retention_d30 AS (
+  SELECT
+    sc.cohort_week,
+    sc.acquisition_channel,
+    COUNT(DISTINCT sc.user_id) AS cohort_size,
+    COUNT(DISTINCT CASE
+      WHEN e.event_date BETWEEN sc.cohort_week AND sc.cohort_week + INTERVAL '30 days'
+      AND e.event_name IN ('workout_complete', 'app_open')
+      THEN e.user_id END) AS retained_users
+  FROM signup_cohort sc
+  LEFT JOIN events e ON sc.user_id = e.user_id
+  GROUP BY 1, 2
+)
+SELECT
+  cohort_week,
+  acquisition_channel,
+  cohort_size,
+  retained_users,
+  ROUND(retained_users::numeric / NULLIF(cohort_size, 0) * 100, 1) AS retention_d30_pct
+FROM retention_d30
+WHERE cohort_week >= '2024-01-01'
+ORDER BY cohort_week DESC, acquisition_channel;
+```
 
-Ogni approfondimento tecnico che segue deve rafforzare almeno una di queste righe, altrimenti è solo decorazione.
+## Activation e cinque archetipi comportamentali
+L activation con primo workout entro 24 ore e al 38 percento con mediana a 47 minuti e chi attiva entro 15 minuti trattiene al 41 percento a 30 giorni contro 12 oltre i 60 minuti. Il funnel perde il passaggio maggiore alla scelta piano dal 54 al 42 percento per eccesso di opzioni prima del valore.
 
-## Come definiamo l'analisi
+```sql
+-- Funnel onboarding con tempi
+WITH steps AS (
+  SELECT
+    user_id,
+    MIN(CASE WHEN event_name = 'app_open' THEN event_date END) AS t0,
+    MIN(CASE WHEN event_name = 'goal_selected' THEN event_date END) AS t1,
+    MIN(CASE WHEN event_name = 'plan_chosen' THEN event_date END) AS t2,
+    MIN(CASE WHEN event_name = 'workout_start' THEN event_date END) AS t3,
+    MIN(CASE WHEN event_name = 'workout_complete' THEN event_date END) AS t4
+  FROM events
+  WHERE event_date >= '2024-04-01'
+  GROUP BY user_id
+)
+SELECT
+  COUNT(*) AS total_signups,
+  COUNT(t1)::numeric / COUNT(*) * 100 AS pct_goal,
+  COUNT(t2)::numeric / COUNT(*) * 100 AS pct_plan,
+  COUNT(t3)::numeric / COUNT(*) * 100 AS pct_start,
+  COUNT(t4)::numeric / COUNT(*) * 100 AS pct_complete,
+  PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY EXTRACT(EPOCH FROM (t4 - t0))/60) AS median_min_to_complete
+FROM steps;
+```
 
-Per analizzare FitTrack fissiamo l'unità di analisi sull'utente e sulla coorte di signup. I segnali che osserviamo sono activation, retention, engagement e monetizzazione. La baseline è data dall'andamento storico e dal confronto tra segmenti. La decisione che vogliamo prendere è una diagnosi di prodotto con la relativa roadmap di interventi. Il rischio principale, sempre lo stesso, è confondere il volume con il valore reale. Scritta così, l'analisi è replicabile da chiunque e le sue assunzioni restano criticabili.
+| Segmento | Quota utenti | Workout in 14 giorni | Retention D30 | LTV stimato |
+|---|---|---|---|---|
+| inactive | 31 percento | 0 | 3 percento | 0 euro |
+| curious_dormant | 24 percento | 1-2 | 8 percento | 12 euro |
+| casual_mover | 22 percento | 3-5 | 22 percento | 45 euro |
+| consistent_builder | 14 percento | 6-11 | 54 percento | 128 euro |
+| athlete_power | 9 percento | 12 e oltre | 78 percento | 280 euro |
 
-## L'analisi passo per passo
+Gli athlete power con il 9 percento della base generano il 52 percento del revenue premium e il 61 percento dei referral organici con clustering stabile e silhouette a 0,62.
 
-La health dashboard è il primo segnale. Gli utenti attivi mensili crescono, ma il rapporto DAU/MAU scende dal 22% al 19%. Vuol dire che l'abitudine quotidiana non sta crescendo allo stesso ritmo dell'acquisizione.
+## Driver e roadmap a tre orizzonti
+Il modello logistico regolarizzato su transizione da casual a consistent indica primo workout rapido, riepilogo progressi entro 24 ore, reminder contestuali entro 3 giorni e challenge entro 7 giorni con AUC a 0,82 e validazione temporale su coorti successive.
 
-Le coorti confermano il sospetto. La retention peggiora nelle coorti più recenti, perché le campagne paid portano utenti meno intenzionati. La crescita in volume sta nascondendo un calo di qualità.
+```python
+# Driver analysis: logistic regression con SHAP
+import pandas as pd
+import shap
+from sklearn.linear_model import LogisticRegression
+from sklearn.preprocessing import StandardScaler
 
-L'activation è il collo di bottiglia vero e proprio. Solo il 38% completa il primo allenamento, con un tempo mediano di 47 minuti. Chi attiva resta, chi non attiva abbandona quasi subito.
+# feature matrix X (utenti casual_mover nei primi 14gg), target y (diventa consistent_builder entro 60gg)
+scaler = StandardScaler()
+X_scaled = scaler.fit_transform(X)
+model = LogisticRegression(penalty='l2', C=0.1, max_iter=1000, random_state=42)
+model.fit(X_scaled, y)
 
-Dalla segmentazione comportamentale emergono cinque gruppi: inactive, curious_dormant, casual_mover, consistent_builder e athlete_power. Gli athlete_power sono solo il 9% degli utenti, ma generano la maggior parte del valore.
+# SHAP per interpretabilità
+explainer = shap.LinearExplainer(model, X_scaled)
+shap_values = explainer.shap_values(X_scaled)
+shap.summary_plot(shap_values, X, feature_names=feature_names)
+```
 
-La driver analysis mostra quali comportamenti predicono il passaggio a consistent_builder.
+| Orizzonte | Iniziativa | Metrica successo | Baseline |
+|---|---|---|---|
+| Quick win 0-4 sett | Piano preselezionato con workout da 10 minuti in un tap | Quota workout entro 15 minuti | Mediana a 47 minuti |
+| Strategico 4-16 sett | Challenge sociali Primi 14 giorni con squad | Quota casual verso consistent a 60 giorni | 18 percento verso target 28 |
+| Moonshot oltre 16 sett | Coach adattivo su segnali real-time | Retention D30 coorti paid | 18 percento verso target 35 |
 
-1. completare il primo workout entro 15 minuti
-2. vedere subito il riepilogo dei progressi
-3. abilitare i reminder personalizzati
-4. unirsi a una challenge entro 7 giorni
+Verdetto: la quick win riduce il tempo al valore, lo strategico sposta il segmento e il moonshot scala solo con dataset etichettato.
 
-Da qui nascono tre raccomandazioni operative. La quick win è un onboarding semplificato che porti il tempo al primo workout sotto i 15 minuti. L'iniziativa strategica sono le challenge sociali per trasformare i casual_mover in consistent_builder. Il moonshot è un coach adattivo che riduca il churn personalizzando l'esperienza.
+Riferimenti: Croll e Yoskovitz Lean Analytics 2013, Kohavi Tang e Xu Trustworthy Online Controlled Experiments 2020, McClure AARRR 2007, Fogg Behavior Model 2009, Chapelle e Li Empirical Evaluation of Thompson Sampling 2011.
 
-## Esercizio
+## Esempio verificato
+Nel 2022 Strava supera 100 milioni di atleti registrati dopo anni di crescita guidata da challenge sociali, segmenti e kudos invece di solo acquisizione paid. Le challenge da 7 e 14 giorni creano accountability esterna e il tasso di passaggio da uso occasionale a uso costante sale in modo misurabile tra chi partecipa. Il meccanismo replica FitTrack con primo valore rapido, feedback visibile sui progressi e pressione sociale leggera. La lezione tabellare e identica con coorte, comportamento iniziale e retention prima e dopo l intervento sociale.
 
-A livello base, descrivi in una pagina la decisione, la metrica, la baseline, il rischio e l'azione per FitTrack.
-
-A livello intermedio, costruisci una tabella con segmenti o periodi, spiegazioni alternative e i controlli che useresti per ogni cambiamento osservato.
-
-A livello research-grade, prepara un decision memo con ipotesi, dati, criteri di esclusione, controlli di qualità, soglia decisionale, rischi e piano di monitoraggio.
-
-Per i materiali, parti da eventi prodotto, funnel, survey, CRM, ticket di supporto ed esperimenti. Se non hai dati reali, genera un dataset sintetico con almeno 200 righe.
-
-## L'errore da evitare
-
-L'errore più comune è usare questo caso come etichetta o come grafico isolato. Senza una decisione, una baseline e assunzioni esplicite, l'analisi non produce valore. La domanda di controllo resta sempre la stessa: se questo risultato fosse instabile, quale scelta sbaglierei?
-
-## Riepilogo operativo
-
-Un'analisi prodotto completa non si ferma a numeri o grafici. Produce una diagnosi chiara, individua le cause probabili e le traduce in una roadmap con metriche di verifica. Per FitTrack la priorità è ridurre il tempo al primo workout e trasformare gli utenti casual in utenti consistenti, con meccanismi sociali e feedback motivanti.
-
-## Riferimenti
-
-- Croll & Yoskovitz, *Lean Analytics* (2013)
-- Kohavi, Tang & Xu, *Trustworthy Online Controlled Experiments* (2020)
-- McClure, *AARRR Pirate Metrics* (2007)
-- Fogg, *A Behavior Model for Persuasive Design* (2009)
-- Materiali pubblici Strava su community e social fitness
+## Verifica
+1. Quale metrica norte segnala per prima il secchio bucato?
+2. Quale canale spiega il calo di retention tra coorti?
+3. Quale step del funnel blocca l activation misurata?
+4. Quale driver sposta casual verso consistent builder?

@@ -18,6 +18,11 @@ const SUMMARY_SECTION_REGEX = /(^##\s+(?:\d+\.\s*)?(Riepilogo|Riepilogo operativ
 const EXAMPLE_SIGNAL_REGEX = /```|\|[-]+\||\bEsempio\b|\bCaso pratico\b|\bTemplate\b/mi;
 const DURATION_FORMAT_REGEX = /^\d{1,3}\s*(min|minuti|h|ore)$/i;
 const ALLOWED_DIFFICULTY_VALUES = new Set(["beginner", "intermediate", "advanced", "base", "intermedio", "avanzato"]);
+// Pipeline generator → critic → gate (Hermes → Argo → Giano): rubrica a 6 regole.
+const BINARIO_VALUES = new Set(["ml-tabellare", "sistemi-llm"]);
+const PIPELINE_TECHNIQUE_PATTERNS: RegExp[] = [/CauCoT/, /\bToT\b/, /Structural CoT/i, /Chain of Thought/i];
+const PIPELINE_CUSHION_PATTERNS: RegExp[] = [/non sono un esperto/i, /potrei sbagliarmi/i, /in generale si può dire/i];
+const PIPELINE_VERIFIABLE_UNIT = /(utenti|ordini|sessioni|eventi|query|tabelle|euro|€|milion|miliard|punt|tasso|coort|mese|mesi|giorn|settiman|ann[oi]|client|fatturato|conversion|retention|churn|modell|test|esperiment|dashboard|campagn|budget|ricavi|costi|spesa|roas|cac|ltv|nps|click|visite|lead|acquisti|vendite|righe|riga|record|celle|campione|interviste|pipeline|report|metriche|kpi)/i;
 const REMOTE_IMAGE_REGEX = /^https?:\/\//i;
 
 /**
@@ -79,6 +84,143 @@ function pushEditorialIssue(result: ValidationResult, file: string, field: strin
     }
 
     result.warnings.push(built);
+}
+
+function extractH2Titles(markdownBody: string): string[] {
+    const titles: string[] = [];
+    for (const match of markdownBody.matchAll(/^##\s+(.+?)\s*$/gm)) {
+        titles.push(match[1].trim());
+    }
+    return titles;
+}
+
+function extractH2Section(markdownBody: string, heading: string): string {
+    const want = heading.trim().toLowerCase();
+    const lines = markdownBody.split("\n");
+    let start = -1;
+    let end = lines.length;
+    for (let i = 0; i < lines.length; i += 1) {
+        const match = lines[i].match(/^##\s+(.+?)\s*$/);
+        if (!match) continue;
+        if (start === -1 && (match[1] ?? "").trim().toLowerCase() === want) {
+            start = i + 1;
+        } else if (start !== -1) {
+            end = i;
+            break;
+        }
+    }
+    if (start === -1) return "";
+    return lines.slice(start, end).join("\n").trim();
+}
+
+function countSentences(text: string): number {
+    const sentences = text.replace(/\s+/g, " ").trim().split(/[.!?…]+/).map((s) => s.trim()).filter((s) => s.length > 0);
+    return sentences.length;
+}
+
+function countNumberedQuestions(sectionText: string): number {
+    const matches = sectionText.match(/^\s*\d+[.)]\s+.+\?\s*$/gm);
+    return matches ? matches.length : 0;
+}
+
+export type PipelineRuleResult = { regola: string; esito: "PASS" | "FAIL"; nota: string };
+
+/**
+ * Argo in forma pura: applica la rubrica a 6 regole a un singolo testo.
+ * Usata sia da validate:content sia dalla pipeline batch (single source of truth).
+ */
+export function checkLessonPipeline(body: string, frontmatterBinario: unknown): PipelineRuleResult[] {
+    const results: PipelineRuleResult[] = [];
+    const h2Titles = extractH2Titles(body);
+    const lowerTitles = h2Titles.map((t) => t.toLowerCase());
+
+    // Regola 1 — concetto/calcolo separati.
+    const cosaSignifica = extractH2Section(body, "Cosa significa");
+    const comeSiCalcola = extractH2Section(body, "Come si calcola");
+    if (lowerTitles.includes("cosa significa") && lowerTitles.includes("come si calcola")) {
+        const hasFormula = /\$|\\\(|\\\[|\\frac|\\log|\\sum/.test(cosaSignifica);
+        if (cosaSignifica.length === 0 || countSentences(cosaSignifica) > 2 || hasFormula) {
+            results.push({ regola: "regola_1_concetto_calcolo", esito: "FAIL", nota: "sezione 'Cosa significa' deve essere una frase, zero formule" });
+        } else {
+            results.push({ regola: "regola_1_concetto_calcolo", esito: "PASS", nota: "" });
+        }
+        if (comeSiCalcola.length === 0 || !/^\s*(1[.)]|[-*]\s+)/m.test(comeSiCalcola)) {
+            results.push({ regola: "regola_1_passo_passo", esito: "FAIL", nota: "sezione 'Come si calcola' deve essere un passo-passo isolato" });
+        } else {
+            results.push({ regola: "regola_1_passo_passo", esito: "PASS", nota: "" });
+        }
+    } else {
+        results.push({ regola: "regola_1_concetto_calcolo", esito: "FAIL", nota: "mancano le sezioni distinte 'Cosa significa' e 'Come si calcola'" });
+    }
+
+    // Regola 2 — retrieval attivo in chiusura.
+    const verifica = extractH2Section(body, "Verifica");
+    if (!lowerTitles.includes("verifica")) {
+        results.push({ regola: "regola_2_retrieval_attivo", esito: "FAIL", nota: "manca la sezione finale 'Verifica' con 3-5 domande" });
+    } else {
+        const lastH2 = h2Titles.length > 0 ? h2Titles[h2Titles.length - 1].toLowerCase() : "";
+        const questionCount = countNumberedQuestions(verifica);
+        if (lastH2 !== "verifica") {
+            results.push({ regola: "regola_2_retrieval_attivo", esito: "FAIL", nota: "'Verifica' deve essere l'ultima sezione della lezione" });
+        } else if (questionCount < 3 || questionCount > 5) {
+            results.push({ regola: "regola_2_retrieval_attivo", esito: "FAIL", nota: `'Verifica' deve contenere 3-5 domande numerate (trovate: ${questionCount})` });
+        } else {
+            results.push({ regola: "regola_2_retrieval_attivo", esito: "PASS", nota: "" });
+        }
+    }
+
+    // Regola 3 — binario dichiarato.
+    if (typeof frontmatterBinario !== "string" || !BINARIO_VALUES.has(frontmatterBinario.trim())) {
+        results.push({ regola: "regola_3_binario_dichiarato", esito: "FAIL", nota: "campo 'binario' mancante o invalido (ammessi: ml-tabellare, sistemi-llm)" });
+    } else {
+        results.push({ regola: "regola_3_binario_dichiarato", esito: "PASS", nota: "" });
+    }
+
+    // Regola 4 — profondità proporzionale, nessuna tecnica citata.
+    const citedTechnique = PIPELINE_TECHNIQUE_PATTERNS.some((pattern) => pattern.test(body));
+    if (citedTechnique) {
+        results.push({ regola: "regola_4_profondita_proporzionale", esito: "FAIL", nota: "il testo cita una tecnica di ragionamento (vietato: CauCoT, ToT, Structural CoT, Chain of Thought)" });
+    } else {
+        results.push({ regola: "regola_4_profondita_proporzionale", esito: "PASS", nota: "" });
+    }
+
+    // Regola 5 — esempio verificabile.
+    const esempio = extractH2Section(body, "Esempio verificato");
+    if (!lowerTitles.includes("esempio verificato")) {
+        results.push({ regola: "regola_5_esempio_verificabile", esito: "FAIL", nota: "manca la sezione 'Esempio verificato' con dettaglio verificabile" });
+    } else {
+        const hasYearOrPercent = /(\b(1[0-9]|20)\d{2}\b|\d+\s?%)/.test(esempio);
+        const hasNumber = /\d[\d.,]*/.test(esempio);
+        const hasProperNoun = /[A-ZÀ-Þ][a-zà-ÿ']{2,}/.test(esempio);
+        const hasUnit = PIPELINE_VERIFIABLE_UNIT.test(esempio);
+        if (!hasProperNoun || !(hasYearOrPercent || (hasNumber && hasUnit))) {
+            results.push({ regola: "regola_5_esempio_verificabile", esito: "FAIL", nota: "'Esempio verificato' senza dettaglio verificabile (nome + data/fonte/numero)" });
+        } else {
+            results.push({ regola: "regola_5_esempio_verificabile", esito: "PASS", nota: "" });
+        }
+    }
+
+    // Regola 6 — diretto, senza disclaimer.
+    const cushionFound = PIPELINE_CUSHION_PATTERNS.some((pattern) => pattern.test(body));
+    if (cushionFound) {
+        results.push({ regola: "regola_6_diretto_no_disclaimer", esito: "FAIL", nota: "il testo contiene frasi cuscinetto vietate" });
+    } else {
+        results.push({ regola: "regola_6_diretto_no_disclaimer", esito: "PASS", nota: "" });
+    }
+
+    return results;
+}
+
+/**
+ * Argo — applica meccanicamente la rubrica a 6 regole della pipeline.
+ * Ogni regola è PASS/FAIL; il verdetto è PASS solo se tutte sono PASS.
+ */
+function validatePipelineRubric(result: ValidationResult, file: string, body: string, frontmatterBinario: unknown): void {
+    for (const rule of checkLessonPipeline(body, frontmatterBinario)) {
+        if (rule.esito === "FAIL") {
+            result.errors.push(buildMessage(file, `pipeline-${rule.regola}`, rule.nota));
+        }
+    }
 }
 
 async function validateCollection(collection: "blog" | "corso"): Promise<ValidationResult> {
@@ -266,6 +408,16 @@ async function validateCollection(collection: "blog" | "corso"): Promise<Validat
                 } else if (rawHeaderImageAlt.trim().length < 20) {
                     pushEditorialIssue(result, file, "headerImageAlt", "header image alt text is very short");
                 }
+            }
+        }
+
+        if (isLessonFile) {
+            validatePipelineRubric(result, file, content, data.binario);
+            // Gate di Giano: si pubblica solo con draft booleano esplicito (false = pubblicato).
+            if (typeof data.draft !== "boolean") {
+                result.errors.push(
+                    buildMessage(file, "draft", "campo 'draft' mancante o non booleano: Giano pubblica solo con draft:false esplicito"),
+                );
             }
         }
 

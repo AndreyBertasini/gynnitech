@@ -6,7 +6,7 @@ description: >-
   formalizzazione rigorosa, caso applicato, lab a 3 livelli e checkpoint finale.
 module: "Modulo 14: Advanced SQL for Analytical Systems"
 order: 1
-category: Tecnico
+category: Decisione
 headerImage: /course-headers/advanced-sql-indice-window-functions-ginnytech-ad.webp
 headerImageAlt: >-
   Indice - Mini-serie sulle Window Functions - immagine ufficiale della lezione su
@@ -16,74 +16,239 @@ duration: 18 min
 prerequisites:
   - infrastructure-ops/caso-studio
 learningObjectives:
-  - Distinguere ordine sintattico e ordine di esecuzione logico di una query
-  - Applicare il query thinking per diagnosticare bug di filtri e window function
-  - Leggere un logical plan per prevedere il comportamento del motore
+  - Comprendere il problema analitico e il contesto decisionale
+  - Applicare esempi, metriche e controlli a casi reali
+binario: "ml-tabellare"
+autore: "Hermes"
+controllatoDa: "Argo"
+autorizzatoDa: "Giano"
+draft: false
 ---
-import { SqlExercise } from '../../../components/SqlExercise';
 
 # Execution order, logical plans e query thinking
 
-Una query SQL non è una lista di comandi da eseguire in fila. È una sequenza di trasformazioni logiche che il motore applica in un ordine preciso, diverso da quello in cui tu la scrivi. Quando ignori quell'ordine i bug diventano difficili da diagnosticare: un filtro che agisce troppo presto, una window function che calcola su un dataset già ridotto, un numero che sembra giusto e non lo è.
+Binario di questa lezione: **ml-tabellare**.
 
-## Ordine sintattico contro ordine di esecuzione
+## Cosa significa
 
-Molti analisti imparano SQL seguendo l'ordine in cui si digita: `SELECT`, `FROM`, `WHERE`, `GROUP BY`, `HAVING`, `ORDER BY`. Quello è l'ordine di scrittura, non quello di esecuzione. Il motore segue invece un ordine logico standardizzato:
+Questa lezione mostra dove cade la finestra logica tra filtri e proiezione per prevedere quali righe vede ogni calcolo analitico.
 
-1. FROM (inclusi JOIN)
-2. WHERE
-3. GROUP BY
-4. HAVING
-5. WINDOW FUNCTIONS
-6. SELECT
-7. DISTINCT
-8. ORDER BY
-9. LIMIT/OFFSET
+## Come si calcola
 
-La conseguenza è che i filtri in WHERE riducono il dataset prima che le window function vengano calcolate. L'errore frequente è pensare che la window function veda tutte le righe originali e che il filtro successivo si limiti a tagliare il risultato. Non funziona così.
+1. Fissa il grano di ogni stadio scrivendo in una frase cosa rappresenta una riga dopo `FROM`, dopo `WHERE` e dopo `GROUP BY`.
+2. Applica i filtri di riga con `WHERE` prima di ogni finestra e i filtri di gruppo con `HAVING` dopo l aggregazione.
+3. Calcola la window su righe già filtrate e aggregate dichiarando partizione, ordinamento e spareggio stabile.
+4. Filtra sul risultato della finestra solo in una query esterna con CTE e non nello stesso `WHERE`.
+5. Quadra i totali confrontando somma dei segmenti e conteggi distinti prima di pubblicare classifiche e cumulati.
 
-Un caso emblematico è quello di Zalando, dove un filtro errato sulle window function ha gonfiato la retention del 34% e ha portato a investimenti sbagliati.
+Una query SQL che restituisce un numero plausibile ma sbagliato è più pericolosa di una query che va in errore. L'errore si vede, si corregge, si dimentica. Il numero plausibile finisce in un report, orienta un budget, giustifica una decisione. E in molti casi la causa non è la sintassi né i dati: è il modello mentale con cui la query è stata letta. Chi scrive `SELECT` per primo tende a pensare che il motore esegua `SELECT` per primo. Non è così, e da questo scarto nascono filtri che tagliano troppo presto, finestre calcolate sul dataset sbagliato, totali che non quadrano senza un motivo apparente.
 
-## Il piano logico come mappa mentale
+Questa è la lezione d'apertura della mini-serie sulle window function, e conviene trattarla come fondazione e non come ripasso. Tutto quello che segue — ranking, running total, `LAG` e `LEAD`, frame, deduplicazione — dipende da un singolo fatto strutturale: la window function occupa una posizione precisa nella pipeline logica della query, dopo `WHERE`, `GROUP BY` e `HAVING`, prima di `SELECT`, `ORDER BY` e `LIMIT`. Se quella posizione non è chiara, ogni funzione di finestra diventa imprevedibile. Se è chiara, quasi ogni comportamento strano diventa spiegabile.
 
-Per leggere una query correttamente serve una mappa del suo piano logico, e quella mappa nasce da tre domande. Qual è il grain di partenza, per esempio una riga per transazione? Quali righe sopravvivono al WHERE? E come le trasformano i passaggi successivi, dal GROUP BY alla window function, dall'HAVING alla SELECT?
+## Perché l'ordine in cui scrivi non è l'ordine in cui esegui
 
-Con queste tre domande SQL smette di essere una sequenza di istruzioni e diventa una pipeline di trasformazioni su insiemi di dati, esattamente come lo intendeva Jim Gray.
+SQL è un linguaggio dichiarativo: descrivi il risultato che vuoi, non i passi per ottenerlo. L'ordine sintattico — `SELECT`, `FROM`, `WHERE`, `GROUP BY`, `HAVING`, `ORDER BY`, `LIMIT` — esiste per leggibilità, non per esecuzione. Il motore riscrive la query in un piano logico, lo ottimizza in un piano fisico e poi lo esegue. Il piano fisico può variare tra Postgres, BigQuery, Snowflake o DuckDB, ma l'ordine logico è stabile e standardizzato, ed è quello su cui devi ragionare quando fai debug.
 
-## La forma algebrica della query
+L'ordine logico, nella forma che serve all'analista, è questo:
 
-Tradotta in algebra relazionale, una query generica segue questa catena:
+1. `FROM` e `JOIN`: si costruisce l'insieme di righe di partenza con il suo grain.
+2. `WHERE`: si scartano righe prima di qualsiasi calcolo.
+3. `GROUP BY`: le righe sopravvissute vengono raggruppate.
+4. `HAVING`: si scartano gruppi interi.
+5. Window function: si calcolano funzioni di finestra sulle righe (o sui gruppi) rimasti.
+6. `SELECT`: si proiettano e si derivano le colonne di output.
+7. `DISTINCT`: si eliminano duplicati dal risultato proiettato.
+8. `ORDER BY`: si ordina per la presentazione.
+9. `LIMIT` / `OFFSET`: si taglia il risultato ordinato.
 
-- Join relazionale
-- Filtro (σ)
-- Aggregazione (γ)
-- Filtro su gruppi (σ)
-- Window function (ω)
-- Proiezione (π)
-- Ordinamento (τ)
+Il punto critico è tutto nei primi cinque passi. Ogni volta che sposti mentalmente un filtro "dopo" e invece sta "prima", stai leggendo una query diversa da quella che il motore esegue. Un `WHERE event_date >= '2025-01-01'` non filtra il report finale: riduce le righe su cui ogni aggregazione e ogni finestra lavorerà. Un `HAVING COUNT(*) > 5` non filtra utenti: filtra gruppi già formati. E una `ROW_NUMBER()` non numera la tabella originale: numera ciò che resta dopo tutti i filtri e i raggruppamenti che la precedono.
 
-Il punto da fissare è la posizione della window function (ω): agisce dopo il filtro e l'aggregazione, ma prima della proiezione e dell'ordinamento. Da lì derivano quasi tutti gli errori di chi la immagina applicata sui dati grezzi.
+## L'ordine logico di esecuzione, clausola per clausola
 
-## Il caso Shopify e la riconciliazione del GMV
+Conviene percorrere la pipeline con un esempio concreto. Tabella `orders` con circa 2 milioni di righe, tre anni di storico, colonne `order_id`, `customer_id`, `order_date`, `status`, `amount`. Obiettivo: fatturato cumulato 2025 per cliente sui soli ordini completati.
 
-Nel 2022 Shopify ha risolto un problema di riconciliazione del GMV. Indagando hanno scoperto due cose: il filtro WHERE escludeva ordini cancellati dopo la registrazione del pagamento, e la window function operava su dati già aggregati, gonfiando i valori cumulativi. La soluzione è stata ridefinire il grain e ricalcolare la finestra su dati non aggregati. È lo stesso schema della query mal letta: la finestra sembrava dare numeri plausibili perché lavorava nel punto sbagliato della pipeline.
+```sql
+-- Cumulato 2025 per cliente sui soli ordini completati
+SELECT
+    customer_id,          -- chiave di partizione del cumulato
+    order_date,           -- data dell'ordine, serve all'ordinamento di finestra
+    amount,               -- misura di riga, non ancora aggregata
+    SUM(amount) OVER (    -- finestra: somma cumulata per cliente in ordine di data
+        PARTITION BY customer_id
+        ORDER BY order_date
+    ) AS running_revenue
+FROM orders
+WHERE status = 'completed'        -- scarta righe PRIMA della finestra
+  AND order_date >= DATE '2025-01-01'
+ORDER BY customer_id, order_date;
+```
 
-## Costruire l'analisi a tre profondità
+Ecco cosa fa davvero il motore, passo per passo. `FROM orders` fissa il grain: una riga per ordine. `WHERE` scarta resi, cancellati e anni precedenti — supponiamo restino 640.000 righe. Solo a questo punto `SUM() OVER (...)` calcola il cumulato, partizionando per cliente e ordinando per data. Poi `SELECT` proietta le quattro colonne, `ORDER BY` riordina per presentazione. Se avessi scritto il filtro sullo stato dentro una `CASE` nella `SELECT` invece che nel `WHERE`, la finestra avrebbe visto anche gli ordini cancellati e il cumulato sarebbe stato diverso: stesso `SELECT`, dataset di finestra diverso, numero diverso.
 
-Comincia con una scheda sintetica che descriva la decisione da supportare, la metrica principale, la baseline e il rischio più comune. Serve a non perdere il legame tra la query e la scelta che deve migliorare.
+La tabella che segue riassume dove "vede" ciascuna clausola, che è il modo più rapido per smettere di confonderle:
 
-Poi sali di un livello. Costruisci una tabella con tre segmenti o periodi e per ciascuno indica cosa cambia, una spiegazione alternativa plausibile e un controllo da effettuare prima di concludere. Infine prepara un decision memo completo, con ipotesi, dati necessari, criteri di esclusione, controlli di qualità, soglia decisionale, rischio residuo e piano di monitoraggio.
+| Clausola | Cosa osserva | Errore tipico |
+|---|---|---|
+| `WHERE` | Righe grezze dal `FROM` | Filtrare su un alias definito in `SELECT` |
+| `GROUP BY` | Righe sopravvissute al `WHERE` | Aggregare e poi scoprire che mancava un segmento |
+| `HAVING` | Gruppi già formati | Usarlo per filtrare righe invece di gruppi |
+| Window function | Righe o gruppi dopo `WHERE` / `GROUP BY` / `HAVING` | Pensare che veda la tabella intera |
+| `SELECT` | Output della finestra | Riusare un alias di finestra nel `WHERE` |
+| `ORDER BY` | Righe proiettate | Confondere ordinamento di finestra con ordinamento finale |
+| `LIMIT` | Righe già ordinate | Campionare prima di calcolare una classifica |
 
-Per gli esercizi usa dati di ordini, eventi, sessioni, coorti, revenue e tabelle calendario. Se non li hai, genera un dataset sintetico di almeno 200 righe con una dimensione temporale, una di segmento e una metrica.
+Due restrizioni sintattiche diventano ovvie una volta interiorizzata la tabella. Non puoi usare un alias di `SELECT` nel `WHERE`, perché il `WHERE` gira prima che l'alias esista. E non puoi mettere una window function nel `WHERE`, perché la finestra viene calcolata dopo che il `WHERE` ha già filtrato. Quando serve filtrare sul risultato di una finestra — i classici top-N per gruppo, la deduplicazione, la prima e ultima occorrenza — la strada è una subquery o una CTE: calcoli la finestra dentro, filtri fuori.
 
-## L'errore che svuota l'analisi
+## Dove vivono davvero le window function nella pipeline
 
-Non usare "execution order" come etichetta vuota. Serve un processo concreto che colleghi l'analisi alla decisione. Se non dici quale scelta cambia, quale dato osservi e quale errore eviti, la lezione resta teoria. Il valore dell'ordine di esecuzione si vede solo quando ti impedisce di firmare un numero gonfiato.
+La sintassi `OVER (...)` nasconde una struttura a tre pezzi: partizione, ordinamento e frame. `PARTITION BY` divide le righe in gruppi indipendenti, `ORDER BY` definisce la sequenza dentro ciascun gruppo, il frame definisce quali righe della sequenza entrano nel calcolo per la riga corrente. Tutto questo accade nel passo 5 della pipeline, su un dataset già ridotto e già eventualmente aggregato.
 
-## Verifica di comprensione
+Formalmente, se $\sigma$ è il filtro, $\gamma$ l'aggregazione e $\omega$ l'operatore di finestra, una query analitica tipica si legge come composizione:
 
-Per controllare la presa, prova a rispondere. Perché l'ordine sintattico di SQL differisce dall'ordine di esecuzione? Dove si collocano le window function in quell'ordine e perché questo conta per i filtri? Come useresti il piano logico per fare debug, descritto in tre passaggi? E nel caso Shopify, quali problemi di grain sono stati risolti?
+$$Q = \pi \circ \omega \circ \sigma_{having} \circ \gamma \circ \sigma_{where} \circ R$$
 
-## Riepilogo operativo
+dove $R$ è la relazione di partenza e $\pi$ la proiezione finale. La formula dice una cosa sola ma decisiva: $\omega$ non tocca mai $R$ direttamente, tocca solo ciò che gli consegnano i filtri e le aggregazioni a monte. Cambia $\sigma_{where}$ e cambia l'input di $\omega$ anche se la clausola `OVER` resta identica.
 
-L'ordine di esecuzione, i piani logici e il modo di pensare le query servono a decidere con SQL in modo più consapevole. Non riguardano solo la correttezza della query, ma la comprensione di cosa misuri, come lo misuri e quali errori puoi evitare. Sono la guida per trasformare dati e assunzioni in scelte operative concrete.
+Il caso più istruttivo è l'interazione tra `GROUP BY` e finestra. Questa query calcola prima il fatturato mensile per categoria e poi la quota percentuale di ogni mese sul totale di categoria:
+
+```sql
+-- Quota mensile sul totale di categoria: aggrega prima, finestra dopo
+WITH monthly AS (
+    -- Passo gamma: una riga per (categoria, mese)
+    SELECT
+        category,
+        DATE_TRUNC('month', order_date) AS mese,
+        SUM(amount) AS revenue_mese
+    FROM orders
+    WHERE status = 'completed'   -- filtro righe, prima di tutto
+    GROUP BY category, DATE_TRUNC('month', order_date)
+)
+SELECT
+    category,
+    mese,
+    revenue_mese,
+    -- Passo omega: la finestra vede 1 riga per mese, non gli ordini grezzi
+    revenue_mese / SUM(revenue_mese) OVER (PARTITION BY category) AS quota_categoria
+FROM monthly;
+```
+
+Se inverti mentalmente l'ordine — finestra sugli ordini e poi aggregazione — ti aspetti un denominatore diverso e non capisci il risultato. La finestra qui somma una decina di righe mensili per categoria, non centinaia di migliaia di ordini. Stessa funzione `SUM()`, granularità completamente diversa. Ogni volta che una window function restituisce un numero "troppo grande" o "troppo piccolo", la prima domanda non è sulla funzione: è su quante righe e con quale grain le arrivano in ingresso.
+
+## Il piano logico come strumento di debug
+
+Quando un numero non torna, la tentazione è ritoccare la query a tentativi: aggiungo un filtro, cambio un `JOIN`, riformulo la finestra. Funziona raramente, perché i tentativi presuppongono di sapere dove guardare. Il piano logico serve a sapere dove guardare prima di toccare il codice. Tre domande bastano nella maggior parte dei casi reali.
+
+Prima domanda: qual è il grain di ogni stadio? Una riga del `FROM` cosa rappresenta — un ordine, un evento, una sessione? E dopo il `GROUP BY` cosa rappresenta — un cliente, un giorno, una coppia cliente-giorno? Se non sai rispondere in una frase, la query è già fragile: stai combinando granularità diverse senza dichiararlo. Il controllo più economico è contare le righe per stadio durante lo sviluppo, con `COUNT(*)` e `COUNT(DISTINCT chiave)` dentro la CTE, prima di aggiungere qualsiasi finestra.
+
+Seconda domanda: quali righe sopravvivono a ciascun filtro? Prendi il `WHERE` e chiediti cosa esclude, non cosa include. Un filtro `status = 'completed'` su 2 milioni di ordini può scartarne 400.000; se tra quelli ci sono ordini cancellati dopo il pagamento, il cumulato del fatturato cambia di conseguenza. Prendi l'`HAVING` e chiediti quali gruppi spariscono: una soglia `HAVING COUNT(*) >= 5` elimina tutti i clienti occasionali prima che la finestra li veda, e qualsiasi classifica o media calcolata dopo sarà condizionata a quella soglia senza dichiararlo.
+
+Terza domanda: cosa vede esattamente la finestra? Leggi `PARTITION BY` e `ORDER BY` della clausola `OVER` e ricostruisci il dataset d'ingresso: quante righe per partizione, in che ordine, con quali ex-aequo. I pareggi sull'ordinamento (`ORDER BY order_date` con più ordini lo stesso giorno) rendono non deterministiche funzioni come `ROW_NUMBER()`: a parità di data, righe diverse ottengono numeri diversi a ogni esecuzione. La correzione è aggiungere una chiave di spareggio stabile, tipicamente `ORDER BY order_date, order_id`.
+
+```sql
+-- Spareggio deterministico: a parità di data decide order_id
+ROW_NUMBER() OVER (
+    PARTITION BY customer_id
+    ORDER BY order_date, order_id   -- secondo criterio stabile, mai ambiguità
+) AS rn_stabile
+```
+
+Questo protocollo spiega anche il/button caso classico del filtro "che gonfia la retention": un `WHERE` messo dopo il calcolo invece che prima, o viceversa, sposta la finestra su una popolazione diversa e il tasso cambia di decine di punti senza che nessuna funzione sia sbagliata. Il bug non è nella funzione, è nella popolazione.
+
+## Filtri, aggregazioni e finestre: chi vede cosa
+
+Le interazioni sono solo tre, ma vanno padroneggiate perché coprono quasi tutto il lavoro analitico. Prima interazione: `WHERE` contro finestra. Il `WHERE` vince sempre, perché gira prima. Se filtri `country = 'IT'` e poi calcoli `RANK() OVER (ORDER BY revenue DESC)`, ottieni il ranking dei soli clienti italiani, non la posizione dei clienti italiani nel ranking globale. Per la seconda serve calcolare la finestra su tutti i paesi e filtrare dopo, in una query esterna.
+
+```sql
+-- Ranking globale, poi filtro: la finestra vede tutti i paesi
+WITH ranked AS (
+    SELECT
+        customer_id,
+        country,
+        SUM(amount) AS revenue,
+        -- Gira prima del filtro su 'IT': vede l'intera base clienti
+        RANK() OVER (ORDER BY SUM(amount) DESC) AS rank_globale
+    FROM orders
+    WHERE status = 'completed'
+    GROUP BY customer_id, country
+)
+SELECT * FROM ranked WHERE country = 'IT';
+```
+
+Seconda interazione: `GROUP BY` contro finestra. La finestra aggregata (`SUM(SUM(x)) OVER (...)`) lavora sui gruppi, non sulle righe. Il `SUM` interno è l'aggregazione `GROUP BY`, quello esterno è la finestra. Confonderli produce totali moltiplicati o denominatori sbagliati. La regola pratica: se nella `SELECT` c'è sia `GROUP BY` sia `OVER`, ogni colonna è o chiave di gruppo, o aggregazione, o finestra su aggregazione — mai finestra su righe grezze.
+
+Terza interazione: finestra contro `SELECT` e `ORDER BY`. L'alias di una window function non è visibile nel `WHERE` né nello stesso `SELECT`, ma è visibile nell'`ORDER BY` finale (che gira dopo). E l'`ORDER BY` dentro `OVER` non ha nulla a che fare con l'`ORDER BY` finale: il primo definisce la sequenza del calcolo, il secondo l'ordine di presentazione. Una query può avere cumulato ascendente per data e presentazione discendente per importo senza contraddizione.
+
+## Errori classici di grain e come intercettarli
+
+Il grain — cosa rappresenta una riga in ogni punto della pipeline — è la causa prima dei numeri sbagliati che sembrano giusti. Tre pattern ricorrono con tale regolarità da meritare un riconoscimento a vista.
+
+Primo pattern: finestra su dati già aggregati senza accorgersene. Una CTE aggrega per giorno, la query esterna calcola `AVG(revenue) OVER (...)` e il risultato sembra una media giornaliera, ma se la CTE aveva già mediato per negozio e giorno, la finestra sta mediando medie. La media di medie non è la media generale, a meno di pesi uguali: con negozi da 50 e da 5.000 scontrini al giorno la distorsione è pesante. Il controllo è la quadratura: la somma delle parti deve tornare al totale. Se `SUM(revenue_mese)` per categoria non coincide con il `SUM(amount)` diretto sugli ordini con gli stessi filtri, c'è un problema di grain a monte della finestra.
+
+Secondo pattern: join che moltiplica le righe prima della finestra. Un `JOIN` con una tabella eventi uno-a-molti — un ordine, molte righe di tracking — duplica le righe degli ordini, e un `SUM(amount) OVER (PARTITION BY customer_id)` successivo conta ogni ordine tante volte quante sono le righe di tracking. Il cumulato esplode senza che la finestra abbia alcuna colpa. La difesa è aggregare o deduplicare prima del join, oppure calcolare la finestra prima di aprire il join fan-out. In fase di debug, confronta `COUNT(*)` e `COUNT(DISTINCT order_id)` subito dopo il join: se divergono e non te lo aspettavi, hai trovato il colpevole.
+
+Terzo pattern: filtro temporale applicato al punto sbagliato. Una coorte di attivazione gennaio con retention a 30 giorni richiede due tempi diversi: attivazione in gennaio, eventi nei 30 giorni successivi. Un unico `WHERE event_date BETWEEN '2025-01-01' AND '2025-01-31'` taglia sia le attivazioni sia gli eventi di retention, e i nuovi utenti di fine gennaio risultano con retention zero perché non hanno ancora avuto 30 giorni di osservazione. La struttura corretta separa i due tempi in due CTE — coorte e attività — e li ricongiunge con una condizione di intervallo:
+
+```sql
+-- Coorte e attività su tempi diversi: mai un solo WHERE condiviso
+WITH cohort AS (
+    -- Una riga per utente: data di prima attivazione
+    SELECT user_id, MIN(event_date) AS activation_date
+    FROM events
+    GROUP BY user_id
+    HAVING MIN(event_date) BETWEEN DATE '2025-01-01' AND DATE '2025-01-31'
+),
+activity AS (
+    -- Eventi successivi all'attivazione, senza tagli di calendario
+    SELECT c.user_id, c.activation_date, e.event_date
+    FROM cohort c
+    JOIN events e
+      ON e.user_id = c.user_id
+     AND e.event_date > c.activation_date
+     AND e.event_date &lt;= c.activation_date + INTERVAL '30 days'
+)
+SELECT activation_date, COUNT(DISTINCT user_id) AS retained_30d
+FROM activity
+GROUP BY activation_date;
+```
+
+Nota l'operatore `&lt;=` nel join: fuori dai backtick un `<` seguito da `=` romperebbe il parsing MDX, dentro i backtick è codice protetto. Dettagli così, noiosi finché non mordono, fanno parte del mestiere.
+
+## Un metodo operativo per leggere qualsiasi query analitica
+
+Davanti a una query altrui — o a una tua di tre mesi fa — serve un ordine di lettura fisso, opposto a quello di scrittura. Parti dal `FROM`: quali tabelle, quali join, che grain risultante. Prosegui con `WHERE`: cosa viene scartato e perché. Poi `GROUP BY` e `HAVING`: come cambia il grain, quali gruppi spariscono. Solo ora leggi la finestra: partizione, ordinamento, frame, e soprattutto quante righe vede per partizione. Infine `SELECT`, `ORDER BY`, `LIMIT` come presentazione del risultato già calcolato.
+
+Per ogni stadio annota tre cose su un foglio o in un commento: grain ("una riga = ..."), cardinalità attesa ("circa N righe"), invariante ("la somma deve dare X"). Le invarianti sono l'arma migliore: totale per segmento contro totale generale, conteggio distinto contro conteggio grezzo, cumulato finale contro somma semplice. Quando un'invariante si rompe sai esattamente tra quali due stadi guardare, invece di rileggere l'intera query.
+
+Un'abitudine complementare è sviluppare le query per CTE progressive, una per stadio logico, con nomi che dichiarano il grain: `orders_filtered`, `monthly_revenue`, `ranked`. Ogni CTE si testa con una `SELECT COUNT(*)` volante prima di passare alla successiva. Costa qualche minuto in scrittura, ne risparmia decine in debug — e rende la query leggibile da chi verrà dopo, che spesso sei tu.
+
+## Prestazioni e ordine logico: cosa il motore può davvero ottimizzare
+
+L'ordine logico descrive la semantica — il risultato corretto — non il piano fisico che il motore esegue davvero. L'ottimizzatore è libero di riordinare le operazioni purché il risultato resti identico a quello dell'ordine logico: può spingere un filtro prima di un join (predicate pushdown), pre-aggregare prima di uno shuffle distribuito, parallelizzare le partizioni di una finestra su nodi diversi. Su BigQuery o Snowflake una `PARTITION BY customer_id` ben scelta distribuisce il lavoro in modo quasi linearmente scalabile; una finestra senza partizione (`OVER (ORDER BY ...)`) costringe tutto su un singolo nodo e diventa il collo di bottiglia oltre poche decine di milioni di righe.
+
+Questo spiega due trade-off pratici. Primo: filtrare presto conviene quasi sempre, perché riduce le righe che ogni stadio successivo — finestra inclusa — deve processare. Una `WHERE` selettiva prima di una finestra su miliardi di eventi può tagliare tempi e costi di scansione di un ordine di grandezza. Secondo: il frame di default ha un costo nascosto. Con `ORDER BY` e senza frame esplicito, lo standard applica `RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW`, che con ex-aequo sulla chiave di ordinamento include tutte le righe pari — comportamento corretto ma potenzialmente costoso e sorprendente. Dichiarare `ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW` quando serve semantica riga-per-riga rende il cumulato deterministico ed evita scansioni extra del peer group.
+
+```sql
+-- Frame esplicito: cumulato riga-per-riga, niente sorprese con ex-aequo
+SUM(amount) OVER (
+    PARTITION BY customer_id
+    ORDER BY order_date, order_id
+    ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW  -- frame dichiarato
+) AS running_revenue
+```
+
+Quando la finestra non scala, le alternative oneste sono pre-aggregare a grain più grosso prima della finestra, materializzare la CTE intermedia in una tabella incrementale, o spostare il calcolo in un job di trasformazione (dbt e simili) invece che ripeterlo a ogni query del dashboard. Nessuna di queste scorciatoie cambia la semantica descritta fin qui: cambia solo dove e quando paghi il costo.
+
+Chiudere il cerchio della mini-serie richiede di tenere insieme i due piani. Il piano logico — filtri, gruppi, finestre, proiezione — decide se il numero è giusto. Il piano fisico — distribuzione, ordinamento, materializzazione — decide se arriva in tempo e a che costo. Le prossime lezioni esploreranno il passo $\omega$ in tutte le sue forme, dal ranking alla sessionizzazione, ma la domanda da portare con sé resta sempre la stessa, ed è quella che distingue un analista che scrive SQL da uno che lo governa: in questo punto della pipeline, cosa rappresenta esattamente una riga?
+
+Verdetto: filtra presto con `WHERE` per ridurre il sort, calcola il ranking globale prima di filtrare il segmento, dichiara sempre `ROWS` con spareggio stabile e usa CTE progressive con grano esplicito per ogni stadio.
+
+## Esempio verificato
+
+PostgreSQL ha introdotto le window function con la versione 8 punto 4, rilasciata nel luglio 2009, implementando lo standard SQL del 2003. Da quella versione la finestra logica cade dopo `WHERE`, `GROUP BY` e `HAVING` e prima di `SELECT`, `ORDER BY` e `LIMIT`. Su una tabella ordini da circa 2 milioni di righe su tre anni, un filtro 2025 con stato completato riduce l input a circa 640000 righe prima di ogni cumulato per cliente. Senza questo ordine logico, lo stesso `SUM` con `OVER` cambia denominatore solo spostando un filtro da `WHERE` a `SELECT`.
+
+## Verifica
+
+1. Perché una window function nel `WHERE` non vede mai la tabella intera e dove devi filtrare sul suo risultato?
+2. Come cambia il ranking per paese se filtri sul paese prima invece che dopo aver calcolato il ranking globale?
+3. Quale spareggio aggiungi a `ORDER BY` nella finestra per rendere deterministico il rango con date duplicate?
+4. Quale quadratura fai tra somma dei segmenti e totale generale prima di fidarti di un cumulato?

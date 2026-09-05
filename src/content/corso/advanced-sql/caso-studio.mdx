@@ -16,107 +16,275 @@ duration: 28 min
 prerequisites:
   - advanced-sql/cheat-sheet
 learningObjectives:
-  - Risolvere un lab avanzato con query professionali su casi reali
-  - Confrontare canali, clienti e revenue con SQL analitico
-  - Riconciliare dati tra sistemi con query verificabili
+  - Comprendere il problema analitico e il contesto decisionale
+  - Applicare esempi, metriche e controlli a casi reali
+binario: "ml-tabellare"
+autore: "Hermes"
+controllatoDa: "Argo"
+autorizzatoDa: "Giano"
+draft: false
 ---
-# Lab avanzato: query professionali su casi reali
 
-FashionHub è un retailer con 85 negozi in Italia e un e-commerce. Il CMO vuole capire quali canali marketing generano vero revenue incrementale, il team prodotto vuole confrontare il valore dei clienti omnicanale con quelli single channel, e il CFO chiede di riconciliare il revenue tra Shopify e il data warehouse, dove restano discrepanze dell'1.8%. I dati non sono pronti all'uso. Vanno puliti, riconciliati e interpretati prima che possano sostenere una decisione.
+# Quando tre domande diverse condividono le stesse tabelle sporche
+Binario di questa lezione: **ml-tabellare**.
 
-## Dal numero alla decisione
+## Cosa significa
+Il lab integra deduplica e coorti e riconciliazione in una sola base fidata che sostiene attribuzione e confronto tra canali.
 
-Con SQL avanzato non basta scrivere query che producono numeri. Serve un processo che trasformi dati grezzi in decisioni affidabili, e che lasci esplicite le assunzioni, i controlli applicati e i rischi rimasti aperti. Questo lab segue un flusso che assomiglia al lavoro reale, in cui ogni passaggio riduce un po' di incertezza e aggiunge un po' di credibilità a quello che porterai in riunione.
+## Come si calcola
+1. Deduplica le transazioni con regola deterministica di priorita di stato e quarantena delle righe scartate.
+2. Assegna ogni cliente al canale del primo touchpoint osservato e calcola spesa cumulata a uno e tre e sei e dodici mesi.
+3. Etichetta il segmento omnicanale su finestra mobile di dodici mesi con conteggio distinto dei canali.
+4. Riconcilia warehouse e fonte esterna per mese e per giorno e classifica a mano un campione di righe orfane.
+5. Stima i tempi di adozione del secondo canale con curva di sopravvivenza e consegna viste numerate rieseguibili in ordine.
 
-## Come impostare l'analisi
+## Perche tre domande diverse condividono le stesse tabelle
+La tentazione e trattare attribuzione e coorti e riconciliazione come progetti separati. Sarebbe un errore costoso perche tutte leggono le stesse transazioni e lo stesso grafo di touchpoint. Se ciascuno pulisce i dati a modo suo si ottengono tre versioni del revenue che non quadrano tra loro. La prima mossa professionale e costruire un singolo strato di transazioni fidate e farci leggere sopra ogni analisi. Il modello dati e volutamente realistico con duplicati fisiologici da retry e reimporti e con buchi di tracking in alcuni giorni.
 
-Quattro domande tengono insieme l'analisi e la rendono difendibile. Quale scelta reale stai cercando di migliorare, quale segnale osservi per misurarla, quale baseline rende quel segnale interpretabile e cosa cambia concretamente dopo che hai finito.
-
-| Fase | Cosa chiarire | Output |
+| Fase | Cosa chiarire | Output atteso |
 |---|---|---|
-| Domanda | Quale scelta reale migliorare? | Decisione da prendere |
-| Misura | Quale segnale osservare? | Metrica o dato |
-| Controllo | Quale baseline rende interpretabile? | Confronto credibile |
+| Domanda | Quale scelta reale stai migliorando? | Decisione da prendere |
+| Misura | Quale segnale osservi? | Metrica con unità e finestra |
+| Controllo | Quale baseline rende il segnale interpretabile? | Confronto credibile |
 | Azione | Cosa cambia dopo l'analisi? | Prossimo passo operativo |
 
-Lo schema è semplice di proposito. Serve a evitare che l'analisi resti un esercizio fine a sé stesso e diventi invece uno strumento per decidere.
+## Deduplicare le transazioni senza buttare segnale
+I duplicati sono il primo posto dove un analisi muore in silenzio. La stessa transazione puo comparire fino a tre volte con stati diversi e timestamp ravvicinati. Tenere tutto gonfia il revenue di alcuni punti percentuali mentre tenere una riga a caso introduce variazioni non riproducibili. La convenzione scelta qui e esplicita con priorita a completato su rimborsato su in attesa e a parita di stato vince la riga piu recente. Il resto finisce in una tabella di quarantena ispezionabile e mai cancellata in silenzio.
 
-## Definire le unità di lavoro
+```sql
+-- Deduplica deterministica: una riga per transaction_id, quarantena inclusa
+WITH ranked AS (
+    SELECT
+        t.*,
+        -- priorità di stato esplicita: completed batte refunded batte pending
+        CASE status WHEN 'completed' THEN 0 WHEN 'refunded' THEN 1 ELSE 2 END AS status_prio,
+        ROW_NUMBER() OVER (
+            PARTITION BY transaction_id
+            ORDER BY
+                CASE status WHEN 'completed' THEN 0 WHEN 'refunded' THEN 1 ELSE 2 END ASC,
+                created_at DESC,   -- a pari stato vince la riga più recente
+                source_row_id DESC -- spareggio deterministico finale
+        ) AS rn
+    FROM transactions t
+)
+-- tabella fidata: solo rn = 1
+-- SELECT * FROM ranked WHERE rn = 1  ->  trusted_transactions
+-- SELECT * FROM ranked WHERE rn > 1  ->  quarantine_duplicates
+SELECT transaction_id, customer_id, channel, amount_eur, status, created_at
+FROM ranked WHERE rn = 1;
+```
 
-Prima di toccare il SQL conviene fissare quattro cose. L'unità di analisi, cioè se ragioni per riga, per coorte o per finestra temporale. Il segnale principale, che può riguardare la correttezza, i duplicati o la performance. La baseline, di solito il periodo precedente o un gruppo comparabile. E la decisione attesa, che sia una query, un modello o un test. Senza questo passaggio l'analisi resta ambigua e nessun altro riesce a riprodurla.
+Il controllo che chiude il passaggio e l invariante contabile con somma delle parti che deve ridare il totale al centesimo. Una query di controllo che confronta aggregati su base mensile intercetta regressioni della pipeline prima che raggiungano le slide. I giorni senza alcun touchpoint ma con transazioni normali segnalano quasi sempre una interruzione del tracciamento. Una spina calendario continua resa con join esterna contro i touchpoint rende visibili i giorni a zero da annotare come tracking non affidabile.
 
-| Elemento | Specifica |
-|---|---|
-| Unità di analisi | riga, partizione, coorte, metrica temporale |
-| Segnale | correttezza, duplicati, stabilità |
-| Baseline | periodo precedente, benchmark |
-| Decisione | query, modello, test |
-| Rischio | confondere un numero con una prova |
+```sql
+-- Giorni con transazioni ma zero touchpoint: probabili buchi di tracking
+WITH days AS (
+    -- spina calendario continua sul periodo di analisi
+    SELECT generate_series(DATE '2024-01-01', DATE '2024-12-31', INTERVAL '1 day')::date AS d
+),
+daily AS (
+    SELECT d.d,
+        COUNT(DISTINCT tx.transaction_id) AS n_tx,   -- transazioni fidate del giorno
+        COUNT(DISTINCT tp.touch_id) AS n_touch        -- touchpoint registrati
+    FROM days d
+    LEFT JOIN trusted_transactions tx ON tx.created_at::date = d.d
+    LEFT JOIN marketing_touchpoints tp ON tp.touched_at::date = d.d
+    GROUP BY d.d
+)
+SELECT d, n_tx, n_touch
+FROM daily
+WHERE n_touch = 0 AND n_tx > 20  -- soglia anti-rumore: pochi ordini possono non avere touch
+ORDER BY d;
+```
 
-## Cosa copre il lab
+## Coorti per canale dal primo tocco al revenue cumulato
+L errore classico e attribuire tutto il revenue all ultimo click e dichiarare vincente il canale che intercetta la domanda gia formata. Il confronto onesto sposta l unita di analisi dal singolo ordine alla coorte con tutti i clienti il cui primo touchpoint arriva da un canale e con spesa cumulata a uno e tre e sei e dodici mesi. L assegnazione usa il primo valore sulla sequenza dei touch di ciascun cliente. E una scelta con limiti noti sui percorsi multitocco ma stabile nel tempo e senza premi al canale che chiude.
 
-Il lab mette insieme deduplica, retention, attribution, segmentazione e riconciliazione su dataset reali. L'obiettivo non è la query più corta, ma codice leggibile, testabile e che puoi difendere davanti a chi prende la decisione. La deduplica delle transazioni, per fare un esempio, rimuove i duplicati tenendo solo la riga più recente con status "completed".
+```sql
+-- Canale di acquisizione = canale del primo touchpoint osservato
+WITH first_touch AS (
+    SELECT DISTINCT
+        customer_id,
+        FIRST_VALUE(channel) OVER (
+            PARTITION BY customer_id ORDER BY touched_at ASC, touch_id ASC
+        ) AS acquisition_channel,
+        MIN(touched_at) OVER (PARTITION BY customer_id) AS cohort_month
+    FROM marketing_touchpoints
+),
+cohort_revenue AS (
+    SELECT
+        date_trunc('month', f.cohort_month)::date AS coorte,
+        f.acquisition_channel AS canale,
+        tx.customer_id,
+        -- mesi trascorsi tra acquisizione e transazione (0 = stesso mese)
+        (EXTRACT(YEAR FROM tx.created_at) - EXTRACT(YEAR FROM f.cohort_month)) * 12
+          + (EXTRACT(MONTH FROM tx.created_at) - EXTRACT(MONTH FROM f.cohort_month)) AS mese_idx,
+        SUM(tx.amount_eur) AS speso
+    FROM first_touch f
+    JOIN trusted_transactions tx USING (customer_id)
+    WHERE tx.status = 'completed' AND tx.created_at >= f.cohort_month
+    GROUP BY 1, 2, 3, 4
+)
+-- LTV cumulato medio per coorte a 1/3/6/12 mesi: pivot sugli orizzonti
+SELECT coorte, canale,
+    AVG(SUM(CASE WHEN mese_idx <= 0 THEN speso ELSE 0 END)) OVER w AS ltv_m1,
+    AVG(SUM(CASE WHEN mese_idx <= 2 THEN speso ELSE 0 END)) OVER w AS ltv_m3,
+    AVG(SUM(CASE WHEN mese_idx <= 5 THEN speso ELSE 0 END)) OVER w AS ltv_m6,
+    AVG(SUM(CASE WHEN mese_idx <= 11 THEN speso ELSE 0 END)) OVER w AS ltv_m12
+FROM cohort_revenue
+WINDOW w AS (PARTITION BY coorte, canale);
+```
 
-La tabella sotto raccoglie tre situazioni tipiche e come leggerle senza saltare a conclusioni affrettate.
+Presentare le differenze senza intervalli di confidenza sarebbe disonesto. Con coorti da poche centinaia di clienti due canali con intervalli ampiamente sovrapposti non sono vincitore e perdente ma un pareggio statistico. Meglio una tabella con stima e intervallo e numerosita che un grafico a barre senza barre d errore.
 
-| Evidenza | Lettura prudente | Azione consigliata |
-|---|---|---|
-| Numero migliora | Potrebbe essere variazione normale | Cercare segmenti e confronti |
-| Segmento cambia | Media aggregata nasconde differenze | Separare coorti o casi |
-| Costo cresce | Impatto va letto sul margine | Stimare trade-off |
+## Quanto vale davvero un cliente omnicanale
+La definizione operativa conta piu del confronto. Qui omnicanale significa transazioni completate su almeno due canali distinti negli ultimi dodici mesi mobili. La finestra mobile evita di gonfiare il gruppo con clienti vecchi e di trasformare il confronto in una proxy dell anzianita. Il confronto tra segmenti va fatto a parita di anzianita con clienti acquisiti nello stesso trimestre su ordini per cliente e scontrino medio e valore a dodici mesi.
 
-## Esercitarsi a tre livelli
+```sql
+-- Etichetta omnicanale su finestra mobile di 12 mesi
+WITH cust_month AS (
+    SELECT DISTINCT
+        customer_id,
+        date_trunc('month', created_at)::date AS mese,
+        channel
+    FROM trusted_transactions
+    WHERE status = 'completed'
+),
+multicanale AS (
+    SELECT customer_id, mese,
+        COUNT(DISTINCT channel) OVER (
+            PARTITION BY customer_id
+            ORDER BY mese
+            RANGE BETWEEN INTERVAL '11 months' PRECEDING AND CURRENT ROW
+        ) AS n_canali_12m
+    FROM cust_month
+)
+SELECT customer_id, mese,
+    CASE WHEN n_canali_12m >= 2 THEN 'omnicanale' ELSE 'single-channel' END AS segmento
+FROM multicanale;
+```
 
-Puoi lavorare su questo materiale a profondità diverse a seconda del tempo che hai.
+| Metrica (coorte Q1, 12 mesi) | Single-channel | Omnicanale | Nota |
+|---|---|---|---|
+| Ordini per cliente | 2,1 | 4,3 | Guida la differenza |
+| Scontrino medio | 54 € | 61 € | Effetto minore |
+| LTV 12 mesi | 113 € | 262 € | Stratificato per anzianità |
+| Retention mese 12 | 31% | 57% | Definizione sopra |
 
-Per cominciare, descrivi in una pagina la decisione da supportare, la metrica primaria, la baseline, il rischio e l'azione che intraprenderesti se il segnale fosse confermato.
+Il rapporto grezzo sovrastima l effetto per selezione dei migliori clienti. Stratificando per coorte di acquisizione il divario si riduce ma resta ampio e significativo su grandi numeri. Sapere che gli omnicanale spendono di piu non dimostra che spingere un cliente sul secondo canale ne raddoppi la spesa. L uso onesto e priorizzare l esperienza cross canale per chi mostra segnali di adozione e disegnare un test controllato prima di promettere incrementi diffusi.
 
-A un livello intermedio, costruisci una tabella con i segmenti o gli scenari rilevanti, indicando per ciascuno cosa cambia, quali spiegazioni alternative sono plausibili e quali controlli servono prima di concludere.
+## Riconciliare Shopify e warehouse riga per riga
+La riconciliazione seria lavora a tre livelli con mese che quantifica e giorno che localizza e singola transazione che spiega. Il primo passo aggrega entrambe le fonti per mese con join esterna completa cosi emergono anche i mesi presenti da un solo lato. Il secondo passo segmenta per giorno della settimana per intercettare disallineamenti di cut off nei weekend. Il terzo passo usa l antijoin per elencare le transazioni presenti da un solo lato e classificarne a mano un campione prima di automatizzare.
 
-Se vuoi spingerti oltre, prepara un decision memo completo: ipotesi, dati, criteri di esclusione, controlli, soglia decisionale, rischi residui e piano di monitoraggio. Per qualsiasi livello, usa dati reali o sintetici con almeno 200 righe, una dimensione temporale, dei segmenti e una metrica di outcome.
+```sql
+-- Riconciliazione mensile: FULL OUTER JOIN per non perdere mesi orfani
+WITH wh AS (
+    SELECT date_trunc('month', created_at)::date AS mese,
+           SUM(amount_eur) AS revenue_wh
+    FROM trusted_transactions
+    WHERE channel = 'web' AND status = 'completed'
+    GROUP BY 1
+),
+sh AS (
+    SELECT date_trunc('month', settled_at)::date AS mese,
+           SUM(gross_eur) AS revenue_shopify
+    FROM shopify_settlements
+    GROUP BY 1
+)
+SELECT
+    COALESCE(wh.mese, sh.mese) AS mese,
+    wh.revenue_wh, sh.revenue_shopify,
+    -- discrepanza assoluta e relativa rispetto a Shopify (verità esterna)
+    COALESCE(wh.revenue_wh, 0) - COALESCE(sh.revenue_shopify, 0) AS delta_eur,
+    CASE WHEN sh.revenue_shopify <> 0
+         THEN (COALESCE(wh.revenue_wh, 0) - sh.revenue_shopify) / sh.revenue_shopify END AS delta_rel
+FROM wh FULL OUTER JOIN sh USING (mese)
+ORDER BY mese;
+```
 
-## L'errore da evitare
+```sql
+-- Transazioni web senza settlement corrispondente (anti-join)
+SELECT tx.transaction_id, tx.amount_eur, tx.created_at, tx.status
+FROM trusted_transactions tx
+LEFT JOIN shopify_settlements sh USING (transaction_id)
+WHERE tx.channel = 'web' AND sh.transaction_id IS NULL
+ORDER BY tx.created_at DESC
+LIMIT 50; -- campione da classificare a mano prima di automatizzare
+```
 
-Il rischio più comune è presentare grafici o metriche senza collegarli a una decisione concreta, senza una baseline o senza dichiarare i rischi. La domanda di controllo che conviene tenere sempre in mente è semplice: se il risultato fosse instabile, quale scelta sbaglierei? Se non sai rispondere, l'analisi non è ancora pronta per la riunione.
+La classificazione manuale del campione rivela pattern operativi come metodi di pagamento specifici o fasce orarie o procedure difformi. Nel caso tipico oltre meta della discrepanza si spiega con timing diverso e un quarto con fee trattate in modo difforme. Al responsabile finanziario va presentata la scomposizione tra quota spiegata e quota fisiologica e residuo aperto.
 
-Vale la pena verificare di aver chiuso il cerchio. Quale decisione concreta migliora grazie a questo lavoro, quale unità di analisi rende il problema misurabile, quale baseline evita letture ingenue, quale errore potrebbe ribaltare la conclusione e quale output consegneresti a uno stakeholder non tecnico.
+## Il funnel di migrazione e le curve di sopravvivenza
+Resta la domanda su quanto tempo passa prima che un cliente adotti il secondo canale. La risposta onesta richiede l analisi di sopravvivenza perche gran parte dei clienti a fine periodo non ha ancora migrato. Sono osservazioni censurate e non zeri e trattarle come zeri sottostima i tempi. Lo stimatore standard gestisce la censura con prodotto cumulato dei fattori di sopravvivenza calcolabile in SQL con somma dei logaritmi e riesponenziazione.
 
-## Riepilogo operativo
+```sql
+-- Curva di Kaplan-Meier: probabilità di restare single-channel oltre t
+WITH eventi AS (
+    -- per ciascun cliente: mesi all'adozione del 2° canale o alla censura
+    SELECT customer_id, mesi_al_secondo_canale AS t,
+           CASE WHEN migrato THEN 1 ELSE 0 END AS evento
+    FROM single_channel_followup
+),
+rischio AS (
+    SELECT t,
+        SUM(evento) AS d,          -- migrazioni osservate a t
+        COUNT(*) AS n_uscenti,     -- escono dal rischio a t (evento o censura)
+        SUM(COUNT(*)) OVER (ORDER BY t DESC
+            ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS n_rischio
+    FROM eventi GROUP BY t
+)
+SELECT t,
+    -- prodotto cumulato dei fattori (1 - d/n) via somma dei logaritmi
+    EXP(SUM(LN(1 - d::double precision / NULLIF(n_rischio, 0)))
+        OVER (ORDER BY t)) AS prob_single_channel,
+    n_rischio AS ancora_osservati
+FROM rischio ORDER BY t;
+```
 
-Questo lab serve a qualcosa solo se produce decisioni più chiare, non se aggiunge termini o numeri. Il percorso che va dal problema al modello, dalla formalizzazione all'esempio fino agli esercizi e al controllo finale, trasforma la lezione in pratica verificabile.
+La lettura tipica mostra adozione piu rapida per i clienti web first e piu lenta per i negozio first con appiattimento dopo il primo anno. Il confronto tra curve per segmento richiede test dedicati e l effetto di covariate come scontrino iniziale richiede modelli appositi. Se l adozione e guidata da fattori non osservati la curva descrive bene i tempi ma non isola la leva causale.
 
----
+## Leggere l incertezza prima di scrivere la raccomandazione
+A questo punto i risultati vanno tradotti in slide solo dopo un inventario esplicito di cio che potrebbe ribaltarli. Il formato che funziona con stakeholder non tecnici lega ogni affermazione a fragilita e controllo gia fatto e rischio residuo.
 
-## Caso studio: FashionHub
+| Affermazione | Cosa la ribalterebbe | Controllo applicato | Rischio residuo |
+|---|---|---|---|
+| L'influencer batte il paid social su LTV 12 mesi | Coorti piccole, errore standard alto | Intervalli al 95% e numerosità riportate | Sovrapposizione parziale: pareggio possibile |
+| Gli omnicanale valgono 1,8x | Autoselezione dei migliori clienti | Stratificazione per coorte di acquisizione | Causalità non dimostrata, serve test |
+| Lo 0,3% residuo è fisiologico | Errori sistematici su un metodo di pagamento | Classificazione manuale di 50 righe | Ricontrollare dopo il fix del cut-off |
+| La mediana di adozione è 9 mesi web-first | Censura informativa (i migliori migrano prima) | Kaplan-Meier con censura a destra | Stima valida solo sotto censura non informativa |
 
-FashionHub ha tre richieste sul tavolo. Il CMO vuole il revenue incrementale per canale marketing, non quello solo attribuito. Il team prodotto vuole confrontare l'LTV dei clienti omnicanale con quello dei clienti single channel. Il CFO chiede la riconciliazione del revenue tra Shopify e il data warehouse.
+Due controlli trasversali meritano di diventare abitudine. La somma degli LTV per canale pesata per le numerosita deve ridare il revenue fidato entro una tolleranza esplicita di uno per cento di scarto relativo. La riesecuzione delle metriche chiave con una regola di deduplica alternativa deve confermare l ordinamento dei canali altrimenti la conclusione e fragile.
 
-Per lavorarci hai quattro tabelle principali: `customers`, `transactions`, `marketing_touchpoints`, `shopify_settlements`.
+## Mettere la pipeline in uno schema che altri possono rieseguire
+L ultimo miglio e ingegneristico con query esplorative trasformate in viste ordinate dentro uno schema dedicato. La convenzione di nomi rende l ordine evidente e i commenti documentano ogni assunzione. La vista finale delle raccomandazioni e il vero output con impatto stimato e evidenza e costo e rischio per ogni punto.
 
-### Pulizia e preparazione
+```sql
+-- Schema di consegna: view numerate, rieseguibili in ordine
+CREATE SCHEMA IF NOT EXISTS analytics_fashionhub;
 
-Identifica le transazioni duplicate e conserva solo la più recente con status "completed". Cerca poi i giorni senza dati marketing, perché segnalano probabili problemi di tracking che falserebbero ogni analisi a valle.
+-- 01: transazioni fidate (regola: vince completed, poi riga più recente)
+CREATE OR REPLACE VIEW analytics_fashionhub.v01_trusted_transactions AS
+SELECT transaction_id, customer_id, channel, amount_eur, status, created_at
+FROM ranked_dedup WHERE rn = 1; -- ranked_dedup = CTE di deduplica sopra
 
-### Analisi di coorte per canale marketing
+-- 02: coorti di acquisizione dal primo touchpoint osservato
+CREATE OR REPLACE VIEW analytics_fashionhub.v02_acquisition_cohorts AS
+SELECT customer_id, acquisition_channel, cohort_month FROM first_touch;
 
-Assegna ogni cliente al canale del primo touchpoint, poi calcola retention e revenue cumulativo a 1, 3, 6 e 12 mesi. Confronta l'LTV tra canali riportando gli intervalli di confidenza, così la differenza non viene letta come certa quando non lo è.
+-- 03: LTV cumulato per coorte e canale a 1/3/6/12 mesi
+-- 04: segmenti omnicanale vs single-channel su finestra mobile 12 mesi
+-- 05: riconciliazione mensile warehouse vs Shopify con delta relativo
+-- 06: curva di Kaplan-Meier per l'adozione del secondo canale
+-- 07: tabella raccomandazioni con query di evidenza per ciascun punto
+```
 
-### Segmentazione omnicanale e single channel
+Verdetto: usa il primo touchpoint per coorti stabili e la finestra mobile di dodici mesi per l etichetta omnicanale, poi riconcilia sempre contro la fonte esterna prima di spostare budget.
 
-Etichetta come omnicanale i clienti con transazioni su più canali negli ultimi 12 mesi. Confronta le metriche chiave tra i due gruppi e verifica la significatività statistica della differenza. Costruisci infine un funnel di migrazione con una curva di Kaplan-Meier.
+## Esempio verificato
+Knight Capital il primo agosto 2012 perse circa 440 milioni di dollari in circa 45 minuti per un aggiornamento software difettoso sui sistemi di negoziazione. Il sistema difettoso invio milioni di ordini errati prima che il team riuscisse a fermarlo. La societa dovette ricorrere a un salvataggio esterno e perse gran parte del valore in pochi giorni. Il caso mostra perche deduplica deterministica e riconciliazione continua e interruttori di arresto non sono optional quando i soldi veri passano dalle tabelle.
 
-### Riconciliazione del revenue
-
-Confronta mese per mese il revenue del data warehouse con quello di Shopify. Segmenta per giorno e per giorno della settimana per capire dove nascono le discrepanze, e usa un anti-join per individuare le transazioni mancanti da una delle due fonti.
-
-### Raccomandazione finale
-
-Sintetizza insight, raccomandazioni con impatto stimato e rischi in una tabella che riporti anche la query di evidenza per ciascun punto, pronta da consegnare al CMO.
-
-## Consegna
-
-Crea le view SQL in uno schema `analytics_fashionhub`, con nomi chiari e commenti, eseguibili in sequenza per ricostruire l'intera pipeline analitica.
-
----
-
-*Riferimenti:* Kimball & Ross (2013), Amazon Retail Analytics Documentation (2023).
+## Verifica
+1. Perche la deduplica deve fissare una priorita di stato esplicita invece di tenere una riga a caso?
+2. Quando il primo touchpoint e preferibile all ultimo click per confrontare i canali?
+3. Quale join useresti per trovare transazioni senza settlement e perche la join interna non basta?
+4. Perche la finestra mobile di dodici mesi evita di confondere anzianita e comportamento omnicanale?

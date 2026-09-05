@@ -6,7 +6,7 @@ description: >-
   formalizzazione rigorosa, caso applicato, lab a 3 livelli e checkpoint finale.
 module: "Modulo 14: Advanced SQL for Analytical Systems"
 order: 4
-category: Tecnico
+category: Decisione
 headerImage: /course-headers/advanced-sql-lag-lead-e-analisi-sequenziale-ginnytech-ad.webp
 headerImageAlt: >-
   LAG, LEAD e analisi sequenziale tra eventi - immagine ufficiale della lezione
@@ -16,91 +16,274 @@ duration: 18 min
 prerequisites:
   - advanced-sql/ranking-e-deduplicazione
 learningObjectives:
-  - Confrontare ogni riga con la precedente e la successiva usando lag e lead
-  - Applicare ranking, cumulative logic e frame alle serie temporali
-  - Leggere sequenze di comportamento con SQL analitico
+  - Comprendere il problema analitico e il contesto decisionale
+  - Applicare esempi, metriche e controlli a casi reali
+binario: "ml-tabellare"
+autore: "Hermes"
+controllatoDa: "Argo"
+autorizzatoDa: "Giano"
+draft: false
 ---
+
 # Ranking, lag/lead, cumulative logic e frames
 
-Il fatturato settimanale cresce, ma il margine scende e alcuni clienti rallentano gli acquisti. Una somma aggregata non basta a leggere una situazione del genere: serve confrontare ogni riga con la precedente, con la successiva e con il cumulato fino a quel punto. Ranking, lag/lead, cumulative logic e frames sono ciò che trasforma SQL in uno strumento per leggere sequenze e traiettorie, non solo totali.
+Binario di questa lezione: **ml-tabellare**.
 
-## Quando il totale nasconde la dinamica
+## Cosa significa
 
-Nell'analisi avanzata con SQL il problema è scrivere query corrette e significative anche quando grain, finestre temporali, coorti e casi limite si complicano. Non si tratta di imparare funzioni a memoria. Si tratta di migliorare decisioni concrete partendo da dati, assunzioni esplicite e controlli che rendano il risultato discutibile.
+Questa lezione mostra come dare memoria alle righe con `LAG`, `LEAD` e frame cumulati per misurare gap, variazioni e sessioni in ordine di tempo.
 
-## Una mappa per orientarsi
+## Come si calcola
 
-Ogni analisi tecnica regge solo se punta a una scelta. Questo schema tiene insieme i quattro punti che la rendono utile.
+1. Partiziona per cliente con `PARTITION BY` e ordina per tempo reale con chiave stabile per rendere univoco il vicino.
+2. Calcola gap e variazione con `LAG` a offset 1 gestendo nulli iniziali e zeri al denominatore con `NULLIF`.
+3. Costruisci progressivi e medie mobili con frame `ROWS` esplicito e usa `RANGE` su date quando i giorni mancano.
+4. Ricostruisci sessioni con flag di rottura oltre soglia e somma cumulata per numerare le visite.
+5. Esegui controlli su pareggi, gap negativi e partizioni da una riga prima di pubblicare durate e conversioni.
 
-| Fase | Cosa chiarire | Output |
+Il fatturato settimanale sale, il margine scende e due clienti enterprise ordinano a intervalli sempre più lunghi. Il dashboard segna verde sugli ordini totali e rosso sulla cassa, e nessuno capisce perché. Il problema non è la somma: è la sequenza. Quanto tempo passa tra un ordine e il successivo, se il secondo acquisto arriva prima o dopo il rinnovo, se la crescita è un trend o tre settimane fortunate. Finché SQL guarda solo totali, queste domande restano fuori portata.
+
+`LAG`, `LEAD`, le cumulative e i frame servono a questo: dare a ogni riga una memoria del passato e uno sguardo sul futuro, senza uscire da una singola query. Il prezzo da pagare è la precisione su ordinamento, partizioni e frame. Sbagli una di queste tre cose e ottieni numeri plausibili ma falsi, che sono peggio di un errore evidente.
+
+## Perché gli aggregati da soli non raccontano storie
+
+Un `GROUP BY` collassa la storia in un numero. Utile per il reporting, cieco per la dinamica. Prendi una tabella `ordini(cliente_id, data_ordine, importo)`: il totale per cliente ti dice chi spende di più, non chi sta rallentando, chi compra in burst prima di sparire, chi reagisce a un aumento di prezzo.
+
+L'analisi sequenziale rovescia la prospettiva: tiene le righe individuali e aggiunge colonne calcolate dai vicini. Per ogni ordine vuoi sapere il precedente, il successivo, il gap in giorni, la variazione percentuale, il progressivo speso fino a quel momento. Solo con queste colonne la riga smette di essere un punto isolato e diventa un fotogramma di una traiettoria.
+
+Il caso classico è il supporto clienti. Intercom ha scoperto che il suo "tempo alla prima risposta" era sistematicamente sbagliato: associava ogni risposta di un agente all'ultimo messaggio utente con un join su timestamp, e quando due agenti rispondevano fuori ordine o un utente scriveva due messaggi di fila, i tempi si sfasavano di ore. Solo ordinando i messaggi per conversazione e usando `LAG` per legare ogni risposta al messaggio utente immediatamente precedente il calcolo è diventato affidabile. Nessun modello nuovo, solo l'ordine corretto degli eventi.
+
+La regola pratica: se la domanda contiene "prima", "dopo", "tra", "consecutivo", "cumulato" o "mobile", non serve un'altra tabella aggregata. Serve una window function con un `ORDER BY` che rifletta il tempo reale del fenomeno, non l'ordine di inserimento.
+
+## Come ragiona una window function su sequenze ordinate
+
+La sintassi sembra innocua e nasconde tre decisioni che determinano tutto il risultato:
+
+```sql
+-- Struttura minima di una window su sequenza temporale
+SELECT
+    cliente_id,
+    data_ordine,
+    importo,
+    LAG(data_ordine) OVER (
+        PARTITION BY cliente_id   -- entro quale gruppo ha senso il "precedente"
+        ORDER BY data_ordine, id  -- quale colonna definisce davvero la sequenza
+    ) AS data_ordine_precedente
+FROM ordini;
+-- PARTITION BY: il vicino deve appartenere allo stesso cliente, mai a un altro
+-- ORDER BY: data + chiave stabile per rompere i pareggi sullo stesso giorno
+```
+
+`PARTITION BY` definisce il mondo in cui "precedente" ha senso. Senza partizione, il `LAG` del primo ordine di un cliente restituisce l'ultimo ordine di un altro cliente: rumore puro. `ORDER BY` definisce chi è il vicino. Se ordini per `data_ordine` e due ordini condividono lo stesso timestamp, l'ordinamento è non deterministico e il `LAG` cambia tra un'esecuzione e l'altra. Aggiungere una chiave univoca come secondo criterio (`id`) rende la sequenza stabile e riproducibile.
+
+Il terzo pezzo è il frame, cioè quante righe attorno alla corrente partecipano al calcolo. `LAG` e `LEAD` guardano una riga a distanza fissa; le cumulative come `SUM() OVER (...)` guardano un intervallo che si allarga. Il default di Postgres quando specifichi `ORDER BY` in una window aggregata è `RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW`, che con valori duplicati nell'ordinamento include più righe di quante ne aspetti. Dichiarare il frame in modo esplicito non è pedanteria: è l'unico modo per sapere cosa stai sommando.
+
+Vale la pena fissare il modello mentale: la window non filtra né raggruppa, aggiunge contesto. Il numero di righe in output resta identico a quello in input. Se parti da 10.000 eventi, ottieni 10.000 righe arricchite. Le aggregazioni con `GROUP BY` riducono, le window annotano. Confondere i due comportamenti è l'origine di quasi tutti i doppi conteggi quando si mescolano i due costrutti nella stessa query.
+
+## LAG e LEAD senza sorprese: offset, default e partizioni
+
+`LAG(expr, offset, default)` guarda indietro di `offset` righe, `LEAD` guarda avanti. La firma completa è raramente usata e quasi sempre la causa dei bug più stupidi: omettere il terzo argomento significa ottenere `NULL` sulla prima o ultima riga della partizione, e quel `NULL` poi si propaga in sottrazioni e divisioni.
+
+```sql
+-- Gap e variazione tra ordini consecutivi dello stesso cliente
+SELECT
+    cliente_id,
+    data_ordine,
+    importo,
+    LAG(data_ordine, 1) OVER w AS prev_data,
+    LAG(importo, 1) OVER w AS prev_importo,
+    -- Differenza in giorni dal precedente; NULL solo sul primo ordine
+    data_ordine - LAG(data_ordine, 1) OVER w AS gap_giorni,
+    -- Variazione percentuale; il default evita divisioni su NULL
+    ROUND(
+        (importo - LAG(importo, 1, importo) OVER w)
+        / LAG(importo, 1, importo) OVER w::numeric, 4
+    ) AS variazione_pct
+FROM ordini
+WINDOW w AS (PARTITION BY cliente_id ORDER BY data_ordine, id);
+-- La clausola WINDOW riusa la stessa definizione e garantisce coerenza
+-- tra tutte le colonne calcolate sui vicini
+```
+
+Tre dettagli contano più della sintassi. Primo, l'offset maggiore di 1 serve per confronti stagionali riga-per-riga: `LAG(importo, 12) OVER (PARTITION BY cliente_id ORDER BY mese)` confronta ogni mese con lo stesso mese dell'anno prima, senza self-join. Secondo, il default va scelto con intenzione: per un gap temporale `NULL` sul primo evento è corretto perché "tempo dal precedente" non esiste; per una variazione percentuale usare l'importo corrente come default forza uno zero pulito invece di un `NULL` che sparisce dalle medie. Terzo, `LAG` e `LEAD` ignorano il frame: anche se specifichi `ROWS BETWEEN 1 PRECEDING AND 1 FOLLOWING`, guardano comunque all'offset fisico nella partizione ordinata.
+
+C'è poi la distinzione tra riga precedente e valore precedente non nullo. Se la colonna contiene buchi, `LAG(stato)` restituisce il valore della riga prima anche se è `NULL`. La forma `LAG(stato) IGNORE NULLS` esiste in Oracle e BigQuery ma non in Postgres, dove va emulata con un `MAX() OVER` su frame o con una sottoquery che compatta i non-nulli. Sapere in anticipo su quale dialetto gira la query evita di scoprire il limite il giorno del deploy.
+
+## Differenze, durate e cambi di stato riga per riga
+
+Una volta che ogni riga conosce i vicini, tre calcoli coprono buona parte dell'analisi operativa: quanto è passato, di quanto è cambiato, se qualcosa è scattato.
+
+Il gap temporale è il più sottovalutato. Su eventi utente con `event_time timestamptz`, la differenza `event_time - LAG(event_time) OVER w` restituisce un `interval` che rivela burst, abbandoni e ritmi. Un gap mediano di 2 minuti con code a 6 ore indica due regimi d'uso diversi, non una media di 40 minuti che non descrive nessuno. Attenzione ai fusi orari: se `event_time` è `timestamp without time zone` e i client scrivono in ora locale, i gap attorno al cambio ora legale risultano di un'ora sbagliati. Normalizzare in UTC in ingestione costa poco e salva le durate.
+
+La variazione richiede più disciplina perché coinvolge una divisione. La formula è sempre la stessa:
+
+$$r_t = \frac{x_t - x_{t-1}}{x_{t-1}}$$
+
+dove $x_t$ è il valore corrente e $x_{t-1}$ il `LAG` a offset 1. Quando $x_{t-1} = 0$ la divisione esplode: `NULLIF(prev, 0)` restituisce `NULL` invece di un errore, e un `CASE` esplicito distingue "crescita da zero" da "dato mancante". Due casi con numeri concreti: da 0 a 50 euro non è "+infinito%", è una prima attivazione; da 200 a 230 euro è $r = 0{,}15$, cioè +15%. Mescolare i due casi in una media distrugge il senso dell'indicatore.
+
+Il cambio di stato è un confronto booleano tra corrente e `LAG`: `stato <> LAG(stato) OVER w` segnala upgrade, downgrade, passaggi di funnel. Combinato con `LEAD` permette di etichettare ogni riga come inizio, mezzo o fine di una fase. Un pattern tipico sugli abbonamenti marca il primo mese di un nuovo piano confrontando `piano_corrente` con `LAG(piano_corrente)`: se diversi, la riga è una transizione e merita un'analisi separata rispetto ai rinnovi stabili. Qui `NULL` sul primo evento va trattato come "sicuramente una transizione", con `COALESCE(LAG(piano) OVER w, 'nuovo')`.
+
+## Totali progressivi e medie mobili: quando ROWS mente
+
+Le cumulative rispondono alla domanda "a che punto siamo arrivati fin qui". Il running total è la forma base:
+
+```sql
+-- Progressivo speso per cliente in ordine cronologico
+SELECT
+    cliente_id,
+    data_ordine,
+    importo,
+    SUM(importo) OVER (
+        PARTITION BY cliente_id
+        ORDER BY data_ordine, id
+        ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+    ) AS speso_progressivo,
+    COUNT(*) OVER (
+        PARTITION BY cliente_id
+        ORDER BY data_ordine, id
+        ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+    ) AS n_ordini_fino_a_qui
+FROM ordini;
+-- ROWS conta righe fisiche: ogni riga aggiunge esattamente il suo importo
+-- Il frame esplicito evita il default RANGE che con date duplicate
+-- includerebbe tutte le righe pari data nella stessa cornice
+```
+
+La media mobile e il rolling a finestra fissa sono la versione "ultimi N" dello stesso meccanismo. `AVG(importo) OVER (ORDER BY giorno ROWS BETWEEN 6 PRECEDING AND CURRENT ROW)` dà la media a 7 giorni. Sembra banale finché i giorni non mancano: se il negozio chiude la domenica, 7 righe coprono 8 giorni di calendario e la media mobile accelera senza motivo.
+
+Qui entra la differenza tra `ROWS` e `RANGE`, che Robinhood ha imparato a proprie spese. Il team calcolava un ARPU rolling a 30 giorni con `ROWS 29 PRECEDING`: contava 30 righe-giorno qualunque fosse la loro data. Nei periodi con buchi di ingestione o giorni a volume zero saltati dalla tabella, la finestra copriva 45 giorni reali e produceva picchi improvvisi alla ricomparsa dei dati. Passando a `RANGE BETWEEN INTERVAL '29 days' PRECEDING AND CURRENT ROW` su una colonna data, la finestra è tornata a misurare 30 giorni di calendario e i picchi sono spariti. La lezione: `ROWS` ragiona in righe, `RANGE` in valori logici. Per finestre temporali serve `RANGE` su date, per classifiche posizionali serve `ROWS`.
+
+Un corollario pratico: la media mobile su `RANGE` con timestamp richiede di troncare la granularità (`date_trunc('day', ts)`) altrimenti ogni microsecondo fa storia a sé e la finestra non aggrega nulla. E quando servono pesi diversi per giorno, come dare più peso ai giorni recenti con $w_i = 0{,}9^{k}$, le window standard non bastano: meglio una aggregazione su join di intervallo o una funzione dedicata, perché forzare pesi esponenziali dentro un frame diventa illeggibile e fragile.
+
+| Obiettivo | Frame corretto | Errore tipico |
 |---|---|---|
-| Domanda | Quale scelta reale deve migliorare? | Decisione da prendere |
-| Misura | Quale segnale osservabile rappresenta il problema? | Metrica o dato sorgente |
-| Controllo | Quale baseline rende il risultato interpretabile? | Confronto credibile |
-| Azione | Che cosa cambia dopo l'analisi? | Prossimo passo operativo |
+| Progressivo dall'inizio | `ROWS UNBOUNDED PRECEDING AND CURRENT ROW` | Omettere il frame con `ORDER BY` su date duplicate |
+| Ultimi 7 giorni di calendario | `RANGE 6 giorni PRECEDING` su data | Usare `ROWS 6 PRECEDING` con giorni mancanti |
+| Media mobile su eventi | `ROWS N PRECEDING` su sequenza densa | Applicare `RANGE` su timestamp grezzi al microsecondo |
+| Confronto stesso mese anno prima | `LAG(x, 12)` su serie mensile completa | Offset su serie con mesi mancanti senza normalizzazione |
 
-## Definire l'unità di lavoro
+## Sessioni, funnel e percorsi ricostruiti in SQL
 
-Per rendere analizzabile il problema con ranking, lag/lead, cumulative logic e frames, definisci prima l'unità di lavoro, che sia riga, partizione, finestra o coorte. Poi scegli il segnale principale, tra correttezza, performance, presenza di duplicati e stabilità. Da lì fissi la baseline di confronto e la decisione attesa. Senza questo passaggio i risultati rischiano di essere inutili o, peggio, fuorvianti.
+Il salto di qualità arriva combinando `LAG` e cumulative: si ricostruiscono oggetti che non esistono nelle tabelle, come sessioni e funnel. La sessionizzazione è il pattern più riusabile. L'idea è che eventi vicini nel tempo appartengono alla stessa visita, eventi lontani aprono una visita nuova.
 
-| Elemento | Specifica richiesta |
-|---|---|
-| Unità di analisi | riga, partizione, finestra, join, coorte o metrica temporale |
-| Segnale principale | correttezza, performance, duplicati, grain e stabilità |
-| Baseline | Periodo precedente, gruppo comparabile, benchmark o scenario controfattuale |
-| Decisione | query, modello intermedio, test SQL o pattern riusabile |
-| Rischio | Scambiare un numero disponibile per una prova sufficiente |
+Il procedimento ha due mosse. Prima si calcola il gap dal precedente e si marca con 1 ogni riga che apre una sessione. Poi si cumulano quei flag per ottenere un identificativo crescente:
 
-## LAG e LEAD: il tempo come variabile esplicita
+```sql
+-- Sessioni da 30 minuti su eventi e-commerce
+WITH con_gap AS (
+    SELECT
+        user_id, event_time, page,
+        -- Gap in minuti dal precedente dello stesso utente
+        EXTRACT(EPOCH FROM (
+            event_time - LAG(event_time) OVER (
+                PARTITION BY user_id ORDER BY event_time
+            )
+        )) / 60.0 AS gap_minuti
+    FROM eventi
+),
+con_flag AS (
+    SELECT
+        *,
+        -- Nuova sessione se primo evento o gap oltre soglia
+        CASE WHEN gap_minuti IS NULL OR gap_minuti > 30
+             THEN 1 ELSE 0 END AS nuova_sessione
+    FROM con_gap
+)
+SELECT
+    *,
+    -- Il cumulato dei flag numerà le sessioni 1, 2, 3...
+    SUM(nuova_sessione) OVER (
+        PARTITION BY user_id ORDER BY event_time
+        ROWS UNBOUNDED PRECEDING
+    ) AS session_id
+FROM con_flag;
+-- La soglia 30 minuti è una scelta di prodotto, non una costante fisica:
+-- va validata confrontando durata mediana e tasso di conversione
+-- con soglie alternative a 15 e 60 minuti
+```
 
-Le funzioni LAG e LEAD confrontano ogni riga con la precedente o la successiva all'interno di una partizione ordinata. Questo rende visibile la dinamica temporale: quanto tempo è passato, se un evento è il primo o l'ultimo, se c'è stato un cambiamento di stato.
+Spotify applica lo stesso schema su miliardi di eventi giornalieri: flag di rottura più somma cumulativa, tutto in SQL distribuito prima di qualsiasi modello. Il vantaggio è che il calcolo è incrementale per utente e parallelizza bene; il rischio è scegliere la soglia a sensazione. Una soglia troppo corta frammenta una stessa intenzione d'acquisto in tre sessioni, una troppo lunga fonde la visita del mattino con quella della sera.
 
-Intercom, per esempio, è riuscita a calcolare correttamente il "Time to First Response" (TFR) solo dopo aver usato LAG per associare ogni messaggio dell'agente al messaggio utente precedente, evitando gli errori dovuti a risposte fuori sequenza.
+Lo stesso scheletro risolve i funnel: `LEAD(pagina) OVER (PARTITION BY sessione ORDER BY event_time)` mostra dove va l'utente dopo ogni pagina, e contare le transizioni `product_page → cart → checkout` dà le conversioni passo-passo senza join. La formula di conversione resta elementare, $$c = \frac{N_{\text{checkout completo}}}{N_{\text{vista prodotto}}}$$ ma calcolata su sequenze ordinate invece che su conteggi scollegati rivela dove il percorso si spezza davvero.
 
-## Cumulative logic: somma, conteggio e media su finestre
+## Trappole di ordinamento, NULL e timestamp che rompono tutto
 
-Le funzioni cumulative calcolano running total, medie mobili e rolling window. La differenza tra ROWS e RANGE nel frame è il punto critico: ROWS conta righe fisiche, RANGE ragiona sui valori logici, per esempio intervalli temporali.
+Le window su sequenze falliscono in modi silenziosi. Quattro controlli prevengono la maggior parte dei danni.
 
-Robinhood ha scoperto che usare ROWS 29 PRECEDING per un rolling 30-day ARPU produceva picchi falsi, perché contava righe e non giorni con volume simile. Passando a RANGE con un intervallo temporale, la metrica è diventata stabile e rappresentativa.
+Primo, i pareggi nell'ordinamento. Se ordini solo per `data_ordine` di tipo `date` e un cliente ha tre ordini lo stesso giorno, Postgres li considera peer: con il frame di default `RANGE`, il running total assegna a tutte e tre le righe lo stesso totale, quello di fine giornata. Con `ROWS` assegna tre totali diversi in ordine arbitrario. Nessuna delle due è "giusta" finché non decidi cosa significa "prima" a parità di giorno: serve una seconda chiave (`id`, `created_at`) che rompa il pareggio in modo stabile e documentato.
 
-## Pattern sequenziali: sessionizzazione e percorsi
+Secondo, i `NULL` nei vicini. `LAG` su colonna nullable restituisce `NULL` sia quando la riga precedente non esiste sia quando esiste ma vale `NULL`: due situazioni opposte con lo stesso segnale. Distinguerle richiede `COUNT(*) OVER` o un marcatore esplicito di prima-riga come `ROW_NUMBER() OVER w = 1`. Senza questa distinzione, un sensore che smette di trasmettere e un sensore che trasmette zero sembrano identici.
 
-Combinando LAG e logica cumulativa si costruiscono pattern più complessi, come la sessionizzazione, che raggruppa eventi vicini nel tempo in sessioni distinte. Il processo ha due passaggi: identificare le righe che aprono una nuova sessione, quando il gap temporale supera una soglia, e assegnare un session_id cumulando quei flag.
+Terzo, i buchi temporali. `LAG(importo, 1)` su una serie giornaliera con weekend mancanti confronta il lunedì con il venerdì, non con la domenica. Se l'analisi assume passi giornalieri, i gap vanno resi espliciti con un calendario di riferimento in `LEFT JOIN`: le date mancanti compaiono come righe a `NULL` e il confronto diventa onesto. Il costo è una tabella date da mantenere; il beneficio è non spacciare un confronto a 3 giorni per un confronto giorno-su-giorno.
 
-Spotify usa questo pattern per processare miliardi di eventi al giorno e ottenere metriche di sessione accurate senza far esplodere i costi di calcolo.
+Quarto, la granularità del confronto. Mescolare `timestamptz` e `timestamp` nello stesso `ORDER BY` o sottrarre timestamp di fusi diversi produce gap corretti solo per caso. La regola è una sola: tutto in `timestamptz` UTC fino alla presentazione, conversione al fuso locale solo nell'ultimo `SELECT` verso il dashboard. Un sanity check economico è verificare che `MIN(gap)` non sia negativo: gap negativi significano eventi fuori ordine o doppie conversioni di fuso, mai "clienti dal futuro".
 
-## Leggere una traiettoria con prudenza
+```sql
+-- Controlli rapidi prima di fidarsi di una window temporale
+SELECT
+    COUNT(*) AS righe,
+    -- Quanti pareggi nell'ordinamento scelto
+    COUNT(*) - COUNT(DISTINCT (cliente_id, data_ordine, id)) AS duplicati_chiave,
+    -- Quanti gap negativi = ordinamento o fusi sospetti
+    COUNT(*) FILTER (
+        WHERE data_ordine < LAG(data_ordine) OVER (
+            PARTITION BY cliente_id ORDER BY data_ordine, id
+        )
+    ) AS gap_negativi,
+    -- Quante partizioni con una sola riga = LAG/LEAD sempre NULL
+    COUNT(*) FILTER (
+        WHERE COUNT(*) OVER (PARTITION BY cliente_id) = 1
+    ) AS righe_senza_vicini
+FROM ordini;
+-- Se uno di questi numeri è alto, il problema è a monte della window:
+-- chiavi, ingestione o scelta della partizione
+```
 
-Un team deve capire l'effetto di un upgrade di piano. Confronta il valore precedente con quello successivo, mette in ranking gli eventi, guarda la cumulata nel tempo. LAG, LEAD e frames trasformano dati isolati in una narrazione analitica leggibile.
+## Mettere le sequenze in produzione senza fidarsi alla cieca
 
-| Evidenza osservata | Lettura prudente | Azione consigliata |
-|---|---|---|
-| Il numero migliora | Potrebbe essere reale o variazione normale | Cercare confronto e segmentazione |
-| Un segmento cambia più degli altri | La media aggregata nasconde differenze | Separare coorti o casi d'uso |
-| Il costo cresce insieme al risultato | Leggere l'impatto sul margine | Stimare trade-off e sostenibilità |
+Una query sequenziale che funziona su un campione può degradare su milioni di righe per due motivi: ordinamenti costosi e frame che impediscono lo streaming. `PARTITION BY user_id ORDER BY event_time` su miliardi di eventi richiede un sort per utente; senza indice su `(user_id, event_time)` o tabella già clusterizzata, il sort domina il tempo totale. In Postgres un indice btree composito sulla coppia partizione-ordinamento trasforma spesso un sort oneroso in una scansione ordinata. Nei warehouse distribuiti la stessa coppia dovrebbe guidare la distribuzione e il sort key, altrimenti ogni nodo scambia dati con tutti gli altri prima di calcolare un `LAG`.
 
-## Costruire l'analisi a tre profondità
+Il secondo tema è la correttezza nel tempo. Una sessionizzazione con soglia 30 minuti va monitorata come un modello: durata mediana delle sessioni, eventi per sessione, quota di sessioni single-event. Se la mediana raddoppia dopo un rilascio dell'app che introduce polling in background, non è cambiato il comportamento utente: è cambiato il segnale, e la soglia va ritarata. Fissare un controllo che confronta queste tre metriche settimana su settimana costa una query schedulata e intercetta derive che nessun test unitario vede.
 
-Comincia con una scheda sintetica: decisione da supportare, metrica primaria, baseline, rischio e azione. Poi costruisci una tabella con tre segmenti o scenari e per ciascuno indica cosa cambia, le spiegazioni alternative e i controlli da fare prima di agire. Il passo più ambizioso è un decision memo con ipotesi, dati, criteri di esclusione, controlli di qualità, soglia decisionale, rischio residuo e piano di monitoraggio. Per il materiale vanno bene dati reali o sintetici, purché abbiano almeno 200 righe, una dimensione temporale, dei segmenti e una metrica di outcome.
+C'è infine il confine oltre il quale SQL sequenziale smette di essere lo strumento giusto. `LAG` e `LEAD` guardano a distanza fissa e nota; pattern a distanza variabile come "l'utente ha fatto X da qualche parte nelle 5 azioni precedenti" richiedono frame scorrevoli con aggregazioni condizionali, ancora gestibili. Ma vincoli d'ordine complessi con ripetizioni e alternative, tipo "vista prodotto poi aggiunta al carrello poi o checkout o rimozione entro 3 passi", appartengono al pattern matching (`MATCH_RECOGNIZE` in Oracle, Trino e Snowflake) o a un motore a stati fuori dal database. Forzarli con `LAG` annidati produce query che nessuno riesce più a leggere né a testare. La maturità sta nel riconoscere quando una window elegante è diventata un labirinto e spostare quella logica dove ha gli operatori adatti, tenendo in SQL solo i flag e le cumulative che alimenta.
 
-## L'errore che svuota l'analisi
+## Un caso completo: dal click al checkout senza perdere il filo
 
-L'errore più comune è usare ranking, lag/lead, cumulative logic e frames come etichetta senza un processo dietro: grafici senza decisione, metriche senza baseline, conclusioni senza assunzioni dichiarate. La domanda chiave è: se il risultato fosse instabile, quale scelta sbaglierei? Se non c'è una risposta concreta, manca il collegamento tra analisi e azione.
+Chiudi il cerchio con un caso che usa tutti i pezzi insieme. Un e-commerce registra eventi `(user_id, event_time, page, action)`: il 1° febbraio l'utente 1 passa da homepage a scheda prodotto in 2 minuti e mezzo, aggiunge al carrello dopo altri 3 minuti, completa il checkout 15 minuti dopo e torna nel pomeriggio; l'utente 2 guarda due pagine a un minuto di distanza e ricompare due ore dopo. La domanda operativa è secca: quanto dura davvero una visita, dove si interrompe il percorso, quali ritorni sono nuove visite e quali sono continuazioni.
 
-## Verifica di comprensione
+La query a due stadi della sezione sulle sessioni risponde senza join. Con soglia 30 minuti, l'utente 1 ottiene due sessioni: la prima da cinque eventi in 20 minuti fino al checkout completato, la seconda da un evento isolato alle 14:30. L'utente 2 ottiene anch'esso due sessioni: due eventi ravvicinati al mattino, uno isolato a mezzogiorno. Il gap che apre la seconda sessione dell'utente 1 è di 370 minuti, quello dell'utente 2 di 119 minuti: entrambi ben oltre soglia, quindi flag a 1 senza ambiguità. I casi interessanti sono quelli vicini alla soglia, tipo un gap di 28 contro 33 minuti, dove la classificazione cambia per 5 minuti di scroll passivo: lì la scelta della soglia decide il denominatore delle conversioni.
 
-Per controllare la presa, prova a rispondere. Qual è la differenza tra LAG e LEAD e quando useresti l'uno o l'altro? Cosa cambia tra ROWS e RANGE in un frame, con un esempio in cui la scelta è critica? Come costruiresti una sessionizzazione con due window function, passo per passo? Quale decisione concreta dovrebbe migliorare questa lezione? E quale output consegneresti a uno stakeholder non tecnico?
+Con le sessioni numerate, il resto è aritmetica leggibile. La durata di sessione è `MAX(event_time) - MIN(event_time)` per `(user_id, session_id)`; gli eventi per sessione sono un `COUNT(*)`; la conversione è la quota di sessioni che contengono sia `add` sia `complete`. Su questi numeri si innesta `LEAD` per le transizioni: `LEAD(page) OVER (PARTITION BY user_id, session_id ORDER BY event_time)` affianca a ogni pagina la successiva e rivela che il passaggio critico non è `cart → checkout`, che converte bene, ma `product_page → cart`, dove la maggioranza esce. Senza partizione per sessione, il `LEAD` dell'ultimo evento del mattino punterebbe al primo del pomeriggio e inventerebbe un percorso che nessun utente ha percorso.
 
-## Riepilogo operativo
+```sql
+-- Durata e conversione per sessione, una volta numerate
+SELECT
+    user_id,
+    session_id,
+    MIN(event_time) AS inizio,
+    MAX(event_time) AS fine,
+    -- Durata in minuti; sessioni mono-evento = 0, non NULL
+    EXTRACT(EPOCH FROM (MAX(event_time) - MIN(event_time))) / 60.0 AS durata_min,
+    COUNT(*) AS n_eventi,
+    -- Conversione: serve almeno un add e un complete nella stessa sessione
+    BOOL_OR(action = 'add') AND BOOL_OR(action = 'complete') AS convertita
+FROM sessioni
+GROUP BY user_id, session_id;
+-- BOOL_OR aggrega un segnale booleano su tutta la sessione:
+-- evita self-join tra tipi di evento diversi
+```
 
-Ranking, lag/lead, cumulative logic e frames sono strumenti potenti solo quando guidano decisioni più chiare. Servono a trasformare dati isolati in storie sequenziali, sempre dentro un modello che collega problema, misura, controllo e azione.
+Il punto che rende il caso istruttivo è cosa succede variando la soglia. A 15 minuti nulla cambia per questi due utenti, perché i gap reali sono molto sopra o molto sotto. A 60 minuti nemmeno. Ma su traffico reale con code di gap attorno a 25-40 minuti, spostare la soglia di 15 minuti sposta il 5-10% delle sessioni da una classe all'altra e con esse il tasso di conversione. Per questo la soglia va riportata accanto a ogni metrica di sessione, come si riporta l'intervallo di confidenza accanto a una stima: senza, il numero è preciso ma non interpretabile. E quando qualcuno chiede "ma come sei arrivato a questo numero", la risposta è una catena corta e verificabile: gap da `LAG`, rotture da soglia dichiarata, numerazione da somma cumulativa, aggregazione per sessione. Ogni anello si controlla con una query di cinque righe.
 
----
+Verdetto: usa `ROWS` per posizioni e progressivi su sequenze dense, `RANGE` su date per finestre di calendario, `LAG` a offset fisso per confronti consecutivi e calendario con `LEFT JOIN` quando i buchi temporali devono restare visibili.
 
-## Controllo di qualità
+## Esempio verificato
 
-Prima di applicare queste tecniche verifica completezza, duplicati, timezone, definizioni e segmenti esclusi. Molte analisi falliscono perché i dati di partenza non rappresentano il comportamento atteso, e nessuna window function corregge un grain sbagliato a monte.
+La Taxi and Limousine Commission di New York pubblica corse dei taxi gialli dal 2009 con centinaia di milioni di record e picco oltre 170 milioni di corse nel 2014. Ordinando per tassista e orario con `LAG` emerge il gap tra corse consecutive e i burst da traffico o sosta. Con frame a 30 giorni di calendario su date troncate al giorno, i buchi di ingestione non allungano la finestra come accade con `ROWS` su righe rade. Senza chiave stabile di spareggio e controllo dei gap negativi, gli stessi eventi producono durate diverse tra esecuzioni.
 
-## Interpretazione per segmenti
+## Verifica
 
-La media aggregata è solo un punto di partenza. Segmenta per canale, coorte, piano, paese o device. Quando segmenti diversi si muovono in direzioni opposte, la media diventa fuorviante e ti porta verso decisioni sbagliate.
+1. Perché `LAG` senza spareggio stabile rende non riproducibile il gap tra ordini dello stesso giorno?
+2. Quando `ROWS` allunga una media mobile oltre i giorni di calendario e quando serve `RANGE` su data?
+3. Come distingui un nullo di primo evento da un valore mancante nei vicini con `LAG`?
+4. Quale denominatore usi per la conversione da vista prodotto a checkout su sequenze ordinate?
