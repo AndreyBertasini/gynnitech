@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { currentSiteLanguage } from '../utils/language';
+import { trackEvent } from '../utils/analytics';
 import {
   countCompletedLessons,
   dispatchLessonCompleted,
@@ -16,6 +17,7 @@ export function markLessonCompleted(moduleId: string, slug: string): void {
   progress[key] = { moduleId, slug, completed: true, timestamp: Date.now() };
   saveLessonProgress(progress);
   dispatchLessonCompleted(moduleId, slug);
+  trackEvent('lesson_complete', { module_id: moduleId, lesson_slug: slug });
 }
 
 export function isLessonCompleted(moduleId: string, slug: string): boolean {

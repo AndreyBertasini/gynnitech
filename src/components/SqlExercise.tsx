@@ -2,6 +2,7 @@ import { useMemo, useState } from 'react';
 import initSqlJs, { type Database, type SqlJsStatic, type SqlValue } from 'sql.js';
 import sqlWasmUrl from 'sql.js/dist/sql-wasm.wasm?url';
 import { currentSiteLanguage } from '../utils/language';
+import { trackEvent } from '../utils/analytics';
 
 type ResultTable = {
   columns: string[];
@@ -186,6 +187,7 @@ export function SqlExercise({ description, hint, initialQuery, solutionQuery }: 
       const db = await createSampleDb();
       const queryResult = db.exec(normalizedQuery);
       db.close();
+      trackEvent('sql_run', { rows: queryResult.length > 0 ? queryResult[0].values.length : 0 });
 
       if (queryResult.length === 0) {
         setMessage(copy.emptyResult);

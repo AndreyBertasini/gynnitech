@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { trackEvent } from '../utils/analytics';
 
 interface Question {
   id: string;
@@ -48,6 +49,9 @@ export function QuizExercise({ quizId, title, questions }: Props) {
   const handleSubmit = () => {
     setRevealed(Object.keys(answers).reduce((acc, k) => ({ ...acc, [k]: true }), {}));
     setSubmitted(true);
+    const correctCount = questions.filter((q) => answers[q.id] === q.correctIndex).length;
+    const pct = Math.round((correctCount / questions.length) * 100);
+    trackEvent('quiz_submit', { quiz_id: quizId, correct: correctCount, total: questions.length, pct });
   };
 
   const handleReset = () => {
