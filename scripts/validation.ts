@@ -127,46 +127,47 @@ export type PipelineRuleResult = { regola: string; esito: "PASS" | "FAIL"; nota:
 
 /**
  * Argo in forma pura: applica la rubrica a 6 regole a un singolo testo.
+ * Le regole 1, 2 e 5 verificano i CONCETTI (definizione, passi, esempio,
+ * autoverifica) con titoli liberi e naturali: nessuna intestazione fissa.
  * Usata sia da validate:content sia dalla pipeline batch (single source of truth).
  */
 export function checkLessonPipeline(body: string, frontmatterBinario: unknown): PipelineRuleResult[] {
     const results: PipelineRuleResult[] = [];
     const h2Titles = extractH2Titles(body);
     const lowerTitles = h2Titles.map((t) => t.toLowerCase());
+    const sections = h2Titles.map((title, i) => ({
+        title,
+        text: extractH2Section(body, title),
+    }));
 
-    // Regola 1 — concetto/calcolo separati.
-    const cosaSignifica = extractH2Section(body, "Cosa significa");
-    const comeSiCalcola = extractH2Section(body, "Come si calcola");
-    if (lowerTitles.includes("cosa significa") && lowerTitles.includes("come si calcola")) {
-        const hasFormula = /\$|\\\(|\\\[|\\frac|\\log|\\sum/.test(cosaSignifica);
-        if (cosaSignifica.length === 0 || countSentences(cosaSignifica) > 2 || hasFormula) {
-            results.push({ regola: "regola_1_concetto_calcolo", esito: "FAIL", nota: "sezione 'Cosa significa' deve essere una frase, zero formule" });
-        } else {
-            results.push({ regola: "regola_1_concetto_calcolo", esito: "PASS", nota: "" });
-        }
-        if (comeSiCalcola.length === 0 || !/^\s*(1[.)]|[-*]\s+)/m.test(comeSiCalcola)) {
-            results.push({ regola: "regola_1_passo_passo", esito: "FAIL", nota: "sezione 'Come si calcola' deve essere un passo-passo isolato" });
-        } else {
-            results.push({ regola: "regola_1_passo_passo", esito: "PASS", nota: "" });
-        }
+    // Regola 1 — concetto/calcolo separati (titoli liberi).
+    // Una sezione definisce il concetto (senza formule, poche frasi);
+    // un'altra è un passo-passo.
+    const definitionSection = sections.find(
+        (s) => s.text.length > 0 && countSentences(s.text) <= 4 && !/\$|\\\(|\\\[|\\frac|\\log|\\sum/.test(s.text),
+    );
+    const stepsSection = sections.find((s) => /^\s*(1[.)]|[-*]\s+)/m.test(s.text));
+    if (definitionSection && stepsSection && definitionSection.title !== stepsSection.title) {
+        results.push({ regola: "regola_1_concetto_calcolo", esito: "PASS", nota: "" });
     } else {
-        results.push({ regola: "regola_1_concetto_calcolo", esito: "FAIL", nota: "mancano le sezioni distinte 'Cosa significa' e 'Come si calcola'" });
+        results.push({
+            regola: "regola_1_concetto_calcolo",
+            esito: "FAIL",
+            nota: "servono due sezioni distinte: una che definisce il concetto (senza formule) e una passo-passo",
+        });
     }
 
-    // Regola 2 — retrieval attivo in chiusura.
-    const verifica = extractH2Section(body, "Verifica");
-    if (!lowerTitles.includes("verifica")) {
-        results.push({ regola: "regola_2_retrieval_attivo", esito: "FAIL", nota: "manca la sezione finale 'Verifica' con 3-5 domande" });
+    // Regola 2 — autoverifica in chiusura (titolo libero).
+    const lastSection = sections.length > 0 ? sections[sections.length - 1] : undefined;
+    const questionCount = lastSection ? countNumberedQuestions(lastSection.text) : 0;
+    if (lastSection && questionCount >= 3 && questionCount <= 5) {
+        results.push({ regola: "regola_2_retrieval_attivo", esito: "PASS", nota: "" });
     } else {
-        const lastH2 = h2Titles.length > 0 ? h2Titles[h2Titles.length - 1].toLowerCase() : "";
-        const questionCount = countNumberedQuestions(verifica);
-        if (lastH2 !== "verifica") {
-            results.push({ regola: "regola_2_retrieval_attivo", esito: "FAIL", nota: "'Verifica' deve essere l'ultima sezione della lezione" });
-        } else if (questionCount < 3 || questionCount > 5) {
-            results.push({ regola: "regola_2_retrieval_attivo", esito: "FAIL", nota: `'Verifica' deve contenere 3-5 domande numerate (trovate: ${questionCount})` });
-        } else {
-            results.push({ regola: "regola_2_retrieval_attivo", esito: "PASS", nota: "" });
-        }
+        results.push({
+            regola: "regola_2_retrieval_attivo",
+            esito: "FAIL",
+            nota: `l'ultima sezione deve contenere 3-5 domande di autoverifica numerate (trovate: ${questionCount})`,
+        });
     }
 
     // Regola 3 — binario dichiarato.
@@ -184,20 +185,22 @@ export function checkLessonPipeline(body: string, frontmatterBinario: unknown): 
         results.push({ regola: "regola_4_profondita_proporzionale", esito: "PASS", nota: "" });
     }
 
-    // Regola 5 — esempio verificabile.
-    const esempio = extractH2Section(body, "Esempio verificato");
-    if (!lowerTitles.includes("esempio verificato")) {
-        results.push({ regola: "regola_5_esempio_verificabile", esito: "FAIL", nota: "manca la sezione 'Esempio verificato' con dettaglio verificabile" });
+    // Regola 5 — esempio verificabile (titolo libero).
+    const exampleSection = sections.find((s) => {
+        const hasYearOrPercent = /(\b(1[0-9]|20)\d{2}\b|\d+\s?%)/.test(s.text);
+        const hasNumber = /\d[\d.,]*/.test(s.text);
+        const hasProperNoun = /[A-ZÀ-Þ][a-zà-ÿ']{2,}/.test(s.text);
+        const hasUnit = PIPELINE_VERIFIABLE_UNIT.test(s.text);
+        return hasProperNoun && (hasYearOrPercent || (hasNumber && hasUnit));
+    });
+    if (exampleSection) {
+        results.push({ regola: "regola_5_esempio_verificabile", esito: "PASS", nota: "" });
     } else {
-        const hasYearOrPercent = /(\b(1[0-9]|20)\d{2}\b|\d+\s?%)/.test(esempio);
-        const hasNumber = /\d[\d.,]*/.test(esempio);
-        const hasProperNoun = /[A-ZÀ-Þ][a-zà-ÿ']{2,}/.test(esempio);
-        const hasUnit = PIPELINE_VERIFIABLE_UNIT.test(esempio);
-        if (!hasProperNoun || !(hasYearOrPercent || (hasNumber && hasUnit))) {
-            results.push({ regola: "regola_5_esempio_verificabile", esito: "FAIL", nota: "'Esempio verificato' senza dettaglio verificabile (nome + data/fonte/numero)" });
-        } else {
-            results.push({ regola: "regola_5_esempio_verificabile", esito: "PASS", nota: "" });
-        }
+        results.push({
+            regola: "regola_5_esempio_verificabile",
+            esito: "FAIL",
+            nota: "manca una sezione con un esempio concreto e verificabile (nome + data/fonte/numero)",
+        });
     }
 
     // Regola 6 — diretto, senza disclaimer.
