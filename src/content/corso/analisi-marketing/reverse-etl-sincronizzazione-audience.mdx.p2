@@ -1,0 +1,44 @@
+Il punto che separa un sync serio da un esportatore di CSV con uno scheduler è la politica di scrittura combinata con la modalità di invio. In modalità **full refresh** ogni esecuzione spedisce l'intero segmento e la destinazione viene riallineata: chi non c'è più viene rimosso. È semplice da ragionare e auto-riparante — un invio corrotto viene corretto dal successivo — ma costa in volume e molte API ads applicano limiti giornalieri sul numero di operazioni. In modalità **delta** vengono spediti solo ingressi e uscite rispetto all'esecuzione precedente: efficiente, quasi obbligatoria sopra il milione di righe, ma fragile se un delta va perso, perché lo stato della destinazione diverge in silenzio finché qualcuno non lancia un riallineamento completo.
+
+La pratica diffusa è ibrida: delta frequenti più un full refresh periodico di riconciliazione, ad esempio ogni notte o ogni domenica. La tabella di stato che rende possibile il delta vive nel warehouse — una snapshot del segmento precedente con hash per riga — e va trattata come infrastruttura critica, non come tabella temporanea.
+
+Un esempio concreto di query sorgente aiuta a fissare le idee. Segmento di riattivazione per un e-commerce: clienti che hanno comprato almeno due volte, inattivi da oltre 90 giorni, con consenso attivo e senza resi aperti.
+
+```sql
+-- Segmento di riattivazione: clienti dormienti di valore, contattabili
+-- Ogni riga è un utente pronto da inviare alla destinazione
+SELECT
+  c.customer_id            -- identificatore interno, chiave di join
+  , c.email_address        -- identificatore per il match sulla piattaforma
+  , c.phone_e164           -- secondo identificatore, aumenta il match rate
+  , MAX(o.delivered_at) AS last_order_at
+  , COUNT(o.order_id) AS lifetime_orders
+FROM marts.dim_customers AS c
+JOIN marts.fact_orders AS o
+  ON o.customer_id = c.customer_id
+WHERE c.marketing_consent = TRUE        -- solo contattabili
+  AND c.consent_updated_at <= CURRENT_DATE - INTERVAL '1 day'  -- consenso consolidato
+  AND NOT EXISTS (                      -- escludi chi ha resi o reclami aperti
+    SELECT 1 FROM marts.fact_returns AS r
+    WHERE r.customer_id = c.customer_id AND r.status = 'open'
+  )
+GROUP BY c.customer_id, c.email_address, c.phone_e164
+HAVING MAX(o.delivered_at) <= CURRENT_DATE - INTERVAL '90 days'
+   AND COUNT(o.order_id) >= 2;
+```
+
+Notare i dettagli che contano in produzione: il filtro sul consenso consolidato evita di sincronizzare revoche ancora in propagazione, l'esclusione dei resi aperti impedisce di spendere budget su clienti arrabbiati, e la granularità a una riga per utente con identificatori multipli massimizza le probabilità di match a destinazione.
+
+## Identità e match rate: dove si gioca la vera partita
+
+Quando una piattaforma ads riceve 100.000 email e ne "matcha" 45.000, quel 45% è il **match rate**, e quasi ogni delusione sul Reverse ETL nasce qui. Il match rate non misura la qualità del segmento: misura quanti identificatori inviati la piattaforma riesce a collegare a un profilo noto. Email con alias e domini usa-e-getta, numeri di telefono in formati incoerenti, utenti che comprano con la mail di lavoro e usano il social con quella personale — ogni disallineamento brucia reach prima ancora che la campagna parta.
+
+La prima leva è inviare più identificatori per riga: email più telefono più identificatore esterno (quando la piattaforma lo supporta, come l'`external_id` di Meta legato al login o al cookie proprietario). Ogni identificatore aggiuntivo è una seconda chance di match sullo stesso utente. La seconda leva è la normalizzazione a monte, nel warehouse, una volta per tutte: email in minuscolo e senza spazi, telefoni in formato E.164 con prefisso internazionale, nomi senza titoli. Le piattaforme documentano regole precise — Meta richiede ad esempio hash SHA-256 di email normalizzate — e applicarle nel mapper in modo deterministico evita discrepanze tra sync successivi che gonfiano artificialmente ingressi e uscite.
+
+$$ \text{match rate} = \frac{\text{identificatori riconosciuti dalla piattaforma}}{\text{identificatori inviati}} $$
+
+Il benchmark onesto: per liste email B2C ben curate su Meta o Google, un match rate tra 40% e 70% è normale; sotto il 30% c'è quasi sempre un problema di igiene degli identificatori o di consenso implicito (utenti che non hanno mai interagito con la piattaforma con quell'email). Sopra l'80% capita con traffico loggato proprietario o con l'uso di identificatori first-party persistenti. Diffidare di chi promette di "alzare il match rate" senza toccare i dati: gli unici modi reali sono identificatori migliori, più identificatori per utente, e segmenti composti da persone che esistono davvero su quella piattaforma.
+
+Un errore ricorrente è confondere la dimensione del segmento nel warehouse con la reach comprabile. Un segmento da 200.000 utenti con match rate del 40%, da cui la piattaforma esclude il 15% per policy e frequency capping naturale ne rende raggiungibili metà, produce un'audience effettiva di circa 34.000 persone. Dimensionare budget e aspettative su 200.000 porta a CPM apparentemente folli e a conclusioni sbagliate sulla creatività. La formula della reach effettiva merita un posto nel report che accompagna ogni sync:
+
+$$ \text{reach effettiva} \approx N_{\text{segmento}} \times \text{match rate} \times (1 - \text{quota esclusa}) \times \text{frazione servibile} $$
