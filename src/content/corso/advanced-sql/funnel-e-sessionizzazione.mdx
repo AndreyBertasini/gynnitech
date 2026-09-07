@@ -35,11 +35,11 @@ Questa lezione mostra come trasformare timestamp grezzi in sessioni con soglia d
 
 ## Come si calcola
 
-1. Fissa la tabella eventi con `user_id`, `event_name` ed `event_time` in `timestamptz` e deduplica su tripla prima di ogni finestra.
-2. Calcola il gap dal precedente con `LAG` per utente in ordine di tempo e apri una nuova sessione quando il gap supera la soglia o è nullo.
+1. Fissa la tabella eventi con `user_id`, `event_name` ed `event_time` in `timestamptz` e deduplica sulla tripla prima di ogni finestra.
+2. Calcola il gap dal precedente con `LAG` per utente in ordine di tempo e apri una nuova sessione quando il gap supera la soglia o è `NULL`.
 3. Numera le sessioni con somma cumulata del flag di apertura e aggrega una riga per sessione con inizio, fine e conteggio eventi.
-4. Mappa ogni evento a numero di passo e calcola il passo più profondo raggiunto in ordine per il funnel stretto oppure usa aggregazioni con `FILTER` per il funnel lasco.
-5. Attribuisci le conversioni tra visite con self join temporale entro finestra dichiarata e quadra ingressi, uscite e transizioni prima di pubblicare il tasso.
+4. Mappa ogni evento a un numero di passo e calcola il passo più profondo raggiunto in ordine per il funnel stretto, oppure usa aggregazioni con `FILTER` per il funnel lasco.
+5. Attribuisci le conversioni tra visite con self-join temporale entro una finestra dichiarata e quadra ingressi, uscite e transizioni prima di pubblicare il tasso.
 
 Un funnel racconta quanti utenti attraversano una sequenza di passi — vista prodotto, aggiunta al carrello, checkout, pagamento — e dove si perdono per strada. La sessionizzazione risponde a una domanda più a monte: cosa conta come una singola visita, quando tutto quello che hai è una lista di timestamp? Senza una definizione esplicita di sessione, ogni tasso di conversione è un numero appeso al nulla, perché il denominatore cambia senza che nessuno se ne accorga. In questa pagina costruiamo entrambi in SQL puro, con pattern che reggono su tabelle eventi reali: orari che arrivano in disordine, utenti che tornano dopo mesi, qualche evento che manca del tutto. Il dialetto di riferimento è PostgreSQL, ma quasi tutto gira anche altrove con ritocchi minimi.
 
@@ -58,7 +58,7 @@ CREATE TABLE events (
 
 ## Perché i funnel mentono più spesso delle query che li calcolano
 
-Il calcolo di un funnel sembra aritmetica elementare: conti chi fa il passo 1, conti chi fa anche il 2, dividi. Il problema è che ogni parola di quella frase nasconde una decisione. "Chi fa il passo 2" significa entro quanto tempo dal passo 1? Nella stessa sessione, entro 24 ore, entro 30 giorni, senza alcun limite? Cambiando solo la finestra, lo stesso dataset passa da un tasso del 18% a uno del 41%, ed entrambe le query sono sintatticamente corrette. La differenza è semantica, e va scritta prima del `SELECT`, non scoperta dopo.
+Il calcolo di un funnel sembra aritmetica elementare: conti chi fa il passo 1, conti chi fa anche il passo 2, poi dividi. Il problema è che ogni parola nasconde una decisione. "Chi fa il passo 2" significa entro quanto tempo dal passo 1? Nella stessa sessione, entro 24 ore, entro 30 giorni o senza alcun limite? Cambiando solo la finestra, lo stesso dataset passa da un tasso del 18% a uno del 41%. Entrambe le query sono sintatticamente corrette. La differenza è semantica e va scritta prima del `SELECT`, non scoperta dopo.
 
 La seconda ambiguità riguarda l'ordine. Un funnel stretto richiede la sequenza esatta A → B → C; uno lasco accetta chi ha fatto A, B e C in qualunque ordine. Per un checkout e-commerce la sequenza conta: nessuno paga prima di aver visto un prodotto, e se i dati dicono il contrario c'è un bug di tracciamento, non un utente creativo. Per un funnel editoriale — homepage, articolo, newsletter — l'ordine è molto meno informativo, e imporlo taglia fuori percorsi legittimi. La scelta tra stretto e lasco non è tecnica, è una tesi sul comportamento che stai misurando.
 
@@ -245,9 +245,9 @@ LEFT JOIN buys b ON b.user_id = v.user_id
 GROUP BY v.user_id, v.view_time;
 ```
 
-Il `LEFT JOIN` con `FILTER` invece del `WHERE` è la riga che decide se la query è corretta: filtrare nel `WHERE` trasformerebbe il join in inner e cancellerebbe le viste non convertite — esattamente il denominatore. Il tasso a 7 giorni è poi $conv_7 = N(viste\;con\;attributed\_buy) / N(viste)$. Allargando $W$ da 1 a 7 a 30 giorni il tasso cresce per costruzione; pubblicare il numero senza $W$ è come pubblicare una velocità senza unità di misura.
+Il `LEFT JOIN` con `FILTER` invece del `WHERE` è la riga che decide se la query è corretta. Filtrare nel `WHERE` trasformerebbe il join in inner e cancellerebbe le viste non convertite, cioè esattamente il denominatore. Il tasso a 7 giorni è poi $conv_7 = N(viste\;con\;attributed\_buy) / N(viste)$. Allargando $W$ da 1 a 7 a 30 giorni il tasso cresce per costruzione. Pubblicare il numero senza $W$ è come pubblicare una velocità senza unità di misura.
 
-Il self-join ha un costo quadratico potenziale: per utenti iperattivi con migliaia di eventi, il prodotto cartesiano per utente esplode. Due difese standard: restringere il join con la condizione temporale direttamente nella `ON` (`AND b.buy_time <= v.buy_time + interval '7 days'`), così il planner può lavorare per intervalli, e pre-aggregare al primo evento utile per utente-giorno prima di joinare. Se il motore supporta `MATCH_RECOGNIZE` (Oracle, Snowflake, Trino recente), la stessa logica si esprime in modo più leggibile e spesso più veloce; in Postgres il self-join resta la via maestra.
+Il self-join ha un costo quadratico potenziale: per utenti iperattivi con migliaia di eventi, il prodotto cartesiano per utente esplode. Due difese standard: restringere il `JOIN` con la condizione temporale direttamente nella `ON` (`AND b.buy_time <= v.buy_time + interval '7 days'`), così il planner lavora per intervalli, e pre-aggregare al primo evento utile per utente-giorno prima di joinare. Se il motore supporta `MATCH_RECOGNIZE` (Oracle, Snowflake, Trino recente), la stessa logica si esprime in modo più leggibile e spesso più veloce. In Postgres il self-join resta la via maestra.
 
 ## Quando gli utenti saltano i passi: leggere i percorsi reali
 
@@ -300,9 +300,9 @@ Le trappole dati, in ordine di frequenza reale. Fusi orari: se `event_time` è `
 
 Un funnel ben calcolato si legge in tre mosse. Prima: guarda i tassi passo-passo, non l'end-to-end — il collo di bottiglia è il passo con $r_k$ minimo, ed è lì che ogni punto recuperato vale di più in assoluto. Seconda: segmenta prima di concludere. Lo stesso funnel per traffico organico e a pagamento, per mobile e desktop, per nuovi e ricorrenti racconta storie diverse; il tasso aggregato è una media ponderata dal mix, e se il mix cambia nel tempo il tasso si muove senza che nessun percorso sia cambiato — il classico paradosso di Simpson applicato al prodotto. Terza: diffida dei movimenti senza meccanismo. Un +3 punti sul checkout nella stessa settimana del redesign è un'ipotesi, non una prova; la prova richiede coorti comparabili o un esperimento, e il funnel da solo non la fornisce.
 
-Vale anche il controllo più umile e più trascurato: la quadratura. La somma delle sessioni per passo più quelle uscite deve tornare al totale delle sessioni entrate; le transizioni in uscita da un passo devono sommare al 100%. Se non torna, c'è un filtro messo nel posto sbagliato — quasi sempre un `WHERE` che doveva essere un `FILTER`, o eventi `NULL` mangiati da un join. E quando presenti il risultato, la riga di contesto non è facoltativa: denominatore, finestra, regola d'ordine, soglia di sessione, esclusioni. Cinque informazioni, una riga. È la differenza tra un numero che orienta una decisione e uno che decora una slide.
+Vale anche il controllo più umile e più trascurato: la quadratura. La somma delle sessioni per passo più quelle uscite deve tornare al totale delle sessioni entrate. Le transizioni in uscita da un passo devono sommare al 100%. Se non torna, c'è un filtro messo nel posto sbagliato — quasi sempre un `WHERE` che doveva essere un `FILTER`, o eventi `NULL` mangiati da un `JOIN`. Quando presenti il risultato, la riga di contesto non è facoltativa: denominatore, finestra, regola d'ordine, soglia di sessione ed esclusioni. Cinque informazioni in una riga. È la differenza tra un numero che orienta una decisione e uno che decora una slide.
 
-Verdetto: usa il funnel stretto con ordine imposto per checkout e pagamenti, il funnel lasco con `FILTER` per percorsi editoriali, sessioni a 30 minuti solo dopo aver guardato la distribuzione dei gap e finestra di attribuzione sempre dichiarata accanto al tasso.
+Verdetto: usa il funnel stretto con ordine imposto per checkout e pagamenti, il funnel lasco con `FILTER` per percorsi editoriali, sessioni a 30 minuti solo dopo aver guardato la distribuzione dei `gap` e finestra di attribuzione sempre dichiarata accanto al tasso.
 
 ## Esempio verificato
 
@@ -310,7 +310,7 @@ Google Analytics 4, rilasciato nell ottobre 2020, mantiene a 30 minuti il timeou
 
 ## Verifica
 
-1. Quando apri una nuova sessione con `LAG` e soglia di inattività e come tratti il primo evento con gap nullo?
+1. Quando apri una nuova sessione con `LAG` e soglia di inattività e come tratti il primo evento con `gap` nullo?
 2. Quale denominatore rende confrontabile il tasso di conversione tra due passi del funnel stretto?
 3. Perché un filtro nel `WHERE` dopo `LEFT JOIN` cancella il denominatore nelle conversioni con finestra di attribuzione?
 4. Quando il funnel lasco supera lo stretto del 20 percento cosa indica sui percorsi reali degli utenti?

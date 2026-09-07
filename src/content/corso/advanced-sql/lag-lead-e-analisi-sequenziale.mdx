@@ -36,10 +36,10 @@ Questa lezione mostra come dare memoria alle righe con `LAG`, `LEAD` e frame cum
 ## Come si calcola
 
 1. Partiziona per cliente con `PARTITION BY` e ordina per tempo reale con chiave stabile per rendere univoco il vicino.
-2. Calcola gap e variazione con `LAG` a offset 1 gestendo nulli iniziali e zeri al denominatore con `NULLIF`.
+2. Calcola `gap` e variazione con `LAG` a offset 1, gestendo i `NULL` iniziali e gli zeri al denominatore con `NULLIF`.
 3. Costruisci progressivi e medie mobili con frame `ROWS` esplicito e usa `RANGE` su date quando i giorni mancano.
-4. Ricostruisci sessioni con flag di rottura oltre soglia e somma cumulata per numerare le visite.
-5. Esegui controlli su pareggi, gap negativi e partizioni da una riga prima di pubblicare durate e conversioni.
+4. Ricostruisci le sessioni con flag di rottura oltre soglia e somma cumulata per numerare le visite.
+5. Esegui controlli su pareggi, `gap` negativi e partizioni da una riga prima di pubblicare durate e conversioni.
 
 Il fatturato settimanale sale, il margine scende e due clienti enterprise ordinano a intervalli sempre più lunghi. Il dashboard segna verde sugli ordini totali e rosso sulla cassa, e nessuno capisce perché. Il problema non è la somma: è la sequenza. Quanto tempo passa tra un ordine e il successivo, se il secondo acquisto arriva prima o dopo il rinnovo, se la crescita è un trend o tre settimane fortunate. Finché SQL guarda solo totali, queste domande restano fuori portata.
 
@@ -105,7 +105,7 @@ WINDOW w AS (PARTITION BY cliente_id ORDER BY data_ordine, id);
 -- tra tutte le colonne calcolate sui vicini
 ```
 
-Tre dettagli contano più della sintassi. Primo, l'offset maggiore di 1 serve per confronti stagionali riga-per-riga: `LAG(importo, 12) OVER (PARTITION BY cliente_id ORDER BY mese)` confronta ogni mese con lo stesso mese dell'anno prima, senza self-join. Secondo, il default va scelto con intenzione: per un gap temporale `NULL` sul primo evento è corretto perché "tempo dal precedente" non esiste; per una variazione percentuale usare l'importo corrente come default forza uno zero pulito invece di un `NULL` che sparisce dalle medie. Terzo, `LAG` e `LEAD` ignorano il frame: anche se specifichi `ROWS BETWEEN 1 PRECEDING AND 1 FOLLOWING`, guardano comunque all'offset fisico nella partizione ordinata.
+Tre dettagli contano più della sintassi. Primo, l'offset maggiore di 1 serve per confronti stagionali riga per riga: `LAG(importo, 12) OVER (PARTITION BY cliente_id ORDER BY mese)` confronta ogni mese con lo stesso mese dell'anno prima, senza self-join. Secondo, il default va scelto con intenzione. Per un `gap` temporale il `NULL` sul primo evento è corretto, perché il tempo dal precedente non esiste. Per una variazione percentuale, usare l'importo corrente come default forza uno zero pulito invece di un `NULL` che sparisce dalle medie. Terzo, `LAG` e `LEAD` ignorano il frame: anche se specifichi `ROWS BETWEEN 1 PRECEDING AND 1 FOLLOWING`, guardano comunque all'offset fisico nella partizione ordinata.
 
 C'è poi la distinzione tra riga precedente e valore precedente non nullo. Se la colonna contiene buchi, `LAG(stato)` restituisce il valore della riga prima anche se è `NULL`. La forma `LAG(stato) IGNORE NULLS` esiste in Oracle e BigQuery ma non in Postgres, dove va emulata con un `MAX() OVER` su frame o con una sottoquery che compatta i non-nulli. Sapere in anticipo su quale dialetto gira la query evita di scoprire il limite il giorno del deploy.
 
@@ -151,9 +151,9 @@ FROM ordini;
 
 La media mobile e il rolling a finestra fissa sono la versione "ultimi N" dello stesso meccanismo. `AVG(importo) OVER (ORDER BY giorno ROWS BETWEEN 6 PRECEDING AND CURRENT ROW)` dà la media a 7 giorni. Sembra banale finché i giorni non mancano: se il negozio chiude la domenica, 7 righe coprono 8 giorni di calendario e la media mobile accelera senza motivo.
 
-Qui entra la differenza tra `ROWS` e `RANGE`, che Robinhood ha imparato a proprie spese. Il team calcolava un ARPU rolling a 30 giorni con `ROWS 29 PRECEDING`: contava 30 righe-giorno qualunque fosse la loro data. Nei periodi con buchi di ingestione o giorni a volume zero saltati dalla tabella, la finestra copriva 45 giorni reali e produceva picchi improvvisi alla ricomparsa dei dati. Passando a `RANGE BETWEEN INTERVAL '29 days' PRECEDING AND CURRENT ROW` su una colonna data, la finestra è tornata a misurare 30 giorni di calendario e i picchi sono spariti. La lezione: `ROWS` ragiona in righe, `RANGE` in valori logici. Per finestre temporali serve `RANGE` su date, per classifiche posizionali serve `ROWS`.
+Qui entra la differenza tra `ROWS` e `RANGE`, che il team di Robinhood ha imparato a proprie spese. Il team calcolava un `ARPU` rolling a 30 giorni con `ROWS 29 PRECEDING`: contava 30 righe-giorno qualunque fosse la loro data. Nei periodi con buchi di ingestione o giorni a volume zero saltati dalla tabella, la finestra copriva 45 giorni reali e produceva picchi improvvisi alla ricomparsa dei dati. Passando a `RANGE BETWEEN INTERVAL '29 days' PRECEDING AND CURRENT ROW` su una colonna data, la finestra è tornata a misurare 30 giorni di calendario e i picchi sono spariti. La lezione: `ROWS` ragiona in righe, `RANGE` in valori logici. Per finestre temporali serve `RANGE` su date, per classifiche posizionali serve `ROWS`.
 
-Un corollario pratico: la media mobile su `RANGE` con timestamp richiede di troncare la granularità (`date_trunc('day', ts)`) altrimenti ogni microsecondo fa storia a sé e la finestra non aggrega nulla. E quando servono pesi diversi per giorno, come dare più peso ai giorni recenti con $w_i = 0{,}9^{k}$, le window standard non bastano: meglio una aggregazione su join di intervallo o una funzione dedicata, perché forzare pesi esponenziali dentro un frame diventa illeggibile e fragile.
+Un corollario pratico: la media mobile su `RANGE` con timestamp richiede di troncare la granularità con `date_trunc('day', ts)`, altrimenti ogni microsecondo fa storia a sé e la finestra non aggrega nulla. Quando servono pesi diversi per giorno, come dare più peso ai giorni recenti con $w_i = 0{,}9^{k}$, le window standard non bastano. Meglio una aggregazione su `JOIN` di intervallo o una funzione dedicata, perché forzare pesi esponenziali dentro un frame diventa illeggibile e fragile.
 
 | Obiettivo | Frame corretto | Errore tipico |
 |---|---|---|
@@ -273,7 +273,7 @@ GROUP BY user_id, session_id;
 -- evita self-join tra tipi di evento diversi
 ```
 
-Il punto che rende il caso istruttivo è cosa succede variando la soglia. A 15 minuti nulla cambia per questi due utenti, perché i gap reali sono molto sopra o molto sotto. A 60 minuti nemmeno. Ma su traffico reale con code di gap attorno a 25-40 minuti, spostare la soglia di 15 minuti sposta il 5-10% delle sessioni da una classe all'altra e con esse il tasso di conversione. Per questo la soglia va riportata accanto a ogni metrica di sessione, come si riporta l'intervallo di confidenza accanto a una stima: senza, il numero è preciso ma non interpretabile. E quando qualcuno chiede "ma come sei arrivato a questo numero", la risposta è una catena corta e verificabile: gap da `LAG`, rotture da soglia dichiarata, numerazione da somma cumulativa, aggregazione per sessione. Ogni anello si controlla con una query di cinque righe.
+Il punto che rende il caso istruttivo è cosa succede variando la soglia. A 15 minuti nulla cambia per questi due utenti, perché i `gap` reali sono molto sopra o molto sotto. A 60 minuti nemmeno. Su traffico reale con code di `gap` attorno a 25-40 minuti, spostare la soglia di 15 minuti sposta il 5-10% delle sessioni da una classe all'altra, e con esse il tasso di conversione. Per questo la soglia va riportata accanto a ogni metrica di sessione, come si riporta l'intervallo di confidenza accanto a una stima. Senza, il numero è preciso ma non interpretabile. Quando qualcuno chiede "ma come sei arrivato a questo numero", la risposta è una catena corta e verificabile: `gap` da `LAG`, rotture da soglia dichiarata, numerazione da somma cumulativa e aggregazione per sessione. Ogni anello si controlla con una query di cinque righe.
 
 Verdetto: usa `ROWS` per posizioni e progressivi su sequenze dense, `RANGE` su date per finestre di calendario, `LAG` a offset fisso per confronti consecutivi e calendario con `LEFT JOIN` quando i buchi temporali devono restare visibili.
 
@@ -283,7 +283,7 @@ La Taxi and Limousine Commission di New York pubblica corse dei taxi gialli dal 
 
 ## Verifica
 
-1. Perché `LAG` senza spareggio stabile rende non riproducibile il gap tra ordini dello stesso giorno?
+1. Perché `LAG` senza spareggio stabile rende non riproducibile il `gap` tra ordini dello stesso giorno?
 2. Quando `ROWS` allunga una media mobile oltre i giorni di calendario e quando serve `RANGE` su data?
-3. Come distingui un nullo di primo evento da un valore mancante nei vicini con `LAG`?
+3. Come distingui un `NULL` di primo evento da un valore mancante nei vicini con `LAG`?
 4. Quale denominatore usi per la conversione da vista prodotto a checkout su sequenze ordinate?
