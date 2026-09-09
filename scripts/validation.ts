@@ -422,6 +422,21 @@ async function validateCollection(collection: "blog" | "corso"): Promise<Validat
                     buildMessage(file, "draft", "campo 'draft' mancante o non booleano: Giano pubblica solo con draft:false esplicito"),
                 );
             }
+            // Anti-regressione: i template editoriali non devono ricomparire.
+            const rawDescription = String(data.description ?? "");
+            if (/Lezione (core|narrativa) del modulo/i.test(rawDescription)) {
+                pushEditorialIssue(result, file, "editorial", "description con boilerplate 'Lezione core/narrativa del modulo': scrivi una description specifica");
+            }
+            const genericObjectives = Array.isArray(data.learningObjectives)
+                ? data.learningObjectives.filter((o) => typeof o === "string" && /Comprendere il problema analitico e il contesto decisionale|Applicare esempi, metriche e controlli a casi reali/.test(o))
+                : [];
+            if (genericObjectives.length > 0) {
+                pushEditorialIssue(result, file, "editorial", "learningObjectives generici da template: scrivi obiettivi specifici per la lezione");
+            }
+            const firstParagraph = content.replace(/^\s*import[\s\S]*?\n\n/, "").replace(/^#.*?\n\n/, "").split(/\n\s*\n/)[0] ?? "";
+            if (/^Questa lezione appartiene/i.test(firstParagraph.trim())) {
+                pushEditorialIssue(result, file, "editorial", "apertura con template 'Questa lezione appartiene al binario': scrivi un incipit naturale");
+            }
         }
 
         if (!isLessonFile) {

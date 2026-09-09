@@ -47,12 +47,20 @@ function splitFrontmatter(raw: string): { frontmatter: string; body: string } {
         return { frontmatter: "", body: raw };
     }
 
-    const parts = raw.split("---", 3);
-    if (parts.length < 3) {
-        return { frontmatter: "", body: raw };
+    // Il delimitatore di chiusura è una riga composta solo da "---".
+    // split("---", 3) era sbagliato: troncava il body alle righe separatore
+    // delle tabelle markdown (| --- |), falsando i risultati del test.
+    const lines = raw.split("\n");
+    for (let i = 1; i < lines.length; i += 1) {
+        if (lines[i].trim() === "---") {
+            return {
+                frontmatter: lines.slice(1, i).join("\n"),
+                body: lines.slice(i + 1).join("\n"),
+            };
+        }
     }
 
-    return { frontmatter: parts[1], body: parts[2] };
+    return { frontmatter: "", body: raw };
 }
 
 function extractField(frontmatter: string, field: string): string {
