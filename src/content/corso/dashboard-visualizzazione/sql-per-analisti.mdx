@@ -44,6 +44,49 @@ Una dashboard affidabile nasce da query con quattro proprietà: `grain` esplicit
 
 Verdetto: `grain` dichiarato, date parametriche e denominatore visibile; il resto è ottimizzazione.
 
+## I pattern in codice
+
+La `date spine` si costruisce generando le date e lasciando che il `left join` porti gli eventi: i giorni senza eventi restano a zero, non spariscono.
+
+```sql
+WITH giorni AS (
+  SELECT generate_series(
+    DATE '2026-01-01',
+    DATE '2026-03-31',
+    INTERVAL '1 day'
+  )::date AS giorno
+)
+SELECT
+  g.giorno,
+  COUNT(e.event_id) AS eventi
+FROM giorni g
+LEFT JOIN eventi e
+  ON e.data_competenza = g.giorno
+GROUP BY g.giorno
+ORDER BY g.giorno;
+```
+
+Il confronto con il periodo precedente usa una finestra: la variazione percentuale si calcola dentro la query, non a mano in un foglio.
+
+```sql
+SELECT
+  settimana,
+  SUM(eventi) AS eventi,
+  LAG(SUM(eventi), 1) OVER (ORDER BY settimana) AS eventi_precedenti,
+  ROUND(
+    100.0 * (SUM(eventi) - LAG(SUM(eventi), 1) OVER (ORDER BY settimana))
+    / NULLIF(LAG(SUM(eventi), 1) OVER (ORDER BY settimana), 0),
+    1
+  ) AS variazione_pct
+FROM vista_settimanale
+GROUP BY settimana
+ORDER BY settimana;
+```
+
+Il `NULLIF` nel denominatore è la gestione esplicita dei valori nulli: se la settimana precedente ha zero eventi, la divisione per zero diventa `NULL` invece di un errore, e chi legge la dashboard vede "non calcolabile" invece di un numero falso.
+
+Il Top N con categoria residuale funziona così: classifichi i primi 5 canali per volume e raggruppi tutto il resto in una riga "Altri". Con 12 canali e 100.000 eventi, i primi 5 ne coprono 87.000 e la riga residuale ne raccoglie 13.000: la vista resta leggibile e il totale resta corretto, perché la somma delle righe continua a dare 100.000. Senza la categoria residuale, o mostri 12 righe e perdi leggibilità, o tagli i canali minori e il totale non torna più.
+
 ## Tenere le query leggere e governate
 
 Le query pesanti si materializzano in tabelle intermedie aggiornate di notte. La finestra di default resta limitata, tipicamente agli ultimi 90 giorni. Le date sono sempre parametri, mai valori scritti a mano. Un timeout blocca le query fuori controllo prima che saturino il warehouse. Quando due dashboard mostrano numeri diversi, la causa è quasi sempre `grain`, `join` o data di competenza: allineare questi tre elementi elimina il conflitto prima ancora di discutere di grafici e filtri.
@@ -54,9 +97,19 @@ Verdetto: prima materializza e limita la finestra, poi ottimizza la sintassi.
 
 Quando una vista conta righe ordine e l'altra righe pagamento, i totali divergono senza che nessuno abbia sbagliato i conti. La correzione parte dal `grain`: stessa unità, stesso filtro di stato, stessa data di competenza. Poi si fissa il denominatore unico e lo si documenta nella descrizione della metrica. Solo dopo si toccano visualizzazioni e filtri.
 
+Un caso con numeri. La dashboard ordini conta 1.200 ordini a marzo, quella pagamenti 1.050 pagamenti nello stesso mese. Nessuno ha sbagliato: 150 ordini sono stati creati ma non ancora pagati, e le due viste usano date diverse, data di creazione contro data di pagamento. Allineando la data di competenza a quella di pagamento e il filtro di stato a "pagato", entrambe le viste mostrano 1.050. Il conflitto si risolve sulla definizione, non sul grafico.
+
+## Gli errori che producono dashboard in conflitto
+
+Quattro errori hanno sintomi riconoscibili. Il `grain` non dichiarato produce totali che cambiano quando qualcuno aggiunge un filtro. I `join` su chiavi non univoche duplicano le righe e gonfiano le somme: il sintomo è un totale che cresce quando aggiungi una tabella. Le date scritte a mano nel codice producono numeri fermi che nessuno aggiorna. E il denominatore implicito, per esempio "utenti" senza dire se attivi o registrati, rende ogni confronto tra dashboard una discussione senza fine. Se due viste non tornano, la prima domanda non è "quale grafico è giusto" ma "quale definizione è diversa".
+
 ## La prova della longevità
 
 SQL nasce nel 1974 nei laboratori IBM di San Jose con il paper di Donald Chamberlin e Raymond Boyce sul linguaggio SEQUEL per il prototipo System R. Nel 1986 diventa standard ANSI e da allora sopravvive a ogni ondata tecnologica perché la stessa query dichiarativa gira su Postgres, BigQuery e Snowflake con modifiche minime. La lezione per chi alimenta dashboard è diretta e misurabile: il costo di una query non è la sua esecuzione ma la sua manutenzione, quindi vince la query portabile e leggibile.
+
+## La checklist prima di pubblicare una query
+
+Prima di consegnare una query a una dashboard, verifica sei punti. Il `grain` è dichiarato in un commento o nel nome della vista? I filtri di stato e di data sono espliciti e coerenti con le altre viste? I `join` sono su chiavi univoche, con un controllo sui duplicati? Le date sono parametri, non valori scritti a mano? Il denominatore è visibile e documentato nella descrizione della metrica? La finestra temporale è limitata a ciò che serve? Se manca anche una sola risposta, la query funziona ma non è difendibile: e una dashboard si difende prima in riunione, non dopo.
 
 ## Domande per allenarti
 
@@ -64,3 +117,4 @@ SQL nasce nel 1974 nei laboratori IBM di San Jose con il paper di Donald Chamber
 2. Quale denominatore usi e come gestisci i valori nulli?
 3. Quale controllo allinea la tua query con le altre dashboard esistenti?
 4. Quale finestra temporale evita di leggere dati inutili?
+5. Quale data di competenza rende coerenti due viste che oggi divergono?

@@ -45,19 +45,49 @@ Il passaggio dal problema alla produzione segue cinque passi concreti.
 
 I sistemi tradizionali come `PostgreSQL`, `MySQL` o `SQL Server` sono `row-oriented`. Quando salvi una riga in una tabella `ordini` con `id_ordine`, `id_utente`, `importo` e `data_transazione`, tutti i valori vanno scritti in modo contiguo su disco. Questa disposizione è ottimale per carichi transazionali: recuperi, inserisci o aggiorni intere righe. La query `SELECT * FROM ordini WHERE id_ordine = 12345` resta così efficientissima. Il mondo analytics pone domande diverse. Raramente serve un singolo ordine. Servono invece l'importo medio dell'ultimo mese o i primi dieci utenti per spesa totale. In un sistema `row-oriented` il calcolo di `AVG(importo)` legge l'intera tabella con tutte le colonne anche se ne serve una sola. Su miliardi di righe lo spreco di I/O diventa il collo di bottiglia. ClickHouse memorizza per colonna e legge solo le colonne richieste.
 
+La differenza non si vede su una tabella da diecimila righe: si vede quando il fattore di scansione è enorme. Con cento milioni di ordini e cento colonne per riga, una query su una sola colonna legge in un sistema a righe cento volte più byte di quelli che servono. Nel colonnare la lettura è proporzionale a ciò che chiedi, e la compressione trae vantaggio dall'omogeneità: una colonna di timestamp o di flag comprime molto meglio delle righe eterogenee. È questa combinazione, meno I/O e più compressione, a rendere interattive le aggregazioni che altrove producono scan da minuti.
+
 Verdetto: usa ClickHouse per scansioni analitiche su molte righe e poche colonne. Tieni il `row-oriented` per transazioni puntuali su intere righe.
 
 ## MergeTree e ordine fisico
 
 La velocità di ClickHouse dipende da ordine fisico, compressione e partizioni, non dal nome del database. Ogni scelta fisica va collegata a pattern di lettura, cardinalità e costo di manutenzione. La chiave `ORDER BY` decide l'ordine su disco. Da quell'ordine dipende quali query saltano intere parti senza leggerle. Le partizioni per tempo isolano i dati recenti da quelli storici e rendono le scadenze gestibili. Gli insert in `batch` evitano troppe piccole parti che rallentano `merge` e query.
 
+Una creazione di tabella essenziale per un registro di eventi web mostra come le tre leve si incastrano:
+
+```sql
+CREATE TABLE eventi_web (
+  ts DateTime,
+  utente_id UInt64,
+  pagina String,
+  durata_ms UInt32
+)
+ENGINE = MergeTree
+PARTITION BY toYYYYMM(ts)
+ORDER BY (utente_id, ts);
+```
+
+La partizione mensile fa sì che le query sull'ultimo mese leggano solo quella partizione; l'`ORDER BY` su `utente_id` mette insieme le righe dello stesso utente, così un filtro o un gruppo su `utente_id` salta le grana che non servono. Le insert devono arrivare a migliaia di righe per volta, non una alla volta: ogni insert diventa una parte separata del disco e l'accumulo di parti piccole costringe il `merge` a lavorare di più. La regola operativa è misurare, su una query reale, quante colonne e quante partizioni vengono lette: `EXPLAIN` o i log di query mostrano le `Read` per partizione, ed è lì che si scopre se l'ordinamento scelto serve davvero alle query dominanti.
+
 ## L'errore tipico
 
 L'errore tipico è usare ClickHouse come etichetta invece che come criterio di scelta. Si mostrano numeri senza decisione, senza `baseline` e senza rischio residuo. La domanda di controllo resta semplice: se questo risultato fosse instabile, quale scelta sbaglierei.
 
+Il secondo errore è confondere la causa con l'effetto: spostare i dati a ClickHouse e aspettarsi che le query diventino veloci da sole. Se la query dominante filtra per `regione` ma l'`ORDER BY` è solo sulla data, la scansione resta larga. Se non partizionati per tempo, `DELETE` e `TTL` su dati vecchi non esprimono il beneficio atteso. Se il carico è transazionale, con aggiornamenti frequenti di singole righe, lo strumento sbagliato resta ClickHouse: i suoi punti di forza si trasformano in debiti, e il confronto con PostgreSQL diventa impietoso. La diagnosi deve precedere la scelta del motore, mai il contrario.
+
+## Come riconoscere che stai sbagliando modello
+
+- La query dominante filtra per tempo ma la partizione è su un'altra chiave.
+- Ogni insert parte da un servizio che scrive riga per riga.
+- Non sai, per la tua query principale, quante colonne su trenta vengono lette davvero.
+- La dashboard analitica condivide il database transazionale dello storefront.
+- La risposta alla domanda "cos'è l'1% di dati che conta davvero?" resta vuota perché si risponde con il volume.
+
 ## Un caso concreto: Yandex.Metrica
 
 Yandex sviluppa ClickHouse per interrogare i log di Yandex.Metrica e lo rilascia open source nel 2016. Il motore nasce per aggregazioni interattive su miliardi di eventi con tabelle partizionate per tempo e lettura per sole colonne necessarie. La documentazione lega ogni scelta fisica a quella scala: insert in batch, parti ordinate e query che evitano letture inutili. Da qui deriva il criterio operativo: modella per le letture dominanti e misura sempre quali partizioni e colonne ogni query tocca davvero.
+
+La scala di Yandex.Metrica non è un decoro: la documentazione ufficiale del progetto cita volumi oltre 20 miliardi di righe al giorno su singoli cluster. A quel volume un database a righe non legge nemmeno una colonna in tempi interattivi: le aggregazioni diventano scan di giornata. Il colonnare regge perché ogni query legge una frazione minuscola del totale, e ogni decisione fisica, ordine, partizione, compressione, batch, è stata presa per mantenere piccola quella frazione. Quando progetti la tua prima tabella ClickHouse, valgono le stesse domande su scala minore: quale filtro taglia più dati, quale colonna serve davvero, quanto spazio spreca ogni parte che non viene fusa.
 
 ## Domande per ripassare
 
@@ -65,3 +95,4 @@ Yandex sviluppa ClickHouse per interrogare i log di Yandex.Metrica e lo rilascia
 2. Quale chiave `ORDER BY` sceglieresti per le tue query dominanti?
 3. Come verifichi che una query legga solo partizioni e colonne necessarie?
 4. Quale errore di modellazione rende lenta una dashboard su miliardi di righe?
+5. Quale differenza pratica passa tra insert singole e insert in batch?
