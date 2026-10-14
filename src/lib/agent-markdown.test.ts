@@ -1,6 +1,8 @@
 import matter from 'gray-matter';
 import { describe, expect, test } from 'vitest';
-import { mdxToAgentMarkdown, renderAgentDocument } from './agent-markdown';
+import { GITHUB_PROFILE_URL, LINKEDIN_URL } from '../consts';
+import { mdxToAgentMarkdown, renderAboutDocument, renderAgentDocument } from './agent-markdown';
+import { PERSON_TOPICS } from './entity';
 
 const LEFTOVER_TAG = /<\/?(Aside|Steps|Tabs|TabItem|Card|CardGrid)\b/;
 
@@ -144,6 +146,34 @@ describe('renderAgentDocument', () => {
   test('converts the body', () => {
     const doc = renderAgentDocument({ title: 'T', url: 'https://ginnytech.it/x/' }, "import a from 'b';\n\n<Steps>\n1. uno\n</Steps>");
     expect(doc).not.toContain('import');
+    expect(doc).not.toMatch(LEFTOVER_TAG);
+  });
+});
+
+describe('renderAboutDocument', () => {
+  const doc = renderAboutDocument();
+  const { data, content } = matter(doc);
+
+  test('is addressed to the HTML about page', () => {
+    expect(data.url).toBe('https://ginnytech.it/about/');
+    expect(data.author_url).toBe('https://ginnytech.it/about');
+    expect(content.match(/^# /gm)).toHaveLength(1);
+  });
+
+  test('lists every topic as an absolute link to its course module', () => {
+    for (const topic of PERSON_TOPICS) {
+      expect(content).toContain(`- [${topic.name}](https://ginnytech.it${topic.href})`);
+    }
+  });
+
+  test('names the public profiles and the role', () => {
+    expect(content).toContain(LINKEDIN_URL);
+    expect(content).toContain(GITHUB_PROFILE_URL);
+    expect(content).toContain('MarTech Expert, Data Engineer e Formatore');
+    expect(content).toContain('GinnyTech');
+  });
+
+  test('contains no component tags', () => {
     expect(doc).not.toMatch(LEFTOVER_TAG);
   });
 });

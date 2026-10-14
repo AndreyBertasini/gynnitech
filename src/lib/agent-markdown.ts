@@ -1,5 +1,5 @@
-import { SITE_AUTHOR, SITE_NAME } from '../consts';
-import { PERSON_URL } from './entity';
+import { BOOKING_URL, CONTACT_EMAIL, SITE_AUTHOR, SITE_NAME, SITE_URL } from '../consts';
+import { PERSON_SAME_AS, PERSON_TOPICS, PERSON_URL, personNode } from './entity';
 
 export type AgentDocMeta = {
   title: string;
@@ -172,3 +172,29 @@ export function renderAgentDocument(meta: AgentDocMeta, body: string): string {
 
   return `---\n${frontmatter}\n---\n\n# ${meta.title}\n\n${mdxToAgentMarkdown(body)}\n`;
 }
+
+/** Markdown twin of /about: who the author is, what they work on, where the proof lives. */
+export function renderAboutDocument(): string {
+  const person = personNode();
+  const topics = PERSON_TOPICS.map((topic) => `- [${topic.name}](${SITE_URL}${topic.href})`).join('\n');
+  const profiles = PERSON_SAME_AS.map((url) => `- ${url}`).join('\n');
+  const body = [
+    String(person.description),
+    `**Ruolo:** ${String(person.jobTitle)}`,
+    `**Organizzazione:** [${SITE_NAME}](${SITE_URL}), piattaforma gratuita e senza paywall per imparare MarTech, analytics engineering, A/B testing e data engineering.`,
+    `## Temi su cui lavora e insegna\n\n${topics}`,
+    `## Profili pubblici\n\n${profiles}`,
+    `## Contatti\n\n- Email: ${CONTACT_EMAIL}\n- Prenota una call: ${BOOKING_URL}`,
+  ].join('\n\n');
+
+  return renderAgentDocument(
+    {
+      title: `Chi è ${SITE_AUTHOR}`,
+      description: String(person.description),
+      url: `${PERSON_URL}/`,
+    },
+    body,
+  );
+}
+
+export const MARKDOWN_HEADERS = { 'Content-Type': 'text/markdown; charset=utf-8' };
