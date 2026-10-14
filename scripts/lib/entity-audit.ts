@@ -24,7 +24,7 @@ function hasAuthorLink(html: string): boolean {
     for (const [tag] of html.matchAll(/<a\b[^>]*>/gi)) {
         const rel = /\brel="([^"]*)"/i.exec(tag)?.[1] ?? "";
         const href = /\bhref="([^"]*)"/i.exec(tag)?.[1] ?? "";
-        if (rel.split(/\s+/).includes("author") && /(^|\/\/ginnytech\.it)\/about\/?$/.test(href)) {
+        if (rel.split(/\s+/).includes("author") && /(^|\/\/ginnytech\.it)(\/en)?\/about\/?$/.test(href)) {
             return true;
         }
     }

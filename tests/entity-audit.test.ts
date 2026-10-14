@@ -62,6 +62,11 @@ describe("auditEntityGraph", () => {
         expect(auditEntityGraph(html)).toEqual([]);
     });
 
+    test("accepts the English about page as the author link", () => {
+        const html = page({ "@type": "Article", inLanguage: "en-US", author: person }, '<a rel="author" href="/en/about/">A</a>');
+        expect(auditEntityGraph(html)).toEqual([]);
+    });
+
     test("accepts an English page with the same Person id", () => {
         const html = page({ "@graph": [{ "@type": "Article", inLanguage: "en-US", author: person }] }, AUTHOR_LINK);
         expect(auditEntityGraph(html)).toEqual([]);

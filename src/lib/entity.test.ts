@@ -8,6 +8,7 @@ import {
   PERSON_TOPICS,
   PERSON_URL,
   organizationNode,
+  organizationRef,
   personNode,
   personRef,
 } from './entity';
@@ -62,6 +63,18 @@ describe('PERSON_SAME_AS', () => {
   test('contains LinkedIn and GitHub profiles', () => {
     expect(PERSON_SAME_AS).toContain(LINKEDIN_URL);
     expect(PERSON_SAME_AS).toContain(GITHUB_PROFILE_URL);
+  });
+});
+
+describe('organizationRef', () => {
+  test('is a compact Organization with the canonical id and an ImageObject logo', () => {
+    expect(organizationRef()).toEqual({
+      '@type': 'Organization',
+      '@id': 'https://ginnytech.it/#ginnytech',
+      name: 'GinnyTech',
+      url: 'https://ginnytech.it',
+      logo: { '@type': 'ImageObject', url: 'https://ginnytech.it/ginni.webp' },
+    });
   });
 });
 

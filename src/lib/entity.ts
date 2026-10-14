@@ -43,6 +43,16 @@ export function personRef() {
   };
 }
 
+export function organizationRef() {
+  return {
+    '@type': 'Organization' as const,
+    '@id': ORGANIZATION_ID,
+    name: SITE_NAME,
+    url: SITE_URL,
+    logo: { '@type': 'ImageObject' as const, url: `${SITE_URL}/ginni.webp` },
+  };
+}
+
 export function personNode(): Record<string, unknown> {
   return {
     '@type': 'Person',
