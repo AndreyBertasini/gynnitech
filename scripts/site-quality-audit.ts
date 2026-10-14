@@ -2,6 +2,7 @@ import { promises as fs } from "fs";
 import path from "path";
 import { redirectEntries } from "../src/lib/config/redirects.mjs";
 import { auditEntityGraph } from "./lib/entity-audit";
+import { auditMarkdownTwin } from "./lib/markdown-audit";
 
 const DIST_ROOT = path.join(process.cwd(), "dist");
 const SITE_ORIGIN = "https://ginnytech.it";
@@ -612,6 +613,19 @@ async function main(): Promise<void> {
                 file,
                 message: `font asset exceeds ${formatBytes(MAX_FONT_BYTES)} (${formatBytes(stat.size)})`,
             });
+        }
+    }
+
+    const markdownFiles = await walkFiles(DIST_ROOT, (filePath) => filePath.endsWith(".md"));
+    for (const filePath of markdownFiles) {
+        const file = relativeDistPath(filePath);
+        const isGeneratedTwin = file === "about.md" || file.startsWith("blog/") || file.startsWith("course/");
+        if (!isGeneratedTwin) {
+            continue;
+        }
+        const minBodyChars = file === "about.md" ? 600 : 1500;
+        for (const message of auditMarkdownTwin(await fs.readFile(filePath, "utf-8"), minBodyChars)) {
+            issues.push({ file, message: `markdown: ${message}` });
         }
     }
 
