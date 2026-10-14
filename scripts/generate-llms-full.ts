@@ -12,10 +12,12 @@ async function main() {
     sections.push("> This file contains the full text of the primary content on ginnytech.it,");
     sections.push("> for LLM crawlers that want the complete corpus rather than the index in llms.txt.");
     sections.push("> License: CC BY 4.0 — cite the source and link the original page.");
+    sections.push("> Author: Andrii Dyshkantiuk (https://ginnytech.it/about).");
+    sections.push("> Each article and lesson also has a Markdown twin: its URL plus .md (see the Markdown line).");
     sections.push("");
 
     // Blog (Italian)
-    const blogFiles = (await glob("src/content/blog/*.mdx")).sort();
+    const blogFiles = (await glob("src/content/blog/*.mdx")).map(toPosix).sort();
     sections.push(`## Blog articles (${blogFiles.length})`);
     sections.push("");
     for (const file of blogFiles) {
@@ -24,6 +26,7 @@ async function main() {
         const slug = file.replace(/^src\/content\/blog\//, "").replace(/\.mdx$/, "");
         sections.push(`### ${data.title}`);
         sections.push(`URL: ${SITE_URL}/blog/${slug}`);
+        sections.push(`Markdown: ${SITE_URL}/blog/${slug}.md`);
         sections.push(`Date: ${data.date ?? ""}`);
         sections.push("");
         sections.push(stripMarkdown(content));
@@ -31,7 +34,7 @@ async function main() {
     }
 
     // Course lessons (Italian)
-    const corsoFiles = (await glob("src/content/corso/**/*.mdx")).sort();
+    const corsoFiles = (await glob("src/content/corso/**/*.mdx")).map(toPosix).sort();
     sections.push(`## Course lessons (${corsoFiles.length})`);
     sections.push("");
     for (const file of corsoFiles) {
@@ -40,7 +43,12 @@ async function main() {
         const rel = file.replace(/^src\/content\/corso\//, "").replace(/\.mdx$/, "");
         const [module, slug] = rel.split("/");
         sections.push(`### ${data.title}`);
-        sections.push(`URL: ${SITE_URL}/course/${module}/${slug}`);
+        if (slug) {
+            sections.push(`URL: ${SITE_URL}/course/${module}/${slug}`);
+            sections.push(`Markdown: ${SITE_URL}/course/${module}/${slug}.md`);
+        } else {
+            sections.push(`URL: ${SITE_URL}/course/${module}`);
+        }
         sections.push("");
         sections.push(stripMarkdown(content));
         sections.push("");
@@ -50,8 +58,14 @@ async function main() {
     console.log(`Wrote public/llms-full.txt (${sections.length} lines)`);
 }
 
+// glob returns backslash paths on Windows; every path logic below assumes "/".
+function toPosix(file: string): string {
+    return file.replace(/\\/g, "/");
+}
+
 function stripMarkdown(md: string): string {
     return md
+        .replace(/\{\/\*[\s\S]*?\*\/\}/g, "") // MDX comments (internal editorial markers)
         .replace(/```[\s\S]*?```/g, "") // code blocks
         .replace(/`([^`]+)`/g, "$1") // inline code
         .replace(/!\[[^\]]*\]\([^)]*\)/g, "") // images
