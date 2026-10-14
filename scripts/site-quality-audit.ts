@@ -1,6 +1,7 @@
 import { promises as fs } from "fs";
 import path from "path";
 import { redirectEntries } from "../src/lib/config/redirects.mjs";
+import { auditEntityGraph } from "./lib/entity-audit";
 
 const DIST_ROOT = path.join(process.cwd(), "dist");
 const SITE_ORIGIN = "https://ginnytech.it";
@@ -524,6 +525,11 @@ async function main(): Promise<void> {
         }
 
         auditSeo(html, file, issues, isRedirectPage);
+        if (!isRedirectPage && file !== "404.html") {
+            for (const message of auditEntityGraph(html)) {
+                issues.push({ file, message: `entity: ${message}` });
+            }
+        }
         auditImages(html, file, issues);
         auditMarkdownRendering(html, file, issues);
         auditTextEncoding(html, file, issues);
