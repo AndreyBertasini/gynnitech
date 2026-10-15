@@ -7,16 +7,16 @@
 | # | File | Sezioni | Schemi | Quiz |
 |---|---|---|---|---|
 | 1 | `cultura-data-driven` | 5 | 2: i tre pilastri, il percorso in cinque passi | 5 (tutte nuove) |
-| 2 | `decision-making-dati` | 4 | 3: le sei lettere di DECIDE, l'antidoto al gut feel | 5 (tutte nuove) |
+| 2 | `decision-making-dati` | 4 | 2: le sei lettere di DECIDE, l'antidoto al gut feel | 5 (tutte nuove) |
 | 3 | `okr-e-kpi` | 4 | 2: cinque passi per OKR e KPI, tre qualità di un set di KPI | 5 (tutte nuove) |
-| 4 | `framework-jtbd` | 4 | 3: tre principi, cinque passi dal job alla decisione | 5 (tutte nuove) |
+| 4 | `framework-jtbd` | 4 | 2: tre principi, cinque passi dal job alla decisione | 5 (tutte nuove) |
 | 5 | `ricerca-quantitativa` | 4 | 2: quattro strumenti qualitativi, numeri-persone-numeri | 5 (tutte nuove) |
 | 6 | `interviste-profondita` | 4 | 2: i cinque momenti dell'intervista, dalla ricerca alla tabella | 5 (tutte nuove) |
 | 7 | `ciclo-deming-hadi` | 4 | 2: le quattro fasi del ciclo, il ciclo HADI | 5 (tutte nuove) |
 | 8 | `cheat-sheet` | 4 | 2: la checklist in cinque passi, quattro strumenti e quattro ruoli | 5 (tutte nuove) |
 | 9 | `caso-studio` | 4 | 2: il laboratorio in cinque passi, la roadmap a sei mesi | 5 (tutte nuove) |
 
-Le nove lezioni non avevano un quiz: i 5 quesiti di ciascuna sono nuovi. (`decision-making-dati` e `framework-jtbd` hanno 2 schemi nel corpo più 1 nella sezione sul gut feel e sul job; il totale per lezione resta tra 2 e 3.)
+Le nove lezioni non avevano un quiz: i 5 quesiti di ciascuna sono nuovi.
 
 ## Cosa è stato tolto o spostato
 
