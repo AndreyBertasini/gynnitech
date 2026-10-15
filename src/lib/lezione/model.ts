@@ -1,6 +1,7 @@
 /** Contesto di una lezione «3 secondi», messo in Astro.locals dal template della lezione. */
 export type LezioneContext = {
   sezioni: string[];
+  obiettivi: string[];
   numero: number;
   totale: number;
   moduloTitolo: string;
@@ -12,20 +13,6 @@ export type Evidenza = {
   riga?: number;
   passo?: number;
 };
-
-/** «2 · Leggere poco». Lancia se la sezione non esiste: la build deve fallire, non mostrare un'etichetta sbagliata. */
-export function sectionLabel(ctx: LezioneContext | undefined, sezione: number): string {
-  if (!ctx) throw new Error('Componente «3 secondi» fuori da una lezione con formato: "3s".');
-  const nome = ctx.sezioni[sezione - 1];
-  if (!Number.isInteger(sezione) || !nome) {
-    throw new Error(`Sezione ${sezione} inesistente: la lezione ne dichiara ${ctx.sezioni.length}.`);
-  }
-  return `${sezione} · ${nome}`;
-}
-
-export function progressSegments(totale: number, attiva: number): boolean[] {
-  return Array.from({ length: totale }, (_, i) => i === attiva - 1);
-}
 
 const toRiga = (value: string, voce: string): number => {
   const riga = Number(value);

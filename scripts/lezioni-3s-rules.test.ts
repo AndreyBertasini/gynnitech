@@ -4,7 +4,7 @@ import { checkLezione3s } from './lezioni-3s-rules';
 const domandaQuiz = (n: number) => `  { id: "q${n}", text: "Domanda ${n}", options: ["si", "no"], correctIndex: 0, explanation: "Perché." },`;
 const quiz = (n: number) => ['<QuizExercise client:visible quizId="prova" questions={[', ...Array.from({ length: n }, (_, i) => domandaQuiz(i + 1)), ']} />'].join('\n');
 
-const lezione = (o: Partial<Record<'obiettivi' | 'slideTitolo' | 'slideApertura' | 'lati' | 'schema2' | 'tre' | 'riepilogo' | 'quiz', string>> = {}) => `---
+const lezione = (o: Partial<Record<'obiettivi' | 'percorso' | 'slideTitolo' | 'slideApertura' | 'lati' | 'dopoSlide' | 'schema2' | 'tre' | 'riepilogo' | 'quiz', string>> = {}) => `---
 title: "Prova"
 description: "Lezione di prova."
 formato: "3s"
@@ -13,7 +13,7 @@ learningObjectives:
 ${o.obiettivi ?? '  - Spiegare uno\n  - Scegliere due\n  - Calcolare tre'}
 ---
 
-<Percorso />
+${o.percorso ?? '<Percorso />\n\n<Obiettivi />'}
 
 Un gancio breve. Una frase sola.
 
@@ -25,12 +25,18 @@ ${o.lati ?? '<Lato nome="A" sottotitolo="primo lato" scelta="A punta qui" />\n<L
 </Confronto>
 </Slide>
 
+${o.dopoSlide ?? 'A sinistra vediamo A, a destra B. Scegliamo A quando serve.\n\n<Pattern si="Usiamo A per leggere" no="Usiamo B per leggere" />'}
+
 <Schema sezione="1" titolo="Primo schema">
 <Passo testo="Uno." />
 <Passo testo="Due." />
 <Passo testo="Tre." />
 <MiniTabella colonne="a,b" righe="2" evidenzia="col:a@3" />
 </Schema>
+
+Lo schema mostra la colonna a che si accende al terzo passo.
+
+<ErroreTipico sbagliato="Leggiamo tutto" giusto="Leggiamo solo a" />
 
 <Messaggio>Frase uno.</Messaggio>
 
@@ -48,6 +54,10 @@ ${o.schema2 ?? `<Schema sezione="2" titolo="Secondo schema">
 <Fase nome="C" testo="terzo" passo="3" />
 </Passi>
 </Schema>
+
+Ogni fase arriva dopo la precedente. Nessuna salta il turno.
+
+<Pattern si="Seguiamo l'ordine A, B, C" no="Partiamo da C" />
 
 <Messaggio>Frase due.</Messaggio>`}
 
@@ -127,6 +137,18 @@ describe('checkLezione3s', () => {
 
   test('regola 7: il quiz vuole 5 domande', () => {
     expect(errori(lezione({ quiz: quiz(4) })).join('\n')).toMatch(/quiz/i);
+  });
+
+  test('regola 8: gli obiettivi stanno nel corpo con <Obiettivi />', () => {
+    expect(errori(lezione({ percorso: '<Percorso />' })).join('\n')).toMatch(/Obiettivi/);
+  });
+
+  test('regola 8: ogni figura ha una spiegazione scritta', () => {
+    expect(errori(lezione({ dopoSlide: '<Pattern si="Usiamo A" no="Usiamo B" />' })).join('\n')).toMatch(/spiegazione/);
+  });
+
+  test('regola 8: ogni figura ha pattern e anti-pattern', () => {
+    expect(errori(lezione({ dopoSlide: 'A sinistra vediamo A, a destra B.' })).join('\n')).toMatch(/Pattern/);
   });
 
   test('avviso: una frase di prosa oltre 20 parole', () => {

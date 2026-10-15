@@ -6,40 +6,18 @@ import {
   maxDataValore,
   parseEvidenzia,
   parseRighe,
-  progressSegments,
-  sectionLabel,
   type LezioneContext,
 } from './model';
 
 const ctx: LezioneContext = {
   sezioni: ['Righe e colonne', 'Leggere poco', 'MergeTree'],
+  obiettivi: ['Spiegare', 'Scegliere', 'Verificare'],
   numero: 2,
   totale: 9,
   moduloTitolo: 'Real-time analytics con ClickHouse',
 };
 
 const cols = ['order_id', 'user_id', 'amount', 'status'];
-
-describe('sectionLabel', () => {
-  test('restituisce numero e nome della sezione', () => {
-    expect(sectionLabel(ctx, 2)).toBe('2 · Leggere poco');
-  });
-
-  test('lancia se la sezione non esiste', () => {
-    expect(() => sectionLabel(ctx, 4)).toThrow();
-    expect(() => sectionLabel(ctx, 0)).toThrow();
-  });
-
-  test('lancia se manca il contesto della lezione', () => {
-    expect(() => sectionLabel(undefined, 1)).toThrow();
-  });
-});
-
-describe('progressSegments', () => {
-  test('accende solo il segmento della sezione attiva', () => {
-    expect(progressSegments(4, 2)).toEqual([false, true, false, false]);
-  });
-});
 
 describe('parseEvidenzia', () => {
   test('legge colonne con passo e righe', () => {

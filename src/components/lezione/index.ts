@@ -11,11 +11,13 @@ import MiniTabella from './MiniTabella.astro';
 import Nodo from './Nodo.astro';
 import NumeriGrandi from './NumeriGrandi.astro';
 import Numero from './Numero.astro';
+import Obiettivi from './Obiettivi.astro';
 import Opzione from './Opzione.astro';
 import Opzioni from './Opzioni.astro';
 import Passi from './Passi.astro';
 import Percorso from './Percorso.astro';
 import Passo from './Passo.astro';
+import Pattern from './Pattern.astro';
 import Relazioni from './Relazioni.astro';
 import Schema from './Schema.astro';
 import Slide from './Slide.astro';
@@ -36,10 +38,12 @@ export const lezioneComponents = {
   Nodo,
   NumeriGrandi,
   Numero,
+  Obiettivi,
   Opzione,
   Opzioni,
   Passi,
   Passo,
+  Pattern,
   Percorso,
   Relazioni,
   Schema,

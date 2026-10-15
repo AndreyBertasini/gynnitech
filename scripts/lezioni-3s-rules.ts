@@ -6,7 +6,7 @@ export type Esito = { errors: string[]; warnings: string[] };
 const TAG_LEZIONE = [
   'Slide', 'Percorso', 'Messaggio', 'Domanda', 'ErroreTipico', 'Confronto', 'Lato', 'Criterio', 'Passi', 'Fase',
   'Opzioni', 'Opzione', 'MiniTabella', 'TabellaDati', 'Barre', 'Barra', 'NumeriGrandi', 'Numero', 'Relazioni', 'Nodo',
-  'Schema', 'Passo',
+  'Schema', 'Passo', 'Pattern', 'Obiettivi',
 ];
 const TAG_APERTO = new RegExp(`<(${TAG_LEZIONE.join('|')})\\b([^>]*)(>?)`, 'g');
 const ATTRIBUTI_VISIBILI = ['titolo', 'messaggio', 'didascalia', 'nome', 'sottotitolo', 'testo', 'a', 'b', 'etichetta'];
@@ -176,6 +176,29 @@ export function checkLezione3s(raw: string, rel: string): Esito {
       if (domande !== 5) errore('Riepilogo', `il quiz deve avere 5 domande, trovate ${domande}`);
     }
   }
+
+  // 8. obiettivi nel corpo; ogni figura con spiegazione scritta e pattern / anti-pattern
+  const primaH2 = righe.findIndex((r) => /^## /.test(r));
+  const apertura = primaH2 === -1 ? righe : righe.slice(0, primaH2);
+  if (!apertura.some((r) => /^<Obiettivi\s*\/>$/.test(r.trim()))) errore('Obiettivi', 'manca <Obiettivi /> prima della prima H2');
+  let figura: string | null = null;
+  righe.forEach((riga, i) => {
+    const t = riga.trim();
+    if (/^<(Slide|Schema)\b/.test(t)) figura = attr(t, 'titolo') ?? '';
+    if ((t === '</Slide>' || t === '</Schema>') && figura !== null) {
+      const titolo = figura;
+      figura = null;
+      const dopo: string[] = [];
+      for (const r of righe.slice(i + 1)) {
+        const s = r.trim();
+        if (/^## /.test(s) || /^<(Slide|Schema)\b/.test(s)) break;
+        dopo.push(s);
+      }
+      const prosa = dopo.some((s) => s !== '' && !/^(<|\||#)/.test(s));
+      if (!prosa) errore('figura', `«${titolo}»: manca la spiegazione scritta dopo il disegno`);
+      if (!dopo.some((s) => /^<(Pattern|ErroreTipico)\b/.test(s))) errore('figura', `«${titolo}»: manca <Pattern> (o <ErroreTipico>) dopo il disegno`);
+    }
+  });
 
   // avviso: frasi di prosa troppo lunghe
   for (const riga of righe) {

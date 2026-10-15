@@ -6,7 +6,7 @@ export function attr(tag: string, name: string): string | undefined {
   return new RegExp(`\\b${name}="([^"]*)"`).exec(tag)?.[1];
 }
 
-const SPARISCONO = /^(<\/(Slide|Confronto|Passi|Opzioni|Barre|NumeriGrandi|Relazioni|Schema|ErroreTipico|TabellaDati)>|<(Confronto|Passi|Opzioni|Barre|NumeriGrandi)>|<Percorso\s*\/>|<TabellaDati\b[^>]*>)$/;
+const SPARISCONO = /^(<\/(Slide|Confronto|Passi|Opzioni|Barre|NumeriGrandi|Relazioni|Schema|ErroreTipico|TabellaDati)>|<(Confronto|Passi|Opzioni|Barre|NumeriGrandi)>|<(Percorso|Obiettivi)\s*\/>|<TabellaDati\b[^>]*>)$/;
 
 const leggibile = (voce: string): string => {
   const [corpo, passo] = voce.trim().split('@');
@@ -70,6 +70,8 @@ export function convertLezioneLine(line: string, state: AgentState): string | nu
     }
     case 'ErroreTipico':
       return `- ✗ ${a('sbagliato')}\n- ✓ ${a('giusto')}`;
+    case 'Pattern':
+      return `- ✓ Pattern: ${a('si')}\n- ✗ Anti-pattern: ${a('no')}`;
     default:
       return null;
   }

@@ -75,6 +75,16 @@ describe('convertLezioneLine', () => {
     );
   });
 
+  test('Pattern diventa due righe ✓/✗', () => {
+    expect(convertLezioneLine('<Pattern si="Leggiamo solo le colonne della query" no="SELECT * su una tabella analitica" />', nuovo())).toBe(
+      '- ✓ Pattern: Leggiamo solo le colonne della query\n- ✗ Anti-pattern: SELECT * su una tabella analitica',
+    );
+  });
+
+  test('Obiettivi sparisce (gli obiettivi stanno nel frontmatter)', () => {
+    expect(convertLezioneLine('<Obiettivi />', nuovo())).toBe('');
+  });
+
   test('ErroreTipico, chiuso o con slot', () => {
     const atteso = '- ✗ SELECT * legge tutto\n- ✓ Solo le colonne che servono';
     expect(convertLezioneLine('<ErroreTipico sbagliato="SELECT * legge tutto" giusto="Solo le colonne che servono" />', nuovo())).toBe(atteso);
