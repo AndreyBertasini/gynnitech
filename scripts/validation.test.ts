@@ -1,6 +1,6 @@
 import { describe, expect, test } from "vitest";
 import path from "path";
-import { validatePath } from "./validation";
+import { checkLessonPipeline, validatePath } from "./validation";
 
 describe("validatePath", () => {
     // Use a platform-agnostic base directory
@@ -51,5 +51,55 @@ describe("validatePath", () => {
         const trickyTarget = "../test-dir-sibling/file.txt";
 
         expect(() => validatePath(trickyBase, trickyTarget)).toThrow();
+    });
+});
+
+describe("checkLessonPipeline — lezioni formato 3s", () => {
+    const corpo3s = [
+        "## Righe e colonne",
+        "",
+        "<Slide titolo=\"Righe contro colonne\" messaggio=\"Righe per transazioni.\">",
+        "</Slide>",
+        "",
+        "Testo della sezione. Seconda frase. Terza frase. Quarta frase. Quinta frase.",
+        "",
+        "## Leggere poco",
+        "",
+        "<Schema titolo=\"Perché leggiamo poco\">",
+        "<Passo testo=\"Uno.\" />",
+        "</Schema>",
+        "",
+        "Altro testo. Seconda. Terza. Quarta. Quinta.",
+        "",
+        "## Riepilogo",
+        "",
+        "<Messaggio>Uno.</Messaggio>",
+        "",
+        "<QuizExercise client:visible quizId=\"q\" questions={[",
+        "  { id: \"1\", correctIndex: 0 },",
+        "  { id: \"2\", correctIndex: 1 },",
+        "  { id: \"3\", correctIndex: 0 },",
+        "]} />",
+    ].join("\n");
+    const esito = (body: string, formato?: string) =>
+        Object.fromEntries(checkLessonPipeline(body, "ml-tabellare", formato).map((r) => [r.regola, r.esito]));
+
+    test("regola 1 passa con una figura e uno schema", () => {
+        expect(esito(corpo3s, "3s").regola_1_concetto_calcolo).toBe("PASS");
+    });
+
+    test("regola 2 passa con un quiz da 3–5 domande nell'ultima sezione", () => {
+        expect(esito(corpo3s, "3s").regola_2_retrieval_attivo).toBe("PASS");
+    });
+
+    test("regola 2 fallisce se l'ultima sezione non ha il quiz", () => {
+        const senzaQuiz = corpo3s.slice(0, corpo3s.indexOf("<QuizExercise"));
+        expect(esito(senzaQuiz, "3s").regola_2_retrieval_attivo).toBe("FAIL");
+    });
+
+    test("senza formato 3s le regole 1 e 2 restano quelle di sempre", () => {
+        const r = esito(corpo3s);
+        expect(r.regola_1_concetto_calcolo).toBe("FAIL");
+        expect(r.regola_2_retrieval_attivo).toBe("FAIL");
     });
 });
