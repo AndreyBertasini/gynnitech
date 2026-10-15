@@ -246,11 +246,20 @@ Per ogni modulo: build, estrazione delle stringhe mancanti delle pagine del modu
 - **Volume:** circa una sessione per modulo; il pilota serve a misurare il tempo reale.
 - **Fuori scope:** materiale per l'aula (`.pptx`, `.docx`, scheda studenti), nuove immagini header, cambi di URL, doppioni tra moduli e argomenti mancanti segnalati in `docs/titoli-corso.md`.
 
+## 12a. Modifiche dopo la prima prova (2026-10-15, richieste dall'autore)
+
+Prevalgono sulle sezioni precedenti dove le contraddicono.
+
+1. **Template della lezione (tutte le lezioni):** via i box «Cosa imparerai» e «Collegamenti» in cima alla pagina; nelle card dei collegamenti via l'intestazione «Percorso collegato» e le etichette di relazione («Collegamento tematico», «Modulo vicino»…), i link restano. Gli obiettivi si mostrano nel corpo con `<Obiettivi />` (legge `learningObjectives`); la slide «obiettivi» di §5 diventa questo componente.
+2. **Le figure fanno parte della pagina** (supera §3 «cornice 16:9» e §4 «Cornice comune»): `<Slide>` è una figura nel testo, larga quanto il testo e alta quanto serve, senza riquadro, etichetta di sezione e barra di avanzamento. Restano titolo breve, disegno e riquadro ★. `sezione` è accettata ma non mostrata.
+3. **Niente da cliccare** (supera §4 «Schema che cresce», parte JavaScript): `<Schema>` mostra subito tutti i passi, una riga per passo (testo a sinistra, disegno a destra; su mobile uno sotto l'altro). Nessun pulsante, nessuno script.
+4. **Ogni grafico ha accanto il testo:** dopo ogni `<Slide>` e ogni `<Schema>`, prima della figura o H2 successiva, servono una spiegazione scritta con voce umana (cosa vediamo, perché conta) e pattern / anti-pattern con `<Pattern si="…" no="…" />` (dopo uno schema vale anche `<ErroreTipico>`). Nuova regola 8 del validatore, insieme all'obbligo di `<Obiettivi />` prima della prima H2.
+
 ## 12. Criteri di accettazione del pilota
 
 - La pagina di `clickhouse-fondamenti` rende con le due forme degli esempi del prompt il materiale che la lezione ha già: il confronto row-oriented / column-oriented per carichi transazionali e analitici (confronto a specchio, come «OLTP e OLAP a confronto») e la lettura delle sole colonne della query (schema che cresce in 4 passi, come «Perché leggiamo solo alcune colonne»). Le sigle OLTP/OLAP si introducono solo come nomi dei due carichi già descritti.
 - Supera il controllo automatico, `validate:content`, i test, `astro check` e la build.
-- Funziona in tema scuro e chiaro, su mobile, con tastiera e senza JavaScript.
+- Funziona in tema scuro e chiaro e su mobile (nessuno scroll orizzontale della pagina); tutti i passi degli schemi sono visibili senza interazione.
 - La versione `.md` per agenti contiene gli schemi in forma testuale.
 - `/en/` della lezione è in inglese.
 - L'autore approva lo stile prima del primo modulo.

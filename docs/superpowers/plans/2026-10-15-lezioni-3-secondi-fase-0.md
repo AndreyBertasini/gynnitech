@@ -10,6 +10,8 @@
 
 **Spec:** `docs/superpowers/specs/2026-10-15-lezioni-3-secondi-design.md` (regole didattiche: `docs/lezioni/prompt-3-secondi.md`).
 
+> **Aggiornamento dopo il Task 8 (richieste dell'autore, spec §12a):** `<Slide>` è una figura nel testo (niente cornice 16:9, etichetta, barra); `<Schema>` mostra tutti i passi senza stepper (lo stepper del Task 5 è stato rimosso); nuovi `<Obiettivi />` e `<Pattern si no />`; regola 8 del validatore; tolti dal template i box «Cosa imparerai» / «Collegamenti» e le etichette delle card. Nel Task 12 le verifiche su pulsanti e tastiera dello schema non si applicano più: si verifica che tutte le viste siano visibili e che ogni figura abbia spiegazione e pattern.
+
 ## Global Constraints
 
 - Branch `claude/lezioni-3-secondi` (impilato sulla PR #102 `claude/analizza-corsi-structure-f4afab`). Un commit per task; push e PR solo nel Task 12.
