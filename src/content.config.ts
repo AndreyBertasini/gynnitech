@@ -32,7 +32,7 @@ export const collections = {
         schema: blogSchema,
     }),
     corso: defineCollection({
-        loader: glob({ pattern: "**/*.{md,mdx}", base: "./src/content/corso", retainBody: false }),
+        loader: glob({ pattern: "**/*.{md,mdx}", base: "./src/content/corso", retainBody: true }),
         schema: corsoSchema,
     }),
     // Validate raw JSON before adding runtime metadata.
