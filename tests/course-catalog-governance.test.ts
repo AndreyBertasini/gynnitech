@@ -107,7 +107,7 @@ describe("Course catalog governance", () => {
 
         expect(conceptMap).toContain(`${moduleCount} moduli`);
         expect(conceptMap).toContain(`${lessonCount} lezioni`);
-        expect(conceptMap).toContain("Direzioni in Analitica");
-        expect(conceptMap).toContain("Fondamenti Filosofici dell Analisi dei Dati");
+        expect(conceptMap).toContain("Direzioni dell'analitica");
+        expect(conceptMap).toContain("Fondamenti filosofici dell'analisi dei dati");
     });
 });
