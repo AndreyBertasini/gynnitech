@@ -34,6 +34,8 @@ export const corsoSchema = z.object({
     duration: z.string().optional(),
     difficulty: z.enum(['beginner', 'intermediate', 'advanced', 'base', 'intermedio', 'avanzato']).optional(),
     learningObjectives: z.array(z.string()).optional(),
+    formato: z.literal('3s').optional(),
+    sezioni: z.array(z.string().trim().min(1)).min(3).max(6).optional(),
 });
 
 export const productsSchema = z.object({
