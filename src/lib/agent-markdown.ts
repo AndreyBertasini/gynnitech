@@ -1,5 +1,6 @@
 import { BOOKING_URL, CONTACT_EMAIL, SITE_AUTHOR, SITE_NAME, SITE_URL } from '../consts';
 import { PERSON_SAME_AS, PERSON_TOPICS, PERSON_URL, personNode } from './entity';
+import { attr, convertLezioneLine, type AgentState } from './lezione/agent';
 
 export type AgentDocMeta = {
   title: string;
@@ -18,10 +19,6 @@ const EXPORT_START = /^export\s+(?:(?:const|let|var|function|default|async|class
 const IMPORT_COMPLETE = /(\bfrom\s+['"][^'"]+['"]|^import\s+['"][^'"]+['"])\s*;?\s*$|;\s*$/;
 const MDX_COMMENT = /\{\/\*[\s\S]*?\*\/\}/g;
 const SELF_CLOSING_COMPONENT = /<[A-Z][A-Za-z0-9]*(?:\s[^<>]*?)?\/>/g;
-
-function attr(tag: string, name: string): string | undefined {
-  return new RegExp(`\\b${name}="([^"]*)"`).exec(tag)?.[1];
-}
 
 /** Rewrites one stretch of prose (never inline code) so component tags become Markdown or markers. */
 function rewriteProse(text: string): string {
@@ -49,6 +46,7 @@ export function mdxToAgentMarkdown(body: string): string {
   let skippingImport = false;
   let skippingWidget = false;
   let contentStarted = false;
+  const lezioneState: AgentState = { passo: 0 };
 
   const quote = (line: string) => (inAside ? (line === '' ? '>' : `> ${line}`) : line);
 
@@ -104,6 +102,13 @@ export function mdxToAgentMarkdown(body: string): string {
       if (/\/>\s*$/.test(raw)) skippingWidget = false;
       continue;
     }
+
+    const lezione = convertLezioneLine(raw.trim(), lezioneState);
+    if (lezione !== null) {
+      for (const piece of lezione.split('\n')) pushProse(piece);
+      continue;
+    }
+
     const widget = /^<([A-Z][A-Za-z0-9]*)\b/.exec(raw);
     if (widget && !KNOWN_COMPONENTS.has(widget[1])) {
       if (/\/>\s*$/.test(raw)) continue;
