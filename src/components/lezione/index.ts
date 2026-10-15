@@ -15,7 +15,9 @@ import Opzione from './Opzione.astro';
 import Opzioni from './Opzioni.astro';
 import Passi from './Passi.astro';
 import Percorso from './Percorso.astro';
+import Passo from './Passo.astro';
 import Relazioni from './Relazioni.astro';
+import Schema from './Schema.astro';
 import Slide from './Slide.astro';
 import TabellaDati from './TabellaDati.astro';
 
@@ -37,8 +39,10 @@ export const lezioneComponents = {
   Opzione,
   Opzioni,
   Passi,
+  Passo,
   Percorso,
   Relazioni,
+  Schema,
   Slide,
   TabellaDati,
 };

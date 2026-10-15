@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'vitest';
 import {
   cellMark,
+  extractPassi,
   highlightTableRows,
   maxDataValore,
   parseEvidenzia,
@@ -98,6 +99,19 @@ describe('highlightTableRows', () => {
 
   test('lancia se la riga non esiste', () => {
     expect(() => highlightTableRows(html, [3])).toThrow();
+  });
+});
+
+describe('extractPassi', () => {
+  const html =
+    '<span class="lz-passo-dato" hidden>I dati sono in una tabella.</span>\n<span class="lz-passo-dato" hidden>Ogni colonna è un file &amp; basta.</span><div class="lz-minitab">x</div>';
+
+  test('raccoglie i testi dei passi nell’ordine', () => {
+    expect(extractPassi(html).passi).toEqual(['I dati sono in una tabella.', 'Ogni colonna è un file &amp; basta.']);
+  });
+
+  test('toglie i marcatori dal disegno', () => {
+    expect(extractPassi(html).disegno.trim()).toBe('<div class="lz-minitab">x</div>');
   });
 });
 

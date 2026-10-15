@@ -89,6 +89,14 @@ export function highlightTableRows(html: string, righe: number[]): string {
   return html.slice(0, start) + body + html.slice(end);
 }
 
+const PASSO_DATO = /<span class="lz-passo-dato" hidden(?:="")?>([\s\S]*?)<\/span>/g;
+
+/** Separa i marcatori dei <Passo> (testi, già escapati) dal disegno di uno <Schema>. */
+export function extractPassi(html: string): { passi: string[]; disegno: string } {
+  const passi = [...html.matchAll(PASSO_DATO)].map((m) => m[1].trim());
+  return { passi, disegno: html.replace(PASSO_DATO, '') };
+}
+
 /** Valore massimo degli attributi data-valore delle <Barra> renderizzate. */
 export function maxDataValore(html: string): number {
   const valori = [...html.matchAll(/data-valore="([\d.]+)"/g)].map((m) => Number(m[1]));
