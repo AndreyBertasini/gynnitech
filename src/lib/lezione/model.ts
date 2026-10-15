@@ -71,6 +71,31 @@ export function cellMark(evidenze: Evidenza[], riga: number, colonna: string): {
   return passi.length > 0 ? { statico: false, passo: Math.min(...passi) } : { statico: false };
 }
 
+/** Aggiunge la classe lz-accento alle righe richieste (1-based) del <tbody>. Lancia se una riga non esiste. */
+export function highlightTableRows(html: string, righe: number[]): string {
+  if (righe.length === 0) return html;
+  const start = html.indexOf('<tbody');
+  const end = html.indexOf('</tbody>', start);
+  if (start === -1 || end === -1) throw new Error('TabellaDati: manca il corpo della tabella.');
+  let riga = 0;
+  const body = html.slice(start, end).replace(/<tr(\s[^>]*)?>/g, (tag, attrs: string | undefined) => {
+    riga += 1;
+    if (!righe.includes(riga)) return tag;
+    if (attrs && /\sclass="/.test(attrs)) return tag.replace(/\sclass="([^"]*)"/, ' class="$1 lz-accento"');
+    return `<tr${attrs ?? ''} class="lz-accento">`;
+  });
+  const mancanti = righe.filter((r) => r > riga);
+  if (mancanti.length > 0) throw new Error(`TabellaDati: righe inesistenti ${mancanti.join(', ')} (la tabella ne ha ${riga}).`);
+  return html.slice(0, start) + body + html.slice(end);
+}
+
+/** Valore massimo degli attributi data-valore delle <Barra> renderizzate. */
+export function maxDataValore(html: string): number {
+  const valori = [...html.matchAll(/data-valore="([\d.]+)"/g)].map((m) => Number(m[1]));
+  if (valori.length === 0) throw new Error('<Barre> senza <Barra>.');
+  return Math.max(...valori);
+}
+
 /** «2,4» → [2, 4] per TabellaDati. */
 export function parseRighe(spec: string | undefined): number[] {
   if (!spec?.trim()) return [];

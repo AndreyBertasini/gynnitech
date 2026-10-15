@@ -1,5 +1,14 @@
 import { describe, expect, test } from 'vitest';
-import { cellMark, parseEvidenzia, parseRighe, progressSegments, sectionLabel, type LezioneContext } from './model';
+import {
+  cellMark,
+  highlightTableRows,
+  maxDataValore,
+  parseEvidenzia,
+  parseRighe,
+  progressSegments,
+  sectionLabel,
+  type LezioneContext,
+} from './model';
 
 const ctx: LezioneContext = {
   sezioni: ['Righe e colonne', 'Leggere poco', 'MergeTree'],
@@ -69,6 +78,36 @@ describe('cellMark', () => {
 
   test('una cella non coperta resta normale', () => {
     expect(cellMark(evidenze, 1, 'status')).toEqual({ statico: false });
+  });
+});
+
+describe('highlightTableRows', () => {
+  const html = '<table><thead><tr><th>a</th></tr></thead><tbody><tr><td>1</td></tr><tr class="x"><td>2</td></tr></tbody></table>';
+
+  test('marca in accento le righe richieste del corpo della tabella', () => {
+    expect(highlightTableRows(html, [1])).toContain('<tbody><tr class="lz-accento"><td>1</td>');
+  });
+
+  test('aggiunge la classe a una riga che ne ha già una', () => {
+    expect(highlightTableRows(html, [2])).toContain('<tr class="x lz-accento"><td>2</td>');
+  });
+
+  test("non tocca l'intestazione", () => {
+    expect(highlightTableRows(html, [1])).toContain('<thead><tr><th>a</th>');
+  });
+
+  test('lancia se la riga non esiste', () => {
+    expect(() => highlightTableRows(html, [3])).toThrow();
+  });
+});
+
+describe('maxDataValore', () => {
+  test('restituisce il valore massimo tra gli attributi data-valore', () => {
+    expect(maxDataValore('<div data-valore="12"></div><div data-valore="100"></div><div data-valore="3.5"></div>')).toBe(100);
+  });
+
+  test('lancia se non ci sono barre', () => {
+    expect(() => maxDataValore('<div></div>')).toThrow();
   });
 });
 
