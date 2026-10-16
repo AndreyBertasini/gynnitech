@@ -2,6 +2,7 @@ import type { APIRoute, GetStaticPaths } from 'astro';
 import { type CollectionEntry, getCollection } from 'astro:content';
 import { SITE_URL } from '../../../consts';
 import { MARKDOWN_HEADERS, renderAgentDocument } from '../../../lib/agent-markdown';
+import { readEntryBody } from '../../../lib/entry-body';
 
 const slugOf = (file: string) => file.replace(/\.[^/.]+$/, '');
 
@@ -13,8 +14,11 @@ export const getStaticPaths = (async () => {
   });
 }) satisfies GetStaticPaths;
 
-export const GET: APIRoute = ({ props, params }) => {
+export const GET: APIRoute = async ({ props, params }) => {
   const { entry } = props as { entry: CollectionEntry<'corso'> };
+  if (!entry.filePath) {
+    throw new Error(`corso entry "${entry.id}" has no filePath; cannot read its Markdown body`);
+  }
   const text = renderAgentDocument(
     {
       title: entry.data.title,
@@ -22,7 +26,7 @@ export const GET: APIRoute = ({ props, params }) => {
       url: `${SITE_URL}/course/${params.module}/${params.slug}/`,
       dateModified: entry.data.dateModified,
     },
-    entry.body ?? '',
+    await readEntryBody(entry.filePath),
   );
   return new Response(text, { headers: MARKDOWN_HEADERS });
 };
