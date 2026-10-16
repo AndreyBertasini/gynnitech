@@ -11,7 +11,8 @@ npm run preview          # Serve production build locally
 npm run validate:content # Validate frontmatter, slugs, and lesson quality
 npm run test             # Run Vitest tests
 npm run validate:3s      # Rules of the "3 secondi" lesson format (only lessons with formato: "3s")
-npm run check            # validate:content + validate:3s + astro check + vitest (pre-commit)
+npm run validate:articolo # Rules of the "articolo tecnico" format (only lessons with formato: "articolo")
+npm run check            # validate:content + validate:3s + validate:articolo + astro check + vitest (pre-commit)
 ```
 
 `STRICT_EDITORIAL=1 npm run validate:content` — treats editorial warnings (missing summary, no examples) as errors.
@@ -71,6 +72,8 @@ Configured as a Vite plugin (`@tailwindcss/vite`) in `astro.config.mjs`. No sepa
 - **Starlight components** available in MDX: `<Aside>`, `<Steps>`, `<Tabs>`, `<TabItem>`, `<Card>`, `<CardGrid>`
 - **Lucide React** icons available in MDX
 - **"3 secondi" lesson components** (no import needed, only on lessons with `formato: "3s"` + `sezioni: [...]` in the frontmatter): `<Percorso />`, `<Obiettivi />`, `<Slide>`, `<Schema>`/`<Passo>`, `<Confronto>`/`<Lato>`/`<Criterio>`, `<Passi>`/`<Fase>`, `<Opzioni>`/`<Opzione>`, `<MiniTabella>`, `<TabellaDati>`, `<Barre>`/`<Barra>`, `<NumeriGrandi>`/`<Numero>`, `<Relazioni>`/`<Nodo>`, `<Pattern>`, `<ErroreTipico>`, `<Messaggio>`, `<Domanda>`. **One tag per line, string attributes only** (`sezione="2"`, never `{2}`): the agent-markdown converter and `validate:3s` read the MDX line by line. Every figure is followed by a written explanation and a `<Pattern si no />`; the closing `## Riepilogo` has 3 `<Messaggio>` and a 5-question `QuizExercise`. Rules: `docs/superpowers/specs/2026-10-15-lezioni-3-secondi-design.md` (§12a prevails); plan per module: `docs/lezioni/`. Styles: `src/styles/lezione.css` (`--lz-*`, linked only on 3s pages).
+
+- **"Articolo tecnico" lessons** (`formato: "articolo"`, the ClickHouse lessons): prose with 6 H2 (case, mechanism, typical error, solution, hard case, checklist), 1,300–1,900 words, `sql` blocks that really run, no 3s components, no `QuizExercise`. Rules R1–R11: `scripts/lezioni-articolo-rules.ts`; prompt: `docs/lezioni/prompt-articolo-tecnico.md`; plan: `docs/superpowers/plans/2026-10-16-articoli-clickhouse.md`. Run the SQL with `docs/lezioni/strumenti/run-clickhouse-sql.py` (chDB).
 
 ## Known MDX Gotchas
 
