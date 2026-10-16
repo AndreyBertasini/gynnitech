@@ -14,4 +14,5 @@ Questi file erano nello scratchpad locale della sessione. Sono salvati qui perch
 | `verify-en.sh` | Build completa e controllo: 0 stringhe EN scoperte, URL identici (778 pagine). |
 | `card-table.mjs <modulo>` | Genera la tabella delle lezioni per la scheda `docs/lezioni/NN-modulo.md`. |
 | `fix-track.mjs` | Allinea i frammenti «On the» / «track …» attorno al grassetto `ml-tabellare`. |
+| `run-clickhouse-sql.py <lezione.mdx> [--show]` | Esegue in chDB (ClickHouse embedded) i blocchi ```` ```sql ```` di una lezione, in ordine. Exit 1 al primo errore, con riga e messaggio. Con `--show` stampa risultati e `rows_read`: sono i numeri da copiare nel testo. Verificato: chDB 4.4.0 = ClickHouse 26.9.2.1. Non c'è `system.query_log`. Installazione: `python3 -m venv <dir>/chvenv && <dir>/chvenv/bin/pip install chdb`. Prova: `fixtures/ok.mdx` (exit 0) e `fixtures/broken.mdx` (exit 1). |
 | `mirror.ps1` | (Windows) copia il repo in una cartella di build per aggirare il bug del tsconfig nei worktree annidati. |
