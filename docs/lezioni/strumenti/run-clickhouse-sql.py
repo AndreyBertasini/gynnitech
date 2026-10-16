@@ -80,6 +80,11 @@ def istruzioni(blocco, riga_blocco):
     return out
 
 
+def senza_commenti_iniziali(istruzione):
+    """Toglie i commenti prima dell'istruzione, per riconoscerne il tipo."""
+    return re.sub(r"^(\s*(--[^\n]*(\n|$)|/\*.*?\*/))*\s*", "", istruzione, flags=re.DOTALL)
+
+
 def main(argv):
     mostra = "--show" in argv
     percorsi = [a for a in argv[1:] if not a.startswith("--")]
@@ -97,7 +102,8 @@ def main(argv):
     s = session.Session()
     versione = str(s.query("SELECT version()", "CSV")).strip().strip('"')
     for riga, istruzione in lista:
-        lettura = istruzione.lstrip().lower().startswith(LETTURE)
+        tipo = senza_commenti_iniziali(istruzione).lower()
+        lettura = tipo.startswith(LETTURE)
         try:
             risultato = s.query(istruzione, "JSON" if lettura else "TabSeparated")
         except Exception as errore:  # chDB solleva eccezioni generiche con il messaggio del server
@@ -113,7 +119,7 @@ def main(argv):
             for r in dati.get("data", []):
                 print("    " + "\t".join(str(v) for v in r.values()))
             stat = dati.get("statistics", {})
-            if stat and not istruzione.lstrip().lower().startswith("explain"):
+            if stat and not tipo.startswith("explain"):
                 print(f"    rows_read={stat.get('rows_read')} bytes_read={stat.get('bytes_read')}")
     print(f"ClickHouse {versione} · chDB {chdb.__version__}")
     return 0
