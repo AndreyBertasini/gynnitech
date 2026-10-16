@@ -35,7 +35,7 @@ Altre decisioni:
 
 Il branch `claude/analizza-corsi-structure-f4afab` (PR #102, titoli chiari) è la base di tutto: va unito in `main` prima della catena, oppure la catena si rebasa dopo.
 
-**Bug dei `.md` vuoti:** era corretto due volte, da #101 (`readEntryBody`) e da #103 (`retainBody: true`). Nel branch di correzione resta solo `retainBody: true` (la causa); della #101 è stato portato l'audit post-build dei `.md` (`scripts/lib/markdown-audit.ts`, hook in `scripts/site-quality-audit.ts`, `tests/markdown-audit.test.ts`) come guardia contro la regressione. Unendo anche la #101 così com'è, `readEntryBody` diventa codice morto e `src/pages/course/[module]/[slug].md.ts` va in conflitto: meglio chiuderla e tenere questo.
+**Bug dei `.md` vuoti:** era corretto due volte, da #101 (`readEntryBody`) e da #103 (`retainBody: true`). Nel branch di correzione resta solo `retainBody: true` (la causa); della #101 è stato portato l'audit post-build dei `.md` (`scripts/lib/markdown-audit.ts`, hook in `scripts/site-quality-audit.ts`, `tests/markdown-audit.test.ts`) come guardia contro la regressione. Unendo anche la #101 così com'è non ci sono conflitti (verificato con `git merge-tree`, l'audit è identico), ma `readEntryBody` resta come secondo fix ridondante accanto a `retainBody: true`: meglio chiuderla e tenere questo.
 
 ### Commenti di revisione (automatici, Codex)
 
