@@ -167,7 +167,16 @@ describe("Content Schemas", () => {
                 }
             });
 
-            test("rifiuta formato diverso da \"3s\"", () => {
+            test("accetta formato \"articolo\" senza sezioni", () => {
+                const result = corsoSchema.safeParse({ ...base, formato: "articolo" });
+                expect(result.success).toBe(true);
+                if (result.success) {
+                    expect(result.data.formato).toBe("articolo");
+                    expect(result.data.sezioni).toBeUndefined();
+                }
+            });
+
+            test("rifiuta formato \"slide\"", () => {
                 expect(corsoSchema.safeParse({ ...base, formato: "slide" }).success).toBe(false);
             });
 
