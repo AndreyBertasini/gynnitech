@@ -30,7 +30,7 @@ Altre decisioni:
 | 3 metriche-fondamenti | `claude/lezioni-m03-metriche-fondamenti` | #106 | m02 | aperta |
 | 4 gestione-data-driven | `claude/lezioni-m04-gestione-data-driven` | #107 | m03 | aperta |
 | 5 analisi-prodotto | `claude/lezioni-m05-analisi-prodotto` | #108 | m04 | aperta |
-| 6 analisi-marketing | `claude/lezioni-m06-analisi-marketing` | bozza (vedi sotto) | m05 | **incompleto** |
+| 6 analisi-marketing | `claude/lezioni-m06-analisi-marketing` | #109 (bozza) | m05 | **incompleto** |
 | 12 real-time-analytics | (solo pilota `clickhouse-fondamenti`, in #103) | | | 8 lezioni da fare |
 
 Il branch `claude/analizza-corsi-structure-f4afab` (PR #102, titoli chiari) è la base di tutto: va unito in `main` prima della catena, oppure la catena si rebasa dopo.
