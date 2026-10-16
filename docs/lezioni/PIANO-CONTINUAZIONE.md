@@ -1,6 +1,6 @@
 # Piano di continuazione — riscrittura dei 21 moduli nel formato «3 secondi»
 
-Aggiornato il 2026-10-16. Documento di passaggio: chi continua (anche in una sessione cloud) legge questo file, `docs/superpowers/specs/2026-10-15-lezioni-3-secondi-design.md` (§12a prevale) e `docs/lezioni/prompt-3-secondi.md`.
+Aggiornato il 2026-10-16 (sessione cloud: commenti di revisione trattati, modulo 6 completato). Documento di passaggio: chi continua (anche in una sessione cloud) legge questo file, `docs/superpowers/specs/2026-10-15-lezioni-3-secondi-design.md` (§12a prevale) e `docs/lezioni/prompt-3-secondi.md`.
 
 ## 1. Richiesta e decisioni dell'autore
 
@@ -30,30 +30,34 @@ Altre decisioni:
 | 3 metriche-fondamenti | `claude/lezioni-m03-metriche-fondamenti` | #106 | m02 | aperta |
 | 4 gestione-data-driven | `claude/lezioni-m04-gestione-data-driven` | #107 | m03 | aperta |
 | 5 analisi-prodotto | `claude/lezioni-m05-analisi-prodotto` | #108 | m04 | aperta |
-| 6 analisi-marketing | `claude/lezioni-m06-analisi-marketing` | #109 (bozza) | m05 | **incompleto** |
+| 6 analisi-marketing | `claude/lezioni-m06-analisi-marketing` | #109 (bozza) | m05 | completo nel branch di correzione `claude/great-hawking-e54n7i` (PR con base m06): da unire in m06, poi togliere il «bozza» |
 | 12 real-time-analytics | (solo pilota `clickhouse-fondamenti`, in #103) | | | 8 lezioni da fare |
 
 Il branch `claude/analizza-corsi-structure-f4afab` (PR #102, titoli chiari) è la base di tutto: va unito in `main` prima della catena, oppure la catena si rebasa dopo.
 
-### Commenti di revisione ancora da trattare (automatici, Codex)
+**Bug dei `.md` vuoti:** era corretto due volte, da #101 (`readEntryBody`) e da #103 (`retainBody: true`). Nel branch di correzione resta solo `retainBody: true` (la causa); della #101 è stato portato l'audit post-build dei `.md` (`scripts/lib/markdown-audit.ts`, hook in `scripts/site-quality-audit.ts`, `tests/markdown-audit.test.ts`) come guardia contro la regressione. Unendo anche la #101 così com'è, `readEntryBody` diventa codice morto e `src/pages/course/[module]/[slug].md.ts` va in conflitto: meglio chiuderla e tenere questo.
 
-Sono arrivati sulle PR #104–#108 mentre la sessione lavorava. Vanno corretti **sul branch del modulo** e poi rimessi in cascata (rebase dei branch successivi). Ogni commento ha un `comment_id`: dopo la correzione, rispondere in thread con `gh api repos/AndreyBertasini/gynnitech/pulls/<PR>/comments/<id>/replies` e chiudere il thread.
+### Commenti di revisione (automatici, Codex)
 
-- **#104 (m01)** — `public/llms-full.txt` non rigenerato dopo la riscrittura di `panoramica/come-funziona-questo-corso.mdx`: lanciare `npm run llms:full` e committare (comment 4285260320).
+Sono arrivati sulle PR #104–#108. **Tutti e 11 sono stati corretti** nel branch `claude/great-hawking-e54n7i` (commit `fix(corso): correzioni dai commenti di revisione su #105-#108` e `chore: llms-full.txt rigenerato…`), che poggia sulla punta della catena (m06). I fix NON sono nei branch dei singoli moduli: le PR #104–#108 mostrano ancora il testo originale, quindi i thread restano aperti finché i fix non vengono portati nei rispettivi branch (cherry-pick) o la catena non viene unita. Ogni commento ha un `comment_id`: dopo il cherry-pick, rispondere in thread con `gh api repos/AndreyBertasini/gynnitech/pulls/<PR>/comments/<id>/replies` e chiudere il thread.
+
+Stato per commento (✅ corretto nel branch di correzione):
+
+- **#104 (m01)** — `public/llms-full.txt` non rigenerato dopo la riscrittura di `panoramica/come-funziona-questo-corso.mdx`: lanciare `npm run llms:full` e committare (comment 4285260320). ✅
 - **#105 (m02)**, `data-collection/privacy.mdx`:
-  - riga ~102: non richiedere «zero righe» subito nei backup; l'EDPB ammette backup con cancellazione al ciclo di retention, serve evitare la reintroduzione dei dati al restore (4285410961);
-  - riga ~118: la retention non è «90 giorni» per legge, va derivata dallo scopo; presentare 90 giorni solo come ipotesi (4285410972).
+  - riga ~102: non richiedere «zero righe» subito nei backup; l'EDPB ammette backup con cancellazione al ciclo di retention, serve evitare la reintroduzione dei dati al restore (4285410961); ✅
+  - riga ~118: la retention non è «90 giorni» per legge, va derivata dallo scopo; presentare 90 giorni solo come ipotesi (4285410972). ✅
 - **#106 (m03)**:
-  - `inizio-successo.mdx` ~36: le stringhe di `learningObjectives` ora visibili tramite `<Obiettivi />` non sono nella cache EN; tradurle (4285483879);
-  - `inizio-successo.mdx` ~91: domanda invertita, deve essere «A quanti driver colleghiamo ogni iniziativa?» (4285483884);
-  - `generazione-idee.mdx` ~82: togliere la coorte del primo acquisto dalla risposta sul confronto tra campagne, a meno che sia incrociata con la campagna (4285483891).
+  - `inizio-successo.mdx` ~36: le stringhe di `learningObjectives` ora visibili tramite `<Obiettivi />` non sono nella cache EN; tradurle (4285483879); ✅
+  - `inizio-successo.mdx` ~91: domanda invertita, deve essere «A quanti driver colleghiamo ogni iniziativa?» (4285483884); ✅
+  - `generazione-idee.mdx` ~82: togliere la coorte del primo acquisto dalla risposta sul confronto tra campagne, a meno che sia incrociata con la campagna (4285483891). ✅
 - **#107 (m04)**:
-  - `ricerca-quantitativa.mdx` ~147: Nielsen riguarda test di usabilità, non interviste; presentare 5–8 interviste come euristica (4285566072);
-  - `ricerca-quantitativa.mdx` ~166: non dedurre il «movimento» dei segmenti da una sola istantanea; aggiungere le basi o descrivere solo la differenza di livello (4285566077);
-  - `framework-jtbd.mdx` ~194: la sequenza Superhuman è invertita rispetto a `marketing-data-science/pmf.mdx` (22% → segmentazione e onboarding → 58%) (4285566086).
+  - `ricerca-quantitativa.mdx` ~147: Nielsen riguarda test di usabilità, non interviste; presentare 5–8 interviste come euristica (4285566072); ✅
+  - `ricerca-quantitativa.mdx` ~166: non dedurre il «movimento» dei segmenti da una sola istantanea; aggiungere le basi o descrivere solo la differenza di livello (4285566077); ✅
+  - `framework-jtbd.mdx` ~194: la sequenza Superhuman è invertita rispetto a `marketing-data-science/pmf.mdx` (22% → segmentazione e onboarding → 58%) (4285566086). ✅
 - **#108 (m05)**:
-  - `ux-research.mdx` ~54: il funnel va calcolato con l'ordine degli eventi (coorte iniziale, ogni passo solo dopo il precedente), altrimenti conversioni sopra il 100% (4285685916);
-  - `caso-studio.mdx` ~119: la query non produce più il 54%→42% citato; reinserire gli stadi intermedi o calcolare le conversioni passo per passo (4285685928).
+  - `ux-research.mdx` ~54: il funnel va calcolato con l'ordine degli eventi (coorte iniziale, ogni passo solo dopo il precedente), altrimenti conversioni sopra il 100% (4285685916); ✅
+  - `caso-studio.mdx` ~119: la query non produce più il 54%→42% citato; reinserire gli stadi intermedi o calcolare le conversioni passo per passo (4285685928). ✅
 
 Questa classe di errore (affermazioni non verificate nelle lezioni) è la ragione per cui ogni scheda elenca i «fatti da verificare»: i nuovi moduli devono evitare di aggiungerne.
 
@@ -64,11 +68,11 @@ Branch `claude/lezioni-m06-analisi-marketing`, due commit sopra m05:
 1. `feat(corso): modulo 6 …` — 22 lezioni in italiano, `validate:3s` 0 errori, 1139 test ok.
 2. `i18n(en): modulo 6, traduzioni parziali` — stringhe 0–2289 su 2792 già nella cache.
 
-**Manca:**
+**Fatto nel branch `claude/great-hawking-e54n7i`** (sopra m06): traduzione EN completa (603 stringhe, comprese quelle cambiate dai fix di revisione), build completa con 0 stringhe EN introdotte e scoperte, 778 URL identici, audit del sito superato; scheda `docs/lezioni/06-analisi-marketing.md`.
 
-- tradurre le ultime 503 stringhe: rifare `rebuild-dump.sh` (rigenera `intro.json`; quelle già in cache non compaiono più), tradurre il resto, `verify-en.sh` fino a 0 scoperte e 778 URL;
-- generare la scheda `docs/lezioni/06-analisi-marketing.md` (tabella con `card-table.mjs`);
-- togliere il «bozza» dalla PR.
+**Manca:** unire quel branch in m06 e togliere il «bozza» da #109. Poi i fix di revisione vanno portati nei branch m01–m05 (§2).
+
+Come sono stati fatti gli strumenti su Linux (nessuna copia di build è servita): `build-and-dump.sh` lancia `astro build` e `dump-missing-en.ts` (copia di `translate-static-en.ts` con la scrittura delle stringhe mancanti su un file) nel repository; per `missing-head.json` serve una **seconda build del branch base**, fatta in un worktree con `node_modules` copiato con `cp -al` (con un symlink Astro fallisce con «No cached compile metadata»).
 
 Lezioni del modulo, in ordine: performance-marketing, modelli-attribuzione, customer-journey-mapping, mmm-incrementality, funnel-unit-economics, seo-content-analytics, crm-email-analytics, social-media-analytics, efficacia-brand, costruire-brand-forte, martech-dashboard-operativi, ga4-avanzato, server-side-tracking-gtm-server-capi, reverse-etl-sincronizzazione-audience, lifecycle-orchestration-multicanale, cdp-identity-resolution-audience-activation, b2b-martech-ops, gtm-datalayer-qa-tracking, analisi-end-to-end-utm, marketing-data-pipeline, caso-studio, cheat-sheet. L'ultima rimanda a `/course/dashboard-visualizzazione/data-visualization/`.
 
