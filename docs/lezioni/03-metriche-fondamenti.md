@@ -36,6 +36,11 @@ Le sei lezioni non avevano un quiz: i 5 quesiti di ciascuna sono nuovi. I numeri
 - Uber (`caso-studio`): 2019, ricavi 14,1 miliardi di dollari, perdita netta 8,5 miliardi, quotazione a maggio.
 - «Ogni ordine perde dieci centesimi su cento» (`caso-studio`): è una lettura didattica del calcolo −10 su 100 di volume lordo, non un dato di un'azienda reale.
 
+## Correzioni dopo la revisione (2026-10-16)
+
+- `inizio-successo`: la domanda di sezione era invertita; ora è «A quanti driver colleghiamo ogni iniziativa?», risposta «A uno solo». Gli obiettivi di apprendimento, ora visibili con `<Obiettivi />`, sono nella cache EN.
+- `generazione-idee`: per confrontare due campagne la coorte è «per campagna d'ingresso»; la coorte di primo acquisto serve solo incrociata con la campagna.
+
 ## Traduzione inglese
 
 684 stringhe nuove, aggiunte a mano a `src/data/i18n/en-static-cache.json`. Dopo la build completa: 0 stringhe introdotte e scoperte, URL invariati (778 pagine).

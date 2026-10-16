@@ -51,6 +51,11 @@ Le undici lezioni non avevano un quiz: i 5 quesiti di ciascuna sono nuovi. Il nu
 - FitTrack (`caso-studio`): è un caso didattico inventato; tutti i suoi numeri sono illustrativi e il testo lo dichiara.
 - Benchmark delle transizioni B2C (20-40%, 30-50%, 10-25%, 5-15%, 3-8%) in `analisi-coorte`: indicazioni della lezione originale, non attribuite a una fonte.
 
+## Correzioni dopo la revisione (2026-10-16)
+
+- `ux-research`: la query del funnel contava gli utenti distinti per evento senza l'ordine, quindi un tasso poteva superare il 100%. Ora parte dagli iscritti e conta uno step solo se segue il precedente (prima occorrenza di ogni evento).
+- `caso-studio`: la query del funnel di onboarding aveva perso gli stadi intermedi e non poteva più produrre il 54% → 42% citato. Reinseriti `goal_selected` e `workout_start`; le percentuali sono sulla coorte di chi ha aperto l'app, con l'ordine dei passi.
+
 ## Traduzione inglese
 
 1165 stringhe nuove, aggiunte a mano a `src/data/i18n/en-static-cache.json`. Dopo la build completa: 0 stringhe introdotte e scoperte, URL invariati (778 pagine).

@@ -33,11 +33,16 @@ Le nove lezioni non avevano un quiz: i 5 quesiti di ciascuna sono nuovi.
 - Amazon, memo narrativi di sei pagine dal 2004 (`cultura-data-driven`, `cheat-sheet`, `caso-studio`): la data e il divieto di slide sono nella lezione originale.
 - Amazon Fire Phone (`decision-making-dati`, `ciclo-deming-hadi`): lancio nel 2014, «170 milioni di dollari di perdita», riconoscimento da parte di Bezos «nella lettera agli azionisti del 2015». Verificare cifra, lettera di riferimento e l'affermazione che «i dati descrivevano un mercato saturo e poco differenziato».
 - Google e gli OKR (`okr-e-kpi`): adozione nel 1999 dopo la presentazione di John Doerr, che li aveva visti in Intel; riferimento a *Measure What Matters* (2018).
-- Superhuman e il test di Sean Ellis (`framework-jtbd`): 2017-2019, soglia del 40% di utenti «molto delusi», racconto di First Round Review del 2018.
-- Nielsen, 2000, cinque utenti e circa 85% dei problemi (`ricerca-quantitativa`, `interviste-profondita`).
+- Superhuman e il test di Sean Ellis (`framework-jtbd`): sequenza allineata a `marketing-data-science/pmf`: 22% di «molto delusi», poi segmentazione e riprogettazione dell'onboarding, poi 58%; soglia del 40% di Sean Ellis; racconto di First Round Review del 2018. L'intervallo «2017-2019» della lezione originale è stato tolto perché non verificato.
+- Nielsen, 2000, cinque utenti e circa 85% dei problemi (`interviste-profondita`): riguarda i test di usabilità e in quella lezione è presentato come tale. In `ricerca-quantitativa` non è più citato.
 - Airbnb e gli host giapponesi (`ricerca-quantitativa`): tasso di risposta +21%; aneddoto della lezione originale, non verificato altrove.
 - Walkman / iPod / streaming come soluzioni dello stesso job (`framework-jtbd`) e il caso del trapano: esempi classici, non attribuiti a una fonte nella lezione.
 - Numeri didattici (abbandono al checkout 62%→71%, mobile 78% contro desktop 52%, KR da 120 a 400 clienti enterprise, 500K nuovi clienti, 200 MQL): esempi della lezione originale, non dati reali.
+
+## Correzioni dopo la revisione (2026-10-16)
+
+- `ricerca-quantitativa`: «cinque-otto interviste» è presentato come euristica di partenza («ci fermiamo quando non emergono pattern nuovi»), non più attribuito a Nielsen, che parla di test di usabilità. Il confronto mobile 78% / desktop 52% descrive una differenza di livello, non il «movimento» dei segmenti, che da una sola istantanea non si deduce.
+- `framework-jtbd`: la sequenza di Superhuman era invertita rispetto a `marketing-data-science/pmf`; ora è 22% → segmentazione e onboarding → 58%.
 
 ## Traduzione inglese
 

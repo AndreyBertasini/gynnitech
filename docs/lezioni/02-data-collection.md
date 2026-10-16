@@ -40,6 +40,10 @@ Ogni lezione ha, in fondo, una sezione «Pratica» con l'esercizio SQL che già 
 - Segment e Twilio (`quickstart`): fondazione nel 2011, acquisizione per 3,2 miliardi di dollari a ottobre 2020.
 - Fivetran (2024), «What is Data Integration?» (`integrations`): riferimento della lezione originale.
 
+## Correzioni dopo la revisione (2026-10-16)
+
+- `privacy`: i backup non si portano a zero righe subito; si svuotano al ciclo di conservazione e, se si ripristina un backup, si ripuliscono di nuovo i dati già cancellati. La retention non è «90 giorni» per legge: la durata si ricava dallo scopo e 90 giorni è solo un'ipotesi da verificare. Non attribuisco la regola sui backup a un'autorità: la fonte indicata dal revisore automatico (EDPB, Comitato europeo per la protezione dei dati) va verificata prima di citarla.
+
 ## Traduzione inglese
 
 915 stringhe nuove, aggiunte a mano a `src/data/i18n/en-static-cache.json`. Dopo la build completa: 0 stringhe introdotte e scoperte, URL invariati (778 pagine).
