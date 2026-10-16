@@ -154,6 +154,32 @@ describe("Content Schemas", () => {
             const result = corsoSchema.safeParse(invalid);
             expect(result.success).toBe(false);
         });
+
+        describe("formato 3 secondi", () => {
+            const base = { title: "Lesson 1", description: "Intro" };
+
+            test("accetta formato \"3s\" con 4 sezioni", () => {
+                const result = corsoSchema.safeParse({ ...base, formato: "3s", sezioni: ["A", "B", "C", "D"] });
+                expect(result.success).toBe(true);
+                if (result.success) {
+                    expect(result.data.formato).toBe("3s");
+                    expect(result.data.sezioni).toEqual(["A", "B", "C", "D"]);
+                }
+            });
+
+            test("rifiuta formato diverso da \"3s\"", () => {
+                expect(corsoSchema.safeParse({ ...base, formato: "slide" }).success).toBe(false);
+            });
+
+            test("rifiuta sezioni fuori da 3–6", () => {
+                expect(corsoSchema.safeParse({ ...base, sezioni: ["A", "B"] }).success).toBe(false);
+                expect(corsoSchema.safeParse({ ...base, sezioni: ["A", "B", "C", "D", "E", "F", "G"] }).success).toBe(false);
+            });
+
+            test("rifiuta una sezione vuota", () => {
+                expect(corsoSchema.safeParse({ ...base, sezioni: ["A", "", "C"] }).success).toBe(false);
+            });
+        });
     });
 
     describe("productsSchema", () => {

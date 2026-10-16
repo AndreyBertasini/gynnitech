@@ -131,7 +131,8 @@ export type PipelineRuleResult = { regola: string; esito: "PASS" | "FAIL"; nota:
  * autoverifica) con titoli liberi e naturali: nessuna intestazione fissa.
  * Usata sia da validate:content sia dalla pipeline batch (single source of truth).
  */
-export function checkLessonPipeline(body: string, frontmatterBinario: unknown): PipelineRuleResult[] {
+export function checkLessonPipeline(body: string, frontmatterBinario: unknown, formato?: unknown): PipelineRuleResult[] {
+    const tre = formato === "3s";
     const results: PipelineRuleResult[] = [];
     const h2Titles = extractH2Titles(body);
     const lowerTitles = h2Titles.map((t) => t.toLowerCase());
@@ -147,7 +148,11 @@ export function checkLessonPipeline(body: string, frontmatterBinario: unknown): 
         (s) => s.text.length > 0 && countSentences(s.text) <= 4 && !/\$|\\\(|\\\[|\\frac|\\log|\\sum/.test(s.text),
     );
     const stepsSection = sections.find((s) => /^\s*(1[.)]|[-*]\s+)/m.test(s.text));
-    if (definitionSection && stepsSection && definitionSection.title !== stepsSection.title) {
+    // Formato 3s: il concetto sta nelle figure (<Slide>), il passo-passo negli schemi (<Schema>).
+    const regola1 = tre
+        ? /<Slide\b/.test(body) && /<Schema\b/.test(body)
+        : Boolean(definitionSection && stepsSection && definitionSection.title !== stepsSection.title);
+    if (regola1) {
         results.push({ regola: "regola_1_concetto_calcolo", esito: "PASS", nota: "" });
     } else {
         results.push({
@@ -160,7 +165,10 @@ export function checkLessonPipeline(body: string, frontmatterBinario: unknown): 
     // Regola 2 — autoverifica in chiusura (titolo libero).
     const lastSection = sections.length > 0 ? sections[sections.length - 1] : undefined;
     const questionCount = lastSection ? countNumberedQuestions(lastSection.text) : 0;
-    if (lastSection && questionCount >= 3 && questionCount <= 5) {
+    // Formato 3s: l'autoverifica finale è il QuizExercise del Riepilogo.
+    const quizCount = lastSection && /<QuizExercise\b/.test(lastSection.text) ? (lastSection.text.match(/\bcorrectIndex\s*:/g) ?? []).length : 0;
+    const regola2 = tre ? quizCount >= 3 && quizCount <= 5 : Boolean(lastSection && questionCount >= 3 && questionCount <= 5);
+    if (regola2) {
         results.push({ regola: "regola_2_retrieval_attivo", esito: "PASS", nota: "" });
     } else {
         results.push({
@@ -218,8 +226,8 @@ export function checkLessonPipeline(body: string, frontmatterBinario: unknown): 
  * Argo — applica meccanicamente la rubrica a 6 regole della pipeline.
  * Ogni regola è PASS/FAIL; il verdetto è PASS solo se tutte sono PASS.
  */
-function validatePipelineRubric(result: ValidationResult, file: string, body: string, frontmatterBinario: unknown): void {
-    for (const rule of checkLessonPipeline(body, frontmatterBinario)) {
+function validatePipelineRubric(result: ValidationResult, file: string, body: string, frontmatterBinario: unknown, formato: unknown): void {
+    for (const rule of checkLessonPipeline(body, frontmatterBinario, formato)) {
         if (rule.esito === "FAIL") {
             result.errors.push(buildMessage(file, `pipeline-${rule.regola}`, rule.nota));
         }
@@ -415,7 +423,7 @@ async function validateCollection(collection: "blog" | "corso"): Promise<Validat
         }
 
         if (isLessonFile) {
-            validatePipelineRubric(result, file, content, data.binario);
+            validatePipelineRubric(result, file, content, data.binario, data.formato);
             // Gate di Giano: si pubblica solo con draft booleano esplicito (false = pubblicato).
             if (typeof data.draft !== "boolean") {
                 result.errors.push(

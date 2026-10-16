@@ -1,6 +1,13 @@
 /// <reference path="../.astro/types.d.ts" />
 /// <reference types="astro/client" />
 
+declare namespace App {
+  interface Locals {
+    /** Contesto delle lezioni con formato: "3s", impostato dal template della lezione. */
+    lezione?: import('./lib/lezione/model').LezioneContext;
+  }
+}
+
 declare module 'sql.js' {
   export type SqlValue = string | number | Uint8Array | null;
 
