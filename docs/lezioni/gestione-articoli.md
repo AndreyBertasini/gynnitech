@@ -12,7 +12,7 @@ Regole di lettura:
 |---|---|---|---|
 | `cultura-data-driven` | 1.373 | 12 min | scritta, vedi sotto |
 | `decision-making-dati` | 1.332 | 12 min | scritta, vedi sotto |
-| `okr-e-kpi` | | | da fare |
+| `okr-e-kpi` | 1.331 | 12 min | scritta, vedi sotto |
 | `framework-jtbd` | | | da fare |
 | `ricerca-quantitativa` | | | da fare |
 | `interviste-profondita` | | | da fare |
@@ -62,3 +62,26 @@ Regole di lettura:
 **Corretto rispetto alla lezione precedente:** la lettera di Bezos sul Fire Phone era datata «2015»: è quella del 2018 (aprile 2019). «Perdita» diventa «svalutazione». Tolti «i dati descrivevano un mercato saturo» e «l'azienda aveva scommesso su feature uniche»: nessuna fonte, e nessuna fonte pubblica dice quali dati o quale processo ci fossero dietro la scelta di Amazon.
 
 **Non verificati / non usati:** la dicitura «Type 1 / Type 2» per le decisioni (la ricerca non l'ha confermata nel testo della lettera; non usata); la durata dei prezzi del Fire Phone e le cifre alternative («mezzo miliardo» in una fonte, in contrasto con i 170 milioni).
+
+## gestione-data-driven/okr-e-kpi
+
+**Titolo, URL, prerequisiti invariati.** Perde i componenti «3 secondi» e il quiz. Aggiunto un obiettivo di apprendimento (OKR o KPI per lo stesso tema).
+
+**Caso:** ricostruito (dichiarato), numeri di esempio.
+
+| Numero nel testo | Fonte |
+|---|---|
+| 9 Key Result su 9, ricavo enterprise −8%, 3 webinar, 6 casi cliente, 200 contatti qualificati | numeri di esempio del caso dichiarato |
+| Da 120 a 200 clienti, da 1,2 a 1,6 milioni di euro, abbandono dal 9% al 6%, soglia 7 e 10 | numeri di esempio della scheda giusta |
+| «180 vale il 75%» | (180 − 120) / (200 − 120) = 0,75 (Python) |
+| «da 0 Key Result su 3 con baseline e data a 3 su 3» | obiettivo dichiarato, non misura |
+| «da cinque a dieci KPI» | regola pratica del corso, dichiarata come tale; nessuna fonte |
+
+**Fatti verificati (solo ricerca, nessuna pagina aperta):**
+- Guida Google re:Work sugli OKR ([pagina](https://rework.withgoogle.com/intl/en/guides/set-goals-with-okrs)): Doerr ha imparato gli OKR da Andy Grove in Intel; li ha portati ai vertici di Google «all'inizio del 2000» (data approssimata dalla guida); scala da 0 a 1,0 e risultato intorno al 70% come tipico; circa tre Key Result per Objective. Il testo riporta la discordanza: altre fonti dicono 1999.
+- Gestione per obiettivi di Drucker (1954) → Grove in Intel (anni Settanta) → *High Output Management* (1983): [Wikipedia](https://en.wikipedia.org/wiki/Objectives_and_key_results), la fonte più affidabile tra quelle trovate; blog di fornitori di software e altri siti concordano.
+- Intervista di Laszlo Bock su WhatMatters: gli OKR vanno separati dalla retribuzione ([pagina](https://www.whatmatters.com/articles/laszlo-bock-divorce-compensation-from-okrs)); il testo non attribuisce a Google una policy.
+
+**Corretto rispetto alla lezione precedente:** «da tre a cinque Key Result» diventa «circa tre per Objective» (indicazione della guida di Google); «Google adotta gli OKR nel 1999» diventa «inizio del 2000 secondo Google, 1999 secondo altre fonti»; «60-70% è un successo» diventa «intorno al 70% come tipico». Tolti: «500K nuovi clienti», «dominare il mercato europeo» (esempi senza fonte; sostituiti dal caso dichiarato).
+
+**Non verificati / non usati:** la data esatta del corso di Grove frequentato da Doerr (1975, solo Wikipedia); il 12,5 milioni di dollari investiti da Doerr in Google (materiale editoriale del libro).
