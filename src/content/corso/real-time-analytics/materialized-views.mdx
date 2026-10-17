@@ -40,7 +40,7 @@ La reazione abituale è cercare un bug nella somma o nella query della dashboard
 
 ## Cosa fa una materialized view
 
-Tre fatti, in questa sequenza.
+Il meccanismo si regge su tre fatti.
 
 Il primo: una materialized view incrementale è un trigger sull'insert. Quando un blocco di righe entra nella tabella sorgente, la `SELECT` della vista gira solo su quel blocco e il risultato finisce nella tabella di destinazione. I dati già presenti non vengono rivisitati ([viste incrementali](https://clickhouse.com/docs/materialized-view/incremental-materialized-view)).
 
@@ -120,11 +120,11 @@ Sembra ragionevole: `utenti` è un numero e `SummingMergeTree` somma i numeri. M
 
 ### Leggere la destinazione come se fosse già fusa
 
-Sembra ragionevole: è una tabella, la si legge. Ma le righe con la stessa chiave si fondono più tardi, in un momento che decide il server. Dopo 1.000 eventi in ritardo, i 60 minuti dell'ora 1 occupano 120 righe, e una dashboard che le legge senza `GROUP BY` disegna ogni minuto due volte.
+È una tabella, quindi la si legge come una tabella. Ma le righe con la stessa chiave si fondono più tardi, in un momento che decide il server. Dopo 1.000 eventi in ritardo, i 60 minuti dell'ora 1 occupano 120 righe, e una dashboard che le legge senza `GROUP BY` disegna ogni minuto due volte.
 
 ### Una vista su una tabella già piena
 
-Sembra ragionevole: la vista c'è, quindi i numeri tornano. Ma una vista incrementale vede solo i dati che arrivano dopo la sua creazione. L'ora 0 era già nella tabella e nella vista non c'è. `POPULATE` sembra la scorciatoia, e la documentazione ne sconsiglia l'uso: può perdere le righe inserite mentre la vista viene creata.
+La vista esiste e si dà per scontato che i numeri tornino. Ma una vista incrementale vede solo i dati che arrivano dopo la sua creazione. L'ora 0 era già nella tabella e nella vista non c'è. `POPULATE` sembra la scorciatoia, e la documentazione ne sconsiglia l'uso: può perdere le righe inserite mentre la vista viene creata.
 
 ## Stati di aggregazione e backfill
 
@@ -133,8 +133,8 @@ I criteri, in ordine di priorità:
 1. Per ogni misura chiedetevi se è additiva. Somme e conteggi lo sono; distinti, medie e percentili no.
 2. Le misure non additive si memorizzano come stati (`uniqExactState`) in una tabella `AggregatingMergeTree` e si leggono con `uniqExactMerge`. Quelle additive possono restare numeri, con `SimpleAggregateFunction(sum, UInt64)`. Qui si usa `uniqExact` perché il conto deve tornare; `uniq` è approssimato.
 3. Leggete la destinazione sempre con `GROUP BY` e con la funzione `-Merge`: prima del merge in background le righe di una chiave sono più d'una.
-4. Create la vista prima del backfill e riempite lo storico con un `INSERT … SELECT` che scrive stati, limitato ai dati più vecchi del minimo già presente nella destinazione. Mai `POPULATE`.
-5. Fate coincidere la `GROUP BY` della vista con l'`ORDER BY` della destinazione: è la chiave su cui il motore fonde le righe, e se divergono le righe si fondono con meno efficienza.
+4. Fissate il confine del backfill prima di creare la vista e non spostatelo: un istante T, la vista copre ciò che entra dopo, un `INSERT … SELECT` che scrive stati copre ciò che ha `ts` prima di T. Mai `POPULATE`. Il minimo letto dalla destinazione non è un confine: se prima del backfill arriva un evento in ritardo per un minuto vecchio, il minimo torna indietro e lo storico successivo a quel minuto non viene mai riempito.
+5. Fate coincidere la `GROUP BY` della vista con l'`ORDER BY` della destinazione: è la chiave su cui il motore fonde le righe. Se la vista raggruppa anche per una colonna fuori dalla chiave, al merge le righe che differiscono solo per quella colonna diventano una e la colonna tiene un valore qualsiasi: i numeri diventano sbagliati. ClickHouse 26.9 rifiuta la definizione con `AggregatingMergeTree` e l'accetta con `SummingMergeTree`.
 
 Lo stesso scenario, scritto bene:
 
@@ -148,6 +148,7 @@ CREATE TABLE utenti_minuto_v2
 ENGINE = AggregatingMergeTree
 ORDER BY minuto;
 
+-- Confine T: l'inizio dell'ora 3. Si fissa qui, prima della vista, e il backfill lo riusa tale e quale.
 CREATE MATERIALIZED VIEW utenti_minuto_v2_mv TO utenti_minuto_v2 AS
 SELECT toStartOfMinute(ts) AS minuto, uniqExactState(id_utente) AS utenti, count() AS eventi
 FROM eventi
@@ -156,31 +157,32 @@ GROUP BY minuto;
 -- L'ora 3 arriva dopo la vista: la vista la aggrega da sola.
 INSERT INTO eventi SELECT * FROM carica_ora(ora = 3);
 
--- Il backfill: solo i dati più vecchi del primo minuto già presente nella destinazione.
+-- Il backfill: solo ciò che ha ts prima del confine T.
 INSERT INTO utenti_minuto_v2
 SELECT toStartOfMinute(ts) AS minuto, uniqExactState(id_utente), count()
 FROM eventi
-WHERE ts < (SELECT min(minuto) FROM utenti_minuto_v2)
+WHERE ts < toStartOfDay(now()) - toIntervalDay(1) + toIntervalHour(3)
 GROUP BY minuto;
 
 -- Ora la vista e la tabella grezza coincidono: 1.201.000 eventi.
 SELECT (SELECT count() FROM eventi) AS grezzi, (SELECT sum(eventi) FROM utenti_minuto_v2) AS nella_vista;
 
 -- Altri 500 eventi in ritardo per l'ora 1, con 50 utenti nuovi: la vista li fonde senza ricalcolare.
+-- I primi 100 utenti nuovi dell'ora 1 erano già nel lotto in ritardo, riempito dal backfill.
 INSERT INTO eventi
 SELECT toStartOfDay(now()) - toIntervalDay(1) + toIntervalSecond(3600 + cityHash64(number, 1) % 3600), 20000 + number % 50, 1.00
 FROM numbers(500);
 
--- Si legge sempre con GROUP BY e -Merge: 5.000 utenti per ora, 5.150 per l'ora 1.
+-- Si legge sempre con GROUP BY e -Merge: 5.000 utenti per ora, 5.150 per l'ora 1 (5.000 + 100 + 50).
 SELECT toStartOfHour(minuto) AS ora, uniqExactMerge(utenti) AS utenti_unici, sum(eventi) AS eventi
 FROM utenti_minuto_v2
 GROUP BY ora
 ORDER BY ora;
 ```
 
-Il livello torna da 189.705 a 5.000, quasi quaranta volte meno. Il totale della vista coincide con la tabella grezza, 1.201.000 eventi su 1.201.000, e l'ora 1 sale da 5.000 a 5.150 utenti con l'arrivo degli eventi in ritardo, senza nessun ricalcolo.
+Il livello torna da 189.705 a 5.000, quasi quaranta volte meno. Il totale della vista coincide con la tabella grezza, 1.201.000 eventi su 1.201.000, e l'ora 1 sale da 5.000 a 5.150 utenti: 100 dal primo lotto in ritardo, riempito dal backfill, e 50 dal secondo, fuso dalla vista senza nessun ricalcolo.
 
-Gli eventi in ritardo non sono il problema che sembrano. Ogni evento cade nel minuto che gli spetta e lo stato di quel minuto si aggiorna al merge. Il limite sta altrove.
+Per le misure, gli eventi in ritardo non sono il problema che sembrano. Ogni evento cade nel minuto che gli spetta e lo stato di quel minuto si aggiorna al merge. Il limite sta nel confine del backfill, che è un confine di inserimento approssimato con un tempo di evento. Un evento con `ts` prima di T che entra dopo la creazione della vista finisce nella vista e poi di nuovo nel backfill: gli utenti unici non cambiano, gli eventi contano due volte. Con il minimo letto dalla destinazione, lo stesso evento fa sparire lo storico. Il controllo è il totale della vista contro quello della sorgente, su una finestra chiusa, dopo ogni backfill. Se la sorgente ha una colonna con l'istante di inserimento, usate quella come confine al posto di `ts`.
 
 La vista si cancella e si ricrea senza toccare la sorgente, con `DROP VIEW`. Gli stati sbagliati già scritti si ricostruiscono rileggendo la tabella grezza: una scansione, qui di 1,2 milioni di righe. Ma solo se la tabella grezza esiste ancora. Se ha un `TTL` più corto della vista, quello che è scaduto non si recupera.
 
@@ -273,7 +275,7 @@ Questo articolo non copre le viste a cascata e il Kafka engine. Non copre nemmen
 
 1. Ogni misura della vista è additiva, o è memorizzata come stato di aggregazione?
 2. Ogni lettura della destinazione usa `GROUP BY` e la funzione `-Merge`?
-3. Come e quando si riempie lo storico, e con quale confine rispetto al primo dato già presente nella vista?
+3. Il confine del backfill è fissato prima di creare la vista, e separa ciò che entra dopo da ciò che c'era già?
 4. Il totale della vista coincide con la query diretta sulla sorgente, sulla stessa finestra chiusa?
 5. Le dimensioni usate dalla vista devono restare quelle di quando l'evento è entrato, o seguire quelle di oggi?
 

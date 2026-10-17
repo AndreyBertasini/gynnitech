@@ -3,13 +3,15 @@
 
 Uso: run-clickhouse-sql.py <lezione.mdx> [--show]
 
-Exit 0 se ogni istruzione gira, 1 al primo errore. Con --show stampa le righe
+Exit 0 se ogni istruzione gira, 1 al primo errore, 2 se l'uso è sbagliato. Con --show stampa le righe
 di risultato di SELECT/EXPLAIN/SHOW e, per ogni SELECT, rows_read e bytes_read:
 sono i numeri da copiare nel testo della lezione.
 Direttive, come commenti subito prima dell'istruzione:
   -- ripeti: N                 esegue l'istruzione N volte (N insert separati)
   -- errore atteso: CODICE     l'istruzione deve fallire con CODICE (es. TOO_MANY_PARTS);
                                con "ripeti" si ferma al primo errore e stampa a quale ripetizione
+Un blocco ```sql con attributi (```sql title="...") viene eseguito come gli altri. Una riga
+"-- ripeti:" o "-- errore atteso:" scritta male (es. codice in minuscolo) è un errore, non un commento.
 Ambiente: python3 -m venv <dir>/chvenv && <dir>/chvenv/bin/pip install chdb
 """
 import json
@@ -28,7 +30,7 @@ def blocchi_sql(testo):
     out, corrente, partenza = [], None, 0
     for numero, riga in enumerate(righe, start=1):
         if corrente is None:
-            if re.match(r"^\s*```\s*sql\s*$", riga, re.IGNORECASE):
+            if re.match(r"^\s*```\s*sql(\s|$)", riga, re.IGNORECASE):
                 corrente, partenza = [], numero + 1
         elif re.match(r"^\s*```\s*$", riga):
             out.append((partenza, "\n".join(corrente)))
@@ -89,11 +91,17 @@ def senza_commenti_iniziali(istruzione):
     return re.sub(r"^(\s*(--[^\n]*(\n|$)|/\*.*?\*/))*\s*", "", istruzione, flags=re.DOTALL)
 
 
+DIRETTIVA = re.compile(r"^\s*--\s*(ripeti|errore atteso)\b.*$", re.MULTILINE)
+RIPETI = re.compile(r"^\s*--\s*ripeti:\s*(\d+)\s*$", re.MULTILINE)
+ATTESO = re.compile(r"^\s*--\s*errore atteso:\s*([A-Z_]+)\s*$", re.MULTILINE)
+
+
 def direttive(istruzione):
-    """Legge `-- ripeti: N` e `-- errore atteso: CODICE` tra i commenti iniziali."""
-    ripeti = re.search(r"^\s*--\s*ripeti:\s*(\d+)\s*$", istruzione, re.MULTILINE)
-    atteso = re.search(r"^\s*--\s*errore atteso:\s*([A-Z_]+)\s*$", istruzione, re.MULTILINE)
-    return (int(ripeti.group(1)) if ripeti else 1), (atteso.group(1) if atteso else None)
+    """Legge `-- ripeti: N` e `-- errore atteso: CODICE`. Restituisce (ripetizioni, atteso, scritte_male)."""
+    ripeti, atteso = RIPETI.search(istruzione), ATTESO.search(istruzione)
+    valide = {m.group(0) for m in RIPETI.finditer(istruzione)} | {m.group(0) for m in ATTESO.finditer(istruzione)}
+    scritte_male = [m.group(0).strip() for m in DIRETTIVA.finditer(istruzione) if m.group(0) not in valide]
+    return (int(ripeti.group(1)) if ripeti else 1), (atteso.group(1) if atteso else None), scritte_male
 
 
 def main(argv):
@@ -105,7 +113,8 @@ def main(argv):
     with open(percorsi[0], encoding="utf-8") as f:
         testo = f.read()
 
-    lista = [(r, s) for partenza, b in blocchi_sql(testo) for r, s in istruzioni(b, partenza)]
+    blocchi = blocchi_sql(testo)
+    lista = [(r, s) for partenza, b in blocchi for r, s in istruzioni(b, partenza)]
     if not lista:
         print("ERR: nessun blocco sql trovato")
         return 1
@@ -115,13 +124,16 @@ def main(argv):
     for riga, istruzione in lista:
         tipo = senza_commenti_iniziali(istruzione).lower()
         lettura = tipo.startswith(LETTURE)
-        ripetizioni, atteso = direttive(istruzione)
+        ripetizioni, atteso, scritte_male = direttive(istruzione)
+        if scritte_male:
+            print(f"ERR L{riga}: direttiva non riconosciuta: {scritte_male[0]}")
+            return 1
         risultato, fallita = None, None
         for n in range(1, ripetizioni + 1):
             try:
                 risultato = s.query(istruzione, "JSON" if lettura else "TabSeparated")
             except Exception as errore:  # chDB solleva eccezioni generiche con il messaggio del server
-                fallita = (n, str(errore).strip().splitlines()[0])
+                fallita = (n, (str(errore).strip().splitlines() or ["errore senza messaggio"])[0])
                 break
         if atteso:
             if fallita is None:
@@ -147,6 +159,7 @@ def main(argv):
             stat = dati.get("statistics", {})
             if stat and not tipo.startswith("explain"):
                 print(f"    rows_read={stat.get('rows_read')} bytes_read={stat.get('bytes_read')}")
+    print(f"{len(blocchi)} blocchi, {len(lista)} istruzioni eseguite")
     print(f"ClickHouse {versione} · chDB {chdb.__version__}")
     return 0
 

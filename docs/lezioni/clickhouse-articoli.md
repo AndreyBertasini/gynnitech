@@ -74,7 +74,7 @@ Fonte della documentazione: repository `ClickHouse/clickhouse-docs`, letto via C
 - `wait_for_async_insert = 1` raccomandato, `= 0` rischioso e senza dead-letter queue; le Buffer table perdono il buffer al crash; async insert come sostituto moderno: `docs/best-practices/_snippets/_async_inserts.md`.
 - `OPTIMIZE FINAL` da evitare nella maggior parte dei casi: `docs/best-practices/_snippets/_avoid_optimize_final.md`.
 
-**Verificato solo con una prova a parte** (non nei blocchi della pagina): stesso token con dati diversi in una sola partizione → il secondo lotto viene scartato (5 righe invece di 8). Nel lotto multi-partizione della pagina i `block_id` differiscono e il comportamento non è lo stesso: per questo il testo cita la documentazione e non mostra la prova.
+**Verificato solo con una prova a parte** (non nei blocchi della pagina): una parte da un solo insert piccolo è di tipo `Compact` (un file per tutte le colonne), una da oltre un milione di righe è `Wide` (un file per colonna); stesso token con dati diversi in una sola partizione → il secondo lotto viene scartato (5 righe invece di 8). Nel lotto multi-partizione della pagina i `block_id` differiscono e il comportamento non è lo stesso: per questo il testo cita la documentazione e non mostra la prova.
 
 **Non verificati:**
 - Il link a `clickhouse.com/docs/best-practices/selecting-an-insert-strategy` deriva dai link interni della documentazione; la sandbox non raggiunge il dominio.
@@ -132,7 +132,7 @@ I dati sono relativi a `toStartOfDay(now())`: i conteggi sono ripetibili nello s
 | 900.000 eventi grezzi contro 600.000 nella vista | query di confronto |
 | 120 righe per 60 minuti dopo 1.000 eventi in ritardo | `count()` / `uniqExact(minuto)` sull'ora 1 |
 | 1.201.000 eventi grezzi = 1.201.000 nella vista | dopo il backfill |
-| ora 1: 5.150 utenti, 301.500 eventi dopo 500 eventi in ritardo con 50 utenti nuovi | `uniqExactMerge` / `sum` |
+| ora 1: 5.150 utenti (5.000 + 100 dal lotto in ritardo riempito dal backfill + 50 dal secondo lotto fuso dalla vista), 301.500 eventi | `uniqExactMerge` / `sum` |
 | 150.057 / 149.943 prima, 209.916 / 90.084 dopo (refreshable); 149.943 / 150.057 (incrementale) | query «L'ora 4 …» |
 | 1.506.500 righe rilette da un giro di refresh | `system.view_refreshes` (`read_rows` = `total_rows`) |
 | «quasi quaranta volte» | 189.705 / 5.000 ≈ 38 |
@@ -140,17 +140,20 @@ I dati sono relativi a `toStartOfDay(now())`: i conteggi sono ripetibili nello s
 **Fatti verificati sulla documentazione:**
 - Una vista incrementale esegue la `SELECT` solo sui blocchi inseriti; i dati inoltrati sono il blocco, non il risultato della tabella: `docs/guides/developer/cascading-materialized-views.md`, `docs/use-cases/observability/clickstack/migration/elastic/concepts.md`.
 - `AggregatingMergeTree` con stati (`uniqExactState`) e `-Merge`; `SimpleAggregateFunction(sum, …)`: `docs/use-cases/time-series/06_materialized-view-rollup.mdx`, `docs/guides/examples/aggregate_function_combinators/sumSimpleState.md`.
-- Backfill con `INSERT … SELECT` di stati per i dati più vecchi del minimo presente; `POPULATE` sconsigliato perché può perdere righe: `docs/use-cases/observability/clickstack/managing/materialized_views.md`.
+- Backfill con `INSERT … SELECT` di stati; `POPULATE` sconsigliato perché può perdere righe: `docs/use-cases/observability/clickstack/managing/materialized_views.md`. Il confine «T fissato prima della vista» e i suoi limiti sono invece una prova a parte (sotto), non una frase della documentazione.
 - Il join in una vista incrementale scatta solo sugli insert della tabella più a sinistra: è uno snapshot della dimensione; la refreshable rilancia la query sull'intero dataset e supporta i join; per un'aggregazione su una tabella la incrementale scala meglio: `docs/materialized-view/incremental-materialized-view.md`, `docs/materialized-view/refreshable-materialized-view.md`.
 - `GROUP BY` allineato a `ORDER BY` della destinazione: `docs/materialized-view/incremental-materialized-view.md`.
 - Le viste refreshable sono production ready dal 2024: `docs/whats-new/changelog/2024.md` (il testo non lo afferma).
 
 **Verificato con una prova a parte:** le viste refreshable richiedono un database `Atomic`; chDB usa di default un motore `Overlay`, per questo il primo blocco crea `lab ENGINE = Atomic` e fa `USE lab`.
 
+**Verificato con una prova a parte (confine del backfill, chDB 26.9):** 10 minuti storici, vista creata, un evento in ritardo per il minuto 0, un evento nuovo, poi il backfill. Con `WHERE ts < (SELECT min(minuto) FROM destinazione)` la sorgente ha 12 eventi e la vista 2: il minimo è tornato al minuto 0 e lo storico non viene riempito. Con un confine fisso scelto prima della vista la vista ha 13 eventi contro 12: l'evento in ritardo conta due volte, una nella vista e una nel backfill. Per questo il testo non promette un confine esatto e rimanda al controllo sul totale. Una vista che raggruppa per una colonna fuori dall'`ORDER BY` della destinazione: con `AggregatingMergeTree` la definizione è rifiutata (codice 36), con `SummingMergeTree` è accettata e dopo `OPTIMIZE … FINAL` due righe che differivano solo per quella colonna sono diventate una.
+
 **Non verificati:**
 - Il link `clickhouse.com/docs/materialized-view/incremental-materialized-view` deriva dal percorso del file nel repository della documentazione; non l'ho aperto.
 - «Lo stato di `uniqExact` cresce con i valori distinti» e il rimando a `uniq`/`uniqCombined`: conoscenza generale, non cercata nella documentazione.
 - «Se la tabella grezza ha un TTL più corto della vista, quello che è scaduto non si recupera»: conseguenza logica, non misurata.
+- «Se la sorgente ha una colonna con l'istante di inserimento, usatela come confine al posto di `ts`»: conseguenza logica, non misurata; resta una piccola finestra tra il confine e la creazione della vista.
 - «A un insert al secondo e un refresh al minuto la differenza è il costo che porta a spegnere la vista»: giudizio, non misura.
 
 ## real-time-analytics/cdc-pattern

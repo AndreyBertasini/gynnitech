@@ -154,7 +154,7 @@ export function checkLessonPipeline(body: string, frontmatterBinario: unknown, f
     const regola1 = tre
         ? /<Slide\b/.test(body) && /<Schema\b/.test(body)
         : articolo
-            ? /^\*\*[^*\n]+\*\*\s*$/m.test(body) && /^\s*1[.)]\s/m.test(body)
+            ? /^\*\*[^*\n]+\*\*\s*$/m.test(body.replace(/`[^`\n]*`/g, "x")) && /^\s*1[.)]\s/m.test(body)
             : Boolean(definitionSection && stepsSection && definitionSection.title !== stepsSection.title);
     if (regola1) {
         results.push({ regola: "regola_1_concetto_calcolo", esito: "PASS", nota: "" });

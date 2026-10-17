@@ -135,4 +135,9 @@ describe("checkLessonPipeline — lezioni formato articolo", () => {
     test("senza formato articolo la regola 1 resta quella di sempre", () => {
         expect(esito(articolo).regola_1_concetto_calcolo).toBe("FAIL");
     });
+
+    test("regola 1 non si ferma su un asterisco dentro il codice inline", () => {
+        const conCodice = articolo.replace("**Ogni insert crea una parte.**", "**Evitate `SELECT *` nelle viste.**");
+        expect(esito(conCodice, "articolo").regola_1_concetto_calcolo).toBe("PASS");
+    });
 });
