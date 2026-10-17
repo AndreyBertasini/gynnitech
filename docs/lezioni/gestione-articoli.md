@@ -15,7 +15,7 @@ Regole di lettura:
 | `okr-e-kpi` | 1.331 | 12 min | scritta, vedi sotto |
 | `framework-jtbd` | 1.353 | 12 min | scritta, vedi sotto |
 | `ricerca-quantitativa` | 1.326 | 12 min | scritta, vedi sotto |
-| `interviste-profondita` | | | da fare |
+| `interviste-profondita` | 1.315 | 11 min | scritta, vedi sotto |
 | `ciclo-deming-hadi` | | | da fare |
 
 ## gestione-data-driven/cultura-data-driven
@@ -128,3 +128,27 @@ Regole di lettura:
 **Corretto rispetto alla lezione precedente:** «le survey in-app ottengono un tasso di risposta tre-cinque volte superiore a quelle via email» e «dieci-venti sessioni mostrano i problemi di UX» tolti come affermazioni (nessuna fonte); la «ventina di sessioni» resta solo come numero di esempio del piano. Il confronto mobile/desktop non è più presentato come «movimento»: ora il caso ha i due periodi per segmento.
 
 **Non verificati / non usati:** Airbnb e gli host giapponesi (nessuna fonte); l'autorevolezza della rassegna su PubMed Central oltre il riassunto.
+
+## gestione-data-driven/interviste-profondita
+
+**Titolo, URL, prerequisiti invariati.** Perde i componenti «3 secondi» e il quiz. Aggiunto un obiettivo di apprendimento (numero fisso o saturazione). La «regola dei cinque utenti» di Nielsen, che la lezione precedente applicava alle interviste, ora è presentata per quello che è: una regola dei test di usabilità qualitativi.
+
+**Caso:** ricostruito (dichiarato), numeri di esempio.
+
+| Numero nel testo | Fonte |
+|---|---|
+| 3 su 5 = 60% | numeri di esempio |
+| Intervallo di Wilson al 95% per 3 su 5: 23,1% – 88,2% | Python, z = 1,959964: centro e semiampiezza del metodo di Wilson |
+| 30 su 50: 46,2% – 72,4% | Python, stesso metodo |
+| «uno su quattro» e «quasi nove su dieci» | arrotondamento di 23,1% e 88,2% |
+| Cinque-otto interviste; «le ultime tre interviste» | euristica del corso e convenzione di lavoro, dichiarate come tali |
+| Apertura e chiusura di due minuti, cinque momenti | struttura della lezione precedente, senza fonte |
+
+**Fatti verificati (solo ricerca, nessuna pagina aperta):**
+- Guest, Bunce e Johnson, *Field Methods*, 2006, «How Many Interviews Are Enough?»: sessanta interviste approfondite con donne in due paesi dell'Africa occidentale; la scheda ([ALNAP](https://library.alnap.org/node/58582)) riporta l'abstract. Le cifre sulle dodici interviste (nel sottoinsieme del Ghana, il 92% dei 109 codici) e sulle sei (temi principali) vengono da **sintesi secondarie**, che avvertono di non trasformarle in una soglia universale; il testo le attribuisce alle sintesi.
+- Nielsen Norman Group, «How Many Participants for a UX Interview?» ([pagina](https://www.nngroup.com/articles/interview-sample-size/)): non esiste un numero d'oro; per molti studi esplorativi cinque partecipanti sono pochi (riassunto del risultato; la sezione sulla saturazione non è comparsa).
+- Nielsen Norman Group, «Why You Only Need to Test with 5 Users» ([pagina](https://www.nngroup.com/articles/why-you-only-need-to-test-with-5-users/)), 2000: la proporzione media di problemi trovati da ogni utente è il 31% (media di progetti dei primi anni Novanta), quindi cinque utenti ne trovano circa l'85%; per studi quantitativi almeno venti utenti.
+
+**Corretto rispetto alla lezione precedente:** «cinque utenti bastano» era applicato alle interviste di profondità come regola; ora è la regola dei test di usabilità, con il limite dichiarato da NN/g stesso (il 31% non vale per tutte le interfacce). «Il silenzio mette a disagio e produce l'insight migliore» resta come pratica, non come fatto. Tolto il numero «5 interviste dopo cui cerchiamo i pattern» come regola.
+
+**Non verificati / non usati:** il testo originale di Guest e colleghi (non letto); la sezione di NN/g sulla saturazione; «le previsioni di un utente sono inaffidabili» (pratica corrente, nessuna fonte citata).
