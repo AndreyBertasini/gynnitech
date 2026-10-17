@@ -14,7 +14,7 @@ Regole di lettura:
 | `decision-making-dati` | 1.332 | 12 min | scritta, vedi sotto |
 | `okr-e-kpi` | 1.331 | 12 min | scritta, vedi sotto |
 | `framework-jtbd` | 1.353 | 12 min | scritta, vedi sotto |
-| `ricerca-quantitativa` | | | da fare |
+| `ricerca-quantitativa` | 1.326 | 12 min | scritta, vedi sotto |
 | `interviste-profondita` | | | da fare |
 | `ciclo-deming-hadi` | | | da fare |
 
@@ -107,3 +107,24 @@ Regole di lettura:
 **Corretto rispetto alla lezione precedente:** «riprogetta l'onboarding intorno a quel gruppo» tolto (nessuna fonte lo conferma; il racconto parla di segmentazione e roadmap); l'intervallo «2017-2019» era già stato tolto. Walkman, iPod e streaming restano come esempio senza attribuzione; il trapano resta come esempio di segmentazione, senza la frase attribuita a Levitt.
 
 **Non verificati / non usati:** la domanda «qual è il vantaggio principale» del sondaggio di Superhuman (non confermata dalle ricerche); l'esistenza di una riprogettazione dell'onboarding; il legame tra Superhuman e il Jobs to be done come metodo dichiarato.
+
+## gestione-data-driven/ricerca-quantitativa
+
+**Titolo, URL, prerequisiti invariati.** Perde i componenti «3 secondi» e il quiz. Aggiunto un obiettivo di apprendimento (sessioni o interviste). **Tolto il caso degli host giapponesi di Airbnb:** una ricerca dedicata non ha trovato nessuna fonte per il «+21% di risposte» né per l'aneddoto sugli host giapponesi.
+
+**Caso:** ricostruito (dichiarato), numeri di esempio.
+
+| Numero nel testo | Fonte |
+|---|---|
+| Abbandono 62% → 71%; mobile 66% → 78%; desktop 51% → 52% | numeri di esempio; la lezione precedente aveva solo 78% e 52% come livelli |
+| «73% delle sessioni da mobile» | 0,73 × 78 + 0,27 × 52 = 70,98 ≈ 71; 0,73 × 66 + 0,27 × 51 = 61,95 ≈ 62 (Python); quota implicita 73,1% e 73,3% |
+| «Venti sessioni», «paio di giorni», «sotto il 70% entro due settimane» | esempi del piano di ricerca; «paio di giorni» è una stima dichiarata |
+| «cinque-otto interviste» | euristica dichiarata, non attribuita a una fonte |
+
+**Fatti verificati (solo ricerca, nessuna pagina aperta):**
+- Una rassegna metodologica sulla ricerca qualitativa ([PubMed Central](https://www.ncbi.nlm.nih.gov/pmc/articles/PMC7650082/)): uno studio quantitativo misura i fattori già noti o sospettati; per scoprire le ragioni servono disegni qualitativi (riassunto del risultato; autori non verificati, non citati).
+- Nielsen Norman Group, articolo sui diary study ([pagina](https://www.nngroup.com/articles/diary-studies/)): i metodi a sessione singola, come i test di usabilità e le interviste, tolgono l'utente dal proprio contesto e durano poco.
+
+**Corretto rispetto alla lezione precedente:** «le survey in-app ottengono un tasso di risposta tre-cinque volte superiore a quelle via email» e «dieci-venti sessioni mostrano i problemi di UX» tolti come affermazioni (nessuna fonte); la «ventina di sessioni» resta solo come numero di esempio del piano. Il confronto mobile/desktop non è più presentato come «movimento»: ora il caso ha i due periodi per segmento.
+
+**Non verificati / non usati:** Airbnb e gli host giapponesi (nessuna fonte); l'autorevolezza della rassegna su PubMed Central oltre il riassunto.
