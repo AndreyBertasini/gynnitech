@@ -97,3 +97,46 @@ describe('checkLezioneArticolo', () => {
     expect(esito6.warnings).toEqual([]);
   });
 });
+
+describe('checkLezioneArticolo, variante senzaCodice', () => {
+  const tabella = ['| Campo | Valore |', '| --- | --- |', '| Responsabile | Marta |'].join('\n');
+  const citazione = ['> Verbale della riunione.', '> Si decide di procedere.', '> Dati a supporto in allegato.'].join('\n');
+  const terzi = `### Primo\n\n${parole(100)}\n\n### Secondo\n\n${parole(100)}\n\n### Terzo\n\n${parole(100)}`;
+  const partiSC = (): Parti => ({
+    ...parti(),
+    s3: `## L'errore tipico\n\n${tabella}\n\n${terzi}`,
+    s4: `## La soluzione\n\n${parole(300)}\n\n${citazione}`,
+  });
+  const renderSC = (p: Parti, flag = 'senzaCodice: true') =>
+    [`---\ntitle: "Prova"\ndescription: "Lezione di prova."\nformato: "articolo"\n${flag}\n---`, '# Prova', ...ORDINE.map((k) => p[k])].join('\n\n');
+  const erroriSC = (p: Parti) => checkLezioneArticolo(renderSC(p), 'prova.mdx').errors.join('\n');
+
+  test('una tabella in sezione 3 e una citazione in sezione 4 bastano: nessun errore', () => {
+    expect(checkLezioneArticolo(renderSC(partiSC()), 'prova.mdx')).toEqual({ errors: [], warnings: [] });
+  });
+
+  test('R4: la sezione 4 senza tabella né citazione non ha il documento giusto', () => {
+    expect(erroriSC({ ...partiSC(), s4: `## La soluzione\n\n${parole(300)}` })).toMatch(/R4: .*documento giusto/);
+  });
+
+  test('R4: due righe di citazione non bastano come documento', () => {
+    const due = '> Prima riga.\n> Seconda riga.';
+    expect(erroriSC({ ...partiSC(), s4: `## La soluzione\n\n${parole(300)}\n\n${due}` })).toMatch(/R4: .*documento giusto/);
+  });
+
+  test('R4: la sezione 3 senza tabella né citazione non ha il documento sbagliato', () => {
+    expect(erroriSC({ ...partiSC(), s3: `## L'errore tipico\n\n${terzi}` })).toMatch(/R4: .*documento sbagliato/);
+  });
+
+  test('R12: un blocco di codice è un errore', () => {
+    expect(erroriSC({ ...partiSC(), s4: `${partiSC().s4}\n\n${sql()}` })).toMatch(/R12/);
+  });
+
+  test('senza il flag, la sezione 3 senza blocco sql continua a fallire', () => {
+    expect(checkLezioneArticolo(render(partiSC()), 'prova.mdx').errors.join('\n')).toMatch(/R4: .*blocco sql/);
+  });
+
+  test('senzaCodice: false vale come assente', () => {
+    expect(checkLezioneArticolo(renderSC(partiSC(), 'senzaCodice: false'), 'prova.mdx').errors.join('\n')).toMatch(/R4: .*blocco sql/);
+  });
+});

@@ -176,6 +176,13 @@ describe("Content Schemas", () => {
                 }
             });
 
+            test("accetta senzaCodice: true e rifiuta un valore che non è booleano", () => {
+                const ok = corsoSchema.safeParse({ ...base, formato: "articolo", senzaCodice: true });
+                expect(ok.success).toBe(true);
+                if (ok.success) expect(ok.data.senzaCodice).toBe(true);
+                expect(corsoSchema.safeParse({ ...base, formato: "articolo", senzaCodice: "si" }).success).toBe(false);
+            });
+
             test("rifiuta formato \"slide\"", () => {
                 expect(corsoSchema.safeParse({ ...base, formato: "slide" }).success).toBe(false);
             });

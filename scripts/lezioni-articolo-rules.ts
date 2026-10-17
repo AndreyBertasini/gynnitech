@@ -1,4 +1,7 @@
-/** Regole del formato «articolo tecnico» (docs/lezioni/prompt-articolo-tecnico.md): solo per le lezioni con formato: "articolo". */
+/**
+ * Regole del formato «articolo tecnico» (docs/lezioni/prompt-articolo-tecnico.md): solo per le lezioni con formato: "articolo".
+ * Con `senzaCodice: true` nel frontmatter (modulo 4) R4 chiede un «documento» sbagliato e uno giusto al posto dei blocchi sql, e R12 vieta ogni blocco di codice.
+ */
 import matter from 'gray-matter';
 import { TAG_LEZIONE, type Esito } from './lezioni-3s-rules';
 
@@ -65,12 +68,29 @@ const prosa = (righe: Riga[]): string[] => righe.filter((r) => !r.codice).map((r
 
 const haSql = (righe: Riga[]) => righe.some((r) => r.codice && r.lingua === 'sql');
 
+const CITAZIONI_MINIME = 3;
+const eSeparatoreDiTabella = (riga: string) => /^[\s|:-]+$/.test(riga) && riga.includes('|') && riga.includes('---');
+
+/** Un «documento» è una tabella Markdown oppure una citazione di almeno 3 righe consecutive. */
+function haDocumento(righe: Riga[]): boolean {
+  const testo = righe.filter((r) => !r.codice).map((r) => r.testo);
+  if (testo.some(eSeparatoreDiTabella)) return true;
+  let consecutive = 0;
+  for (const riga of testo) {
+    consecutive = /^\s*>/.test(riga) ? consecutive + 1 : 0;
+    if (consecutive >= CITAZIONI_MINIME) return true;
+  }
+  return false;
+}
+
 export function checkLezioneArticolo(raw: string, rel: string): Esito {
   const errors: string[] = [];
   const warnings: string[] = [];
   const errore = (regola: string, testo: string) => errors.push(`${rel}: ${regola}: ${testo}`);
 
-  const { intro, sezioni } = dividiInSezioni(leggiRighe(matter(raw).content));
+  const { content, data } = matter(raw);
+  const senzaCodice = data.senzaCodice === true;
+  const { intro, sezioni } = dividiInSezioni(leggiRighe(content));
   const testoProsa = [intro, ...sezioni.map((s) => s.righe)].flatMap(prosa);
 
   if (sezioni.length !== SEZIONI_ATTESE) {
@@ -89,8 +109,13 @@ export function checkLezioneArticolo(raw: string, rel: string): Esito {
 
     const terzi = prosa(sezioni[2].righe).filter((riga) => /^### /.test(riga)).length;
     if (terzi !== 3) errore('R4', `la sezione 3 deve nominare tre errori con tre titoli ### (trovati ${terzi})`);
-    if (!haSql(sezioni[2].righe)) errore('R4', 'la sezione 3 non ha il blocco sql con lo schema sbagliato');
-    if (!haSql(sezioni[3].righe)) errore('R4', 'la sezione 4 non ha il blocco sql con lo schema giusto');
+    if (senzaCodice) {
+      if (!haDocumento(sezioni[2].righe)) errore('R4', 'la sezione 3 non ha il documento sbagliato (una tabella o una citazione di almeno 3 righe)');
+      if (!haDocumento(sezioni[3].righe)) errore('R4', 'la sezione 4 non ha il documento giusto (una tabella o una citazione di almeno 3 righe)');
+    } else {
+      if (!haSql(sezioni[2].righe)) errore('R4', 'la sezione 3 non ha il blocco sql con lo schema sbagliato');
+      if (!haSql(sezioni[3].righe)) errore('R4', 'la sezione 4 non ha il blocco sql con lo schema giusto');
+    }
 
     const sezione1 = prosa(sezioni[0].righe).join('\n');
     if (!LINK_ESTERNO.test(sezione1) && !DICHIARAZIONE_ESEMPIO.test(sezione1)) {
@@ -102,6 +127,10 @@ export function checkLezioneArticolo(raw: string, rel: string): Esito {
         warnings.push(`${rel}: R11: elenco puntato nella sezione ${i + 1}: lì va la prosa`);
       }
     });
+  }
+
+  if (senzaCodice && [intro, ...sezioni.map((s) => s.righe)].some((righe) => righe.some((r) => r.codice))) {
+    errore('R12', 'la lezione è senza codice: nessun blocco di codice recintato');
   }
 
   const ultima = sezioni.at(-1);

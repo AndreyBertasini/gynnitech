@@ -35,6 +35,7 @@ export const corsoSchema = z.object({
     difficulty: z.enum(['beginner', 'intermediate', 'advanced', 'base', 'intermedio', 'avanzato']).optional(),
     learningObjectives: z.array(z.string()).optional(),
     formato: z.enum(['3s', 'articolo']).optional(),
+    senzaCodice: z.boolean().optional(),
     sezioni: z.array(z.string().trim().min(1)).min(3).max(6).optional(),
 });
 
