@@ -69,16 +69,27 @@ const prosa = (righe: Riga[]): string[] => righe.filter((r) => !r.codice).map((r
 const haSql = (righe: Riga[]) => righe.some((r) => r.codice && r.lingua === 'sql');
 
 const CITAZIONI_MINIME = 3;
+const RIGA_CITAZIONE = /^\s*>(.*)$/;
+const RECINTO_IN_CITAZIONE = /^\s*>\s*(`{3,}|~{3,})/;
 const eSeparatoreDiTabella = (riga: string) => /^[\s|:-]+$/.test(riga) && riga.includes('|') && riga.includes('---');
+const eRigaDiTabella = (riga: string | undefined) => riga !== undefined && riga.includes('|') && !eSeparatoreDiTabella(riga);
 
-/** Un «documento» è una tabella Markdown oppure una citazione di almeno 3 righe consecutive. */
+/**
+ * Un «documento» è una tabella Markdown completa (intestazione, separatore e almeno una riga dati)
+ * oppure una citazione con almeno 3 righe di testo: le righe di citazione vuote non contano.
+ */
 function haDocumento(righe: Riga[]): boolean {
   const testo = righe.filter((r) => !r.codice).map((r) => r.testo);
-  if (testo.some(eSeparatoreDiTabella)) return true;
-  let consecutive = 0;
+  if (testo.some((riga, i) => eSeparatoreDiTabella(riga) && eRigaDiTabella(testo[i - 1]) && eRigaDiTabella(testo[i + 1]))) return true;
+  let righeDiTesto = 0;
   for (const riga of testo) {
-    consecutive = /^\s*>/.test(riga) ? consecutive + 1 : 0;
-    if (consecutive >= CITAZIONI_MINIME) return true;
+    const citazione = RIGA_CITAZIONE.exec(riga);
+    if (!citazione) {
+      righeDiTesto = 0;
+      continue;
+    }
+    if (citazione[1].trim()) righeDiTesto += 1;
+    if (righeDiTesto >= CITAZIONI_MINIME) return true;
   }
   return false;
 }
@@ -129,7 +140,7 @@ export function checkLezioneArticolo(raw: string, rel: string): Esito {
     });
   }
 
-  if (senzaCodice && [intro, ...sezioni.map((s) => s.righe)].some((righe) => righe.some((r) => r.codice))) {
+  if (senzaCodice && [intro, ...sezioni.map((s) => s.righe)].some((righe) => righe.some((r) => r.codice || RECINTO_IN_CITAZIONE.test(r.testo)))) {
     errore('R12', 'la lezione è senza codice: nessun blocco di codice recintato');
   }
 

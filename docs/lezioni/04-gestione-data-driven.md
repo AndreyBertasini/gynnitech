@@ -8,15 +8,17 @@ Le lezioni 1–7 (`cultura-data-driven`, `decision-making-dati`, `okr-e-kpi`, `f
 
 **Fatti verificati o corretti** (solo ricerche: nessuna pagina è stata aperta, perché il sandbox non raggiunge i siti):
 
-- **Fire Phone:** la lettera di Bezos che lo cita è quella del 2018, uscita nell'aprile 2019, non del 2015. I 170 milioni di dollari sono una svalutazione del terzo trimestre 2014, legata a scorte e impegni con i fornitori (83 milioni di scorte a fine trimestre), non una «perdita». «I dati descrivevano un mercato saturo» e «feature uniche» sono tolti: nessuna fonte pubblica documenta il processo interno.
+- **Fire Phone:** la lettera di Bezos che lo cita è quella del 2018, uscita nell'aprile 2019, non del 2015. I 170 milioni di dollari sono una svalutazione del terzo trimestre 2014, legata a scorte e impegni con i fornitori (a fine trimestre restavano 83 milioni di «esposizione residua» tra scorte, scorte presso i rivenditori e impegni non annullabili: 10-Q di Amazon), non una «perdita». «I dati descrivevano un mercato saturo» e «feature uniche» sono tolti: nessuna fonte pubblica documenta il processo interno.
 - **Amazon, memo:** il divieto delle slide è dell'email del giugno 2004; i memo narrativi di sei pagine, letti in silenzio, sono quelli descritti nella lettera del 2017 (aprile 2018). Le fonti discordano sulla lunghezza nel 2004 (quattro o sei pagine). `cheat-sheet` e `caso-studio` allineati.
-- **OKR e Google:** circa tre Key Result per Objective e un risultato intorno al 70% come tipico (guida Google re:Work); adozione «inizio 2000» per Google, 1999 per altre fonti; Drucker → Grove (Intel) → Doerr. `cheat-sheet` allineato.
+- **OKR e Google:** circa tre Key Result per Objective e un risultato tra il 60 e il 70% come tipico (fonti su Google); adozione nel 1999 secondo le fonti consultate; Drucker → Grove (Intel) → Doerr. `cheat-sheet` allineato.
 - **Superhuman:** 22% → circa 33% restringendo al gruppo che amava il prodotto → 58% in tre trimestri (First Round Review). La «riprogettazione dell'onboarding» non è confermata. Il metodo non si presenta come Jobs to be done: nella lezione è un esempio di sondaggio, nel caso difficile.
 - **Nielsen, cinque utenti:** vale per i test di usabilità qualitativi (31% medio → circa 85%), non come numero per le interviste; per le interviste NN/g scrive che non esiste un numero d'oro. Guest, Bunce e Johnson 2006 (sessanta interviste): le cifre su dodici e sei interviste vengono da sintesi secondarie.
 - **Airbnb e gli host giapponesi (+21%):** tolto, nessuna fonte.
 - **HADI:** nessun autore né data di origine citabili; non è presentato come «adattamento del PDCA». PDCA: Shewhart, Deming, Giappone intorno al 1950-51 (fonti discordi sull'anno).
 
 ## Lezioni (ordine del modulo)
+
+> Storico: le righe 1–7 descrivono il formato «3 secondi» fino al 2026-10-17. Oggi sono articoli (vedi sopra).
 
 | # | File | Sezioni | Schemi | Quiz |
 |---|---|---|---|---|
@@ -43,6 +45,8 @@ Le nove lezioni non avevano un quiz: i 5 quesiti di ciascuna sono nuovi.
 - Le frasi «Il binario di questa lezione è **ml-tabellare**…» restano come inciso nell'apertura; il campo `binario` nel frontmatter non cambia.
 
 ## Fatti da verificare con la fonte
+
+> Storico: elenco della riscrittura «3 secondi» del 2026-10-16. Gli esiti della verifica sono nell'aggiornamento in alto e in `docs/lezioni/gestione-articoli.md`; tre voci di questo elenco (lettera del Fire Phone «2015», onboarding di Superhuman, Airbnb) sono state smentite o tolte.
 
 - Amazon, memo narrativi di sei pagine dal 2004 (`cultura-data-driven`, `cheat-sheet`, `caso-studio`): la data e il divieto di slide sono nella lezione originale.
 - Amazon Fire Phone (`decision-making-dati`, `ciclo-deming-hadi`): lancio nel 2014, «170 milioni di dollari di perdita», riconoscimento da parte di Bezos «nella lettera agli azionisti del 2015». Verificare cifra, lettera di riferimento e l'affermazione che «i dati descrivevano un mercato saturo e poco differenziato».

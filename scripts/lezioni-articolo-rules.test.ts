@@ -136,6 +136,30 @@ describe('checkLezioneArticolo, variante senzaCodice', () => {
     expect(checkLezioneArticolo(render(partiSC()), 'prova.mdx').errors.join('\n')).toMatch(/R4: .*blocco sql/);
   });
 
+  test('R4: una riga di separazione isolata non è una tabella', () => {
+    expect(erroriSC({ ...partiSC(), s4: `## La soluzione\n\n${parole(300)}\n\n| --- |` })).toMatch(/R4: .*documento giusto/);
+  });
+
+  test('R4: intestazione e separatore senza una riga dati non sono una tabella', () => {
+    const senzaDati = '| Campo | Contenuto |\n| --- | --- |';
+    expect(erroriSC({ ...partiSC(), s4: `## La soluzione\n\n${parole(300)}\n\n${senzaDati}` })).toMatch(/R4: .*documento giusto/);
+  });
+
+  test('R4: le righe di citazione vuote non contano come testo', () => {
+    const due = '> Prima riga.\n>\n> Seconda riga.';
+    expect(erroriSC({ ...partiSC(), s4: `## La soluzione\n\n${parole(300)}\n\n${due}` })).toMatch(/R4: .*documento giusto/);
+  });
+
+  test('tre righe di testo separate da righe di citazione vuote bastano come documento', () => {
+    const tre = '> Prima riga.\n>\n> Seconda riga.\n>\n> Terza riga.';
+    expect(erroriSC({ ...partiSC(), s4: `## La soluzione\n\n${parole(300)}\n\n${tre}` })).toBe('');
+  });
+
+  test('R12: un blocco recintato dentro una citazione è codice', () => {
+    const conRecinto = '> Prima riga.\n>\n> ```sql\n> SELECT 1;\n> ```';
+    expect(erroriSC({ ...partiSC(), s4: `## La soluzione\n\n${parole(300)}\n\n${conRecinto}` })).toMatch(/R12/);
+  });
+
   test('senzaCodice: false vale come assente', () => {
     expect(checkLezioneArticolo(renderSC(partiSC(), 'senzaCodice: false'), 'prova.mdx').errors.join('\n')).toMatch(/R4: .*blocco sql/);
   });
