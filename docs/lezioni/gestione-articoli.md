@@ -16,7 +16,7 @@ Regole di lettura:
 | `framework-jtbd` | 1.353 | 12 min | scritta, vedi sotto |
 | `ricerca-quantitativa` | 1.326 | 12 min | scritta, vedi sotto |
 | `interviste-profondita` | 1.315 | 11 min | scritta, vedi sotto |
-| `ciclo-deming-hadi` | | | da fare |
+| `ciclo-deming-hadi` | 1.352 | 12 min | scritta, vedi sotto |
 
 ## gestione-data-driven/cultura-data-driven
 
@@ -152,3 +152,23 @@ Regole di lettura:
 **Corretto rispetto alla lezione precedente:** «cinque utenti bastano» era applicato alle interviste di profondità come regola; ora è la regola dei test di usabilità, con il limite dichiarato da NN/g stesso (il 31% non vale per tutte le interfacce). «Il silenzio mette a disagio e produce l'insight migliore» resta come pratica, non come fatto. Tolto il numero «5 interviste dopo cui cerchiamo i pattern» come regola.
 
 **Non verificati / non usati:** il testo originale di Guest e colleghi (non letto); la sezione di NN/g sulla saturazione; «le previsioni di un utente sono inaffidabili» (pratica corrente, nessuna fonte citata).
+
+## gestione-data-driven/ciclo-deming-hadi
+
+**Titolo, URL, prerequisiti invariati.** Perde i componenti «3 secondi» e il quiz. **Tolto il Fire Phone** (la lezione precedente lo usava come esempio di «Check saltato»): nessuna fonte pubblica documenta il processo interno di Amazon, e il caso è già usato in `decision-making-dati` per il costo di uscita. Al suo posto un caso dbt ricostruito.
+
+**Caso:** ricostruito (dichiarato), numeri di esempio.
+
+| Numero nel testo | Fonte |
+|---|---|
+| Ricavo da 1,25 a 1,17 milioni di euro, −6,4% | (1,17 − 1,25) / 1,25 = −6,4% (Python) |
+| Ordini rimborsati entro 7 giorni, soglia dell'1%, tre giorni contro tre settimane | numeri di esempio; «tre giorni» è un obiettivo dichiarato |
+| «alza la conversione mobile del 5%» | esempio di ipotesi HADI (dalla lezione precedente: «semplificare il checkout alza la conversione del 5%»), numero di esempio |
+
+**Fatti verificati (solo ricerca, nessuna pagina aperta):**
+- Il ciclo nasce con Walter Shewhart (laboratori Bell); Deming lo ripropose in Giappone intorno al 1950-51; secondo Deming i partecipanti giapponesi ridussero i passi a plan, do, check, act; Deming preferiva «study» a «check» (PDSA): [Wikipedia](https://en.wikipedia.org/wiki/PDCA), [Lean Enterprise Institute](https://www.lean.org/lexicon-terms/pdca/) (secondarie). Le fonti discordano sull'anno (1950 o 1951): il testo scrive «intorno al 1950-51».
+- HADI (Hypothesis, Action, Data, Insights): quattro fasi concordi nelle fonti trovate (blog di marketing, consulenza, presentazioni); **nessun autore o data di origine citabile**; le fonti lo collocano nella pratica delle startup e del Lean. Il testo lo dice.
+
+**Corretto rispetto alla lezione precedente:** «Fire Phone nonostante i dati mostrassero un mercato saturo» e «riconosciuto da Bezos nella lettera agli azionisti del 2015» tolti (vedi `decision-making-dati`); la lettera sul Fire Phone è quella del 2018, uscita nell'aprile 2019.
+
+**Non verificati / non usati:** l'anno esatto del passaggio da Shewhart a Deming e da Deming al PDCA giapponese (fonti discordi); la frase «HADI è l'adattamento del PDCA» della lezione precedente (non confermata: il testo non dichiara una discendenza); «i test di dbt controllano di solito chiavi uniche e campi pieni» (conoscenza corrente di dbt, non cercata).
