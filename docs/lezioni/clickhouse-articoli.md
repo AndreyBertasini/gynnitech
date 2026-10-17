@@ -4,11 +4,11 @@ Piano: `docs/superpowers/plans/2026-10-16-articoli-clickhouse.md`. Prompt: `docs
 
 | Lezione | Argomento | Parole di prosa | Blocchi `sql` |
 |---|---|---|---|
-| `real-time-analytics/clickhouse-fondamenti` | La sorting key di una tabella MergeTree | ~1.350 | 3 |
-| `real-time-analytics/clickhouse-ottimizzazione` | Insert in batch e parti: perché ClickHouse risponde «Too many parts» | ~1.420 | 4 |
-| `data-warehousing/clickhouse` | ClickHouse accanto al warehouse: cosa replicare e come modellarlo | ~1.380 | 3 |
-| `real-time-analytics/materialized-views` | Materialized view incrementali: stati di aggregazione, backfill, vista refreshable | ~1.370 | 3 |
-| `real-time-analytics/cdc-pattern` | ReplacingMergeTree per il CDC: leggere l'ultimo stato di ogni riga | ~1.360 | 3 |
+| `real-time-analytics/clickhouse-fondamenti` | La sorting key di una tabella MergeTree | 1.368 | 3 |
+| `real-time-analytics/clickhouse-ottimizzazione` | Insert in batch e parti: perché ClickHouse risponde «Too many parts» | 1.416 | 4 |
+| `data-warehousing/clickhouse` | ClickHouse accanto al warehouse: cosa replicare e come modellarlo | 1.377 | 3 |
+| `real-time-analytics/materialized-views` | Materialized view incrementali: stati di aggregazione, backfill, vista refreshable | 1.366 | 3 |
+| `real-time-analytics/cdc-pattern` | ReplacingMergeTree per il CDC: leggere l'ultimo stato di ogni riga | 1.362 | 3 |
 
 Fonte della documentazione: repository `ClickHouse/clickhouse-docs`, letto via Context7 il 2026-10-16. I percorsi sotto sono file di quel repository.
 
@@ -185,3 +185,11 @@ Il `rows_read` di `FINAL` senza filtro (179.152 su 130.000 righe) non è citato:
 - Che Debezium emetta `op` = `c`/`u`/`d` con immagini prima e dopo e che la versione derivi dall'LSN (PostgreSQL): conoscenza generale, non cercata nella documentazione di Debezium (non raggiungibile).
 - «Non serve quando i dati nascono già come eventi (clickstream, log)» e «un ETL batch è più semplice se una latenza di ore è accettabile»: giudizi mantenuti dal vecchio testo, non misurati.
 - «Conservate gli eventi nel topic Kafka con una retention adeguata»: consiglio, non dimostrato nella pagina.
+
+## Traduzione EN e verifiche finali (2026-10-17)
+
+- **Stringhe EN scritte:** 367 (prosa, frammenti attorno al codice inline, durate e 13 blocchi di codice). I blocchi di codice sono tradotti per intero: cambiano solo i commenti, gli identificatori e i letterali restano uguali. Le direttive `-- ripeti:` e `-- errore atteso:` non si traducono.
+- **Parole di una lettera tra codici:** l'estrattore ignora le stringhe di un solo carattere; quattro punti («o», «e» tra due `code`) sono stati riscritti in italiano come «oppure» / «ed» per poter essere tradotti.
+- **Blocchi senza segnale italiano:** tre blocchi (soglie e `async_insert` in `clickhouse-ottimizzazione`, dizionario in `data-warehousing/clickhouse`) non avevano parole della lista `italianCodeBlockSignal`; i loro commenti sono stati riformulati con una parola-segnale («numero», «dati», «prodotto») perché venissero tradotti.
+- **Build:** `npm run build` exit 0, `Site quality audit passed: 824 HTML files`, 778 URL identici a `main`; stringhe introdotte e senza EN: 0 (le 15.033 già mancanti su `main` sono estranee e non toccate).
+- **Check:** `npm run check` exit 0 (`validate:content` 0 errori, `validate:articolo` 5 lezioni 0 errori, 1.174 test).

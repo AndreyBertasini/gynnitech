@@ -146,3 +146,13 @@ Totale ≈ 173 lezioni, più il completamento del modulo 6.
 - revisione dell'intero branch e approvazione dello stile pilota da parte dell'autore;
 - aggiornare i comandi `/scrivi-lezione`, `/naturalizza-lezione` e `/ginnytech` al nuovo stile;
 - nota di memoria sul flusso (strumento di composizione, pipeline EN).
+
+## 8. Lezioni ClickHouse come articolo tecnico (2026-10-17)
+
+Le 5 lezioni il cui argomento è un meccanismo ClickHouse non seguono il formato «3 secondi» ma il prompt dell'autore (`docs/lezioni/prompt-articolo-tecnico.md`): `formato: "articolo"`, 6 sezioni, 1.300–1.900 parole di prosa, codice SQL eseguito davvero.
+
+- **Controllo:** `npm run validate:articolo` (regole R1–R11 in `scripts/lezioni-articolo-rules.ts`, incluso in `npm run check`); la rubrica di `validation.ts` ha un ramo per `formato: "articolo"` (regola 1) e non pretende il Riepilogo.
+- **Codice:** `docs/lezioni/strumenti/run-clickhouse-sql.py <lezione.mdx> --show` esegue i blocchi `sql` in chDB (ClickHouse embedded) e stampa i numeri da copiare nel testo. Le direttive `-- ripeti: N` e `-- errore atteso: CODICE` servono a mostrare insert ripetuti ed errori attesi. chDB non ha `system.query_log`.
+- **Scheda e fonti:** `docs/lezioni/clickhouse-articoli.md` (fonte di ogni numero, fatti verificati con il file della documentazione, fatti non verificati).
+- **Traduzione EN:** i blocchi di codice si traducono per intero solo se contengono un segnale italiano (parole della lista `italianCodeBlockSignal` in `scripts/translate-static-en.ts` o lettere accentate); i commenti senza segnale restano in italiano nella pagina EN. Le parole di una sola lettera («o», «e») tra due frammenti di codice non vengono estratte: meglio «oppure», «ed».
+- **Fuori ambito:** `cheat-sheet` e `caso-studio` (non sono articoli), `streaming`, `anomaly-detection`, `dashboards` e `kafka-streaming/kafka-connect` (altro argomento). Se servono, vanno pianificati a parte.
