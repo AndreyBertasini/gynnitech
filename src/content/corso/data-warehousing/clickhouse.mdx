@@ -8,154 +8,219 @@ category: Tecnico
 headerImage: /course-headers/data-warehousing-clickhouse-ginnytech-ad.webp
 headerImageAlt: "ClickHouse nel data warehouse moderno - immagine ufficiale della lezione su GinnyTech, creata da AD"
 difficulty: advanced
-duration: 22 min
+duration: 16 min
 learningObjectives:
-  - Misurare volumi, filtri ricorrenti, freshness e latenza prima di valutare il motore
-  - Applicare la matrice di scelta tra ClickHouse e warehouse general-purpose per scenario
-  - Progettare sorting key, partizioni e compressione sui pattern di lettura dominanti
+  - Misurare quante righe legge la dashboard sulla copia fedele del warehouse e su una tabella larga ordinata sul tempo
+  - Progettare la copia in ClickHouse con tabella denormalizzata, sorting key dalla query dominante, TTL e riconciliazione dei totali
+  - Scegliere tra denormalizzazione e dictionary per gli attributi che cambiano nel tempo
 prerequisites:
   - data-warehousing/data-modeling
+formato: "articolo"
 binario: "ml-tabellare"
 autore: "Hermes"
 controllatoDa: "Argo"
 autorizzatoDa: "Giano"
 draft: false
-dateModified: 2026-09-07
+dateModified: 2026-10-17
 ---
+
 # ClickHouse nel data warehouse moderno
 
-Quando una dashboard operativa deve rispondere in tempo reale su miliardi di righe, il warehouse general-purpose costa troppo o risponde troppo tardi. ClickHouse è il motore specializzato che assorbe quel carico interattivo, ma solo se il modello fisico segue i pattern di lettura: colonne, partizioni, sorting key e compressione. In questa lezione impari a valutarlo con volumi, latenze e costi misurati, non con impressioni.
+Una dashboard di vendita si ricarica ogni trenta secondi su quaranta schermi, e ogni ricarica rilancia la stessa aggregazione sulle ultime 24 ore: 115.200 volte al giorno. Per togliere quel carico al warehouse si aggiunge ClickHouse accanto e si copiano le tabelle così come sono. La dashboard resta lenta, perché legge otto milioni di righe per mostrarne 192.
 
-## L'idea in una frase
+## Otto milioni di righe per 192 celle
 
-ClickHouse accelera le aggregazioni interattive su miliardi di righe affiancando il warehouse principale dove serve latenza bassa. Non lo sostituisce: assorbe il carico interattivo che il warehouse non serve a costi ragionevoli.
+È un caso ricostruito: ottanta giorni di ordini, otto milioni di righe, diecimila prodotti, otto canali, tutti generati dal codice di questa pagina. I numeri non sono una misura di produzione. Sono l'output di chDB 4.4.0, cioè ClickHouse 26.9, e li ottenete rieseguendo i blocchi `sql` nell'ordine in cui compaiono.
 
-## La sequenza di valutazione
+La copia fedele del warehouse ha una tabella dei fatti e una dei prodotti, ordinate per identificativo. La dashboard chiede gli ordini e il fatturato per ora e per canale nelle ultime 24 ore. Per rispondere ClickHouse legge 8.010.000 righe, 33 MB, cioè tutta la tabella dei fatti più i prodotti, e le unisce con un join.
 
-1. Misura volumi, filtri ricorrenti, freshness richiesta e latenza attesa prima di valutare il motore.
-2. Confronta il workload con la matrice di scelta tra motore real-time e warehouse con governance completa.
-3. Progetta `sorting key`, partizioni e compressione insieme ai pattern di lettura dominanti e misurati.
-4. Replica dal warehouse principale solo aggregati e ultimi periodi con pipeline dichiarata e monitorata.
-5. Verifica latenza, costi e freschezza su query reali prima di migrare dashboard operative critiche.
+Con una copia costruita sulla stessa domanda, la stessa risposta costa 100.864 righe e 1,3 MB. Stesso motore, stesso hardware, stesso risultato.
 
-## Quando il problema diventa concreto
+Quando conviene aggiungere ClickHouse accanto al warehouse? Quando la stessa aggregazione sui dati recenti si ripete molte volte al giorno. È questo pattern a giustificarlo, non la dimensione totale dei dati. Se le query sono poche e pesanti, o cambiano a ogni richiesta, il posto giusto è il warehouse e una copia in più è solo un debito. La causa della lentezza non è né il motore né il warehouse: è la forma della copia, che segue le tabelle e non la domanda.
 
-ClickHouse rende velocissime le query su grandi volumi, ma solo se il modello fisico segue i pattern di lettura: colonne, partizioni, `sorting key`, compressione e merge. Il problema arriva quando una dashboard operativa deve rispondere in tempo reale su miliardi di righe e il warehouse general-purpose costa troppo o risponde troppo tardi. A quel punto o accetti la latenza o introduci un motore specializzato e paghi la complessità in più. Parti sempre dai workload: colonne lette, filtri applicati, freshness richiesta e query interattive.
+## Cosa rende veloce la copia
 
-| Passaggio | Domanda da fare | Output atteso |
-|---|---|---|
-| Decisione | Che cosa cambia se introduciamo ClickHouse nel sistema? | Scelta esplicita |
-| Segnale | Quale dato osservabile riduce l'incertezza? | Metrica o evento |
-| Baseline | Rispetto a cosa interpretiamo il risultato? | Confronto credibile |
-| Vincolo | Che cosa può falsare la lettura? | Assunzione da dichiarare |
-| Azione | Quale passo operativo segue? | Raccomandazione controllabile |
+Tre idee reggono tutto il resto.
 
-## La filosofia di ClickHouse
+La prima: la copia è una finestra, non la fonte. Il warehouse conserva la storia, la governance e i test; ClickHouse tiene gli ultimi periodi e gli aggregati che la dashboard consulta.
 
-Snowflake è un warehouse general-purpose. ClickHouse è specializzato sulle aggregazioni enormi: ingestione di milioni di righe al secondo, risposte analitiche in millisecondi, compressione da cinque a dieci volte rispetto a Parquet, scalabilità orizzontale senza single point of failure. La specializzazione spiega perché funziona nel suo dominio e delude fuori.
+La seconda: un join costa più di una tabella già appiattita. La documentazione di ClickHouse lo dice senza giri: i join sono intrinsecamente più costosi di una singola tabella denormalizzata, e per le query a bassa latenza la denormalizzazione è fortemente raccomandata ([minimizzare i join](https://clickhouse.com/docs/best-practices/minimize-optimize-joins)). Il motivo è meccanico: per un join standard ClickHouse costruisce una tabella hash dal lato destro prima di leggere il sinistro, e le versioni recenti anticipano i filtri ma non sempre eliminano quel costo. Il lavoro si sposta dal momento della lettura a quello del caricamento.
 
-## ClickHouse o Snowflake: quando usare cosa
+La terza: l'ordine su disco segue la domanda ([la sorting key](/course/real-time-analytics/clickhouse-fondamenti/) è spiegata nel modulo 12).
 
-| Scenario | Usa | Perché |
-|----------|-----|--------|
-| Dashboard operativa real-time | ClickHouse | Latenza sub-second su miliardi di righe |
-| Report finanziario con transazioni complesse | Snowflake | ACID, governance, audit |
-| Log analytics (CDN, firewall, DNS) | ClickHouse | Ingestione massiva, compressione estrema |
-| Data modeling con lenta evoluzione | Snowflake | Tooling dbt, catalog, lineage |
-| Time-series (IoT, monitoring) | ClickHouse | Motori specializzati per time-series |
+**ClickHouse non sostituisce il warehouse: ne ospita una copia stretta e a scadenza, appiattita sulla domanda che la dashboard ripete.**
 
-In sintesi: usa ClickHouse per dashboard live e log massivi, e Snowflake per verità canonica con governance, audit e modellazione lenta.
+## Tre errori nella copia
 
-Verdetto: ClickHouse vince per dashboard live e log massivi, Snowflake per la verità canonica con governance e audit; nella maggior parte dei casi ClickHouse affianca il warehouse, non lo sostituisce.
-
-## ClickHouse come acceleratore
-
-Nella maggior parte dei casi reali non sostituisce il warehouse: lo affianca con repliche di aggregati e ultimi periodi per query interattive.
-
-```text
-Snowflake/BigQuery (source of truth, governance, ETL)
-        │
-        ▼
-ClickHouse (aggregazioni veloci, dashboard live)
-```
-
-I dati canonici restano nel warehouse con modellazione `dbt`, test e governance. Il subset replicato serve dashboard live. Il pattern è usato da Cloudflare, Uber e Spotify e tiene la verità in un posto solo con query veloci dove servono.
-
-## Esempio SQL: una vista di controllo
-
-Il pattern seguente è eseguibile nella maggior parte dei warehouse moderni e crea una base con metrica, segmento e finestra temporale per confrontare periodi e gruppi senza riscrivere la logica.
+Il blocco crea la copia fedele, la riempie e misura la dashboard. `OPTIMIZE … FINAL` serve solo a rendere ripetibili i conteggi delle parti; non è una pratica da produzione.
 
 ```sql
-WITH base_events AS (
-  SELECT
-    user_id,
-    account_id,
-    event_type,
-    event_time,
-    DATE_TRUNC('week', event_time) AS week,
-    source,
-    device_type
-  FROM events
-  WHERE event_time >= CURRENT_DATE - INTERVAL '180 days'
-    AND user_id IS NOT NULL
-),
-weekly_user_metrics AS (
-  SELECT
-    week,
-    user_id,
-    COALESCE(source, 'unknown') AS source,
-    COALESCE(device_type, 'unknown') AS device_type,
-    COUNT(*) AS total_events,
-    COUNT(DISTINCT DATE(event_time)) AS active_days,
-    COUNT(DISTINCT event_type) AS event_diversity,
-    MAX(CASE WHEN event_type IN ('purchase', 'subscribe', 'activation') THEN 1 ELSE 0 END) AS reached_key_outcome
-  FROM base_events
-  GROUP BY week, user_id, source, device_type
+CREATE TABLE prodotti_v1
+(
+    id_prodotto UInt32,
+    canale String,
+    categoria String
 )
+ENGINE = MergeTree
+ORDER BY id_prodotto;
+
+CREATE TABLE ordini_v1
+(
+    id_ordine UInt64,
+    ts DateTime,
+    id_cliente UInt32,
+    id_prodotto UInt32,
+    importo Decimal(12, 2)
+)
+ENGINE = MergeTree
+ORDER BY id_ordine;
+
+INSERT INTO prodotti_v1
 SELECT
-  week,
-  source,
-  device_type,
-  COUNT(DISTINCT user_id) AS users,
-  ROUND(AVG(active_days), 2) AS avg_active_days,
-  ROUND(AVG(event_diversity), 2) AS avg_event_diversity,
-  ROUND(AVG(reached_key_outcome) * 100, 2) AS key_outcome_rate
-FROM weekly_user_metrics
-GROUP BY week, source, device_type
-ORDER BY week, source, device_type;
+    number,
+    ['web', 'app', 'negozio', 'marketplace', 'telefono', 'email', 'social', 'partner'][1 + number % 8],
+    concat('cat-', toString(number % 50))
+FROM numbers(10000);
+
+INSERT INTO ordini_v1
+SELECT
+    number,
+    toStartOfDay(now()) - toIntervalDay(80) + toIntervalSecond(intDiv(number * 864, 1000)),
+    cityHash64(number) % 50000,
+    cityHash64(number, 1) % 10000,
+    round((cityHash64(number, 2) % 20000) / 100, 2)
+FROM numbers(8000000);
+
+OPTIMIZE TABLE ordini_v1 FINAL;
+
+-- La dashboard sulla copia fedele: 8.010.000 righe lette.
+SELECT toStartOfHour(o.ts) AS ora, p.canale, count() AS ordini, sum(o.importo) AS fatturato
+FROM ordini_v1 AS o
+INNER JOIN prodotti_v1 AS p ON o.id_prodotto = p.id_prodotto
+WHERE o.ts >= toStartOfDay(now()) - toIntervalDay(1)
+GROUP BY ora, p.canale
+ORDER BY ora, p.canale;
+
+-- Correggere un importo con un UPDATE: la riga 12345 sta in una parte sola, da 8 milioni di righe.
+SELECT count() AS parti, sum(rows) AS righe_nella_parte FROM system.parts WHERE active AND table = 'ordini_v1';
+
+ALTER TABLE ordini_v1 UPDATE importo = 0 WHERE id_ordine = 12345 SETTINGS mutations_sync = 1;
 ```
 
-## Esempio Python: controllare stabilità e anomalie
+### Lo schema a stella copiato com'è
 
-```python
+Sembra ragionevole: le tabelle sono già modellate, testate e documentate, e il caricamento è un copia-incolla. Ma la chiave è quella del warehouse, l'identificativo. L'identificativo cresce con il tempo, ma l'indice non lo sa: il filtro della dashboard è sul tempo e nessun granulo si salta. Il join ricostruisce a ogni ricarica un'unione che avrebbe potuto essere fatta una volta sola, all'ingresso.
 
-# df contiene: week, segment, users, key_outcome_rate
-# key_outcome_rate espresso in percentuale, es. 12.4
+### Tutto lo storico, per sicurezza
 
-df = df.sort_values(['segment', 'week']).copy()
-df['previous_rate'] = df.groupby('segment')['key_outcome_rate'].shift(1)
-df['wow_change_pp'] = df['key_outcome_rate'] - df['previous_rate']
-df['rolling_mean'] = df.groupby('segment')['key_outcome_rate'].transform(
-    lambda s: s.rolling(4, min_periods=2).mean()
+Si copia tutto per ogni evenienza: se un giorno servisse, c'è. Ma lo storico c'è già nel warehouse, che esiste per quello. Nella copia ogni mese in più è spazio da fondere, scansionare e ripopolare, senza che nessuna dashboard lo legga.
+
+### ClickHouse trattato come un OLTP
+
+Una correzione arriva dal warehouse e la si applica con `UPDATE`, come si farebbe su un database transazionale. In ClickHouse è una mutation: riscrive, in ogni parte che contiene le righe toccate, la colonna modificata per intero: cambiare un solo importo vuol dire riscrivere quella colonna per una parte da 8 milioni di righe. La documentazione la descrive come un'operazione pesante di I/O da usare con parsimonia, e per le correzioni suggerisce altri motori, come `ReplacingMergeTree`, che il modulo 12 tratta nella [lezione sul CDC](/course/real-time-analytics/cdc-pattern/).
+
+## La copia con la forma della domanda
+
+I criteri, in ordine di priorità:
+
+1. Partite dalla domanda. Scrivete la query che la dashboard ripete e tenete nella copia solo le colonne che usa.
+2. Appiattite le dimensioni dentro la tabella, quando cambiano di rado e la relazione è uno a molti. La documentazione indica questi casi per la denormalizzazione.
+3. Mettete in testa alla chiave i filtri della domanda, partizionate per mese e fate scadere i dati con un `TTL`. La chiave può essere un'espressione: con `toStartOfHour(ts)` il filtro su `ts` salta comunque i granuli, perché la funzione è monotona. Con `ttl_only_drop_parts = 1` una parte sparisce quando tutte le sue righe sono scadute: con partizioni mensili e 90 giorni di TTL, la ritenzione effettiva può arrivare a circa 120 giorni.
+4. Caricate in sola aggiunta dal warehouse e riconciliate i totali su finestre chiuse.
+
+La copia corretta, caricata dalla copia fedele come farebbe un export:
+
+```sql
+CREATE TABLE ordini_larghi
+(
+    ts DateTime,
+    id_ordine UInt64,
+    id_cliente UInt32,
+    canale LowCardinality(String),
+    categoria LowCardinality(String),
+    importo Decimal(12, 2)
 )
-df['rolling_std'] = df.groupby('segment')['key_outcome_rate'].transform(
-    lambda s: s.rolling(4, min_periods=2).std()
-)
-df['z_score'] = (df['key_outcome_rate'] - df['rolling_mean']) / df['rolling_std']
+ENGINE = MergeTree
+PARTITION BY toYYYYMM(ts)
+ORDER BY (toStartOfHour(ts), canale)
+TTL ts + INTERVAL 90 DAY
+SETTINGS ttl_only_drop_parts = 1;
 
-anomalies = df[df['z_score'].abs() >= 2].sort_values('z_score')
-print(anomalies[['week', 'segment', 'key_outcome_rate', 'wow_change_pp', 'z_score']])
+INSERT INTO ordini_larghi
+SELECT o.ts, o.id_ordine, o.id_cliente, p.canale, p.categoria, o.importo
+FROM ordini_v1 AS o
+INNER JOIN prodotti_v1 AS p ON o.id_prodotto = p.id_prodotto;
+
+OPTIMIZE TABLE ordini_larghi FINAL;
+
+-- La stessa dashboard: 100.864 righe lette, nessun join.
+SELECT toStartOfHour(ts) AS ora, canale, count() AS ordini, sum(importo) AS fatturato
+FROM ordini_larghi
+WHERE ts >= toStartOfDay(now()) - toIntervalDay(1)
+GROUP BY ora, canale
+ORDER BY ora, canale;
+
+-- Riconciliazione sulla finestra chiusa di ieri: lo scostamento deve essere zero.
+SELECT
+    (SELECT sum(importo) FROM ordini_larghi WHERE ts >= toStartOfDay(now()) - toIntervalDay(1))
+  - (SELECT sum(importo) FROM ordini_v1 WHERE ts >= toStartOfDay(now()) - toIntervalDay(1)) AS scostamento;
+
+-- La scadenza non è immediata: si applica durante i merge, a intervalli di almeno 14.400 secondi.
+SELECT name, value FROM system.merge_tree_settings WHERE name = 'merge_with_ttl_timeout';
 ```
 
-*Riferimento:* ClickHouse. (2024). "ClickHouse vs Traditional Data Warehouses." *clickhouse.com.*
+Da 8.010.000 righe a 100.864: due ordini di grandezza, sulla stessa domanda e con lo stesso risultato. La riconciliazione dà zero.
 
-## Il motore nato per un problema reale
+La copia è reversibile finché il warehouse resta la fonte: si butta e si ripopola, a costo basso. La sorting key no: non si cambia su una tabella esistente, quindi serve una tabella nuova e una ricarica. Il `TTL` cancella: un dato scaduto si recupera solo dal warehouse.
 
-ClickHouse nasce dentro Yandex per interrogare Yandex.Metrica, uno dei servizi di web analytics più trafficati al mondo, e viene pubblicato open source nel 2016. La promessa che lo distingue è quantitativa: aggregazioni su miliardi di righe in meno di un secondo su hardware comune, grazie a storage colonnare e vettorizzazione spinta. Da allora lo adottano Cloudflare, Spotify e decine di piattaforme real-time, spesso affiancato al warehouse principale invece che al suo posto. La decisione architetturale della lezione nasce da qui: ClickHouse non sostituisce il warehouse, assorbe il carico interattivo che il warehouse non serve a costi ragionevoli.
+Le correzioni che arrivano dopo il caricamento non si applicano con un `UPDATE`. Si ricarica la partizione interessata: `ALTER TABLE … DROP PARTITION` toglie parti intere senza riscrivere nulla, e si reinserisce dal warehouse la finestra corretta. La partizione mensile è quindi, oltre che l'unità di scadenza, quella di correzione. Se le correzioni sono frequenti e puntuali, un mese è troppo grosso: è il segnale per passare a un motore di tabella pensato per questo.
 
-## Domande per ripassare
+## Quando una dimensione cambia
 
-1. Quale workload con volumi e latenza giustifica ClickHouse nel tuo stack?
-2. Quale matrice ti dice se usare ClickHouse o Snowflake per un report?
-3. Quali `sorting key` e partizioni seguono i tuoi pattern di lettura dominanti?
-4. Quale subset replichi dal warehouse con quale freshness garantita?
+La categoria di un prodotto cambia: gli articoli passano da un reparto a un altro. Due strumenti, e danno risposte diverse. La denormalizzazione scrive la categoria dentro ogni ordine al momento del caricamento. Il dictionary tiene la dimensione in memoria e la risolve a ogni lettura con `dictGet`.
+
+Il criterio: **denormalizzate se l'attributo deve restare quello al momento dell'evento, dictionary se deve riflettere il valore corrente.**
+
+```sql
+CREATE DICTIONARY prodotti_dict
+(
+    id_prodotto UInt32,
+    categoria String
+)
+PRIMARY KEY id_prodotto
+SOURCE(CLICKHOUSE(QUERY 'SELECT id_prodotto, categoria FROM prodotti_v1'))
+LIFETIME(MIN 600 MAX 900)
+LAYOUT(HASHED_ARRAY());
+
+SELECT 'prima' AS quando,
+    (SELECT sum(importo) FROM ordini_larghi WHERE categoria = 'cat-7') AS tabella_larga,
+    (SELECT sum(importo) FROM ordini_v1 WHERE dictGet('prodotti_dict', 'categoria', id_prodotto) = 'cat-7') AS dizionario;
+
+-- Il reparto cat-7 viene rinominato nella dimensione del prodotto.
+ALTER TABLE prodotti_v1 UPDATE categoria = 'cat-nuova' WHERE categoria = 'cat-7' SETTINGS mutations_sync = 1;
+SYSTEM RELOAD DICTIONARY prodotti_dict;
+
+SELECT 'dopo' AS quando,
+    (SELECT sum(importo) FROM ordini_larghi WHERE categoria = 'cat-7') AS tabella_larga,
+    (SELECT sum(importo) FROM ordini_v1 WHERE dictGet('prodotti_dict', 'categoria', id_prodotto) = 'cat-7') AS dizionario;
+```
+
+La confusione comune è credere che il dictionary conservi la storia. Non la conserva: dopo il ricaricamento la categoria vecchia sparisce dal passato, e il fatturato storico di `cat-7`, che nella tabella larga resta invariato, nel dictionary va a zero. Nessuno vede un errore. Cambiano i report di mesi fa, e a ogni confronto con il warehouse qualcuno cerca un bug che non c'è.
+
+Un test pratico: un report del mese scorso, rieseguito oggi, deve dare lo stesso numero? Se sì, denormalizzate. Se deve seguire l'anagrafica di oggi, usate il dictionary.
+
+Vale anche il contrario. Per una dimensione che deve riflettere sempre il valore corrente, la denormalizzazione costringe a riscrivere la storia con una mutation su tutta la tabella. Il dictionary regge bene i lookup su piccole dimensioni, ma la documentazione avverte di non usare `dictGet` in un `WHERE` su gran parte delle righe: lì non ci sono indici.
+
+Questo articolo non confronta prezzi né latenze dei warehouse commerciali: non ho misure su di essi, e ClickHouse qui gira da solo. Non copre il trasporto dal warehouse, che sia un export, un CDC o un modello `dbt`. I dati sono sintetici: con dati reali i numeri cambiano.
+
+## Prima di andare in produzione
+
+1. Qual è la query che la dashboard ripete, e quante volte al giorno?
+2. Quante righe legge quella query, rispetto alle celle che mostra?
+3. Quali dimensioni sono appiattite nella tabella e quali vengono risolte alla lettura?
+4. Dopo quanto tempo scade la copia, e dove si recupera un dato scaduto?
+5. Di quanto differiscono i totali della copia da quelli del warehouse, su una finestra chiusa?
+
+La metrica che separa chi ottimizza da chi tira a indovinare è doppia: le righe lette per ogni cella mostrata, e lo scostamento dei totali dalla fonte. La prima misura il lavoro, la seconda la fiducia. Il tempo di risposta, da solo, cambia con il carico della giornata.
+
+Di tutto l'articolo, una scelta pesa ordini di grandezza più del resto: costruire la copia sulla domanda e non sulle tabelle. Nelle prove sono 8.010.000 righe lette contro 100.864.

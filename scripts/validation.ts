@@ -133,6 +133,7 @@ export type PipelineRuleResult = { regola: string; esito: "PASS" | "FAIL"; nota:
  */
 export function checkLessonPipeline(body: string, frontmatterBinario: unknown, formato?: unknown): PipelineRuleResult[] {
     const tre = formato === "3s";
+    const articolo = formato === "articolo";
     const results: PipelineRuleResult[] = [];
     const h2Titles = extractH2Titles(body);
     const lowerTitles = h2Titles.map((t) => t.toLowerCase());
@@ -149,9 +150,12 @@ export function checkLessonPipeline(body: string, frontmatterBinario: unknown, f
     );
     const stepsSection = sections.find((s) => /^\s*(1[.)]|[-*]\s+)/m.test(s.text));
     // Formato 3s: il concetto sta nelle figure (<Slide>), il passo-passo negli schemi (<Schema>).
+    // Formato articolo: il principio è la riga in grassetto, il passo-passo l'elenco numerato dei criteri.
     const regola1 = tre
         ? /<Slide\b/.test(body) && /<Schema\b/.test(body)
-        : Boolean(definitionSection && stepsSection && definitionSection.title !== stepsSection.title);
+        : articolo
+            ? /^\*\*[^*\n]+\*\*\s*$/m.test(body.replace(/`[^`\n]*`/g, "x")) && /^\s*1[.)]\s/m.test(body)
+            : Boolean(definitionSection && stepsSection && definitionSection.title !== stepsSection.title);
     if (regola1) {
         results.push({ regola: "regola_1_concetto_calcolo", esito: "PASS", nota: "" });
     } else {
@@ -487,7 +491,8 @@ async function validateCollection(collection: "blog" | "corso"): Promise<Validat
             );
         }
 
-        if (!hasSummarySection) {
+        // Il formato articolo vieta il riassunto finale: l'avviso non si applica.
+        if (!hasSummarySection && data.formato !== "articolo") {
             pushEditorialIssue(
                 result,
                 file,

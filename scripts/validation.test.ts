@@ -103,3 +103,41 @@ describe("checkLessonPipeline — lezioni formato 3s", () => {
         expect(r.regola_2_retrieval_attivo).toBe("FAIL");
     });
 });
+
+describe("checkLessonPipeline — lezioni formato articolo", () => {
+    const frasi = "Prima frase. Seconda frase. Terza frase. Quarta frase. Quinta frase.";
+    const sezione = (titolo: string, extra = "") => [`## ${titolo}`, "", frasi, "", extra].join("\n");
+    const domande = ["1. Quante parti crea ogni insert?", "2. Quale colonna apre l'ORDER BY?", "3. Quante granule legge la query?", "4. Il TTL è dichiarato?", "5. La riconciliazione torna?"].join("\n");
+    const articolo = [
+        sezione("Il caso"),
+        sezione("Il meccanismo", "**Ogni insert crea una parte.**"),
+        sezione("L'errore", "1. Primo criterio\n2. Secondo criterio"),
+        sezione("La soluzione"),
+        sezione("Il caso difficile"),
+        ["## La checklist", "", domande].join("\n"),
+    ].join("\n\n");
+    const esito = (body: string, formato?: string) =>
+        Object.fromEntries(checkLessonPipeline(body, "ml-tabellare", formato).map((r) => [r.regola, r.esito]));
+
+    test("regola 1 passa con una riga in grassetto e un elenco numerato", () => {
+        expect(esito(articolo, "articolo").regola_1_concetto_calcolo).toBe("PASS");
+    });
+
+    test("regola 1 fallisce senza la riga in grassetto", () => {
+        const senzaGrassetto = articolo.replace("**Ogni insert crea una parte.**", "Ogni insert crea una parte.");
+        expect(esito(senzaGrassetto, "articolo").regola_1_concetto_calcolo).toBe("FAIL");
+    });
+
+    test("regola 2 accetta cinque domande numerate in chiusura", () => {
+        expect(esito(articolo, "articolo").regola_2_retrieval_attivo).toBe("PASS");
+    });
+
+    test("senza formato articolo la regola 1 resta quella di sempre", () => {
+        expect(esito(articolo).regola_1_concetto_calcolo).toBe("FAIL");
+    });
+
+    test("regola 1 non si ferma su un asterisco dentro il codice inline", () => {
+        const conCodice = articolo.replace("**Ogni insert crea una parte.**", "**Evitate `SELECT *` nelle viste.**");
+        expect(esito(conCodice, "articolo").regola_1_concetto_calcolo).toBe("PASS");
+    });
+});

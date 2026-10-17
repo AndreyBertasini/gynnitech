@@ -3,6 +3,8 @@
 > **Fase 0:** contiene solo la lezione pilota. Le altre lezioni del modulo si aggiungono quando il modulo entra in lavorazione.
 > **Stato:** seconda versione, con le correzioni dell'autore del 2026-10-15 (sotto); da approvare prima della riscrittura.
 
+> **Aggiornamento 2026-10-17:** la lezione 2 (`clickhouse-fondamenti`) **non è più «3 secondi»**: per richiesta dell'autore le lezioni su ClickHouse sono state riscritte come *articolo tecnico* (`formato: "articolo"`, prompt in `docs/lezioni/prompt-articolo-tecnico.md`). Sono articoli anche `clickhouse-ottimizzazione`, `materialized-views` e `cdc-pattern` del modulo 12, e `data-warehousing/clickhouse` del modulo 9. Il piano qui sotto per la lezione 2 resta come storia del pilota; la scheda attuale è `docs/lezioni/clickhouse-articoli.md`.
+
 ### Regole aggiunte dall'autore (valgono per tutte le lezioni)
 
 1. **Niente box «Cosa imparerai» e «Collegamenti»** in cima alla pagina: gli obiettivi stanno nel corpo con `<Obiettivi />`.

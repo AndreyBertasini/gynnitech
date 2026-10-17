@@ -3,7 +3,7 @@ import matter from 'gray-matter';
 
 export type Esito = { errors: string[]; warnings: string[] };
 
-const TAG_LEZIONE = [
+export const TAG_LEZIONE = [
   'Slide', 'Percorso', 'Messaggio', 'Domanda', 'ErroreTipico', 'Confronto', 'Lato', 'Criterio', 'Passi', 'Fase',
   'Opzioni', 'Opzione', 'MiniTabella', 'TabellaDati', 'Barre', 'Barra', 'NumeriGrandi', 'Numero', 'Relazioni', 'Nodo',
   'Schema', 'Passo', 'Pattern', 'Obiettivi',

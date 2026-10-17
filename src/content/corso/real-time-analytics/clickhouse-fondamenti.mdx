@@ -9,266 +9,196 @@ headerImage: /course-headers/real-time-analytics-clickhouse-fondamenti-ginnytech
 headerImageAlt: >-
   ClickHouse fondamenti - immagine ufficiale della lezione su GinnyTech, creata da AD
 difficulty: advanced
-duration: 22 min
+duration: 16 min
 prerequisites:
   - real-time-analytics/streaming
 learningObjectives:
-  - Spiegare perché un database colonnare legge meno dati di uno a righe
-  - Scegliere partizione per mese e ORDER BY sulle chiavi di filtro in una tabella MergeTree
-  - Verificare quante partizioni e quante colonne legge una query
-formato: "3s"
-sezioni: ["Righe e colonne", "Leggere poco", "MergeTree", "Scegliere e verificare"]
+  - Spiegare come l'indice primario sparso scarta granuli e perché dipende dall'ordine fisico
+  - Scegliere la sorting key dai filtri della query dominante e partizionare solo per il ciclo di vita
+  - Misurare le righe lette con EXPLAIN indexes = 1 e decidere tra indice di salto e projection
+formato: "articolo"
 binario: "ml-tabellare"
 autore: "Hermes"
 controllatoDa: "Argo"
 autorizzatoDa: "Giano"
 draft: false
-dateModified: 2026-10-15
+dateModified: 2026-10-16
 ---
-import { QuizExercise } from '../../../components/QuizExercise';
 
 # ClickHouse: database colonnare e MergeTree
 
-<Percorso />
+Aprire la scheda di un cliente richiede cinque milioni di righe lette per trovarne 4.967. La tabella sta in ClickHouse, scelto perché legge in fretta, e la query ha il filtro giusto. Nessun errore, nessun avviso: solo un lavoro cento volte più grande del necessario.
 
-<Obiettivi />
+## Cinque milioni di righe per 4.967
 
-Calcoliamo la media degli importi su cento milioni di ordini. La tabella ha cento colonne. Ne serve una sola. Un database a righe le legge tutte, e la query diventa lenta. ClickHouse nasce per questo problema: analizzare molto, leggendo il minimo indispensabile.
+È un caso ricostruito: cinque milioni di eventi web, mille clienti, centosedici giorni, tutti generati dal codice di questa pagina. I numeri non sono una misura di produzione. Sono l'output di chDB 4.4.0, cioè ClickHouse 26.9, e li ottenete rieseguendo i blocchi `sql` nell'ordine in cui compaiono.
 
-<Slide sezione="1" titolo="Dalla lezione sullo streaming" messaggio="Lo stream decide subito. Qui leggiamo tanto.">
-<Passi>
-<Fase nome="Batch" testo="dati a riposo" />
-<Fase nome="Stream" testo="dati in movimento" />
-<Fase nome="Quando" testo="decisione che non aspetta" />
-</Passi>
-</Slide>
+La tabella è quella che nasce il primo giorno di un progetto: `ORDER BY ts`, una partizione per giorno, stringhe dove capita. La scheda cliente esegue `WHERE id_cliente = 42`, che seleziona 4.967 righe. Per trovarle ClickHouse ne legge 5.000.000, cioè 45 MB di colonne per un risultato che ne vale lo 0,1%.
 
-Nella lezione sullo streaming abbiamo visto tre cose. Il batch lavora su dati a riposo. Lo stream lavora su dati in movimento e decide prima che i dati siano completi. Usiamo lo streaming solo quando la decisione perde valore se aspetta. Oggi guardiamo l'altra metà del lavoro: dove salviamo gli eventi per analizzarli in fretta.
+La risposta di riflesso è aggiungere nodi. Funziona finché la tabella cresce meno della macchina. Con un altro ordine su disco la stessa query legge 49.152 righe e 372 KB, sullo stesso hardware.
 
-<Pattern si="Usiamo lo streaming quando la decisione non può aspettare" no="Usiamo lo streaming anche per ogni report mensile" />
+Il motore non è lento. Fa ciò che gli avete chiesto: righe ordinate per tempo, interrogate per cliente. La causa non è la potenza del cluster. È l'ordine in cui le righe stanno sul disco.
 
-## Righe e colonne
+## Cosa legge una query
 
-<Slide sezione="1" titolo="Righe contro colonne" messaggio="Righe per transazioni, colonne per analisi.">
-<Confronto>
-<Lato nome="Righe (OLTP)" sottotitolo="una riga intera" esempio="SELECT * FROM ordini WHERE id_ordine = 12345" />
-<Lato nome="Colonne (OLAP)" sottotitolo="molte righe, poche colonne" esempio="SELECT AVG(importo) FROM ordini" scelta="ClickHouse punta qui" />
-<Criterio nome="Disco" a="righe" b="colonne" />
-<Criterio nome="Query" a="un ordine" b="media mensile" />
-</Confronto>
-</Slide>
+Tre cose, in questa sequenza.
 
-A sinistra c'è il mondo delle transazioni. `PostgreSQL`, `MySQL` e `SQL Server` sono `row-oriented` (salvano per righe). Quando salviamo un ordine, tutti i suoi valori finiscono vicini sul disco. Così recuperiamo, inseriamo o aggiorniamo un ordine intero in un attimo. Chiamiamo questo carico OLTP (elaborazione di transazioni).
+La prima: ClickHouse salva ogni colonna in un file separato. Una query che usa due colonne su sei apre due file. Per questo il costo di `SELECT *` cresce con le colonne della tabella, non con quelle che vi servono.
 
-A destra c'è il mondo dell'analisi, il carico OLAP (elaborazione analitica). Qui un singolo ordine serve raramente. Servono l'importo medio dell'ultimo mese o i primi dieci utenti per spesa. ClickHouse è `column-oriented`: salva i dati colonna per colonna e legge solo le colonne richieste.
+La seconda: dentro ogni parte le righe sono ordinate secondo la chiave `ORDER BY`, e ogni colonna è divisa in granuli di 8.192 righe, valore di default. L'indice primario ha una voce per granulo, il valore della chiave della prima riga. È un indice sparso: non punta alle righe, punta ai blocchi ([indici primari](https://clickhouse.com/docs/primary-indexes)).
 
-<Pattern si="Usiamo il colonnare per medie e conteggi su molte righe" no="Usiamo il colonnare per aggiornare un ordine alla volta" />
+La terza: la query cerca il valore con una ricerca binaria tra le voci e scarta i granuli che non possono contenerlo. Gli altri li legge per intero. Quanti se ne scartano dipende da una cosa sola, cioè da quanto il filtro coincide con l'ordine.
 
-<Domanda risposta="Un sistema a righe, come PostgreSQL: salvare un ordine è un carico transazionale.">Un e-commerce salva ogni ordine appena arriva. Quale sistema usiamo?</Domanda>
+**L'indice primario non cerca righe: scarta granuli, e li scarta bene solo se l'ordine fisico segue i filtri.**
 
-## Leggere poco
+In una tabella ordinata per tempo, mille clienti sono mescolati e ognuno compare in ogni blocco. Nessun granulo si può escludere. In una tabella ordinata per cliente le sue righe stanno una accanto all'altra: qui in sei granuli su 612, perché la tabella ha quattro parti.
 
-<Slide sezione="2" titolo="Una colonna su cento" messaggio="Serve una colonna. Il sistema a righe le legge tutte.">
-<NumeriGrandi>
-<Numero valore="100 milioni" testo="ordini nella tabella" />
-<Numero valore="100" testo="colonne per ogni riga" />
-<Numero valore="1" testo="colonna usata dalla query" />
-</NumeriGrandi>
-</Slide>
+## Tre errori che si trovano ovunque
 
-Un sistema a righe, per calcolare `AVG(importo)`, legge l'intera tabella con tutte le colonne. Ne serve una sola, ma le legge tutte. Su miliardi di righe questo spreco di lettura diventa il collo di bottiglia. Su una tabella da diecimila righe, invece, la differenza quasi non si vede.
-
-<Pattern si="Partiamo dalle colonne che la query usa davvero" no="Guardiamo solo quante righe ha la tabella" />
-
-<Schema sezione="2" titolo="Perché leggiamo solo alcune colonne">
-<Passo testo="I dati sono in una tabella." />
-<Passo testo="Ogni colonna è salvata a parte." />
-<Passo testo="AVG(importo) legge solo la colonna importo." />
-<Passo testo="Una colonna di valori simili si comprime meglio." />
-<MiniTabella colonne="id_ordine,id_utente,importo,data_transazione" righe="4" evidenzia="col:importo@3" separa="2" />
-</Schema>
-
-Leggiamo lo schema riga per riga. Uno: la tabella `ordini` con quattro colonne. Due: ClickHouse salva ogni colonna a parte, come un file separato. Tre: la query chiede solo `importo`, quindi il motore apre solo quella colonna. Quattro: dentro una colonna i valori si somigliano, per esempio tutti timestamp o tutti flag. Valori simili si comprimono molto meglio di righe miste.
-
-<ErroreTipico sbagliato="Leggiamo tutte le colonne, anche quelle che la query non usa" giusto="Leggiamo solo le colonne della query" />
-
-<Slide sezione="2" titolo="Cento volte più byte" messaggio="Il colonnare legge solo ciò che chiediamo.">
-<Barre>
-<Barra nome="A righe" valore="100" etichetta="100×" tipo="normale" />
-<Barra nome="A colonne" valore="1" etichetta="1×" tipo="evidenzia" />
-</Barre>
-</Slide>
-
-Facciamo il conto con la nostra tabella: cento milioni di ordini, cento colonne per riga. Una query su una sola colonna, in un sistema a righe, legge cento volte più byte del necessario. È un calcolo d'esempio, non una misura di laboratorio. Meno byte letti e più compressione: è questa coppia a rendere interattive le aggregazioni che altrove durano minuti.
-
-<Pattern si="Misuriamo i byte letti su tabelle grandi" no="Confrontiamo i motori su diecimila righe" />
-
-<Messaggio>Leggiamo solo le colonne della query.</Messaggio>
-
-<Domanda risposta="3: il motore colonnare apre solo le colonne che la query usa.">Una query usa 3 colonne su 50. Quante colonne legge ClickHouse?</Domanda>
-
-## MergeTree
-
-<Slide sezione="3" titolo="L'ultimo mese di un utente" messaggio="Vogliamo saltare tutto il resto della tabella.">
-<Relazioni centro="eventi_web">
-<Nodo nome="ts" />
-<Nodo nome="utente_id" />
-<Nodo nome="pagina" />
-<Nodo nome="durata_ms" />
-</Relazioni>
-</Slide>
-
-Prendiamo un registro di eventi web con quattro colonne: quando, chi, quale pagina, quanto è durata la visita. La domanda tipica chiede gli eventi dell'ultimo mese di un utente. La velocità di ClickHouse qui dipende da ordine fisico, compressione e partizioni, non dal nome del database. Ogni scelta fisica parte dalla query che facciamo più spesso.
-
-<Pattern si="Partiamo dalla query dominante" no="Partiamo dal nome del motore" />
-
-<Schema sezione="3" titolo="Come MergeTree salta i dati">
-<Passo testo="PARTITION BY toYYYYMM(ts): una partizione per mese." />
-<Passo testo="ORDER BY (utente_id, ts): righe dello stesso utente vicine." />
-<Passo testo="Insert in batch: migliaia di righe per volta." />
-<Passo testo="Poche parti grandi: merge leggero." />
-<Passi>
-<Fase nome="Mese" testo="PARTITION BY" passo="1" />
-<Fase nome="Utente" testo="ORDER BY" passo="2" />
-<Fase nome="Batch" testo="INSERT" passo="3" />
-<Fase nome="Merge" testo="poche parti" passo="4" />
-</Passi>
-</Schema>
-
-Le tre leve lavorano insieme sulla stessa domanda. Uno: la partizione mensile fa leggere alla query solo l'ultimo mese. Due: l'`ORDER BY` su `utente_id` mette vicine le righe dello stesso utente. Così il filtro salta le parti inutili. Tre: gli insert arrivano a migliaia di righe per volta, non una alla volta. Quattro: ogni insert diventa una parte separata sul disco, e tante parti piccole costringono il `merge` a lavorare di più.
-
-Ecco la tabella che mette insieme le tre leve:
+Questo è lo schema che esce da un tutorial e da una scadenza. Il blocco crea la tabella, la riempie con i dati sintetici e misura la scheda cliente.
 
 ```sql
-CREATE TABLE eventi_web (
-  ts DateTime,
-  utente_id UInt64,
-  pagina String,
-  durata_ms UInt32
+CREATE TABLE eventi_web_v1
+(
+    ts DateTime,
+    id_cliente Nullable(UInt32),
+    id_campagna UInt16,
+    pagina String,
+    stato String,
+    durata_ms UInt32
+)
+ENGINE = MergeTree
+PARTITION BY toDate(ts)
+ORDER BY ts;
+
+INSERT INTO eventi_web_v1
+SELECT
+    toDateTime('2026-01-01 00:00:00') + number * 2,
+    cityHash64(number) % 1000,
+    cityHash64(number, 1) % 50,
+    concat('/prodotto/', toString(cityHash64(number, 2) % 40)),
+    ['ok', 'errore', 'timeout', 'redirect', 'bloccato'][1 + cityHash64(number, 3) % 5],
+    cityHash64(number, 4) % 5000
+FROM numbers(5000000);
+
+-- Solo per questa misura: fonde le parti, così i conteggi sono ripetibili.
+OPTIMIZE TABLE eventi_web_v1 FINAL;
+
+-- La scheda cliente: 4.967 righe restituite, 5.000.000 lette.
+SELECT count(), avg(durata_ms) FROM eventi_web_v1 WHERE id_cliente = 42;
+```
+
+### L'ordine parte dal tempo
+
+Sembra ragionevole. Gli eventi arrivano in ordine cronologico, i grafici sono sul tempo, `ORDER BY ts` è la prima chiave che viene in mente. Non lo è perché ogni filtro che non sia il tempo, cliente, campagna o pagina, non guadagna nulla.
+
+Questo è l'errore peggiore, perché non dà sintomi finché la tabella è piccola. Su diecimila righe la differenza non si vede, e quando si vede la tabella ha già un anno di storia.
+
+### Una partizione al giorno per velocità
+
+Si partiziona sul tempo perché le query filtrano sul tempo. Qui nascono 116 partizioni per cinque milioni di righe, e ClickHouse non fonde parti di partizioni diverse. La documentazione è chiara su questo punto: la partizione serve a gestire i dati, per cancellare un mese o spostarlo su storage più economico, non ad accelerare le query. Sempre secondo la documentazione, la cardinalità ottimale della chiave di partizione sta sotto i 100–1.000 valori.
+
+Una partizione al giorno non rende più veloci le query sul cliente. Rende più numerose le parti da aprire.
+
+### Tipi larghi per abitudine
+
+`stato String` con cinque valori, `id_cliente Nullable(UInt32)` perché «potrebbe mancare». La si scambia per prudenza. La documentazione consiglia `LowCardinality` sotto i 10.000 valori distinti ed evita `Nullable` quando basta un valore di default: la colonna `Nullable` ne crea una seconda, di tipo `UInt8`, da leggere ogni volta.
+
+Non è il difetto che rallenta la scheda. È quello che gonfia lo spazio: 95,21 MiB per questa tabella contro 48,29 della versione corretta. Non so dirvi quanto pesi ciascuna delle tre scelte da sola, perché l'esperimento le cambia insieme.
+
+## L'ordine giusto, la partizione giusta
+
+I criteri, in ordine di priorità:
+
+1. Elencate i filtri della query dominante, quella che parte più volte al giorno. Quelle colonne aprono la chiave.
+2. Tra le colonne di filtro, prima quelle con meno valori distinti: la documentazione consiglia la cardinalità crescente, per l'indice e per la compressione. La regola cede alla query dominante, perché un filtro su una colonna in coda è meno efficace di uno in testa ([scelta della chiave](https://clickhouse.com/docs/best-practices/choosing-a-primary-key)).
+3. Partizionate solo per il ciclo di vita dei dati: un mese, e una scadenza con `TTL` oppure `DROP PARTITION`.
+4. Tipi stretti: `LowCardinality` per le stringhe con pochi valori, nessun `Nullable` senza una ragione.
+
+Lo schema corretto, con la copia dei dati dalla tabella sbagliata e la stessa misura:
+
+```sql
+CREATE TABLE eventi_web_v2
+(
+    ts DateTime,
+    id_cliente UInt32,
+    id_campagna UInt16,
+    pagina LowCardinality(String),
+    stato LowCardinality(String),
+    durata_ms UInt32
 )
 ENGINE = MergeTree
 PARTITION BY toYYYYMM(ts)
-ORDER BY (utente_id, ts);
+ORDER BY (id_cliente, ts);
+
+INSERT INTO eventi_web_v2 SELECT * FROM eventi_web_v1;
+
+OPTIMIZE TABLE eventi_web_v2 FINAL;
+
+-- Stessa query, stesso risultato: 49.152 righe lette invece di 5.000.000.
+SELECT count(), avg(durata_ms) FROM eventi_web_v2 WHERE id_cliente = 42;
+
+-- Granuli letti dopo l'indice primario: 6 su 612.
+EXPLAIN indexes = 1 SELECT count() FROM eventi_web_v2 WHERE id_cliente = 42;
+
+-- Partizioni e spazio delle due tabelle: 116 e 4 partizioni.
+SELECT table, uniqExact(partition) AS partizioni, formatReadableSize(sum(data_compressed_bytes)) AS su_disco
+FROM system.parts
+WHERE active AND table LIKE 'eventi_web_v%'
+GROUP BY table
+ORDER BY table;
 ```
 
-<ErroreTipico sbagliato="La query filtra per regione, ma l'ORDER BY è solo sulla data" giusto="L'ORDER BY parte dalle chiavi di filtro della query dominante" />
+Da 5.000.000 righe a 49.152: due ordini di grandezza, sulla stessa query e con lo stesso risultato. La tabella occupa inoltre la metà dello spazio.
 
-Nel caso sbagliato la scansione resta larga, anche dentro ClickHouse. Spostare i dati non basta: la query diventa veloce solo se l'ordine su disco segue i filtri.
+Questa correzione non si fa sul posto. ClickHouse non permette di modificare la chiave primaria di una tabella esistente: si crea la tabella nuova, si copia con `INSERT … SELECT`, come nel blocco qui sopra, e si scambiano i nomi con `EXCHANGE TABLES`, che è atomico. Costa tempo e spazio doppio durante la copia, e se le scritture continuano dovete decidere come non perderle. La chiave si sceglie prima del primo milione di righe, non dopo il miliardo.
 
-<Messaggio>L'ordine su disco decide che cosa saltiamo.</Messaggio>
+## Quando un solo ordine non basta
 
-<Domanda risposta="utente_id, come in ORDER BY (utente_id, ts).">La query filtra per utente. Quale colonna mettiamo per prima nell'ORDER BY?</Domanda>
+La scheda cliente ora è veloce. Poi arriva la seconda domanda: tutti gli eventi di una campagna. `id_campagna` non è in testa alla chiave, e le campagne sono mescolate in ogni granulo.
 
-## Scegliere e verificare
+Gli strumenti sono due. L'indice di salto (data skipping index) tiene un riassunto di ogni blocco di granuli e scarta quelli che non possono contenere il valore. La projection tiene una seconda copia della tabella con un altro ordine, scelta in automatico dal motore.
 
-<Slide sezione="4" titolo="ClickHouse sì o no" messaggio="Colonnare per analisi, righe per transazioni.">
-<Opzioni>
-<Opzione nome="Analisi su molte righe" testo="medie e conteggi, poche colonne" verdetto="si" />
-<Opzione nome="Aggiornamenti di singole righe" testo="carico transazionale" verdetto="no" />
-</Opzioni>
-</Slide>
+Il criterio: **indice di salto se i valori della colonna sono già raggruppati dall'ordine fisico, projection se non lo sono.**
 
-Usiamo ClickHouse per scansioni analitiche su molte righe e poche colonne. Teniamo il database a righe per le transazioni su righe intere. Se il carico è transazionale, con aggiornamenti frequenti di singole righe, ClickHouse è lo strumento sbagliato. I suoi punti di forza diventano debiti, e il confronto con `PostgreSQL` diventa impietoso. La diagnosi viene prima della scelta del motore, mai il contrario.
+```sql
+-- Senza indici: 5.000.000 righe lette.
+SELECT count() FROM eventi_web_v2 WHERE id_campagna = 7;
 
-<Pattern si="Usiamo ClickHouse per scansioni analitiche" no="Usiamo ClickHouse per aggiornamenti frequenti di singole righe" />
+ALTER TABLE eventi_web_v2 ADD INDEX idx_campagna id_campagna TYPE set(100) GRANULARITY 1;
+ALTER TABLE eventi_web_v2 MATERIALIZE INDEX idx_campagna SETTINGS mutations_sync = 1;
 
-<Slide sezione="4" titolo="Come verifichiamo una query" messaggio="Misuriamo partizioni e colonne lette.">
-<Passi>
-<Fase nome="Query" testo="troviamo la query dominante" />
-<Fase nome="Misura" testo="EXPLAIN o log delle query" />
-<Fase nome="Correzione" testo="ORDER BY o partizione" />
-</Passi>
-</Slide>
+-- Con l'indice di salto: ancora 5.000.000 righe, 612 granuli su 612.
+SELECT count() FROM eventi_web_v2 WHERE id_campagna = 7;
+EXPLAIN indexes = 1 SELECT count() FROM eventi_web_v2 WHERE id_campagna = 7;
 
-Prima della produzione controlliamo una query reale. `EXPLAIN` o i log delle query mostrano quante partizioni e quante colonne la query legge. Lì scopriamo se l'ordinamento scelto serve davvero alle query più frequenti. Alcuni segnali ci dicono che il modello è sbagliato:
+ALTER TABLE eventi_web_v2 ADD PROJECTION per_campagna (SELECT * ORDER BY id_campagna, ts);
+ALTER TABLE eventi_web_v2 MATERIALIZE PROJECTION per_campagna SETTINGS mutations_sync = 1;
 
-- la query dominante filtra per tempo, ma la partizione è su un'altra chiave;
-- ogni insert parte da un servizio che scrive riga per riga;
-- non sappiamo quante colonne su trenta la query principale legge davvero.
+-- Con la projection: 139.264 righe, 17 granuli su 612.
+SELECT count() FROM eventi_web_v2 WHERE id_campagna = 7;
+EXPLAIN indexes = 1 SELECT count() FROM eventi_web_v2 WHERE id_campagna = 7;
 
-<Pattern si="Controlliamo con EXPLAIN o con i log delle query" no="Ci fidiamo del motore senza misurare" />
+-- Il costo della projection: una copia della tabella.
+SELECT formatReadableSize(sum(data_compressed_bytes)) AS su_disco
+FROM system.projection_parts
+WHERE active AND table = 'eventi_web_v2';
+```
 
-<Slide sezione="4" titolo="Dove nasce ClickHouse" messaggio="Il motore nasce per leggere poco.">
-<NumeriGrandi>
-<Numero valore="2016" testo="rilascio open source" />
-<Numero valore="20 miliardi+" testo="eventi al giorno in Yandex.Metrica" />
-</NumeriGrandi>
-</Slide>
+La confusione comune è credere che un indice secondario di ClickHouse funzioni come un B-tree, cioè trovi le righe. Qui l'indice ha controllato tutti i 612 granuli e non ne ha scartato uno, perché ogni granulo contiene righe di tutte le campagne. Si paga in scrittura e in spazio, senza guadagnare in lettura, e lo si scopre quando la tabella ha già un miliardo di righe. La documentazione dice la stessa cosa: con poca correlazione tra la colonna filtrata e la chiave di ordinamento, l'indice non salta nulla.
 
-Yandex sviluppa ClickHouse per interrogare i log di Yandex.Metrica e lo rilascia open source nel 2016. La documentazione del progetto cita oltre 20 miliardi di eventi al giorno. A quel volume un database a righe non regge aggregazioni interattive. Il colonnare regge perché ogni query legge una frazione minuscola del totale. Ordine, partizione, compressione e batch servono tutti a tenere piccola quella frazione.
+La projection non è gratis. Qui pesa più della tabella che la contiene, perché ordinata per campagna si comprime peggio.
 
-<Pattern si="Modelliamo la tabella per le letture dominanti" no="Scegliamo il motore prima della diagnosi" />
+Questo articolo non copre replica, sharding e chiavi con più di due colonne. Il dataset è sintetico e uniforme: con clienti reali un cliente grande può occupare da solo centinaia di granuli. Una terza strada, la materialized view verso una seconda tabella, ha la sua lezione nel modulo.
 
-<Domanda risposta="No: è un segnale di modello sbagliato. Analisi e transazioni vogliono motori diversi.">La dashboard analitica condivide il database transazionale dello storefront. Va bene?</Domanda>
+## Prima di andare in produzione
 
-## Riepilogo
+1. Quale query parte più spesso, e i suoi filtri aprono `ORDER BY`?
+2. Quante partizioni ha la tabella dopo un mese di dati, e per cosa servono?
+3. Quante righe legge quella query rispetto a quelle che restituisce?
+4. Quali colonne `String` hanno meno di 10.000 valori distinti, e quali `Nullable` contengono dei nulli?
+5. Qualcuno ha ricreato la tabella con `INSERT … SELECT` su una copia dei dati reali, e quanto ci ha messo?
 
-<Messaggio>Il colonnare legge solo le colonne della query.</Messaggio>
+La metrica che separa chi ottimizza da chi tira a indovinare è il rapporto tra righe lette e righe restituite, cioè `read_rows` ed `result_rows` in `system.query_log`. Chi guarda solo i millisecondi misura la macchina di oggi. Chi guarda il rapporto misura il lavoro, e il lavoro non cambia quando cambia il carico del server.
 
-<Messaggio>Partizione per mese e ORDER BY sulle chiavi di filtro.</Messaggio>
-
-<Messaggio>Misuriamo sempre partizioni e colonne lette.</Messaggio>
-
-<QuizExercise client:visible
-  quizId="real-time-analytics-clickhouse-fondamenti"
-  title="Hai capito ClickHouse e MergeTree?"
-  questions={[
-    {
-      id: 'q1',
-      text: 'Quando conviene lo storage colonnare?',
-      options: [
-        'Per scansioni analitiche su molte righe e poche colonne',
-        'Per aggiornamenti frequenti di singole righe',
-        'Per leggere un ordine per id'
-      ],
-      correctIndex: 0,
-      explanation: 'Il colonnare legge solo le colonne della query: vince quando scansioniamo molte righe e poche colonne.'
-    },
-    {
-      id: 'q2',
-      text: "Quale chiave mettiamo nell'ORDER BY di una tabella MergeTree?",
-      options: [
-        'Sempre e solo la data',
-        'Le chiavi di filtro delle query dominanti',
-        'La colonna con i valori più lunghi'
-      ],
-      correctIndex: 1,
-      explanation: "L'ordine su disco decide quali parti la query salta: deve seguire i filtri più usati."
-    },
-    {
-      id: 'q3',
-      text: 'Come verifichiamo che una query legga solo partizioni e colonne necessarie?',
-      options: [
-        'Contiamo le righe della tabella',
-        'Guardiamo quante colonne ha la tabella',
-        'Usiamo EXPLAIN o i log delle query'
-      ],
-      correctIndex: 2,
-      explanation: "EXPLAIN e i log delle query mostrano le letture per partizione: lì vediamo se l'ordinamento serve davvero."
-    },
-    {
-      id: 'q4',
-      text: 'Quale errore rende lenta una dashboard su miliardi di righe?',
-      options: [
-        "La query filtra per regione, ma l'ORDER BY è solo sulla data",
-        'La tabella ha una partizione per mese',
-        'Gli insert arrivano in batch'
-      ],
-      correctIndex: 0,
-      explanation: "Se il filtro non è nell'ORDER BY, la scansione resta larga anche in ClickHouse."
-    },
-    {
-      id: 'q5',
-      text: 'Che differenza pratica c’è tra insert singole e insert in batch?',
-      options: [
-        'Nessuna: ClickHouse le unisce subito',
-        'Ogni insert crea una parte: tante parti piccole rallentano merge e query',
-        'Le insert singole si comprimono meglio'
-      ],
-      correctIndex: 1,
-      explanation: 'Ogni insert diventa una parte separata; tante parti piccole costringono il merge a lavorare di più.'
-    }
-  ]}
-/>
-
-Nella prossima lezione vediamo come far arrivare i dati in ClickHouse: [Pattern di ingestion in tempo reale](/course/real-time-analytics/clickhouse-ottimizzazione/).
+Di tutto l'articolo, una scelta pesa ordini di grandezza più del resto: la chiave `ORDER BY`. Tipi e partizioni hanno dimezzato lo spazio. La chiave ha tolto due ordini di grandezza alle righe lette.
