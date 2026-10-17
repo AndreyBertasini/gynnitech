@@ -7,6 +7,7 @@ Piano: `docs/superpowers/plans/2026-10-16-articoli-clickhouse.md`. Prompt: `docs
 | `real-time-analytics/clickhouse-fondamenti` | La sorting key di una tabella MergeTree | ~1.350 | 3 |
 | `real-time-analytics/clickhouse-ottimizzazione` | Insert in batch e parti: perché ClickHouse risponde «Too many parts» | ~1.420 | 4 |
 | `data-warehousing/clickhouse` | ClickHouse accanto al warehouse: cosa replicare e come modellarlo | ~1.380 | 3 |
+| `real-time-analytics/materialized-views` | Materialized view incrementali: stati di aggregazione, backfill, vista refreshable | ~1.370 | 3 |
 
 Fonte della documentazione: repository `ClickHouse/clickhouse-docs`, letto via Context7 il 2026-10-16. I percorsi sotto sono file di quel repository.
 
@@ -114,3 +115,39 @@ I dati sono relativi a `toStartOfDay(now())`: i conteggi sono ripetibili nello s
 - Il link `clickhouse.com/docs/best-practices/minimize-optimize-joins` deriva dal nome del file `minimize_optimize_joins.md`; non l'ho aperto (dominio non raggiungibile). Lo slug potrebbe usare trattini o underscore.
 - «Quando conviene aggiungere ClickHouse accanto al warehouse»: è un giudizio dell'autore dell'articolo, non una misura.
 - Il suggerimento «passare a un motore di tabella pensato per questo» rimanda a `ReplacingMergeTree` (lezione sul CDC), non è dimostrato nella pagina.
+
+## real-time-analytics/materialized-views
+
+**Titolo, URL e prerequisiti invariati.** Corretto un difetto preesistente nel frontmatter: una riga orfana («  Materialized Views - immagine ufficiale…») veniva letta da YAML come continuazione di `category`; ora `category` è «Tecnico» (usata solo come etichetta in `src/lib/course-graph.ts`).
+
+**Tolto dal vecchio testo:** l'esempio a catena era rotto (la seconda vista leggeva `user_id` da `mv_events_per_minute`, che non lo contiene); «risultato in <100ms su qualsiasi volume» (nessuna fonte); il paragrafo sul Dataflow Model (Akidau et al., VLDB 2015) e la tesi che i late-arriving events richiedano retraction esterne; il paragrafo generico sugli «errori più comuni» (medie globali, correlazione e causalità), che non parlava di viste.
+
+**Caso:** ricostruito (dichiarato). 5.000 utenti, 300.000 eventi all'ora, 5 ore generate dalla vista parametrica `carica_ora`; i dati sono relativi a `toStartOfDay(now()) - 1 giorno`, quindi i numeri sono ripetibili.
+
+| Numero nel testo | Fonte |
+|---|---|
+| 189.705 (e 189.771) utenti/ora con `sum(uniq)` | query «La dashboard somma i minuti» |
+| 5.000 utenti/ora reali | `uniqExact` sulla tabella grezza |
+| 900.000 eventi grezzi contro 600.000 nella vista | query di confronto |
+| 120 righe per 60 minuti dopo 1.000 eventi in ritardo | `count()` / `uniqExact(minuto)` sull'ora 1 |
+| 1.201.000 eventi grezzi = 1.201.000 nella vista | dopo il backfill |
+| ora 1: 5.150 utenti, 301.500 eventi dopo 500 eventi in ritardo con 50 utenti nuovi | `uniqExactMerge` / `sum` |
+| 150.057 / 149.943 prima, 209.916 / 90.084 dopo (refreshable); 149.943 / 150.057 (incrementale) | query «L'ora 4 …» |
+| 1.506.500 righe rilette da un giro di refresh | `system.view_refreshes` (`read_rows` = `total_rows`) |
+| «quasi quaranta volte» | 189.705 / 5.000 ≈ 38 |
+
+**Fatti verificati sulla documentazione:**
+- Una vista incrementale esegue la `SELECT` solo sui blocchi inseriti; i dati inoltrati sono il blocco, non il risultato della tabella: `docs/guides/developer/cascading-materialized-views.md`, `docs/use-cases/observability/clickstack/migration/elastic/concepts.md`.
+- `AggregatingMergeTree` con stati (`uniqExactState`) e `-Merge`; `SimpleAggregateFunction(sum, …)`: `docs/use-cases/time-series/06_materialized-view-rollup.mdx`, `docs/guides/examples/aggregate_function_combinators/sumSimpleState.md`.
+- Backfill con `INSERT … SELECT` di stati per i dati più vecchi del minimo presente; `POPULATE` sconsigliato perché può perdere righe: `docs/use-cases/observability/clickstack/managing/materialized_views.md`.
+- Il join in una vista incrementale scatta solo sugli insert della tabella più a sinistra: è uno snapshot della dimensione; la refreshable rilancia la query sull'intero dataset e supporta i join; per un'aggregazione su una tabella la incrementale scala meglio: `docs/materialized-view/incremental-materialized-view.md`, `docs/materialized-view/refreshable-materialized-view.md`.
+- `GROUP BY` allineato a `ORDER BY` della destinazione: `docs/materialized-view/incremental-materialized-view.md`.
+- Le viste refreshable sono production ready dal 2024: `docs/whats-new/changelog/2024.md` (il testo non lo afferma).
+
+**Verificato con una prova a parte:** le viste refreshable richiedono un database `Atomic`; chDB usa di default un motore `Overlay`, per questo il primo blocco crea `lab ENGINE = Atomic` e fa `USE lab`.
+
+**Non verificati:**
+- Il link `clickhouse.com/docs/materialized-view/incremental-materialized-view` deriva dal percorso del file nel repository della documentazione; non l'ho aperto.
+- «Lo stato di `uniqExact` cresce con i valori distinti» e il rimando a `uniq`/`uniqCombined`: conoscenza generale, non cercata nella documentazione.
+- «Se la tabella grezza ha un TTL più corto della vista, quello che è scaduto non si recupera»: conseguenza logica, non misurata.
+- «A un insert al secondo e un refresh al minuto la differenza è il costo che porta a spegnere la vista»: giudizio, non misura.

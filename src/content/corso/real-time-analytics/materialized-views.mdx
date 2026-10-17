@@ -5,105 +5,278 @@ description: >-
 module: "Modulo 12: Real-time analytics con ClickHouse"
 order: 6
 category: Tecnico
-  Materialized Views - immagine ufficiale della lezione su GinnyTech
 headerImage: /course-headers/real-time-analytics-materialized-views-ginnytech-ad-v3.webp
 headerImageAlt: "Materialized view e aggregazioni continue - immagine ufficiale della lezione su GinnyTech, creata da AD"
 difficulty: advanced
-duration: 22 min
+duration: 14 min
 prerequisites:
   - real-time-analytics/dashboards
 learningObjectives:
-  - Costruire una catena di materialized view a strati per minuto e per ora
-  - Scegliere tra SummingMergeTree e AggregatingMergeTree con deduplicazione utenti
-  - Gestire i late-arriving events con ignoranza, correzione differita o retraction
+  - Distinguere le misure additive da quelle che richiedono uno stato di aggregazione
+  - Costruire una materialized view incrementale con AggregatingMergeTree, leggerla con -Merge e riempirne lo storico senza POPULATE
+  - Scegliere tra vista incrementale e refreshable in base a ciò da cui dipende il risultato
+formato: "articolo"
 binario: "ml-tabellare"
 autore: "Hermes"
 controllatoDa: "Argo"
 autorizzatoDa: "Giano"
 draft: false
-dateModified: 2026-09-07
+dateModified: 2026-10-17
 ---
+
 # Materialized view e aggregazioni continue
 
-Anche questa lezione viaggia sul binario **ml-tabellare**: i nostri eventi finiscono in tabelle, ma le risposte devono arrivare in tempo reale. Il trucco non è leggere più velocemente, è avere già pronta la risposta prima che la domanda arrivi.
+La dashboard mostra 189.705 utenti unici all'ora. La base clienti ne conta 5.000. Nessuna query ha restituito un errore: la vista materializzata ha fatto ciò che le era stato chiesto, minuto per minuto, e la dashboard ha sommato i minuti.
 
-## L'idea centrale
+## Centottantanovemila utenti su cinquemila
 
-Le materialized view pre-aggregano gli eventi in strati per minuto e per ora così le dashboard leggono solo l'ultimo strato in tempi interattivi. Si rinuncia a un dettaglio per guadagnare velocità, in modo pianificato.
+È un caso ricostruito: cinquemila utenti, 300.000 eventi all'ora, tutti generati dal codice di questa pagina. Una materialized view calcola gli utenti unici di ogni minuto con `uniq`, in una tabella `SummingMergeTree`, e la dashboard somma i minuti per ottenere l'ora. I numeri sono l'output di chDB 4.4.0, cioè ClickHouse 26.9, e li ottenete rieseguendo i blocchi `sql` nell'ordine in cui compaiono.
 
-## Come si costruisce una catena di viste
+Ogni minuto, preso da solo, è corretto. L'ora no: 189.705 contro 5.000, perché un utente attivo in molti minuti viene contato una volta per ognuno. Il grafico ha l'andamento giusto e il livello sbagliato, e per questo nessuno se ne accorge.
 
-Cinque passi portano dal flusso grezzo alla dashboard pronta.
+Nella stessa vista ci sono altri due difetti. Manca un'ora intera di dati: 900.000 eventi nella tabella grezza, 600.000 nella vista. E dopo un lotto in ritardo ogni minuto ha due righe, 120 righe per 60 minuti.
 
-1. Elenca le query più frequenti e la granularità minima che le rende utili.
-2. Costruisci il primo strato di aggregazione al minuto direttamente dallo stream.
-3. Deriva strati orari con deduplicazione utenti solo dove serve precisione.
-4. Dichiara come tratti eventi tardivi e cambi di definizione prima della go-live.
-5. Fai leggere le dashboard solo dall'ultimo strato e misura latenza e freschezza.
+La reazione abituale è cercare un bug nella somma o nella query della dashboard. Non c'è. La causa non è la query: è che una materialized view non conserva una query.
 
-## La catena di aggregazione a strati
+## Cosa fa una materialized view
 
-Un funnel di conversione in tempo reale mostra bene il pattern. Gli eventi grezzi entrano da `Kafka`, una prima materialized view aggrega al minuto, una seconda aggrega all'ora deduplicando gli utenti, e la dashboard legge solo l'ultimo strato.
+Tre fatti, in questa sequenza.
 
-```text
-Eventi Grezzi (Kafka)
-      │
-      ▼
-MV_events_per_minute: event_type × minuto, count()
-      │
-      ▼
-MV_funnel_hourly: funnel_step × ora, unique_users
-      │
-      ▼
-Dashboard: leggi da MV_funnel_hourly
-```
+Il primo: una materialized view incrementale è un trigger sull'insert. Quando un blocco di righe entra nella tabella sorgente, la `SELECT` della vista gira solo su quel blocco e il risultato finisce nella tabella di destinazione. I dati già presenti non vengono rivisitati ([viste incrementali](https://clickhouse.com/docs/materialized-view/incremental-materialized-view)).
 
-Il primo livello aggrega al minuto:
+Il secondo: la tabella di destinazione fonde le righe con la stessa chiave in background, secondo il proprio motore. `SummingMergeTree` somma le colonne numeriche, `AggregatingMergeTree` fonde stati di aggregazione. Prima del merge le righe di una stessa chiave coesistono.
+
+Il terzo: uno stato di aggregazione è un risultato parziale che si può fondere con altri. `uniqExactState` non memorizza un numero, e `uniqExactMerge` unisce due stati senza contare due volte lo stesso utente. Lo stesso vale per le medie e per i percentili, che non si possono sommare.
+
+**Una materialized view è un trigger sull'insert: calcola sul blocco appena arrivato, mai sui dati già presenti, e ciò che scrive deve poter essere fuso con ciò che c'è già.**
+
+## Tre errori che gonfiano i numeri
+
+Questo è lo schema che esce da un tutorial. Il blocco crea un database `Atomic`, come quello predefinito di un server ClickHouse (chDB usa un altro motore, e le viste refreshable lo richiedono), una vista per minuto con `uniq` e carica le ore. La vista `carica_ora` serve solo a generare i dati: è una vista parametrica.
 
 ```sql
-CREATE MATERIALIZED VIEW mv_events_per_minute
-ENGINE = SummingMergeTree()
-ORDER BY (event_time, event_type)
-AS SELECT toStartOfMinute(event_time) AS event_time,
-          event_type, count() AS cnt
-FROM kafka_events GROUP BY event_time, event_type;
+CREATE DATABASE lab ENGINE = Atomic;
+USE lab;
+
+CREATE TABLE eventi
+(
+    ts DateTime,
+    id_utente UInt32,
+    importo Decimal(10, 2)
+)
+ENGINE = MergeTree
+ORDER BY ts;
+
+CREATE VIEW carica_ora AS
+SELECT
+    toStartOfDay(now()) - toIntervalDay(1) + toIntervalSecond({ora:UInt8} * 3600 + intDiv(number * 3600, 300000)) AS ts,
+    toUInt32(cityHash64(number, {ora:UInt8}) % 5000) AS id_utente,
+    round((cityHash64(number, 99) % 10000) / 100, 2) AS importo
+FROM numbers(300000);
+
+-- L'ora 0 arriva prima che esista una vista.
+INSERT INTO eventi SELECT * FROM carica_ora(ora = 0);
+
+CREATE TABLE utenti_minuto_v1
+(
+    minuto DateTime,
+    utenti UInt64,
+    eventi UInt64
+)
+ENGINE = SummingMergeTree
+ORDER BY minuto;
+
+CREATE MATERIALIZED VIEW utenti_minuto_v1_mv TO utenti_minuto_v1 AS
+SELECT toStartOfMinute(ts) AS minuto, uniq(id_utente) AS utenti, count() AS eventi
+FROM eventi
+GROUP BY minuto;
+
+INSERT INTO eventi SELECT * FROM carica_ora(ora = 1);
+INSERT INTO eventi SELECT * FROM carica_ora(ora = 2);
+
+-- La dashboard somma i minuti: circa 190.000 utenti per ora.
+SELECT toStartOfHour(minuto) AS ora, sum(utenti) AS utenti_unici FROM utenti_minuto_v1 GROUP BY ora ORDER BY ora;
+
+-- La verità, dalla tabella grezza: 5.000.
+SELECT toStartOfHour(ts) AS ora, uniqExact(id_utente) AS utenti_unici FROM eventi GROUP BY ora ORDER BY ora;
+
+-- La vista non ha l'ora 0: 900.000 eventi contro 600.000.
+SELECT (SELECT count() FROM eventi) AS grezzi, (SELECT sum(eventi) FROM utenti_minuto_v1) AS nella_vista;
+
+-- 1.000 eventi in ritardo per l'ora 1: ogni minuto ha ora due righe, finché non c'è un merge.
+INSERT INTO eventi
+SELECT toStartOfDay(now()) - toIntervalDay(1) + toIntervalSecond(3600 + cityHash64(number) % 3600), 10000 + number % 100, 1.00
+FROM numbers(1000);
+
+SELECT count() AS righe, uniqExact(minuto) AS minuti
+FROM utenti_minuto_v1
+WHERE minuto >= toStartOfDay(now()) - toIntervalDay(1) + toIntervalHour(1)
+  AND minuto < toStartOfDay(now()) - toIntervalDay(1) + toIntervalHour(2);
 ```
 
-Il secondo aggrega all'ora con deduplicazione utenti:
+### Un valore finale dove serve uno stato
+
+Sembra ragionevole: `utenti` è un numero e `SummingMergeTree` somma i numeri. Ma la somma di conteggi distinti non è un conteggio distinto, e lo stesso vale per le medie. Questo è l'errore peggiore perché il risultato è plausibile: un'ora vale 189.705 invece di 5.000 e il grafico sembra sano.
+
+### Leggere la destinazione come se fosse già fusa
+
+Sembra ragionevole: è una tabella, la si legge. Ma le righe con la stessa chiave si fondono più tardi, in un momento che decide il server. Dopo 1.000 eventi in ritardo, i 60 minuti dell'ora 1 occupano 120 righe, e una dashboard che le legge senza `GROUP BY` disegna ogni minuto due volte.
+
+### Una vista su una tabella già piena
+
+Sembra ragionevole: la vista c'è, quindi i numeri tornano. Ma una vista incrementale vede solo i dati che arrivano dopo la sua creazione. L'ora 0 era già nella tabella e nella vista non c'è. `POPULATE` sembra la scorciatoia, e la documentazione ne sconsiglia l'uso: può perdere le righe inserite mentre la vista viene creata.
+
+## Stati di aggregazione e backfill
+
+I criteri, in ordine di priorità:
+
+1. Per ogni misura chiedetevi se è additiva. Somme e conteggi lo sono; distinti, medie e percentili no.
+2. Le misure non additive si memorizzano come stati (`uniqExactState`) in una tabella `AggregatingMergeTree` e si leggono con `uniqExactMerge`. Quelle additive possono restare numeri, con `SimpleAggregateFunction(sum, UInt64)`. Qui si usa `uniqExact` perché il conto deve tornare; `uniq` è approssimato.
+3. Leggete la destinazione sempre con `GROUP BY` e con la funzione `-Merge`: prima del merge in background le righe di una chiave sono più d'una.
+4. Create la vista prima del backfill e riempite lo storico con un `INSERT … SELECT` che scrive stati, limitato ai dati più vecchi del minimo già presente nella destinazione. Mai `POPULATE`.
+5. Fate coincidere la `GROUP BY` della vista con l'`ORDER BY` della destinazione: è la chiave su cui il motore fonde le righe, e se divergono le righe si fondono con meno efficienza.
+
+Lo stesso scenario, scritto bene:
 
 ```sql
-CREATE MATERIALIZED VIEW mv_funnel_hourly
-ENGINE = AggregatingMergeTree()
-ORDER BY (hour, funnel_step)
-AS SELECT toStartOfHour(event_time) AS hour,
-          funnel_step,
-          uniqState(user_id) AS unique_users_state
-FROM mv_events_per_minute
-JOIN funnel_definitions USING (event_type)
-GROUP BY hour, funnel_step;
+CREATE TABLE utenti_minuto_v2
+(
+    minuto DateTime,
+    utenti AggregateFunction(uniqExact, UInt32),
+    eventi SimpleAggregateFunction(sum, UInt64)
+)
+ENGINE = AggregatingMergeTree
+ORDER BY minuto;
+
+CREATE MATERIALIZED VIEW utenti_minuto_v2_mv TO utenti_minuto_v2 AS
+SELECT toStartOfMinute(ts) AS minuto, uniqExactState(id_utente) AS utenti, count() AS eventi
+FROM eventi
+GROUP BY minuto;
+
+-- L'ora 3 arriva dopo la vista: la vista la aggrega da sola.
+INSERT INTO eventi SELECT * FROM carica_ora(ora = 3);
+
+-- Il backfill: solo i dati più vecchi del primo minuto già presente nella destinazione.
+INSERT INTO utenti_minuto_v2
+SELECT toStartOfMinute(ts) AS minuto, uniqExactState(id_utente), count()
+FROM eventi
+WHERE ts < (SELECT min(minuto) FROM utenti_minuto_v2)
+GROUP BY minuto;
+
+-- Ora la vista e la tabella grezza coincidono: 1.201.000 eventi.
+SELECT (SELECT count() FROM eventi) AS grezzi, (SELECT sum(eventi) FROM utenti_minuto_v2) AS nella_vista;
+
+-- Altri 500 eventi in ritardo per l'ora 1, con 50 utenti nuovi: la vista li fonde senza ricalcolare.
+INSERT INTO eventi
+SELECT toStartOfDay(now()) - toIntervalDay(1) + toIntervalSecond(3600 + cityHash64(number, 1) % 3600), 20000 + number % 50, 1.00
+FROM numbers(500);
+
+-- Si legge sempre con GROUP BY e -Merge: 5.000 utenti per ora, 5.150 per l'ora 1.
+SELECT toStartOfHour(minuto) AS ora, uniqExactMerge(utenti) AS utenti_unici, sum(eventi) AS eventi
+FROM utenti_minuto_v2
+GROUP BY ora
+ORDER BY ora;
 ```
 
-La dashboard legge da `mv_funnel_hourly` con `uniqMerge(unique_users_state)`, con risultato in &lt;100ms su qualsiasi volume.
+Il livello torna da 189.705 a 5.000, quasi quaranta volte meno. Il totale della vista coincide con la tabella grezza, 1.201.000 eventi su 1.201.000, e l'ora 1 sale da 5.000 a 5.150 utenti con l'arrivo degli eventi in ritardo, senza nessun ricalcolo.
 
-## Le rettifiche tardive: i late-arriving events
+Gli eventi in ritardo non sono il problema che sembrano. Ogni evento cade nel minuto che gli spetta e lo stato di quel minuto si aggiorna al merge. Il limite sta altrove.
 
-In un sistema reale gli eventi possono arrivare in ritardo per dispositivi offline o latenza di rete. Se hai già emesso l'aggregazione per un minuto e dopo arriva un evento con tempo precedente, hai tre strade. Puoi ignorarlo: accetti un errore minimo con massima semplicità. Puoi riemettere con retraction su sistemi esterni come `Flink` o `Kafka Streams`, perché ClickHouse non supporta update nativi in vista. Oppure puoi correggere in differita su tabella separata con merge orario, accettando un errore temporaneo per tenere la velocità.
+La vista si cancella e si ricrea senza toccare la sorgente, con `DROP VIEW`. Gli stati sbagliati già scritti si ricostruiscono rileggendo la tabella grezza: una scansione, qui di 1,2 milioni di righe. Ma solo se la tabella grezza esiste ancora. Se ha un `TTL` più corto della vista, quello che è scaduto non si recupera.
 
-Verdetto: ignora i ritardi dove un errore sotto l'uno per cento è accettabile, correggi in differita per reporting critici e usa retraction esterne solo dove serve precisione immediata.
+## Quando il risultato dipende da altro
 
-## Gli errori più comuni
+La vista incrementale vede solo il blocco che entra. Che cosa succede se la misura dipende da un'altra tabella, per esempio dal segmento di ogni utente, e il segmento cambia? Gli strumenti sono due: la vista incrementale con un join, e la vista refreshable, che rilancia a intervalli la query su tutti i dati.
 
-L'errore più comune è usare le viste come etichetta invece che come processo, con grafici senza decisione e metriche senza `baseline`. A livello tecnico evita medie globali premature che nascondono segmenti opposti, tracking con duplicati e timezone incoerenti e scambi tra correlazione e causalità. Ogni analisi porta definizione esplicita, confronto per segmento e verifica contro periodo precedente o controllo.
+Per un'aggregazione su una sola tabella la incrementale scala meglio ed è la scelta di partenza. La documentazione indica la refreshable per le query che l'approccio incrementale non sa esprimere, come i join complessi, quando si può tollerare una freschezza minore.
 
-Riferimenti: ClickHouse (2024), Materialized Views su clickhouse.com/docs; Akidau e colleghi (2015), The Dataflow Model su VLDB 2015.
+Il criterio: **incrementale se il risultato dipende solo dalle righe appena inserite, refreshable se dipende da altre tabelle o dall'insieme dei dati.**
 
-## Il Dataflow Model al lavoro
+```sql
+CREATE TABLE segmenti
+(
+    id_utente UInt32,
+    segmento LowCardinality(String)
+)
+ENGINE = MergeTree
+ORDER BY id_utente;
 
-Akidau e colleghi pubblicano nel 2015 il Dataflow Model su VLDB per unificare batch e streaming con finestre, watermark ed eventi tardivi. Il modello introduce retraction e correzione differita come primitive esplicite per aggregazioni continue. ClickHouse riprende lo stesso compromesso con viste a strati e motori aggreganti che privilegiano velocità con correzioni pianificate. Il criterio resta quello: pre-aggrega per le letture dominanti e dichiara prima come tratti ritardi e ridefinizioni.
+INSERT INTO segmenti SELECT number, if(number < 2500, 'nuovo', 'fedele') FROM numbers(5000);
 
-## Domande per ripassare
+-- Incrementale: il join con segmenti è valutato quando i dati entrano.
+CREATE TABLE eventi_segmento_inc
+(
+    ora DateTime,
+    segmento LowCardinality(String),
+    eventi UInt64
+)
+ENGINE = SummingMergeTree
+ORDER BY (ora, segmento);
 
-1. Quale granularità pre-aggreghi al primo strato e perché?
-2. Quando usi deduplicazione utenti e quando basta un conteggio?
-3. Come tratti eventi tardivi senza rompere le dashboard?
-4. Quale `ORDER BY` rende veloce la lettura dell'ultimo strato?
+CREATE MATERIALIZED VIEW eventi_segmento_inc_mv TO eventi_segmento_inc AS
+SELECT toStartOfHour(e.ts) AS ora, s.segmento AS segmento, count() AS eventi
+FROM eventi AS e
+INNER JOIN segmenti AS s ON e.id_utente = s.id_utente
+GROUP BY ora, segmento;
+
+INSERT INTO eventi SELECT * FROM carica_ora(ora = 4);
+
+-- Refreshable: rilegge tutto, con i segmenti del momento.
+CREATE MATERIALIZED VIEW eventi_segmento_rmv REFRESH EVERY 1 HOUR ENGINE = MergeTree ORDER BY (ora, segmento) AS
+SELECT toStartOfHour(e.ts) AS ora, s.segmento AS segmento, count() AS eventi
+FROM eventi AS e
+INNER JOIN segmenti AS s ON e.id_utente = s.id_utente
+GROUP BY ora, segmento;
+
+SYSTEM WAIT VIEW eventi_segmento_rmv;
+
+-- L'ora 4 prima del cambio: le due strade coincidono, 150.057 e 149.943.
+SELECT 'incrementale' AS vista, segmento, sum(eventi) AS eventi
+FROM eventi_segmento_inc
+WHERE ora = toStartOfDay(now()) - toIntervalDay(1) + toIntervalHour(4)
+GROUP BY segmento
+UNION ALL
+SELECT 'refreshable', segmento, sum(eventi)
+FROM eventi_segmento_rmv
+WHERE ora = toStartOfDay(now()) - toIntervalDay(1) + toIntervalHour(4)
+GROUP BY segmento
+ORDER BY 1, 2;
+
+-- Mille utenti passano da «nuovo» a «fedele».
+ALTER TABLE segmenti UPDATE segmento = 'fedele' WHERE id_utente < 1000 SETTINGS mutations_sync = 1;
+SYSTEM REFRESH VIEW eventi_segmento_rmv;
+SYSTEM WAIT VIEW eventi_segmento_rmv;
+
+-- L'ora 4 dopo il cambio: la refreshable segue i segmenti di oggi, l'incrementale no.
+SELECT 'incrementale' AS vista, segmento, sum(eventi) AS eventi
+FROM eventi_segmento_inc
+WHERE ora = toStartOfDay(now()) - toIntervalDay(1) + toIntervalHour(4)
+GROUP BY segmento
+UNION ALL
+SELECT 'refreshable', segmento, sum(eventi)
+FROM eventi_segmento_rmv
+WHERE ora = toStartOfDay(now()) - toIntervalDay(1) + toIntervalHour(4)
+GROUP BY segmento
+ORDER BY 1, 2;
+
+-- Quanto rilegge un giro di refresh: 1.506.500 righe.
+SELECT read_rows, total_rows FROM system.view_refreshes WHERE view = 'eventi_segmento_rmv';
+```
+
+Prima del cambio le due strade danno lo stesso risultato. Dopo, la refreshable dice 209.916 eventi «fedele» e 90.084 «nuovo», mentre l'incrementale è rimasta a 149.943 e 150.057. Entrambe sono corrette: una risponde «com'era l'utente quando è entrato l'evento», l'altra «com'è oggi».
+
+La confusione comune è scegliere la refreshable pensando a una incrementale più lenta ma uguale. Non lo è: ogni giro rilegge tutto, qui 1.506.500 righe, mentre l'incrementale tocca solo il blocco inserito. A un insert al secondo e un refresh al minuto la differenza è il costo che porta a spegnere la vista. All'opposto, chi si aspetta che un join in una vista incrementale segua la dimensione resta con numeri vecchi per sempre: la documentazione lo descrive come un join con uno snapshot della dimensione.
+
+Questo articolo non copre le viste a cascata e il Kafka engine. Non copre nemmeno `uniqExact` sui grandi insiemi: lo stato cresce con i valori distinti, e lì `uniq` o `uniqCombined` sono scelte da misurare. I numeri vengono da dati sintetici.
+
+## Prima di andare in produzione
+
+1. Ogni misura della vista è additiva, o è memorizzata come stato di aggregazione?
+2. Ogni lettura della destinazione usa `GROUP BY` e la funzione `-Merge`?
+3. Come e quando si riempie lo storico, e con quale confine rispetto al primo dato già presente nella vista?
+4. Il totale della vista coincide con la query diretta sulla sorgente, sulla stessa finestra chiusa?
+5. Le dimensioni usate dalla vista devono restare quelle di quando l'evento è entrato, o seguire quelle di oggi?
+
+La metrica che separa chi ottimizza da chi tira a indovinare è lo scostamento tra la vista e la query diretta sulla sorgente, sulla stessa finestra chiusa. Il tempo di risposta della dashboard non lo rivela: una vista che somma male risponde in fretta lo stesso.
+
+Di tutto l'articolo, una scelta conta più delle altre: gli stati di aggregazione al posto dei valori finali. Le altre scelte cambiano il tempo di una query, questa cambia la risposta. Nelle prove sono 189.705 utenti contro 5.000.
