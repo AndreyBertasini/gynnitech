@@ -9,91 +9,237 @@ headerImage: /course-headers/real-time-analytics-cdc-pattern-ginnytech-ad.webp
 headerImageAlt: >-
   CDC Pattern - immagine ufficiale della lezione su GinnyTech, creata da AD
 difficulty: advanced
-duration: 22 min
+duration: 14 min
 prerequisites:
   - real-time-analytics/clickhouse-fondamenti
 learningObjectives:
-  - Configurare Debezium per pubblicare insert, update e delete come eventi ordinati
-  - Gestire update fuori ordine e delete in ClickHouse con ReplacingMergeTree e FINAL
-  - Valutare quando il CDC batte il batch ETL e quando resta più costoso
+  - Spiegare perché ReplacingMergeTree deduplica ai merge e quindi serve FINAL in lettura
+  - Scegliere la sorting key e il flag di cancellazione per replicare una tabella operativa senza ALTER DELETE
+  - Scegliere tra ReplacingMergeTree e CollapsingMergeTree in base a come si legge il dato e all'ordine d'arrivo
+formato: "articolo"
 binario: "ml-tabellare"
 autore: "Hermes"
 controllatoDa: "Argo"
 autorizzatoDa: "Giano"
 draft: false
-dateModified: 2026-09-07
+dateModified: 2026-10-17
 ---
+
 # Change data capture (CDC)
 
-Il binario di questa lezione è **ml-tabellare**, ma la materia arriva da un posto inatteso: il log di scrittura di un database transazionale. Il CDC trasforma ogni modifica di quel database in un evento ordinato, pronto per l'analitica in tempo reale.
+La dashboard dei ricavi mostra 15.052.864 euro. Il database degli ordini ne conta 9.025.122. La tabella in ClickHouse è alimentata dal CDC, le query usano `FINAL` e le cancellazioni sono state applicate: il numero resta sbagliato del 67 per cento.
 
-## Il concetto in breve
+## Centocinquantamila righe per novantamila ordini
 
-Il Change Data Capture legge il log transazionale e pubblica ogni inserimento, aggiornamento e cancellazione come evento ordinato verso Kafka e ClickHouse. È il ponte discreto tra il mondo OLTP e il mondo analitico.
+È un caso ricostruito: centomila ordini e 185.000 eventi di modifica, generati dal codice di questa pagina. Un decimo degli ordini viene cancellato, quindi nella sorgente ne restano 90.000. I numeri sono l'output di chDB 4.4.0, cioè ClickHouse 26.9, e li ottenete rieseguendo i blocchi `sql` nell'ordine in cui compaiono.
 
-## Come si mette in opera
+La tabella è quella che nasce dai tutorial sul CDC: un motore `ReplacingMergeTree` con una colonna di versione, che «tiene l'ultima versione di ogni riga». Il team ha fatto ciò che la documentazione suggerisce: `FINAL` in lettura e `ALTER TABLE … DELETE` per le cancellazioni. Il risultato sono 150.000 righe e 15.052.863,68 euro, contro 90.000 ordini e 9.025.122,29 nella sorgente.
 
-Ecco la sequenza che porta dal database operativo alla vista analitica.
+Il CDC ha senso quando il database operativo deve alimentare l'analitica quasi in tempo reale. Se una latenza di ore è accettabile, un ETL batch è più semplice e costa meno. Non serve invece quando i dati nascono già come eventi, come clickstream e log: vanno direttamente su Kafka, senza passare dal log transazionale. Qui la scelta è fatta, e il problema è il modo in cui si legge il risultato.
 
-1. Abilita il log logico su `Postgres` o `MySQL` e verifica che ogni modifica sia ordinata e replayabile.
-2. Collega `Debezium` come replica e pubblica gli eventi su topic dedicati per tabella.
-3. Applica deduplicazione e gestione di update fuori ordine e delete con motori versionati.
-4. Carica in ClickHouse con `ReplacingMergeTree` e verifica con letture di controllo.
-5. Dichiara `owner`, monitoraggio del lag e procedura di replay prima della go-live.
+La causa non è il CDC e non è `FINAL`. `ReplacingMergeTree` considera duplicate solo le righe con la stessa chiave `ORDER BY`, e ne toglie i duplicati quando i merge lo decidono.
 
-## Come funziona CDC
+## Cosa deduplica ReplacingMergeTree
 
-Il `CDC` legge il transaction log del database (il `binlog` di `MySQL`, il `WAL` di `PostgreSQL`) e produce un evento per ogni modifica:
+Tre fatti, in questa sequenza.
 
-```text
-INSERT → evento {op: "c", after: {id: 123, name: "Mario", ...}}
-UPDATE → evento {op: "u", before: {...}, after: {id: 123, name: "Maria", ...}}
-DELETE → evento {op: "d", before: {id: 123, ...}}
-```
+Il primo: un evento CDC porta la riga com'è dopo la modifica, una versione crescente e l'indicazione che la riga è stata cancellata. Debezium emette per ogni modifica un evento con il tipo di operazione, `c`, `u` o `d`, e le immagini prima e dopo; la versione si ricava dalla posizione nel log del database, per esempio l'LSN su PostgreSQL.
 
-`Debezium` è lo standard de-facto open source per il `CDC`. Si connette al database come replica, legge il log e scrive i cambiamenti su `Kafka`.
+Il secondo: `ReplacingMergeTree(versione, eliminato)` considera duplicate le righe con gli stessi valori delle colonne `ORDER BY`. Al merge tiene quella con la versione più alta, e se è marcata come eliminata la riga sparisce dal risultato. La documentazione lo chiama «eventual correctness»: la deduplica non è garantita, e non bisogna affidarvisi.
 
-## L'architettura tipica
+Il terzo: prima del merge le versioni coesistono, e quando avvenga lo decide il server. In lettura `FINAL` completa la deduplica mentre la query gira. Ha un costo: la documentazione indica un sovraccarico tra il 21% e il 550% a seconda dei dati, più contenuto se il filtro usa le colonne della chiave.
 
-```text
-PostgreSQL ──► Debezium ──► Kafka ──► Kafka Connect Sink ──► ClickHouse
-                                    ──► Stream processor (ksqlDB/Flink) ──► Alerting
-```
+**`ReplacingMergeTree` deduplica ai merge, non alla lettura: la tabella contiene versioni vecchie e righe cancellate finché non le togliete voi, nella query, con `FINAL`.**
 
-In ClickHouse si usa il motore `ReplacingMergeTree` con `version` per gestire gli `UPDATE` senza deduplicazione istantanea:
+## Tre errori che si leggono nei totali
+
+Questo è il codice che produce il numero sbagliato. Il flusso CDC è una vista che genera un evento per modifica: ogni ordine nasce «nuovo», metà diventa «pagato», un quarto «spedito», un decimo viene cancellato. Gli eventi arrivano da due consumer, fuori ordine, ma la versione resta crescente: è quella a dire quale riga è la più recente, non l'ordine in cui è stata inserita.
 
 ```sql
-CREATE TABLE customers (
-    id UInt64,
-    name String,
-    email String,
-    updated_at DateTime,
-    _version UInt64
-) ENGINE = ReplacingMergeTree(_version)
-ORDER BY id;
+-- Il flusso CDC: un evento per ogni modifica, con versione e flag di cancellazione.
+-- La tupla è (passo, stato, eliminato).
+CREATE VIEW flusso_cdc AS
+SELECT id_ordine, evento.2 AS stato, importo, id_ordine * 10 + evento.1 AS _versione, toUInt8(evento.3) AS _eliminato
+FROM
+(
+    SELECT
+        number + 1 AS id_ordine,
+        round((cityHash64(number) % 20000) / 100, 2) AS importo,
+        arrayJoin(arrayConcat(
+            [(1, 'nuovo', 0)],
+            if(id_ordine % 2 = 0, [(2, 'pagato', 0)], []),
+            if(id_ordine % 4 = 0, [(3, 'spedito', 0)], []),
+            if(id_ordine % 10 = 0, [(4, 'spedito', 1)], [])
+        )) AS evento
+    FROM numbers(100000)
+);
+
+-- Lo stato vero del database operativo: 90.000 ordini, 9.025.122,29 di fatturato.
+CREATE TABLE ordini_sorgente
+(
+    id_ordine UInt64,
+    stato LowCardinality(String),
+    importo Decimal(10, 2)
+)
+ENGINE = MergeTree
+ORDER BY id_ordine;
+
+INSERT INTO ordini_sorgente
+SELECT
+    number + 1,
+    multiIf((number + 1) % 4 = 0, 'spedito', (number + 1) % 2 = 0, 'pagato', 'nuovo'),
+    round((cityHash64(number) % 20000) / 100, 2)
+FROM numbers(100000)
+WHERE (number + 1) % 10 != 0;
+
+SELECT count() AS ordini, sum(importo) AS fatturato FROM ordini_sorgente;
+
+CREATE TABLE ordini_v1
+(
+    id_ordine UInt64,
+    stato String,
+    importo Decimal(10, 2),
+    _versione UInt64,
+    _eliminato UInt8
+)
+ENGINE = ReplacingMergeTree(_versione)
+ORDER BY (id_ordine, stato);
+
+-- Gli eventi arrivano fuori ordine: prima gli ultimi stati, poi i primi.
+INSERT INTO ordini_v1 SELECT * FROM flusso_cdc WHERE _eliminato = 0 AND _versione % 10 = 3;
+INSERT INTO ordini_v1 SELECT * FROM flusso_cdc WHERE _eliminato = 0 AND _versione % 10 < 3;
+
+-- Anche con FINAL le versioni non collassano: 175.000 righe e 17.547.413,29.
+SELECT count() AS righe, sum(importo) AS fatturato FROM ordini_v1 FINAL;
+
+-- Le cancellazioni con ALTER DELETE, una mutation: ancora 150.000 righe e 15.052.863,68.
+ALTER TABLE ordini_v1 DELETE WHERE id_ordine IN (SELECT id_ordine FROM flusso_cdc WHERE _eliminato = 1) SETTINGS mutations_sync = 1;
+
+SELECT count() AS righe, sum(importo) AS fatturato FROM ordini_v1 FINAL;
 ```
 
-`ReplacingMergeTree` mantiene l'ultima versione di ogni riga in base all'`ORDER BY`. La deduplicazione avviene durante i merge in background, quindi non è istantanea. Per query accurate aggiungi `FINAL`: `SELECT * FROM customers FINAL WHERE id = 123`.
+### Una colonna che cambia nella chiave
 
-## Quando serve CDC, e quando no
+Sembra ragionevole: `stato` descrive l'ordine, e una chiave `(id_ordine, stato)` pare più completa del solo identificativo. Ma due versioni con stato diverso hanno chiavi diverse e non sono duplicate, quindi nessuna collassa mai. Qui sono 175.000 righe e 17.547.413,29 euro anche con `FINAL`, quasi il doppio della sorgente. Questo è l'errore peggiore perché `FINAL` sembra funzionare e il motore non segnala nulla. La documentazione avverte che `ReplacingMergeTree` non può aggiornare i valori della chiave.
 
-Il `CDC` ha senso quando hai un database operativo, per esempio ordini o utenti, e vuoi dati near-real-time nel warehouse senza `ETL` pesanti. Non serve invece quando i dati sono già eventi nativi come clickstream o log, perché vanno direttamente in `Kafka` senza passare dal transaction log. Allo stesso modo, quando una latenza di ore è accettabile, il `batch` ETL resta più semplice e meno costoso.
+### Leggere senza FINAL
 
-Verdetto: usa `CDC` quando il database operativo deve alimentare l'analitica in near real-time, resta sul `batch` quando ore di ritardo sono accettabili e vai diretto su `Kafka` per eventi nativi.
+Sembra ragionevole: il motore «tiene l'ultima versione». Lo fa ai merge, non alle letture. Nel blocco della sezione successiva la stessa tabella con la chiave giusta restituisce 130.000 righe e 13.033.869,23 euro senza `FINAL`, e 90.000 righe e 9.025.122,29 con. I 185.000 eventi sono già 130.000 all'insert, perché ClickHouse unisce le versioni con la stessa chiave che cadono nello stesso blocco (`optimize_on_insert`). Il resto spetta ai merge, a un'ora che non decidete.
 
-## Gli errori comuni
+### Le cancellazioni con ALTER DELETE
 
-Il primo errore è fidarsi di export periodici senza gestione di update e delete, con dashboard che mostrano ore vecchie senza dichiararlo. Il secondo è ignorare fuori ordine, replay e cambi di schema, che trasformano la pipeline in fonte di incoerenza. Il terzo è non distinguere creazione da aggiornamento a valle, con conteggi gonfiati e rimborsi trattati come nuovi ordini.
+Sembra ragionevole: arriva un evento di cancellazione, si cancella. Ma in ClickHouse è una mutation, cioè una riscrittura delle parti che contengono le righe toccate. La documentazione la descrive come un'operazione pesante da usare con parsimonia, e per le correzioni indica motori come `ReplacingMergeTree`. Con una mutation per evento, il flusso CDC diventa un flusso di riscritture.
 
-Riferimenti: Debezium Documentation (2024), Architettura Debezium su debezium.io; Zalando Engineering Blog (2021), From Nightly ETL to Real-Time CDC.
+## Chiave stabile, versione, flag
 
-## Il caso Zalando: da ETL notturno a CDC
+I criteri, in ordine di priorità:
 
-Zalando descrive nel 2021 la migrazione da export notturni a CDC con Debezium e Kafka per ordini, pagamenti e rimborsi. Il log transazionale diventa la sorgente ordinata che alimenta warehouse e viste operative senza ETL pesanti. La disciplina che rende il caso utile è esplicita: eventi idempotenti, gestione di update e delete e consumatori che distinguono creazione da aggiornamento. Il guadagno non è solo latenza ma coerenza tra operativo e analitico sotto replay e cambi di schema.
+1. La chiave `ORDER BY` è l'identità della riga: la chiave primaria della tabella operativa. Nessuna colonna che si aggiorna ne fa parte.
+2. La versione cresce e viene dalla sorgente, per esempio dalla posizione nel log. Non è l'orario di arrivo.
+3. La cancellazione è un flag nella stessa tabella: `ReplacingMergeTree(versione, eliminato)`. L'evento di cancellazione si inserisce come qualsiasi altro, con una versione più alta.
+4. Si legge con `FINAL`, filtrando sulle colonne della chiave dove si può. Se la partizione usa solo colonne della chiave, ClickHouse evita da solo di fondere tra partizioni diverse durante `FINAL`.
+5. Si riconcilia con la sorgente: stesso numero di righe e stesso totale.
 
-## Domande per ripassare
+La tabella corretta, con gli stessi eventi:
 
-1. Quale log abiliti per catturare insert, update e delete senza perdere ordine?
-2. Come gestisci update fuori ordine e delete in ClickHouse?
-3. Quando CDC batte il batch ETL e quando resta più costoso?
-4. Quale controllo fai prima di fidarti di una vista alimentata da CDC?
+```sql
+CREATE TABLE ordini_v2
+(
+    id_ordine UInt64,
+    stato LowCardinality(String),
+    importo Decimal(10, 2),
+    _versione UInt64,
+    _eliminato UInt8
+)
+ENGINE = ReplacingMergeTree(_versione, _eliminato)
+ORDER BY id_ordine;
+
+-- Si fermano i merge per vedere la tabella com'è prima che il server la ripulisca.
+SYSTEM STOP MERGES ordini_v2;
+
+INSERT INTO ordini_v2 SELECT * FROM flusso_cdc WHERE _versione % 10 >= 3;
+INSERT INTO ordini_v2 SELECT * FROM flusso_cdc WHERE _versione % 10 < 3;
+
+-- Senza FINAL: 130.000 righe e 13.033.869,23, con versioni vecchie e ordini cancellati.
+SELECT count() AS righe, sum(importo) AS fatturato FROM ordini_v2;
+
+-- Con FINAL: 90.000 righe e 9.025.122,29, come la sorgente.
+SELECT count() AS righe, sum(importo) AS fatturato FROM ordini_v2 FINAL;
+
+-- La riconciliazione con la sorgente: due zeri.
+SELECT
+    (SELECT count() FROM ordini_v2 FINAL) - (SELECT count() FROM ordini_sorgente) AS differenza_ordini,
+    (SELECT sum(importo) FROM ordini_v2 FINAL) - (SELECT sum(importo) FROM ordini_sorgente) AS scostamento;
+
+-- Con un filtro sulla chiave FINAL legge pochi granuli: 16.384 righe su 130.000.
+SELECT stato, importo FROM ordini_v2 FINAL WHERE id_ordine = 4242;
+```
+
+Dalle 150.000 righe e dai 15.052.863,68 euro della tabella sbagliata si arriva a 90.000 righe e 9.025.122,29, identici alla sorgente. Le cancellazioni sono diventate righe come le altre, senza nessuna mutation.
+
+La lettura è reversibile: `FINAL` si può sostituire con un'altra forma di query senza toccare i dati. La chiave no: cambiarla vuol dire tabella nuova e ricarica. E per ricaricare serve ancora il flusso, perché dopo i merge le versioni vecchie non ci sono più. Conservate gli eventi, per esempio nel topic Kafka con una retention adeguata, oppure una copia della sorgente.
+
+## Replacing o Collapsing
+
+`ReplacingMergeTree` risponde a una domanda sola: qual è la riga adesso. Se servono invece somme e conteggi sulle variazioni, per esempio quanti ordini sono passati da «nuovo» a «pagato», c'è la famiglia Collapsing. Ogni modifica si scrive come una riga con segno meno uno, che annulla la precedente, e una con segno più uno, che porta il nuovo stato. Debezium emette già immagine prima e dopo: sembra fatto apposta.
+
+Il criterio: **ReplacingMergeTree se vi serve la riga com'è adesso, CollapsingMergeTree se vi servono somme sulle variazioni e potete garantire l'ordine d'arrivo.**
+
+```sql
+CREATE TABLE ordini_collapsing
+(
+    id_ordine UInt64,
+    stato String,
+    segno Int8
+)
+ENGINE = CollapsingMergeTree(segno)
+ORDER BY id_ordine;
+
+CREATE TABLE ordini_versioned
+(
+    id_ordine UInt64,
+    stato String,
+    segno Int8,
+    versione UInt64
+)
+ENGINE = VersionedCollapsingMergeTree(segno, versione)
+ORDER BY id_ordine;
+
+SYSTEM STOP MERGES ordini_collapsing;
+SYSTEM STOP MERGES ordini_versioned;
+
+-- L'ordine 1 passa da «nuovo» a «pagato»: immagine prima con segno -1, immagine dopo con +1.
+-- L'aggiornamento arriva prima della riga «nuovo» originale.
+INSERT INTO ordini_collapsing VALUES (1, 'nuovo', -1), (1, 'pagato', 1);
+INSERT INTO ordini_collapsing VALUES (1, 'nuovo', 1);
+
+INSERT INTO ordini_versioned VALUES (1, 'nuovo', -1, 1), (1, 'pagato', 1, 2);
+INSERT INTO ordini_versioned VALUES (1, 'nuovo', 1, 1);
+
+-- CollapsingMergeTree con FINAL: «nuovo», sbagliato.
+SELECT id_ordine, stato FROM ordini_collapsing FINAL;
+
+-- VersionedCollapsingMergeTree con FINAL: «pagato».
+SELECT id_ordine, stato FROM ordini_versioned FINAL;
+
+-- La somma con segno non dipende dall'ordine d'arrivo: resta solo «pagato».
+SELECT stato, sum(segno) AS ordini FROM ordini_collapsing GROUP BY stato HAVING ordini != 0;
+```
+
+Con Collapsing le query cambiano forma: si scrive `sum(valore * segno)` e si scartano i gruppi con `HAVING sum(segno) > 0`, invece di leggere una riga. È il prezzo della semplicità in scrittura.
+
+La confusione comune è scegliere Collapsing perché il CDC emette immagine prima e dopo, e poi leggere lo stato con `FINAL`. Se l'aggiornamento arriva prima della riga originale, `FINAL` restituisce «nuovo» al posto di «pagato», senza errori. La somma con segno resta corretta, perché la somma non dipende dall'ordine. `VersionedCollapsingMergeTree` dà la riga giusta anche con `FINAL`, ma chiede la colonna di versione, cioè la stessa cosa che `ReplacingMergeTree` chiedeva già, con una complessità maggiore: la documentazione la descrive come più difficile da implementare.
+
+Questo articolo non copre la configurazione di Debezium e di Kafka Connect, né i cambi di schema della sorgente. Il flusso è sintetico e le versioni sono costruite: nella realtà vengono dal log.
+
+## Prima di andare in produzione
+
+1. La chiave `ORDER BY` coincide con la chiave primaria della tabella operativa, e nessuna delle sue colonne cambia mai?
+2. Da dove viene la versione, e cresce anche quando gli eventi arrivano fuori ordine?
+3. Le cancellazioni arrivano come righe con un flag, o come `ALTER TABLE … DELETE`?
+4. Ogni query che vuole lo stato corrente usa `FINAL`, con un filtro sulla chiave dove possibile?
+5. Quanto differiscono righe e totali dalla sorgente, a una versione fissa?
+
+La metrica che separa chi ottimizza da chi tira a indovinare è lo scostamento di righe e totali tra la tabella letta con `FINAL` e la sorgente, a una versione fissa, insieme al ritardo del CDC. Il numero di righe della tabella grezza non dice nulla: dipende da quando passano i merge.
+
+Di tutto l'articolo, una scelta conta più delle altre: la chiave `ORDER BY`. Le altre scelte cambiano costo e velocità; questa decide se il numero è giusto. Nelle prove sono 175.000 righe per 90.000 ordini con la chiave sbagliata, e 90.000 con quella giusta.

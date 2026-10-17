@@ -8,6 +8,7 @@ Piano: `docs/superpowers/plans/2026-10-16-articoli-clickhouse.md`. Prompt: `docs
 | `real-time-analytics/clickhouse-ottimizzazione` | Insert in batch e parti: perché ClickHouse risponde «Too many parts» | ~1.420 | 4 |
 | `data-warehousing/clickhouse` | ClickHouse accanto al warehouse: cosa replicare e come modellarlo | ~1.380 | 3 |
 | `real-time-analytics/materialized-views` | Materialized view incrementali: stati di aggregazione, backfill, vista refreshable | ~1.370 | 3 |
+| `real-time-analytics/cdc-pattern` | ReplacingMergeTree per il CDC: leggere l'ultimo stato di ogni riga | ~1.360 | 3 |
 
 Fonte della documentazione: repository `ClickHouse/clickhouse-docs`, letto via Context7 il 2026-10-16. I percorsi sotto sono file di quel repository.
 
@@ -151,3 +152,36 @@ I dati sono relativi a `toStartOfDay(now())`: i conteggi sono ripetibili nello s
 - «Lo stato di `uniqExact` cresce con i valori distinti» e il rimando a `uniq`/`uniqCombined`: conoscenza generale, non cercata nella documentazione.
 - «Se la tabella grezza ha un TTL più corto della vista, quello che è scaduto non si recupera»: conseguenza logica, non misurata.
 - «A un insert al secondo e un refresh al minuto la differenza è il costo che porta a spegnere la vista»: giudizio, non misura.
+
+## real-time-analytics/cdc-pattern
+
+**Titolo, URL e prerequisiti invariati.** Tolti dal vecchio testo: il caso Zalando («From Nightly ETL to Real-Time CDC», 2021) e la riga «Riferimenti: Debezium Documentation (2024)…» perché non verificati (nessun link, nessuna lettura della fonte); il paragrafo «errori comuni» generico; lo schema Kafka Connect Sink → ClickHouse e `ReplacingMergeTree(_version)` senza flag di cancellazione. Gli obiettivi di apprendimento sono stati riscritti: la configurazione di Debezium (obiettivo 1) non è più nella lezione, che lo dichiara; «quando il CDC batte il batch ETL» resta come giudizio in due frasi.
+
+**Caso:** ricostruito (dichiarato). 100.000 ordini, 185.000 eventi, 10% cancellati; versione = `id_ordine * 10 + passo`.
+
+| Numero nel testo | Fonte |
+|---|---|
+| 90.000 ordini, 9.025.122,29 | `ordini_sorgente` |
+| 175.000 righe e 17.547.413,29 con `FINAL` e chiave `(id_ordine, stato)` | `ordini_v1` |
+| 150.000 righe e 15.052.863,68 dopo `ALTER … DELETE` | `ordini_v1` dopo la mutation |
+| «sbagliato del 67 per cento» | 15.052.863,68 / 9.025.122,29 ≈ 1,668 |
+| 130.000 righe e 13.033.869,23 senza `FINAL` | `ordini_v2` con merge fermi |
+| 185.000 eventi → 130.000 righe già all'insert | `optimize_on_insert = 1` (verificato in `system.settings`); 185.000 = 100.000 + 50.000 + 25.000 + 10.000 |
+| 90.000 e 9.025.122,29 con `FINAL`; differenze 0 e 0 | riconciliazione con la sorgente |
+| `FINAL` con filtro sulla chiave: 16.384 righe lette | `rows_read` |
+| Collapsing con `FINAL` → «nuovo»; Versioned → «pagato»; somma con segno → «pagato» | blocco finale |
+
+Il `rows_read` di `FINAL` senza filtro (179.152 su 130.000 righe) non è citato: è più alto della tabella e non l'ho spiegato.
+
+**Prova a parte, non nella pagina:** `SYSTEM STOP MERGES` blocca anche le mutation: un `ALTER … DELETE … mutations_sync = 1` su una tabella con i merge fermi non termina mai. Per questo `ordini_v1` non ferma i merge (le chiavi sbagliate non collassano comunque).
+
+**Fatti verificati sulla documentazione:**
+- Deduplica solo ai merge, «eventual correctness», `FINAL` per leggere dati deduplicati; sovraccarico di `FINAL` tra il 21% e il 550%; filtro sulle colonne della chiave lo riduce; `ReplacingMergeTree` non può aggiornare i valori della chiave; colonna `Deleted` per le cancellazioni logiche: `docs/guides/developer/replacing-merge-tree.md`, `docs/managing-data/updating-data/overview.mdx`.
+- Mutation: riscrive le parti con le righe toccate, I/O pesante, da usare con parsimonia; alternative `ReplacingMergeTree`/`CollapsingMergeTree`: `docs/best-practices/_snippets/_avoid_mutations.md`, `docs/managing-data/deleting-data/delete_mutations.mdx`.
+- Collapsing più complesso di Replacing; `VersionedCollapsingMergeTree` per inserimenti da più thread e fuori ordine; query con `sum(x * Sign)` e `HAVING sum(Sign) > 0`: `docs/guides/developer/deduplication.md`, `docs/managing-data/updating-data/overview.mdx`.
+- `do_not_merge_across_partitions_select_final` derivato automaticamente se la partizione usa solo colonne della chiave: `docs/whats-new/changelog/2023.md`.
+
+**Non verificati:**
+- Che Debezium emetta `op` = `c`/`u`/`d` con immagini prima e dopo e che la versione derivi dall'LSN (PostgreSQL): conoscenza generale, non cercata nella documentazione di Debezium (non raggiungibile).
+- «Non serve quando i dati nascono già come eventi (clickstream, log)» e «un ETL batch è più semplice se una latenza di ore è accettabile»: giudizi mantenuti dal vecchio testo, non misurati.
+- «Conservate gli eventi nel topic Kafka con una retention adeguata»: consiglio, non dimostrato nella pagina.
