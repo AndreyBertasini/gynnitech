@@ -6,6 +6,7 @@ Piano: `docs/superpowers/plans/2026-10-16-articoli-clickhouse.md`. Prompt: `docs
 |---|---|---|---|
 | `real-time-analytics/clickhouse-fondamenti` | La sorting key di una tabella MergeTree | ~1.350 | 3 |
 | `real-time-analytics/clickhouse-ottimizzazione` | Insert in batch e parti: perché ClickHouse risponde «Too many parts» | ~1.420 | 4 |
+| `data-warehousing/clickhouse` | ClickHouse accanto al warehouse: cosa replicare e come modellarlo | ~1.380 | 3 |
 
 Fonte della documentazione: repository `ClickHouse/clickhouse-docs`, letto via Context7 il 2026-10-16. I percorsi sotto sono file di quel repository.
 
@@ -47,7 +48,7 @@ Fonte della documentazione: repository `ClickHouse/clickhouse-docs`, letto via C
 
 ## real-time-analytics/clickhouse-ottimizzazione
 
-**Titolo e URL invariati** («Pattern di ingestion in tempo reale»). Non era 3s. Tolti i blocchi `xml`/`sql` del vecchio testo: contenevano impostazioni che non esistono in ClickHouse (`flush_on_async_insert`, `flush_after_inserts`, `deduplicate_key`, `active_inserts`, `queue_size` come segnali) e una query con `SAMPLE` non valida.
+**Titolo e URL invariati** («Pattern di ingestion in tempo reale»). Non era 3s. Tolti i blocchi `xml`/`sql` del vecchio testo: citavano impostazioni assenti da `system.settings` e `system.merge_tree_settings` di ClickHouse 26.9 (verificato con una query: `flush_on_async_insert`, `flush_after_inserts`, `deduplicate_key`, `active_inserts`, `queue_size`) e contenevano una query con `SAMPLE` che il server rifiuta come errore di sintassi.
 
 **Caso:** ricostruito (dichiarato). 200 producer × 1 riga/s.
 
@@ -77,3 +78,39 @@ Fonte della documentazione: repository `ClickHouse/clickhouse-docs`, letto via C
 - Il link a `clickhouse.com/docs/best-practices/selecting-an-insert-strategy` deriva dai link interni della documentazione; la sandbox non raggiunge il dominio.
 - Che i valori predefiniti di `async_insert`/`wait_for_async_insert` valgano anche nel server dell'utente: in chDB 26.9 `system.settings` riporta `async_insert = 1`; per questo gli insert «sbagliati» dichiarano `async_insert = 0`, e il testo non afferma nulla sul default di `async_insert`.
 - «Si può inserire a centomila righe al secondo, purché sia un solo insert»: riformulazione della knowledgebase («you can insert 100K rows per second but only with one big bulk INSERT statement»).
+
+## data-warehousing/clickhouse
+
+**Titolo, URL e prerequisiti invariati.** Non era 3s. Tolti: la tabella ClickHouse/Snowflake con latenze «sub-second» e compressione «da cinque a dieci volte rispetto a Parquet», la frase «il pattern è usato da Cloudflare, Uber e Spotify», il rimando a «clickhouse.com (2024)» e gli esempi SQL/Python generici (vista settimanale, z-score): nessuna di queste affermazioni era verificata o legata a ClickHouse.
+
+**Caso:** ricostruito (dichiarato). 40 schermi × 2 ricariche/min × 60 × 24 = 115.200 aggregazioni al giorno. Nessuna misura su warehouse commerciali: il testo lo dichiara.
+
+| Numero nel testo | Fonte |
+|---|---|
+| 115.200 ricariche al giorno | aritmetica del caso dichiarato |
+| 8 milioni di righe, 10.000 prodotti, 8 canali, 80 giorni, 192 celle | generatore del blocco `sql`; le 192 celle contate con una query a parte (24 ore × 8 canali) |
+| 8.010.000 righe e 33 MB letti sulla copia fedele | `rows_read=8010000 bytes_read=33367444` |
+| 100.864 righe e 1,3 MB sulla tabella larga | `rows_read=100864 bytes_read=1311232` |
+| due ordini di grandezza | 8.010.000 / 100.864 ≈ 79 |
+| scostamento 0 | query di riconciliazione |
+| una sola parte da 8 milioni di righe | `system.parts` su `ordini_v1` dopo `OPTIMIZE FINAL` |
+| `merge_with_ttl_timeout` = 14.400 s | `system.merge_tree_settings` |
+| fatturato `cat-7` 16.005.218,54 prima e dopo; dictionary 0 dopo | query `prima`/`dopo` |
+| ritenzione effettiva fino a ~120 giorni | aritmetica: partizione mensile + TTL 90 giorni con `ttl_only_drop_parts = 1` |
+
+I dati sono relativi a `toStartOfDay(now())`: i conteggi sono ripetibili nello stesso giorno e cambiano di poco solo se il giorno cambia a metà esecuzione. Il `TTL` di 90 giorni non cancella nulla (i dati hanno 80 giorni).
+
+**Fatti verificati sulla documentazione:**
+- Join più costosi di una tabella denormalizzata; denormalizzazione fortemente raccomandata per query a bassa latenza; criteri (tabelle che cambiano di rado, relazioni non molti-a-molti): `docs/best-practices/minimize_optimize_joins.md`.
+- Un join standard costruisce una tabella hash dal lato destro; le versioni recenti anticipano i filtri senza eliminare sempre il costo; `dictGet` in un `WHERE` su gran parte delle righe non usa indici: `docs/dictionary/best-practices.md`.
+- `CREATE DICTIONARY … LIFETIME … LAYOUT(HASHED_ARRAY())` (layout consigliato di default), `SYSTEM RELOAD DICTIONARY`: `docs/dictionary/index.md`, `docs/dictionary/best-practices.md`.
+- Mutation: riscrive le parti che contengono le righe corrispondenti, I/O pesante, alternative `ReplacingMergeTree`/delete leggeri/partizioni: `docs/managing-data/updating-data/overview.mdx`, `docs/best-practices/_snippets/_avoid_mutations.md`.
+- TTL applicato durante i merge, ritardo minimo 4 ore, `ttl_only_drop_parts = 1` consigliato con partizione per la stessa unità: `knowledgebase/when_is_ttl_applied.mdx`, `docs/use-cases/observability/clickstack/ttl.md`.
+- Partizioni eliminabili in modo efficiente (`DROP PARTITION`): `docs/best-practices/_snippets/_avoid_mutations.md`.
+
+**Verificato con una prova a parte:** confronto degli inode dei file prima e dopo una mutation: solo la parte che contiene la riga viene riscritta, le altre ricevono un nuovo nome ma sono collegate con hardlink. Il testo dice «riscrive la parte intera, qui da 8 milioni di righe» perché `ordini_v1` ha una sola parte.
+
+**Non verificati:**
+- Il link `clickhouse.com/docs/best-practices/minimize-optimize-joins` deriva dal nome del file `minimize_optimize_joins.md`; non l'ho aperto (dominio non raggiungibile). Lo slug potrebbe usare trattini o underscore.
+- «Quando conviene aggiungere ClickHouse accanto al warehouse»: è un giudizio dell'autore dell'articolo, non una misura.
+- Il suggerimento «passare a un motore di tabella pensato per questo» rimanda a `ReplacingMergeTree` (lezione sul CDC), non è dimostrato nella pagina.
