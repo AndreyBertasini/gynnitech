@@ -13,7 +13,7 @@ Regole di lettura:
 | `cultura-data-driven` | 1.373 | 12 min | scritta, vedi sotto |
 | `decision-making-dati` | 1.332 | 12 min | scritta, vedi sotto |
 | `okr-e-kpi` | 1.331 | 12 min | scritta, vedi sotto |
-| `framework-jtbd` | | | da fare |
+| `framework-jtbd` | 1.353 | 12 min | scritta, vedi sotto |
 | `ricerca-quantitativa` | | | da fare |
 | `interviste-profondita` | | | da fare |
 | `ciclo-deming-hadi` | | | da fare |
@@ -85,3 +85,25 @@ Regole di lettura:
 **Corretto rispetto alla lezione precedente:** «da tre a cinque Key Result» diventa «circa tre per Objective» (indicazione della guida di Google); «Google adotta gli OKR nel 1999» diventa «inizio del 2000 secondo Google, 1999 secondo altre fonti»; «60-70% è un successo» diventa «intorno al 70% come tipico». Tolti: «500K nuovi clienti», «dominare il mercato europeo» (esempi senza fonte; sostituiti dal caso dichiarato).
 
 **Non verificati / non usati:** la data esatta del corso di Grove frequentato da Doerr (1975, solo Wikipedia); il 12,5 milioni di dollari investiti da Doerr in Google (materiale editoriale del libro).
+
+## gestione-data-driven/framework-jtbd
+
+**Titolo, URL, prerequisiti invariati.** Perde i componenti «3 secondi» e il quiz. Aggiunto un obiettivo di apprendimento (sondaggio o interviste). **Superhuman passa dal caso di apertura al caso difficile:** il suo metodo (Product/Market Fit Engine) non si presenta come Jobs to be done, e il testo lo dice. L'apertura è un caso ricostruito sui clic.
+
+**Caso:** ricostruito (dichiarato), numeri di esempio.
+
+| Numero nel testo | Fonte |
+|---|---|
+| 10.000 → 13.000 clic, +30% | (13.000 − 10.000) / 10.000 = 30,0% (Python) |
+| 2.100 → 2.080 ordini | numeri di esempio; −0,95% |
+| 25 e 60 anni, trapano | esempio della lezione precedente, senza attribuzione |
+| «dal 40% al 50% dei confronti avviati» | obiettivo dichiarato come esempio |
+| 22% → circa 33% → 58%, soglia 40%, tre trimestri | fonti sotto |
+
+**Fatti verificati (solo ricerca, nessuna pagina aperta):**
+- Superhuman: primo sondaggio al 22% di «molto delusi»; restringere al gruppo che amava il prodotto portò il punteggio a circa il 33%; la roadmap divisa tra ciò che già piaceva e ciò che frenava gli altri; 58% «in tre trimestri» secondo il racconto: [First Round Review](https://review.firstround.com/how-superhuman-built-an-engine-to-find-product-market-fit/) e [blog di Superhuman](https://blog.superhuman.com/how-superhuman-built-an-engine-to-find-product-market-fit/) (il risultato riporta il racconto; nelle ricerche precedenti altre fonti dicevano «qualche trimestre» o «meno di un anno»).
+- Soglia del 40% di Sean Ellis, ricavata «confrontando circa cento startup» e considerata da lui «in parte arbitraria»: **solo fonti secondarie** (guide e blog); non ho trovato lo scritto originale. Nel testo è attribuita alle ricostruzioni.
+
+**Corretto rispetto alla lezione precedente:** «riprogetta l'onboarding intorno a quel gruppo» tolto (nessuna fonte lo conferma; il racconto parla di segmentazione e roadmap); l'intervallo «2017-2019» era già stato tolto. Walkman, iPod e streaming restano come esempio senza attribuzione; il trapano resta come esempio di segmentazione, senza la frase attribuita a Levitt.
+
+**Non verificati / non usati:** la domanda «qual è il vantaggio principale» del sondaggio di Superhuman (non confermata dalle ricerche); l'esistenza di una riprogettazione dell'onboarding; il legame tra Superhuman e il Jobs to be done come metodo dichiarato.
