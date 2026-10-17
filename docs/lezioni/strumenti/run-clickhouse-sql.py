@@ -6,6 +6,10 @@ Uso: run-clickhouse-sql.py <lezione.mdx> [--show]
 Exit 0 se ogni istruzione gira, 1 al primo errore. Con --show stampa le righe
 di risultato di SELECT/EXPLAIN/SHOW e, per ogni SELECT, rows_read e bytes_read:
 sono i numeri da copiare nel testo della lezione.
+Direttive, come commenti subito prima dell'istruzione:
+  -- ripeti: N                 esegue l'istruzione N volte (N insert separati)
+  -- errore atteso: CODICE     l'istruzione deve fallire con CODICE (es. TOO_MANY_PARTS);
+                               con "ripeti" si ferma al primo errore e stampa a quale ripetizione
 Ambiente: python3 -m venv <dir>/chvenv && <dir>/chvenv/bin/pip install chdb
 """
 import json
@@ -85,6 +89,13 @@ def senza_commenti_iniziali(istruzione):
     return re.sub(r"^(\s*(--[^\n]*(\n|$)|/\*.*?\*/))*\s*", "", istruzione, flags=re.DOTALL)
 
 
+def direttive(istruzione):
+    """Legge `-- ripeti: N` e `-- errore atteso: CODICE` tra i commenti iniziali."""
+    ripeti = re.search(r"^\s*--\s*ripeti:\s*(\d+)\s*$", istruzione, re.MULTILINE)
+    atteso = re.search(r"^\s*--\s*errore atteso:\s*([A-Z_]+)\s*$", istruzione, re.MULTILINE)
+    return (int(ripeti.group(1)) if ripeti else 1), (atteso.group(1) if atteso else None)
+
+
 def main(argv):
     mostra = "--show" in argv
     percorsi = [a for a in argv[1:] if not a.startswith("--")]
@@ -104,12 +115,27 @@ def main(argv):
     for riga, istruzione in lista:
         tipo = senza_commenti_iniziali(istruzione).lower()
         lettura = tipo.startswith(LETTURE)
-        try:
-            risultato = s.query(istruzione, "JSON" if lettura else "TabSeparated")
-        except Exception as errore:  # chDB solleva eccezioni generiche con il messaggio del server
-            print(f"ERR L{riga}: {str(errore).strip().splitlines()[0]}")
+        ripetizioni, atteso = direttive(istruzione)
+        risultato, fallita = None, None
+        for n in range(1, ripetizioni + 1):
+            try:
+                risultato = s.query(istruzione, "JSON" if lettura else "TabSeparated")
+            except Exception as errore:  # chDB solleva eccezioni generiche con il messaggio del server
+                fallita = (n, str(errore).strip().splitlines()[0])
+                break
+        if atteso:
+            if fallita is None:
+                print(f"ERR L{riga}: atteso l'errore {atteso} ma l'istruzione è riuscita")
+                return 1
+            if f"({atteso})" not in fallita[1]:
+                print(f"ERR L{riga}: atteso {atteso}, ricevuto: {fallita[1]}")
+                return 1
+            print(f"ok  L{riga} errore atteso {atteso} alla ripetizione {fallita[0]}")
+            continue
+        if fallita:
+            print(f"ERR L{riga}: {fallita[1]}")
             return 1
-        print(f"ok  L{riga}")
+        print(f"ok  L{riga}" + (f" x{ripetizioni}" if ripetizioni > 1 else ""))
         if mostra and lettura:
             try:
                 dati = json.loads(str(risultato))

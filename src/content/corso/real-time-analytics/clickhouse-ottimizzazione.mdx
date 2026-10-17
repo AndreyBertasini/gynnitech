@@ -12,113 +12,209 @@ headerImageAlt: >-
   ClickHouse: Ottimizzazione e Best Practices di Produzione - immagine ufficiale
   della lezione su GinnyTech, creata da AD
 difficulty: advanced
-duration: 18 min
+duration: 15 min
 prerequisites:
   - real-time-analytics/cdc-pattern
 learningObjectives:
-  - Dimensionare batch insert, flush e partizionamento per tempo sul carico reale
-  - Rendere l'ingestione idempotente con chiavi deterministiche e retry con backoff
-  - Monitorare backpressure, parti in attesa e costo query prima di scalare il cluster
+  - Calcolare quante parti crea un flusso di insert e confrontarle con le soglie della tabella
+  - Raggruppare gli insert in lotti, scegliere la partizione e rendere i retry idempotenti con un token
+  - Scegliere tra async_insert e batching lato client in base a chi controlla i producer
+formato: "articolo"
 binario: "ml-tabellare"
 autore: "Hermes"
 controllatoDa: "Argo"
 autorizzatoDa: "Giano"
 draft: false
-dateModified: 2026-09-07
+dateModified: 2026-10-17
 ---
+
 # Pattern di ingestion in tempo reale
 
-Il binario di questa lezione è **ml-tabellare** e il tema è il punto di ingresso: come far entrare milioni di eventi al minuto in ClickHouse senza saturare cluster, storage e reperibilità. La scelta non è tra veloce e lento, ma tra dimensione dei batch, frequenza di flush, partizioni, deduplicazione e backpressure.
+Duecento producer scrivono una riga al secondo ciascuno su una tabella ClickHouse. Dopo qualche minuto gli insert rallentano, poi cominciano a fallire con «Too many parts». Il disco ha spazio, la CPU è sotto il limite, i dati da scrivere sono pochi: il cluster rifiuta un lavoro che sembra leggero.
 
-Una piattaforma deve ingerire milioni di eventi al minuto e renderli interrogabili senza saturare cluster, storage e reperibilità. La scelta non è tra veloce e lento, ma tra dimensione dei batch, frequenza di flush, partizioni, deduplicazione e backpressure.
+## Duecento insert al secondo
 
-Il team subisce spike dopo ogni campagna e vede query lente proprio durante le review operative. La soluzione non è aumentare il cluster. Serve cambiare batch size, schema di partizionamento, politica di retry e percorso di ingestione, così da proteggere latenza e costo al tempo stesso.
+È un caso ricostruito: duecento producer, una riga a testa al secondo, una tabella di misure con una partizione al giorno. Il conto è breve. Sono 200 insert al secondo, quindi 12.000 parti nuove al minuto, perché ogni insert scrive una parte sul disco.
 
-## Il concetto in una frase
+Il limite sta in due impostazioni, per partizione. A 1.000 parti attive ClickHouse rallenta gli insert (`parts_to_delay_insert`), a 3.000 li rifiuta con l'errore 252 (`parts_to_throw_insert`). Sono i valori predefiniti di ClickHouse 26.9, letti da `system.merge_tree_settings`. Se i merge non tenessero il passo, quindici secondi di traffico basterebbero per arrivarci.
 
-Gli ingestion pattern decidono come batch, buffer, partizioni e deduplicazione portano milioni di eventi al minuto dentro ClickHouse senza saturare cluster e costi.
+La reazione abituale è un cluster più grande o un disco più veloce. Aiuta per un po', perché i merge corrono di più, finché il traffico cresce e il limite torna.
 
-## Il criterio guida e i cinque passi
+Il numero che conta non è quante righe scrivete. È quanti insert fate. Centomila righe in un insert sono una parte, o poche se attraversano più partizioni. Centomila righe in centomila insert sono centomila parti. La causa non è la capacità del cluster: è la dimensione dei lotti.
 
-Il criterio dell'ingestion pattern non si legge dalla scala dei dati ma dalla catena misurata a monte: throughput di picco, cardinalità delle chiavi e latenza accettabile per decisione. Ogni scelta successiva discende da quelle tre misure.
+## Perché le parti sono il problema
 
-1. **Misura throughput di picco, cardinalità e latenza.** Prima di scegliere qualcosa, campiona il carico reale:
+Tre fatti, in questa sequenza.
+
+Il primo: ogni insert scrive una parte, cioè una cartella di file immutabili, uno o più per colonna, ordinati secondo la chiave `ORDER BY`. Che l'insert abbia una riga o un milione, la parte c'è.
+
+Il secondo: le parti si riducono con i merge. Girano in background, fondono parti della stessa partizione, mai di partizioni diverse, e hanno una velocità limitata da disco e CPU.
+
+Il terzo: per impedire che le parti si accumulino, il server prima rallenta gli insert e poi li rifiuta, partizione per partizione.
+
+La tabella da guardare è `system.parts`: una riga per parte, con la partizione, il numero di righe e lo stato. Se le righe per parte sono poche e le parti attive sono tante, il problema è già qui.
+
+**Ogni insert crea una parte e i merge hanno una velocità limitata: a decidere se reggono è il numero di insert al secondo, non il numero di righe.**
+
+Per questo la documentazione indica lotti di almeno 1.000 righe, idealmente tra 10.000 e 100.000, e circa un insert al secondo per tabella ([inserimenti in blocco](https://clickhouse.com/docs/best-practices/selecting-an-insert-strategy)). Si può inserire a centomila righe al secondo, purché sia un solo insert.
+
+## Tre errori che portano al muro
+
+Questo è il codice che produce il muro. Il blocco ferma i merge, per simulare il momento in cui non tengono il passo, poi scrive come i producer dell'esempio. La direttiva `ripeti` è del runner che esegue la pagina: ripete l'istruzione, come farebbero mille client.
 
 ```sql
-SELECT count() AS eventi, sum(time_sec) AS sec_total
-FROM web_events
-WHERE ingestion_time > now() - interval 1 day
-ORDER BY ingestion_time
-SAMPLE 1000000
+CREATE TABLE misure_v1
+(
+    ts DateTime,
+    id_dispositivo UInt32,
+    valore Float32
+)
+ENGINE = MergeTree
+PARTITION BY toDate(ts)
+ORDER BY (id_dispositivo, ts);
+
+SYSTEM STOP MERGES misure_v1;
+
+-- ripeti: 1000
+INSERT INTO misure_v1 SETTINGS async_insert = 0 VALUES (toDateTime('2026-03-01 10:00:00'), 42, 0.5);
+
+-- Mille insert da una riga: mille parti, una riga per parte.
+SELECT count() AS parti, sum(rows) AS righe FROM system.parts WHERE active AND table = 'misure_v1';
+
+-- Un solo lotto da 100.000 righe che attraversa 58 giorni: 58 parti in più.
+INSERT INTO misure_v1
+SELECT toDateTime('2026-01-01 00:00:00') + number * 50, number % 200, 0.5
+FROM numbers(100000);
+
+SELECT count() AS parti, sum(rows) AS righe FROM system.parts WHERE active AND table = 'misure_v1';
+
+-- Il retry dello stesso lotto, dopo un timeout: le righe raddoppiano.
+INSERT INTO misure_v1
+SELECT toDateTime('2026-01-01 00:00:00') + number * 50, number % 200, 0.5
+FROM numbers(100000);
+
+SELECT count() AS righe FROM misure_v1;
+
+-- Un lotto su 116 giorni supera le 100 partizioni per insert: rifiutato.
+-- errore atteso: TOO_MANY_PARTS
+INSERT INTO misure_v1
+SELECT toDateTime('2026-01-01 00:00:00') + number * 100, number % 200, 0.5
+FROM numbers(100000);
 ```
 
-Annota il throughput e la cardinalità dei principali filtri per fissare `max_insert_block_size` e `index_granularity`. Il risultato fissa batch size, cardinalità e latenza ammissibile per ogni tipologia di query.
+### Un insert per ogni riga
 
-2. **Raggruppa gli eventi in batch insert con flush programmati.** Ogni insert scrive poi la parte temporaneamente in logs/merges/: il `flush_on_async_insert` decide quando trasformarla in partizione stabile. Con `flush_on_async_insert = 0` (default) la scrittura va in una coda in memoria e scarica il batch solo quando dimensione o intervallo di tempo lo giustificano:
+Sembra ragionevole: l'evento arriva, lo si scrive, il dato è subito visibile e non c'è codice di buffering da mantenere. Questo è l'errore peggiore, perché in sviluppo funziona: gli insert sono dieci al minuto. Qui mille insert da una riga producono mille parti da una riga.
 
-```xml
-[merge_tree]
-<merge_tree>
-  <flush_on_async_insert>0</flush_on_async_insert>
-  <flush_after_inserts>0</flush_after_inserts>
-</merge_tree>
+Il rimedio che si improvvisa è un `OPTIMIZE TABLE … FINAL` ogni tanto. Aggiunge lavoro di merge a un sistema che già non tiene il passo, e la documentazione lo sconsiglia nella maggior parte dei casi.
+
+### Una partizione al giorno
+
+Sembra ragionevole perché il tempo è l'asse di tutte le query. Ma le parti si contano per partizione: un solo lotto che attraversa 58 giorni scrive 58 parti, non una. Oltre le 100 partizioni in un singolo insert il server lo rifiuta del tutto, con lo stesso codice di errore.
+
+### Il retry alla cieca
+
+Sembra responsabile: se l'insert scade, lo si rilancia. Ma un timeout non dice se il lotto è stato scritto. Se lo era, ora c'è due volte, e nessuna colonna lo segnala. Nel blocco qui sopra le righe passano da 101.000 a 201.000.
+
+Con le soglie predefinite il muro arriva a 3.000 parti. Per vederlo senza aspettare, abbassiamo la soglia di una tabella a 50.
+
+```sql
+-- Le soglie di questa versione: 1000 e 3000 per partizione.
+SELECT name, value FROM system.merge_tree_settings WHERE name IN ('parts_to_delay_insert', 'parts_to_throw_insert') ORDER BY name;
+
+CREATE TABLE misure_soglia
+(
+    ts DateTime,
+    valore UInt8
+)
+ENGINE = MergeTree
+ORDER BY ts
+SETTINGS parts_to_throw_insert = 50;
+
+SYSTEM STOP MERGES misure_soglia;
+
+-- ripeti: 60
+-- errore atteso: TOO_MANY_PARTS
+INSERT INTO misure_soglia SETTINGS async_insert = 0 VALUES (now(), 1);
 ```
 
-Il `flush_after_inserts` scatta un flush al raggiungimento di un numero fisso di insert (da 1 a 10): conviene usarlo quando le query storiche si aspettano un evento preciso.
+L'errore arriva all'insert numero 51, con il messaggio che trovate nei log: «Too many parts (50 …). Merges are processing significantly slower than inserts».
 
-3. **Partiziona per tempo e ordina per chiavi di filtro dominanti.** La partizione per timestamp riduce le query storiche alla lettura di poche partizioni; l'ordinamento primario e secondario accelera la scansione. Con alte cardinalità un ordinamento debole espande i merge e posticipa il compaction:
+## Lotti grandi, poche partizioni, un token
 
-| Ottimizza | Dove la usa |
-| --- | --- |
-| Partizione (tempo) | Va a fondo su `ingestion_time >= today` |
-| Ordinamento (chiave filtro) | Index-scan veloce quando il filtro è un'uguaglianza |
+I criteri, in ordine di priorità:
 
-4. **Rendi ogni scrittura idempotente con chiavi deterministe e retry.** L'ingestione in produzione fallisce e ritenta, quindi i duplicati sono inevitabili: le tabelle `MergeTree` con deduplicazione via `deduplicate_key` eliminano le righe equivalenti usando una firma canonica `sha1(...)`. Il percorso di ingestione gestisce quindi retry e backpressure, non l'ultima richiesta vinta: retry con ritardo crescente e backoff esponenziale da 1 a 60 secondi.
+1. Raggruppate prima di scrivere: da 10.000 a 100.000 righe per insert, circa un insert al secondo per tabella. Il prezzo è l'attesa nel buffer, e il suo limite è la latenza che chi legge tollera.
+2. Partizionate per mese, o per un periodo più lungo. Ogni partizione toccata da un lotto è una parte in più.
+3. Date a ogni lotto un'identità stabile e passatela come `insert_deduplication_token`. La tabella deve avere una finestra di deduplicazione: nelle tabelle non replicate `non_replicated_deduplication_window` vale 0 e la deduplicazione è spenta, in `ReplicatedMergeTree` è attiva di default.
+4. Lasciate i merge al server: niente `OPTIMIZE FINAL` di routine.
 
-5. **Monitora backpressure, parti in attesa e costo query.** Quando l'ingestione eccede la capacità, misura `active_inserts` e `queue_size` prima di decidere: aumentare il batch, allentare il compaction o degradare per priorità (tabelle calde e fredde):
+La dimensione del lotto si calcola. Dividete le righe al secondo per gli insert al secondo che vi concedete: con 20.000 righe al secondo e un insert al secondo il lotto è di 20.000 righe, e l'attesa massima è un secondo. Se chi legge tollera dieci secondi, i lotti salgono a 200.000 righe e le parti scendono a un decimo. È un esempio di conto, non una misura: i numeri veri sono i vostri.
 
-| Segnale | Azione |
-| --- | --- |
-| `active_inserts` troppo alto | Aumenta `flush_after_inserts` e `max_insert_block_size` |
+Lo stesso lotto da 100.000 righe, scritto bene:
 
-## Il problema in produzione
+```sql
+CREATE TABLE misure_v2
+(
+    ts DateTime,
+    id_dispositivo UInt32,
+    valore Float32
+)
+ENGINE = MergeTree
+PARTITION BY toYYYYMM(ts)
+ORDER BY (id_dispositivo, ts)
+SETTINGS non_replicated_deduplication_window = 1000;
 
-Il collo di bottiglia reale non è la velocità del singolo insert, ma l'accumulo di parti: ogni scrittura asincrona crea una piccola partizione che, senza compaction, moltiplica i file sul disco e rallenta le query di scansione. I guasti tipici sono sempre gli stessi: un **parts explosion** dopo un picco (migliaia di partizioni in attesa sotto `parts_to_merge`) che blocca i merge e gonfia lo storage, un **merge backlog** dove le code di fusione non tengono il ritmo dell'ingestione, un **out-of-memory su join** perché il join senza indice legge e ordina milioni di righe in RAM, oppure un piano **index-only** lento perché l'indice coperto non copre le colonne dell'aggregazione.
+SYSTEM STOP MERGES misure_v2;
 
-Le leve di partizionamento non allineate alle query peggiorano tutto: una partizione con chiave troppo larga rallenta ogni merge, una partizione per tempo assente rende ogni query una scansione full-table, e una partizione mal allineata ai filtri domina il costo. Inoltre una finestra di compaction troppo stretta non compatta, una troppo larga congela il disco, e il **replica lag** su `ON CLUSTER` lascia le query sulle repliche indietro di minuti rispetto al leader, allungando la latenza percepita. Il verdetto è semplice: le scritture vanno **bufferizzate e scritte in batch partizionato per tempo, con deduplicazione deterministica**, mentre lo streaming riga per riga resta solo dove il momento di decisione non tollera attese.
+INSERT INTO misure_v2
+SELECT toDateTime('2026-01-01 00:00:00') + number * 50, number % 200, 0.5
+FROM numbers(100000)
+SETTINGS insert_deduplication_token = 'misure:partizione-3:offset-0-99999';
 
-ClickHouse non è un database tradizionale: è un **OLAP colonnare** progettato per ingestione ad alta velocità e letture aggregate, non per transazioni interattive. Ogni colonna è memorizzata in verticale, quindi il motore esegue query per colonna con esecuzione vettoriale e comprime i blocchi interi. Il rovescio è che un join contro milioni di righe senza indice può esaurire la RAM del server. Il contrasto decisivo è con un row-store **OLTP**: un database transazionale ottimizza insert riga per riga, ma soffre davanti a set aggregati di milioni di righe. La confusione tra i due è l'origine di molte query lente: un `JOIN` analitico sulla tabella transazionale invece che su una copia compattata porta a out-of-memory e lock.
+-- Il retry con lo stesso token viene scartato.
+INSERT INTO misure_v2
+SELECT toDateTime('2026-01-01 00:00:00') + number * 50, number % 200, 0.5
+FROM numbers(100000)
+SETTINGS insert_deduplication_token = 'misure:partizione-3:offset-0-99999';
 
-## La trappola più frequente
+-- Due parti, una per mese, e nessun duplicato.
+SELECT count() AS parti, sum(rows) AS righe, round(sum(rows) / count()) AS righe_per_parte FROM system.parts WHERE active AND table = 'misure_v2';
+```
 
-L'errore più tipico è scambiare familiarità con comprensione, e trattare il framework come risposta invece che come strumento. Se la formalizzazione non lascia spazio a ipotesi, eccezioni e limiti, stai costruendo un rituale invece di una pratica analitica. Il controllo resta operativo: dimensione dei batch, cardinalità, retry, deduplicazione e costo query.
+Una parte ogni riga contro una parte ogni 50.000: quasi cinque ordini di grandezza sul numero di parti per riga. I merge non hanno niente da recuperare.
 
-Il secondo errore comune è confondere il costo del compaction con l'esigenza di compattarlo subito. Un `OPTIMIZE TABLE ... FINAL` dopo ogni ingestione su milioni di righe costa quanto gli insert appena recuperati, perché rilegge e riscrive tutto; la compaction di routine resta in background, e l'intervento finale serve solo per query che soffrono.
+Il token identifica il lotto, non il suo contenuto. La documentazione è esplicita: due lotti con lo stesso token sono lo stesso lotto, anche se i dati cambiano, e il secondo sparisce senza errore. Derivatelo da qualcosa di stabile, come topic, partizione e intervallo di offset, mai da un orologio.
 
-Analogamente, la parte indicizzata deve essere quella delle **query storiche dominanti**, non ogni colonna mai interrogata: altrimenti sprechi storage e raddoppi i tempi di merge. E la partizione per tempo non è un'opzione, ma il fulcro: senza di essa ogni ingestione in batch va a fondo e ogni query soffoca.
+Il batch è reversibile, perché è configurazione del producer. La partizione no: cambiarla vuol dire tabella nuova e copia dei dati, con lo stesso costo visto nella lezione precedente.
 
-Infine il **backpressure** si ignora: misurare `active_inserts` e `queue_size` prima di aggiungere capacità evita di costruire cluster più grandi per un problema di ingestione. La scelta tra **materialized view** e **mutation** spesso viene sbagliata: la materialized view accoppia automaticamente la scrittura alla partizione, ma non aggiorna i `key-value` senza ricostruire lo stato corrente; la mutation fa l'update in tempo, ma scarta i log vecchi e costa I/O proporzionale ai dati interessati.
+## Quando non potete raggruppare
 
-## Checklist operativa
+Non sempre c'è un punto dove raccogliere. Cento servizi scrivono ciascuno per conto proprio, poche righe alla volta, e nessuno vuole mantenere un buffer comune. Gli strumenti sono due.
 
-- Fai sempre il background merge di `MergeTree`: non compattare mai le tabelle a mano.
-- `OPTIMIZE` costa I/O e CPU: non eseguire `OPTIMIZE TABLE ... FINAL` dopo ogni insert.
-- I rapporti di compaction sono indicativi, in base ai tuoi blocchi e codec.
-- I codec zstd, snappy e gzip hanno tradeoff diversi di velocità e rapporto di compressione.
-- Backup dei soli dati su `ON CLUSTER`: metadati e settings rimangono critici.
-- Non allentare il replica lag e tieni le repliche aggiornate.
-- Evita join su milioni di righe senza `primary key` o indice: è la via più sicura verso l'out-of-memory.
-- I sorgenti di join devono avere **materialized columns**.
+Il batching lato client mette un processo, un consumer, Vector o il vostro writer, tra i producer e ClickHouse: raccoglie, scrive un lotto grande e conosce l'esito. `async_insert` sposta il buffer nel server, che tiene insieme gli insert piccoli e li scrive quando il buffer si riempie o scade un timeout.
 
-## L'esempio da cui tutto nasce: Yandex.Metrica
+Il criterio: **`async_insert` se non controllate i client e non potete raggrupparli a monte, batching lato client se avete un punto unico dove raccogliere.**
 
-Yandex.Metrica, tra i servizi di web analytics più usati al mondo, genera decine di miliardi di eventi al giorno: è per interrogarli che ClickHouse è stato costruito e pubblicato open source da Yandex nel 2016. La documentazione ufficiale del progetto cita volumi oltre i 20 miliardi di righe al giorno su singoli cluster, con tempi di risposta interattivi. Ogni pattern della lezione discende da quella scala: bufferizzare prima di scrivere con batch insert, partizionare per tempo, deduplicare con chiavi deterministiche e monitorare il backpressure invece di comprare cluster più grandi.
+```sql
+-- Il server raggruppa; l'insert risponde solo a scrittura avvenuta.
+INSERT INTO misure_v2 SETTINGS async_insert = 1, wait_for_async_insert = 1 VALUES (toDateTime('2026-02-10 08:00:00'), 7, 0.25);
 
-Verdetto: le scritture vanno bufferizzate e scritte in batch partizionato per tempo, con deduplicazione deterministica, mentre lo streaming riga per riga resta solo dove il momento di decisione non tollera attese: misura throughput di picco, cardinalità e latenza prima di scegliere qualunque parametro.
+SELECT count() AS righe FROM misure_v2;
+```
 
-## Domande per ripassare
+La confusione comune è `wait_for_async_insert = 0`, o la vecchia Buffer table. L'insert risponde appena il dato è nel buffer: se la scrittura poi fallisce nessuno lo dice al client, e se il server cade il dato è perso. La documentazione lo definisce rischioso e raccomanda `wait_for_async_insert = 1`, il valore predefinito. Si paga con dati che mancano e nessun errore da cercare. Con `wait_for_async_insert = 1` il client aspetta il flush: la latenza dell'insert sale fino al timeout del buffer.
 
-1. Quando un batch insert protegge latenza e costi rispetto a scritte singole?
-2. Come scegli parte e ordinamento per le tue query dominanti?
-3. Come rendi l'ingestione idempotente dinanzi a retry e duplicati?
-4. Quale segnale di backpressure ti fa degradare per priorità?
+Questo articolo non copre il Kafka engine, le tabelle `Distributed` e la replica. I conti con i merge fermi descrivono un caso estremo: in produzione i merge girano e le parti diminuiscono, ma il loro numero cresce comunque in proporzione agli insert. Quale timeout di buffer sia giusto per voi non so dirlo: dipende dalla latenza che la lettura tollera, e si misura.
+
+## Prima di andare in produzione
+
+1. Quanti insert al secondo riceve ogni tabella, e quante righe ha l'insert mediano?
+2. Quante parti attive ha la partizione più frammentata, e quanto manca a `parts_to_delay_insert`?
+3. Quante partizioni tocca un singolo lotto?
+4. Ogni lotto ha un token derivato da qualcosa di stabile, e la tabella ha una finestra di deduplicazione?
+5. Chi usa `async_insert` ha deciso per iscritto il valore di `wait_for_async_insert`?
+
+La metrica che separa chi ottimizza da chi tira a indovinare è il numero di parti attive per partizione, letto da `system.parts`, insieme alle righe per insert. Il throughput in righe al secondo non dice nulla: lo stesso valore può venire da un insert al secondo o da mille.
+
+Di tutto l'articolo, una scelta pesa ordini di grandezza più del resto: la dimensione del lotto. Nelle prove è una parte ogni riga contro una parte ogni cinquantamila.
