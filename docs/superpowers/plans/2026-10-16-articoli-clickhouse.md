@@ -88,7 +88,7 @@
 
 **Files:**
 - Create: `scripts/lezioni-articolo-rules.ts`, `scripts/lezioni-articolo-rules.test.ts`, `scripts/validate-lezioni-articolo.ts`
-- Modify: `package.json` (script `"validate:articolo": "tsx scripts/validate-lezioni-articolo.ts"`; `check` = `validate:content && validate:3s && validate:articolo && astro check && test`), `CLAUDE.md` (comando `validate:articolo` e riga sul formato nella sezione Course Structure)
+- Modify: `package.json` (script `"validate:articolo": "tsx scripts/validate-lezioni-articolo.ts"`; `check` = `npm run validate:content && npm run validate:3s && npm run validate:articolo && astro check && npm run test`), `CLAUDE.md` (comando `validate:articolo` e riga sul formato nella sezione Course Structure)
 
 **Interfaces:**
 - Consumes: `Esito` (`{ errors: string[]; warnings: string[] }`) da `scripts/lezioni-3s-rules.ts`.
