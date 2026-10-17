@@ -2,6 +2,20 @@
 
 > Riscritto nel formato «3 secondi» (spec: `docs/superpowers/specs/2026-10-15-lezioni-3-secondi-design.md`, §12a). Questa scheda dice che cosa è cambiato e quali fatti vanno verificati. Per le lezioni di questo modulo non c'è stato un piano approvato lezione per lezione: l'autore ha chiesto di riscrivere tutti i moduli.
 
+## Aggiornamento 2026-10-17: sette lezioni come articoli
+
+Le lezioni 1–7 (`cultura-data-driven`, `decision-making-dati`, `okr-e-kpi`, `framework-jtbd`, `ricerca-quantitativa`, `interviste-profondita`, `ciclo-deming-hadi`) sono passate dal formato «3 secondi» al formato «articolo» (`formato: "articolo"`, `senzaCodice: true`), con il prompt dell'autore adattato a un modulo senza codice. Restano «3 secondi» `cheat-sheet` e `caso-studio`, che non sono articoli; se ne sono corretti solo due fatti. Le tabelle sotto («Sezioni», «Schemi», «Quiz») descrivono quindi solo quelle due lezioni. Piano: `docs/superpowers/plans/2026-10-17-articoli-modulo-4.md`. Fonte di ogni numero, fatti verificati e non verificati, lezione per lezione: `docs/lezioni/gestione-articoli.md`.
+
+**Fatti verificati o corretti** (solo ricerche: nessuna pagina è stata aperta, perché il sandbox non raggiunge i siti):
+
+- **Fire Phone:** la lettera di Bezos che lo cita è quella del 2018, uscita nell'aprile 2019, non del 2015. I 170 milioni di dollari sono una svalutazione del terzo trimestre 2014, legata a scorte e impegni con i fornitori (83 milioni di scorte a fine trimestre), non una «perdita». «I dati descrivevano un mercato saturo» e «feature uniche» sono tolti: nessuna fonte pubblica documenta il processo interno.
+- **Amazon, memo:** il divieto delle slide è dell'email del giugno 2004; i memo narrativi di sei pagine, letti in silenzio, sono quelli descritti nella lettera del 2017 (aprile 2018). Le fonti discordano sulla lunghezza nel 2004 (quattro o sei pagine). `cheat-sheet` e `caso-studio` allineati.
+- **OKR e Google:** circa tre Key Result per Objective e un risultato intorno al 70% come tipico (guida Google re:Work); adozione «inizio 2000» per Google, 1999 per altre fonti; Drucker → Grove (Intel) → Doerr. `cheat-sheet` allineato.
+- **Superhuman:** 22% → circa 33% restringendo al gruppo che amava il prodotto → 58% in tre trimestri (First Round Review). La «riprogettazione dell'onboarding» non è confermata. Il metodo non si presenta come Jobs to be done: nella lezione è un esempio di sondaggio, nel caso difficile.
+- **Nielsen, cinque utenti:** vale per i test di usabilità qualitativi (31% medio → circa 85%), non come numero per le interviste; per le interviste NN/g scrive che non esiste un numero d'oro. Guest, Bunce e Johnson 2006 (sessanta interviste): le cifre su dodici e sei interviste vengono da sintesi secondarie.
+- **Airbnb e gli host giapponesi (+21%):** tolto, nessuna fonte.
+- **HADI:** nessun autore né data di origine citabili; non è presentato come «adattamento del PDCA». PDCA: Shewhart, Deming, Giappone intorno al 1950-51 (fonti discordi sull'anno).
+
 ## Lezioni (ordine del modulo)
 
 | # | File | Sezioni | Schemi | Quiz |
