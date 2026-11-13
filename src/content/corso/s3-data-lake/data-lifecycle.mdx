@@ -16,80 +16,136 @@ learningObjectives:
   - Scrivere lifecycle policy con transizioni ed expiration per prefisso
   - Evitare di archiviare in Glacier dati che potrebbero dover essere interrogati
 binario: "ml-tabellare"
+formato: "articolo"
 autore: "Hermes"
 controllatoDa: "Argo"
 autorizzatoDa: "Giano"
 draft: false
-dateModified: 2026-09-07
+dateModified: 2026-11-13
 ---
+
 # Storage class e lifecycle policy su S3
 
-Benvenuti nel binario `ml-tabellare`: qui ragioniamo per classi di dato, soglie e costi. Un `bucket` cresce ogni giorno con log grezzi, file intermedi, snapshot e output analytics, ma quei dati non hanno lo stesso valore dopo 7, 90 o 365 giorni. Il lifecycle corretto non è solo risparmio di storage: decide quali dati restano disponibili, quali diventano freddi e quali non dovrebbero più esistere.
+Un amministratore cloud vuole risparmiare sulla bolletta S3 e configura una regola di Lifecycle sull'intero bucket del data lake che sposta tutti gli oggetti in `S3 Glacier Flexible Retrieval` dopo 30 giorni. Due settimane dopo accadono tre disastri contemporanei: le query di dbt e Athena che leggono gli ultimi 90 giorni nella zona `curated/` falliscono con errore `InvalidObjectState` perché gli oggetti in Glacier non sono interrogabili in tempo reale; la fattura mensile di S3 invece di scendere **raddoppia** per il costo delle milioni di richieste `TRANSITION` su piccoli file e per la penale di durata minima di 90 giorni; e i caricamenti multipart falliti restano a pagamento per sempre perché nella policy manca `AbortIncompleteMultipartUpload`. La causa non è l'uso del cold storage: è applicare le transizioni senza distinguere le zone del data lake, la dimensione minima degli oggetti (128 KB) e il costo delle transizioni API.
 
-## L'idea in una frase
+## Query rotte su Athena e bolletta S3 raddoppiata per una Lifecycle sbagliata
 
-Il ciclo di vita dei dati decide quando ogni prefisso del lake passa dal caldo al freddo e quando sparisce, in base a uso reale, obblighi e costo. Il resto della lezione è applicare questa frase ai tuoi bucket senza sbagliare soglie.
+Questo è un caso ricostruito con numeri di esempio su quanto accade quando si attivano le classi di storage fredde di S3 senza verificare come vengono letti i dati e come AWS tariffa le transizioni. Il bucket del data lake ospita 120 TB divisi tra zona `raw/` (backup dei payload sorgente), zona `curated/` (tabelle Parquet lette ogni giorno da dbt e Athena su finestre di 12 mesi) e zona `staging/` (file temporanei).
 
-## Il metodo, in sei passi
+Nel tentativo di tagliare i costi di storage (da $23/TB/mese di `S3 Standard` a $3,60/TB/mese di `Glacier Flexible`), viene applicata un'unica regola globale a 30 giorni su tutto il bucket:
+1. Non appena i file Parquet del mese scorso nella zona `curated/` compiono 31 giorni e passano in `Glacier Flexible`, i job giornalieri di dbt e le query degli analisti che confrontano il trimestre corrente col trimestre precedente iniziano a fallire: gli oggetti in Glacier non possono essere letti direttamente da una `SELECT` finché non viene eseguito un ripristino asincrono (*RestoreObject*) che impiega da 3 a 5 ore.
+2. Nella zona `raw/` sono presenti 25 milioni di file JSON da 15 kilobyte: poiché AWS applica un costo per ogni mille richieste di transizione ($0,05 per 1.000 oggetti verso Glacier) e fattura una dimensione minima di **40 KB di metadati aggiunti per oggetto** in Glacier, spostare 25 milioni di piccoli file costa **1.250 dollari solo di chiamata API** nel primo mese e gonfia artificialmente lo spazio tariffato.
+3. I file in `staging/` cancellati dopo 15 giorni pagano comunque per intero i 90 giorni di permanenza minima obbligatoria di Glacier (*early deletion fee*).
 
-1. Dividi il `bucket` per classi di dato con retention diversa: `raw`, `curated` e compliance.
-2. Misura la frequenza di lettura di ogni prefisso e annota gli obblighi di retention.
-3. Assegna a ogni classe la sequenza `Standard`, `Infrequent Access` e `Glacier` con giorni espliciti.
-4. Scrivi la policy con transizioni ed expiration e applicala per prefisso, mai unica per tutto il `bucket`.
-5. Verifica che i dati interrogati spesso restino fuori da `Glacier` e che le dashboard leggano solo classi calde.
-6. Riesamina la spesa per classe e i tempi di `restore` prima di alzare o abbassare una soglia.
+La causa del triplo danno è confondere l'archiviazione fredda offline per conformità legale (`raw` storico) con lo storage analitico attivo (`curated`/`analytics`).
 
-## S3 storage classes: dal caldo al freddo
+## Classi di Storage S3, vincoli di 128 KB / durata minima e igiene delle versioni
 
-Le classi `S3` si distinguono per costo, latenza e prezzo di recupero. La regola pratica è semplice: più un dato è freddo, meno costa tenerlo ma più costa e più è lento rileggerlo. La tabella sottostante è quella che ti servirà nelle decisioni di progetto:
+Progettare una politica di ciclo di vita (*S3 Lifecycle Policy*) che riduca del 60% la spesa di archiviazione senza mai rompere una query analitica poggia su tre regole fisiche ed economiche.
 
-| Classe | Costo/GB/mese | Latenza accesso | Recupero | Per dati... |
-|--------|--------------|-----------------|----------|-------------|
-| **S3 Standard** | ~$0.023 | Millisecondi | Gratuito | Ultimi 30-90 giorni |
-| **S3 IA** (Infrequent Access) | ~$0.0125 | Millisecondi | $0.01/GB | 3-12 mesi, accessi rari |
-| **S3 Glacier** | ~$0.004 | Minuti/ore | $0.01-0.03/GB | >12 mesi, solo compliance |
-| **S3 Deep Archive** | ~$0.00099 | Ore | $0.02/GB | Storico obsoleto, quasi mai letto |
+Il primo meccanismo è la **distinzione tra classi ad accesso istantaneo (interrogabili da SQL) e classi asincrone di archivio**. Le classi **`S3 Standard`**, **`S3 Intelligent-Tiering`** (nei tier *Frequent*, *Infrequent* e *Archive Instant Access*), **`S3 Standard-IA`** e **`S3 Glacier Instant Retrieval`** rispondono alle chiamate `GET` in pochi millisecondi: i query engine come Athena, Trino e ClickHouse possono interrogarle direttamente senza alcuno step di ripristino. Al contrario, **`S3 Glacier Flexible Retrieval`** e **`S3 Glacier Deep Archive`** mettono gli oggetti "in congelatore": una chiamata `GET` restituisce errore `403 InvalidObjectState` finché non si invia una richiesta di scongelamento che richiede da minuti a 12 ore. Di conseguenza, le zone `curated/` e `analytics/` non devono **mai** finire in Glacier Flexible o Deep Archive.
 
-## Lifecycle policy in pratica
+Il secondo meccanismo è il rispetto dei **tre vincoli tariffari: dimensione minima `128 KB`, durata minima (`30/90/180 giorni`) e costo di recupero per GB**. Le classi `Standard-IA`, `Glacier Instant` e `Intelligent-Tiering` non applicano il risparmio (o non monitorano) sugli oggetti più piccoli di **128 KB**; inoltre `Standard-IA` impone una permanenza minima di **30 giorni**, `Glacier Instant` e `Flexible` di **90 giorni**, e `Deep Archive` di **180 giorni**. Se cancellate o sovrascrivete un file prima di tale scadenza, pagate per intero i giorni rimanenti.
 
-Una policy concreta sposta i dati lungo le classi man mano che invecchiano e li cancella alla fine del periodo di retention. Il file JSON qui sotto è un esempio realistico: trenta giorni verso `Infrequent Access`, novanta verso `Glacier`, e dopo sette anni la cancellazione definitiva.
+Il terzo meccanismo è l'**igiene automatica delle versioni non correnti (`NoncurrentVersionExpiration`) e dei caricamenti interrotti (`AbortIncompleteMultipartUpload`)**. Su un bucket con Versioning attivo, ogni volta che compattate o riscrivete un file Parquet, la vecchia versione resta su S3 a pagamento per sempre come *Noncurrent Version* se una regola non la elimina dopo 14 o 30 giorni; allo stesso modo, i caricamenti multipart andati in timeout restano invisibili nella normale `ls` ma consumano terabyte di spazio finché una regola automatica non li abortisce dopo 7 giorni.
 
-```json
-{
-  "Rules": [
-    {"Transition": {"Days": 30, "StorageClass": "STANDARD_IA"}},
-    {"Transition": {"Days": 90, "StorageClass": "GLACIER"}},
-    {"Expiration": {"Days": 2555}}  // 7 anni
-  ]
-}
+**Una Lifecycle Policy su S3 genera risparmio reale senza rompere le query solo se differenzia le regole per prefisso di zona, filtra gli oggetti sotto i 128 KB, mantiene le tabelle interrogabili su classi Instant Retrieval ed elimina versioni vecchie e upload incompleti.**
+
+## Tre errori nella scrittura delle Lifecycle Policy del data lake
+
+Il blocco SQL qui sotto mostra una query di audit sull'inventario S3 (`s3_inventory`) che smaschera i tre errori classici: tabelle `curated` finite in Glacier non interrogabile, milioni di file sotto i 128 KB transizionati a caro prezzo e terabyte di versioni non correnti dimenticate:
+
+```sql
+-- Audit su S3 Inventory che rivela gli errori di configurazione della Lifecycle Policy:
+-- ERRORE 1: oggetti della zona curated/ finiti in GLACIER o DEEP_ARCHIVE (rompono Athena/ClickHouse!).
+-- ERRORE 2: oggetti < 128 KB (131.072 byte) spostati in STANDARD_IA / GLACIER (costo API > risparmio).
+-- ERRORE 3: vecchie versioni (is_latest = 0) accumulate da oltre 90 giorni senza NoncurrentVersionExpiration.
+SELECT
+    splitByChar('/', key)[1] AS lake_zone,
+    storage_class,
+    is_latest,
+    count() AS numero_oggetti,
+    round(sum(size_bytes) / 1073741824.0, 2) AS totale_gb,
+    countIf(size_bytes < 131072 AND storage_class != 'STANDARD') AS piccoli_file_transizionati_errati
+FROM monitoring.s3_inventory_daily
+WHERE inventory_date = today()
+GROUP BY lake_zone, storage_class, is_latest
+ORDER BY totale_gb DESC;
 ```
 
-Dopo trenta giorni i dati passano in `Infrequent Access`, dopo novanta giorni in `Glacier`, dopo sette anni vengono cancellati. Su un data lake di grandi dimensioni una policy del genere sposta la spesa dallo storage caldo a quello freddo in modo misurabile.
+### Transizionare le zone Curated o Analytics in Glacier Flexible o Deep Archive
 
-## Query su dati archiviati: la trappola
+Spostare i file Parquet delle zone `curated/` o `analytics/` in `Glacier Flexible Retrieval` o `Deep Archive` dopo 60 o 90 giorni rende inutilizzabile lo storico analitico aziendale. Non appena un analista o un modello di Machine Learning esegue una query anno-su-anno (`WHERE dt >= today() - 365`), il motore SQL si schianta sugli oggetti archiviati. Se volete risparmiare fino al 68% sulle partizioni di `curated/` più vecchie di 90 giorni mantenendole immediatamente interrogabili in millisecondi da qualsiasi query SQL, la classe corretta è **`GLACIER_IR` (*Glacier Instant Retrieval*)** oppure **`INTELLIGENT_TIERING`**.
 
-Qui sta la trappola più comune. `Athena` non può interrogare direttamente i dati in `Glacier`: vanno ripristinati prima, con ore di attesa. Per dati storici che potresti dover interrogare, lasciali in `S3 IA` invece che in `Glacier`. Riserva `Glacier` alla pura compliance, per esempio dati fiscali di cinque anni fa che quasi certamente non leggerai mai.
+### Non impostare il filtro ObjectSizeGreaterThan: 131072 (128 KB) nelle regole di transizione
 
-Il pattern che funziona: tieni in `S3 Standard` i dati degli ultimi novanta giorni, in `IA` quelli tra tre e ventiquattro mesi, in `Glacier` il resto. Le dashboard leggono solo `Standard`, le query di audit richiedono un `restore` da `Glacier` con preavviso.
+Applicare una regola di transizione verso `Standard-IA` o `Glacier` senza il filtro `ObjectSizeGreaterThan = 131072` su un prefisso che contiene file di controllo (`_SUCCESS`, manifest JSON, piccoli log) fa perdere denaro ad ogni esecuzione. Poiché il costo della richiesta di transizione API dipende dal **numero di oggetti** mentre il risparmio sullo storage dipende dai **gigabyte**, spostare un file da 4 KB costa più in chiamata API di quanto quel file risparmierebbe in dieci anni di archiviazione fredda.
 
-In sintesi: `Standard` per gli ultimi novanta giorni, `Infrequent Access` per l'anno successivo e `Glacier` solo per la pura compliance mai interrogata.
+### Attivare il Versioning senza NoncurrentVersionExpiration e AbortIncompleteMultipartUpload
 
-*Riferimenti:*
-- AWS. (2024). "S3 Storage Classes." *aws.amazon.com/s3/storage-classes/.*
+Abilitare S3 Versioning per proteggersi dalle cancellazioni accidentali senza aggiungere contestualmente `NoncurrentVersionExpiration` (es. 30 giorni) e `AbortIncompleteMultipartUpload` (7 giorni) trasforma il bucket in un pozzo senza fondo. Se un job di compattazione o di riscrittura aggiorna ogni giorno 500 GB di tabelle, dopo un mese avrete 500 GB di dati attuali più **15 TB di versioni vecchie nascoste** che pagate a prezzo pieno ogni mese.
 
-## Gli errori che costano cari
+## Matrice di Lifecycle per zona e verifica del risparmio su S3 Inventory
 
-Il primo errore è applicare una sola regola di lifecycle a tutto il `bucket`, ignorando che `raw`, `curated` e dati di compliance hanno valore e obblighi diversi. Il secondo è mandare in `Glacier` dati che potresti dover interrogare, scoprendo solo durante un incidente che il `restore` richiede ore. Il terzo è confondere risparmio di storage con risparmio reale: una policy che cancella dati ancora soggetti a obbligo di retention sposta il costo dal cloud alla multa.
+Per configurare il ciclo di vita ottimale del vostro data lake S3, applicate questa architettura a quattro regole distinte per prefisso:
 
-## Un pezzo di storia: Glacier arriva nel 2012
+1. **Regola Globale di Igiene (tutto il bucket)**: `AbortIncompleteMultipartUpload` dopo **7 giorni** ed eliminazione dei *Delete Markers* orfani (`ExpiredObjectDeleteMarker = true`).
+2. **Prefisso `staging/` e `temp/`**: `Expiration` (cancellazione definitiva) dopo **7 giorni**, nessuna transizione intermedia, `NoncurrentVersionExpiration` dopo **1 giorno**.
+3. **Prefisso `curated/` e `analytics/` (sempre interrogabile via SQL)**: oggetti $> 128\text{ KB}$ in `S3 Standard` per i primi **90 giorni** (dati caldi interrogati continuamente), transizione a **`GLACIER_IR` (*Glacier Instant Retrieval*)** dopo **90 giorni** (o `INTELLIGENT_TIERING` diretto), e `NoncurrentVersionExpiration` dopo **14 giorni** per pulire i vecchi file post-compattazione.
+4. **Prefisso `raw/` (copia di sicurezza append-only per audit e replay rari)**: oggetti $> 128\text{ KB}$ in `Standard` per **30 giorni**, in `Standard-IA` da **30 a 90 giorni**, in **`Glacier Flexible` o `Deep Archive` dopo 90–180 giorni**, con conservazione di 5–10 anni per conformità normativa.
 
-Amazon S3 debutta nel 2006 come storage a oggetti con una sola classe calda e i lake crescono fino a pagare ogni gigabyte come se fosse sempre urgente. Nel 2012 Amazon introduce Glacier, una classe di archiviazione con recupero in ore a costo molto più basso, pensata per dati quasi mai riletti. Da allora la gestione del ciclo di vita diventa una leva di costo standard: i dati recenti restano interrogabili in millisecondi e lo storico scivola verso classi fredde. La regola che resta valida è quella della trappola di Athena: ciò che finisce in archivio freddo non si interroga più a freddo.
+Ecco la query di simulazione e controllo su ClickHouse che calcola il risparmio netto mensile e verifica il rispetto dei vincoli (zero file $< 128\text{ KB}$ transizionati, zero `curated` in Glacier offline):
 
-Verdetto: `Standard` per gli ultimi novanta giorni, `Infrequent Access` per l'anno successivo e `Glacier` solo per la pura compliance mai interrogata: se un dato potrebbe servire a una query, lascialo in `IA` invece che in `Glacier`, perché ciò che finisce in archivio freddo non si interroga più a freddo.
+```sql
+-- Verifica di conformità della Lifecycle Policy e calcolo del costo mensile stimato per zona:
+SELECT
+    splitByChar('/', key)[1] AS lake_zone,
+    storage_class,
+    count() AS oggetti,
+    round(sum(size_bytes) / 1099511627776.0, 3) AS volume_tb,
+    -- Verifica che nessun file sotto 128 KB sia stato transizionato (deve essere 0):
+    countIf(size_bytes < 131072 AND storage_class != 'STANDARD') AS violazioni_128kb,
+    -- Verifica che nessun file curated/analytics sia in Glacier asincrono (deve essere 0):
+    countIf(lake_zone IN ('curated', 'analytics') AND storage_class IN ('GLACIER', 'DEEP_ARCHIVE')) AS violazioni_sql_offline,
+    -- Stima costo mensile storage in USD in base alla classe:
+    round(
+        sum(size_bytes) / 1099511627776.0 * multiIf(
+            storage_class = 'STANDARD', 23.0,
+            storage_class = 'STANDARD_IA', 12.5,
+            storage_class = 'GLACIER_IR', 4.0,
+            storage_class = 'GLACIER', 3.6,
+            storage_class = 'DEEP_ARCHIVE', 0.99,
+            23.0
+        ),
+        2
+    ) AS costo_mensile_stimato_usd
+FROM monitoring.s3_inventory_daily
+WHERE inventory_date = today()
+  AND is_latest = 1
+GROUP BY lake_zone, storage_class
+ORDER BY lake_zone ASC, volume_tb DESC;
+```
 
-## Tre domande per verificare
+Il risultato mette in sicurezza sia l'operatività sia il conto economico: su un data lake da 120 TB (80 TB di storico `raw` e 40 TB di tabelle `curated`), spostare gli 80 TB di `raw` più vecchi di 90 giorni in `Deep Archive` ($0,99/TB) e i 30 TB di `curated` più vecchi di 90 giorni in `Glacier Instant Retrieval` ($4,00/TB) riduce la bolletta mensile da **2.760 dollari a meno di 650 dollari al mese** (-76%), mentre il 100% delle partizioni `curated` degli ultimi cinque anni rimane istantaneamente interrogabile da Athena e ClickHouse senza un solo errore `InvalidObjectState`. Aggiungere il filtro `ObjectSizeGreaterThan = 131072` e separare i prefissi richiede dieci righe nella configurazione Terraform del bucket; bloccare le query di tutta l'azienda perché lo storico `curated` è finito in Glacier offline richiede giorni di restore a pagamento.
 
-1. Dopo quanti giorni un prefisso `raw` smette di meritare la classe `Standard`?
-2. Quando conviene tenere un dato in `Infrequent Access` invece di spostarlo in `Glacier`?
-3. Quale vincolo di `Athena` ti impedisce di interrogare direttamente i dati archiviati?
-4. Quale controllo sugli obblighi di retention fai prima di impostare una expiration?
+## Regole Lifecycle esplicite per età o S3 Intelligent-Tiering automatico
+
+Per gestire il passaggio dal caldo al freddo nella zona `curated/`, l'architetto può scegliere tra due approcci: **regole Lifecycle basate sull'età dell'oggetto** (es. `Standard` $\rightarrow$ `Glacier Instant Retrieval` a 90 giorni) oppure la classe automatica **`S3 Intelligent-Tiering`** (che sposta da sola ogni singolo oggetto tra il tier caldo a $23/TB, il tier infrequente a $12,5/TB dopo 30 giorni senza letture e il tier Archive Instant a $4/TB dopo 90 giorni senza letture, senza alcun costo di recupero per GB).
+
+Il criterio di scelta è netto: **usate `S3 Intelligent-Tiering` per le zone `curated/` e `analytics/` con file grandi ($> 100\text{ MB}$) quando i pattern di lettura degli analisti sono imprevedibili (alcune tabelle vecchie vengono rilette spesso per backtesting ML e in `Glacier Instant` paghereste $0,03 per ogni GB riletto), usate invece regole Lifecycle esplicite per età (`Standard` $\rightarrow$ `Glacier Instant` o `Deep Archive`) sulla zona `raw/` e sulle tabelle di log dove sapete con certezza matematica che dopo 30 giorni nessun processo automatico rileggerà più quei file.**
+
+La confusione comune consiste nell'usare `Intelligent-Tiering` su bucket pieni di milioni di piccoli file: poiché `Intelligent-Tiering` addebita un canone mensile di monitoraggio di **$0,0025 per ogni 1.000 oggetti** (per gli oggetti $\ge 128\text{ KB}$), se i vostri file sono da 200 MB il costo di monitoraggio è irrilevante (pochi centesimi per terabyte), ma se avete 50 milioni di file da 200 KB pagherete 125 dollari al mese solo di tassa di monitoraggio. Sbagliare questa scelta vanifica il risparmio dello storage.
+
+Questo articolo non tratta la replica cross-regione (`S3 Replication Time Control`) né il blocco immutabile WORM (`S3 Object Lock` in modalità Compliance), approfonditi nelle lezioni di sicurezza e disaster recovery. Ricordate che quando usate **Apache Iceberg** o **Delta Lake**, la pulizia dei file dati orfani deve essere coordinata dalle procedure native del table format (`expire_snapshots` / `VACUUM`) prima che intervenga S3, per non corrompere i metadati della tabella.
+
+## Cinque domande prima di applicare una Lifecycle Policy in produzione
+
+1. Avete incluso in cima alla configurazione del bucket `AbortIncompleteMultipartUpload` a 7 giorni, `ExpiredObjectDeleteMarker = true` e una scadenza `NoncurrentVersionExpiration` (14–30 giorni) per non pagare in eterno le versioni sovrascritte?
+2. Tutte le regole di transizione verso classi IA o Glacier hanno il filtro `ObjectSizeGreaterThan = 131072` (128 KB) per evitare di pagare migliaia di richieste API su file minuscoli?
+3. Avete verificato che nessuna regola sposti i prefissi `curated/` o `analytics/` in classi asincrone (`Glacier Flexible` o `Deep Archive`), usando per le tabelle interrogabili solo `Glacier Instant Retrieval` o `Intelligent-Tiering`?
+4. I prefissi temporanei (`staging/`, `tmp/`, `scratch/`) hanno una semplice regola di `Expiration` a 7 giorni senza mai passare per classi con durata minima di 30 o 90 giorni?
+5. Controllate periodicamente con S3 Storage Lens o S3 Inventory la percentuale di byte occupati da versioni non correnti e upload multipart incompleti?
+
+La metrica economica che misura l'efficacia della vostra strategia di ciclo di vita è il **costo effettivo medio per Terabyte al mese** ($\text{Spesa Totale S3 Mensile} / \text{TB Totali Archiviati}$): un data lake maturo mantiene questo valore tra **6 e 10 dollari per TB/mese** (contro i 23 dollari del tutto-in-Standard), con **0% di errori `InvalidObjectState`** sulle query analitiche.
+
+Di tutta la gestione del ciclo di vita su S3, scolpite nella memoria una sola distinzione: la zona `raw` va in congelatore (`Glacier Deep Archive`) perché serve solo in caso di emergenza; la zona `curated` resta sempre sveglia (`Glacier Instant Retrieval` o `Intelligent-Tiering`) perché una tabella che non risponde a una `SELECT` ha smesso di essere una tabella.

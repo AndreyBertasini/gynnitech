@@ -155,47 +155,29 @@ describe("Content Schemas", () => {
             expect(result.success).toBe(false);
         });
 
-        describe("formato 3 secondi", () => {
-            const base = { title: "Lesson 1", description: "Intro" };
+        test("accetta formato \"articolo\"", () => {
+                    const result = corsoSchema.safeParse({ title: "Lesson 1", description: "Intro", formato: "articolo" });
+                    expect(result.success).toBe(true);
+                    if (result.success) {
+                        expect(result.data.formato).toBe("articolo");
+                    }
+                });
 
-            test("accetta formato \"3s\" con 4 sezioni", () => {
-                const result = corsoSchema.safeParse({ ...base, formato: "3s", sezioni: ["A", "B", "C", "D"] });
-                expect(result.success).toBe(true);
-                if (result.success) {
-                    expect(result.data.formato).toBe("3s");
-                    expect(result.data.sezioni).toEqual(["A", "B", "C", "D"]);
-                }
-            });
+                test("accetta senzaCodice: true e rifiuta un valore che non è booleano", () => {
+                    const base = { title: "Lesson 1", description: "Intro", formato: "articolo" };
+                    const ok = corsoSchema.safeParse({ ...base, senzaCodice: true });
+                    expect(ok.success).toBe(true);
+                    if (ok.success) expect(ok.data.senzaCodice).toBe(true);
+                    expect(corsoSchema.safeParse({ ...base, senzaCodice: "si" }).success).toBe(false);
+                });
 
-            test("accetta formato \"articolo\" senza sezioni", () => {
-                const result = corsoSchema.safeParse({ ...base, formato: "articolo" });
-                expect(result.success).toBe(true);
-                if (result.success) {
-                    expect(result.data.formato).toBe("articolo");
-                    expect(result.data.sezioni).toBeUndefined();
-                }
-            });
+                test("rifiuta formato \"3s\"", () => {
+                    expect(corsoSchema.safeParse({ title: "Lesson 1", description: "Intro", formato: "3s" }).success).toBe(false);
+                });
 
-            test("accetta senzaCodice: true e rifiuta un valore che non è booleano", () => {
-                const ok = corsoSchema.safeParse({ ...base, formato: "articolo", senzaCodice: true });
-                expect(ok.success).toBe(true);
-                if (ok.success) expect(ok.data.senzaCodice).toBe(true);
-                expect(corsoSchema.safeParse({ ...base, formato: "articolo", senzaCodice: "si" }).success).toBe(false);
-            });
-
-            test("rifiuta formato \"slide\"", () => {
-                expect(corsoSchema.safeParse({ ...base, formato: "slide" }).success).toBe(false);
-            });
-
-            test("rifiuta sezioni fuori da 3–6", () => {
-                expect(corsoSchema.safeParse({ ...base, sezioni: ["A", "B"] }).success).toBe(false);
-                expect(corsoSchema.safeParse({ ...base, sezioni: ["A", "B", "C", "D", "E", "F", "G"] }).success).toBe(false);
-            });
-
-            test("rifiuta una sezione vuota", () => {
-                expect(corsoSchema.safeParse({ ...base, sezioni: ["A", "", "C"] }).success).toBe(false);
-            });
-        });
+                test("rifiuta formato \"slide\"", () => {
+                    expect(corsoSchema.safeParse({ title: "Lesson 1", description: "Intro", formato: "slide" }).success).toBe(false);
+                });
     });
 
     describe("productsSchema", () => {

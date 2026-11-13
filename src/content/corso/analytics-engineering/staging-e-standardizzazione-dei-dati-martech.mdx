@@ -16,73 +16,177 @@ learningObjectives:
   - Dichiarare model contracts sugli staging per intercettare cambi di schema a monte
   - Bloccare la pull request quando i test falliscono
 binario: "ml-tabellare"
+formato: "articolo"
 autore: "Hermes"
 controllatoDa: "Argo"
 autorizzatoDa: "Giano"
 draft: false
-dateModified: 2026-09-07
+dateModified: 2026-11-13
 ---
 
 # Test, data contract e fiducia nei modelli
 
-Questa lezione appartiene al binario ml-tabellare: parliamo di tabelle che devono dire la verità. Il tema è la fiducia, e la fiducia nei dati non si dichiara: si costruisce con test che girano a ogni build e contratti che non lasciano spazio alle sorprese.
+Un modello dbt `int_orders_enriched` fa un `LEFT JOIN` tra la tabella degli ordini e la tabella dei codici sconto, ma nessuno si è accorto che nella tabella dei codici sconto lo stesso `promo_code = 'WELCOME10'` compare tre volte per tre campagne diverse. Il join moltiplica silenziosamente per tre tutti gli ordini che hanno usato quel codice (*fan-out join*), gonfiando il fatturato mensile del 22% senza che `dbt run` restituisca alcun errore; due giorni dopo, un microservizio cambia il tipo di `amount_eur` da `Decimal` a `String` e rompe le viste della BI. La causa non è un bug di SQL: è eseguire `dbt run` senza **test generici di unicità (`unique`, `not_null`, `accepted_values`, `relationships`)**, senza **Model Contracts (`contract: {enforced: true}`)** e senza usare il comando atomico **`dbt build`**.
 
-## L'idea in una frase
+## Un LEFT JOIN che triplica gli ordini e gonfia il fatturato del ventidue percento
 
-Test e contratti rendono un modello dbt degno di fiducia perché ogni assunzione su schema, valori e relazioni viene verificata a ogni build invece di essere sperata. La differenza è sottile ma decisiva: passare dalla speranza alla verifica.
+Questo è un caso ricostruito con numeri di esempio su quanto accade quando i modelli dbt vengono eseguiti senza asserzioni automatiche sul grano della tabella e senza contratti di schema. Il progetto calcola ogni mattina la tabella `fct_orders` unendo gli ordini con i coupon promozionali e i profili cliente.
 
-## La sequenza di adozione
+In assenza di test e data contract si verificano due incidenti classici:
+1. Lo sviluppatore che scrive `LEFT JOIN {{ ref('stg_marketing__coupons') }} USING (promo_code)` dà per scontato che `promo_code` sia univoco nella tabella dei coupon. In realtà il team marketing ha riutilizzato `'WELCOME10'` in tre anni diversi: ogni ordine con `'WELCOME10'` fa match con 3 righe della tabella di destra e si triplica nell'output finale. Poiché SQL non solleva mai un errore di sintassi quando un join moltiplica le righe, `dbt run` stampa una scritta verde `PASS` mentre il fatturato in dashboard sale di 180.000 euro inesistenti.
+2. Un refactor di un modello a monte rinomina per sbaglio `net_amount_eur` in `net_revenue` o ne cambia il tipo di dato: poiché in SQL dinamico (`CREATE TABLE AS SELECT`) il database accetta qualsiasi colonna prodotta dalla `SELECT`, il cambio di schema scivola fino a produzione e manda in crash i report di Looker/Metabase.
 
-1. Metti i test `unique` e `not_null` sulla chiave primaria di ogni modello e blocca la pull request se falliscono.
-2. Aggiungi i test `accepted_values` sui valori ammessi delle colonne critiche e i test `relationships` tra chiavi esterne e primarie.
-3. Scrivi test mirati in SQL per le regole di business che i test standard non coprono, come la coerenza tra ordini e pagamenti.
-4. Dichiara i contratti sui modelli di staging delle fonti esterne, così un cambio di tipo a monte fa fallire la build in minuti.
-5. Estendi ai controlli statistici sulle metriche centrali solo dopo che i livelli precedenti sono verdi e stabili.
+La causa di entrambi gli incidenti è non dichiarare nei file YAML le invarianti matematiche della tabella (**Data Tests**) e la firma tipizzata delle colonne (**Model Contracts**).
 
-## La piramide dei test
+## I quattro Test Generici, i Model Contracts (enforced: true) e il ciclo dbt build
 
-dbt offre una strategia di test stratificata. Salendo di livello cresce la sofisticazione e cambia la severità con cui un fallimento blocca il lavoro.
+La fiducia nei modelli di un progetto dbt non nasce dalla revisione visiva di qualche riga di esempio, ma da tre barriere automatiche eseguite ad ogni commit e ad ogni run di produzione.
 
-| Livello | Tipo di test | Copertura | Impatto del fallimento |
-| --- | --- | --- | --- |
-| Livello 1, fondamentali | `unique`, `not_null` su primary key | Ogni modello | Blocca la PR |
-| Livello 2, business | `accepted_values`, `relationships` | Ogni colonna critica | Blocca la PR |
-| Livello 3, volume | Range di row count atteso | Modelli chiave | Warning |
-| Livello 4, qualità statistica | Media, deviazione standard, distribuzione | Metriche core | Alert |
+Il primo meccanismo è il quartetto dei **Data Tests generici dichiarati in YAML (`unique`, `not_null`, `accepted_values`, `relationships`)** affiancato dai **Singular Tests / Unit Tests**. Dietro le quinte, dbt traduce ogni test YAML in una query SQL che seleziona le **righe che violano la regola**: se la query restituisce `0 righe` il test passa (`PASS`); se restituisce `>= 1 righe` il test fallisce (`FAIL`). Applicare `unique` e `not_null` sulla chiave primaria di `stg_marketing__coupons` (prima del join) e sulla chiave primaria `order_id` di `fct_orders` (dopo il join) intercetta istantaneamente qualsiasi moltiplicazione da *fan-out join*. Il test `accepted_values` blocca la comparsa di stati imprevisti (es. un nuovo stato `'pending_fraud'` non gestito nelle somme), mentre `relationships` verifica l'integrità referenziale (nessun ordine associato a un `customer_id` inesistente in `dim_customers`).
 
-I test standard coprono la maggior parte dei casi comuni e fermano gli errori gravi. I test singolari aggiungono controlli specifici scritti in SQL, che per passare devono restituire zero righe. I test custom in Jinja sono riutilizzabili e diventano la base di una strategia matura.
+Il secondo meccanismo sono i **Model Contracts (`config: contract: enforced: true`)**. Attivando il contratto su un modello dbt, dbt non si fida più ciecamente dei tipi e dei nomi restituiti dalla `SELECT`: al momento della compilazione confronta le colonne prodotte dalla query con l'elenco esatto di `name`, `data_type` e `constraints` dichiarato nel file YAML, e genera un `CREATE TABLE` con i tipi esatti. Se qualcuno rimuove una colonna, ne cambia il nome o produce un tipo incompatibile, la build fallisce immediatamente prima di toccare i consumatori a valle.
 
-## I data contracts
+Il terzo meccanismo è l'esecuzione atomica con **`dbt build`** invece di lanciare separatamente `dbt run` e poi `dbt test`. Quando usate `dbt run` seguito da `dbt test`, se un modello di staging contiene duplicati (`stg_marketing__coupons`), `dbt run` propaga comunque quei duplicati fino a `fct_orders` in produzione e solo alla fine `dbt test` vi avvisa che il danno è già stato fatto. Con **`dbt build`**, dbt esegue i test di ogni nodo **subito dopo aver creato quel nodo e prima di avviare i nodi figli**: se il test `unique` su `stg_marketing__coupons` fallisce, `dbt build` ferma il ramo e **salta (`SKIP`)** l'aggiornamento di `fct_orders`, proteggendo la tabella di produzione.
 
-Un data contract formalizza l'accordo tra chi produce e chi consuma i dati. Definisce schema, semantica, garanzie di qualità e accordi di freschezza.
+**Un progetto dbt merita la fiducia del business solo se blinda ogni chiave primaria con `unique` + `not_null`, impone `contract: {enforced: true}` sulle interfacce pubbliche ed esegue sempre il grafo con `dbt build` bloccando i figli in caso di errore.**
 
-Dalla versione 1.5 dbt offre i model contracts, che verificano tipi e vincoli al momento della build.
+## Tre errori nella configurazione dei test e dei contratti in dbt
 
-È uno spostamento netto: il sistema garantisce il dato invece di sperare che sia corretto, e la build fallisce in caso contrario.
+Il blocco SQL qui sotto mostra cosa succede nel database quando si esegue un join con una tabella non testata sulla chiave di join e si lasciano tutti i test in modalità `warn` o fuori dal percorso bloccante di `dbt build`:
 
-Il caso più insidioso è il dato plausibile ma sbagliato. Una sorgente marketing smette di inviare `campaign_id` su alcune righe mentre il mart di attribuzione continua a produrre numeri verosimili. Solo i test `not_null`, `accepted_values` e `relationships` lo intercettano prima che la dashboard inganni.
+```sql
+-- ERRORE 1: il modello fa LEFT JOIN su promo_code senza aver messo un test unique su promo_code
+-- nella tabella stg_marketing__coupons!
+-- Risultato: ogni ordine con promo_code duplicato viene moltiplicato (fan-out) in fct_orders!
+SELECT
+    o.order_id,
+    o.customer_id,
+    o.promo_code,
+    c.campaign_channel,
+    o.amount_eur
+FROM {{ ref('stg_shop__orders') }} AS o
+LEFT JOIN {{ ref('stg_marketing__coupons') }} AS c
+    ON o.promo_code = c.promo_code;
 
-## Adozione progressiva
+-- Query SQL corrispondente al test dbt "unique" su order_id che rivela il disastro del fan-out:
+SELECT
+    order_id AS unique_field,
+    count() AS n_records
+FROM analytics_prod.fct_orders
+WHERE order_id IS NOT NULL
+GROUP BY order_id
+HAVING count() > 1;
+```
 
-Non serve testare tutto subito. Provarci porta solo ad abbandonare. Prima settimana: `not_null` e `unique` sulla chiave primaria di ogni modello. Seconda settimana: valori ammessi sulle colonne critiche e relazioni sulle chiavi esterne. Secondo mese: test singolari per le regole di business critiche. Terzo mese: model contracts sui modelli di `staging` delle fonti esterne. Dal trimestre successivo: test custom riusabili e test di qualità statistica.
+### Non mettere unique + not_null sulla chiave di destra prima di un LEFT JOIN
 
-La pipeline di integrazione deve eseguire i test in automatico e bloccare la pull request quando falliscono. Senza questo blocco, i test restano documentazione che nessuno legge.
+Concentrare tutti i test solo sulla tabella finale del mart dimenticando di testare l'unicità della chiave sulle tabelle dimensionali o di lookup che entrano in `LEFT JOIN` è la causa numero uno di metriche gonfiate in dbt. In SQL, se la tabella di sinistra ha 100.000 ordini e la tabella di destra ha 2 righe per la stessa chiave di join, il `LEFT JOIN` produce silenziosamente **200.000 righe**. Ogni singola tabella o CTE usata sul lato destro di un join moltiplicativo potenziale deve avere il test `unique` + `not_null` sulla colonna usata nella clausola `ON`.
 
-## L'errore che svuota i test
+### Lanciare dbt run seguito da dbt test invece di usare dbt build
 
-Capita di usare test e contratti come etichetta invece che come processo: grafici senza decisione, metriche senza baseline, conclusioni che non dichiarano quale assunzione potrebbe invalidarle. I test ci sono, ma nessuno osa farli fallire.
+Configurare l'orchestratore notturno con due step separati (`1. dbt run`, `2. dbt test`) significa chiudere la stalla dopo che i buoi sono scappati. Se alle 03:00 di notte la tabella sorgente contiene dati corrotti, `dbt run` costruisce con successo tutti i modelli di staging, intermediate e marts sovrascrivendo le tabelle di produzione con i dati corrotti; alle 03:20 `dbt test` fallisce e manda un allarme, ma nel frattempo le dashboard della direzione stanno già leggendo le tabelle di produzione avvelenate. Sostituire la coppia con un unico comando **`dbt build`** trasforma ogni test `severity: error` su uno staging in un interruttore automatico che impedisce la sovrascrittura dei marts a valle.
 
-La domanda di controllo è semplice, cioè quale scelta sbaglieresti se questo risultato fosse instabile. Se i test non ti aiutano a rispondere, stai collezionando badge, non proteggendo numeri.
+### Mettere test pesanti sull'intero storico di cinque anni ad ogni esecuzione oraria
 
-Verdetto: prima unicità e non-nullità ovunque, poi valori e relazioni sulle colonne critiche, poi contratti sulle fonti esterne; i controlli statistici vengono dopo, non prima.
+Eseguire un test `unique` o `relationships` senza clausola `where` ogni 15 minuti su una tabella incrementale di eventi da 5 miliardi di righe in ClickHouse o S3 brucia risorse per ricontrollare milioni di volte i dati del 2022 che non sono mai cambiati. Sui modelli incrementali ad altissimo volume, i test generici in YAML vanno sempre circoscritti alla finestra mobile recente tramite la configurazione **`config: {where: "occurred_date >= today() - 7"}`**, mantenendo il controllo in sub-secondo.
 
-## Il caso Knight Capital
+## Test SQL compilati, Singularity Check e verifica di copertura contratti in ClickHouse
 
-Il primo agosto 2012 la società di trading Knight Capital ha perso 440 milioni di dollari in 45 minuti per aver rilasciato in produzione codice non testato, che ha generato milioni di ordini errati. L'errore stava in una funzionalità obsoleta riattivata per sbaglio, e nessun controllo automatico ha fermato il rilascio. La società non si è più ripresa ed è stata acquisita entro l'anno. È il caso estremo che giustifica la regola della lezione: nessun modello cambia in produzione se i suoi test non sono verdi.
+Per blindare la qualità dei vostri modelli dbt su ClickHouse, applicate questi quattro criteri in ordine di priorità:
 
-## Domande per metterti alla prova
+1. Dichiarate nei file `_<layer>__models.yml` i test **`unique` e `not_null`** sulla chiave primaria di **tutti** i modelli (`stg_`, `int_`, `fct_`, `dim_`), più `accepted_values` sulle colonne di stato e `relationships` sulle chiavi esterne dei marts.
+2. Sulle tabelle grandi incrementali, aggiungete ai test la clausola `where: "order_date >= today() - 7"` e salvate i record falliti per ispezione immediata con `store_failures: true`.
+3. Attivate **`contract: {enforced: true}`** con tutti i `data_type` espliciti sui modelli di interfaccia (`staging` critici e `marts`), così che nessun cambio involontario di nome o tipo colonna possa compilare.
+4. Nella pipeline di CI (pull request) e in produzione eseguite sempre **`dbt build --fail-fast`** (o `dbt build --select state:modified+` in CI tramite Slim CI).
 
-1. Quali test metteresti sulla chiave primaria di ogni modello e cosa succede se falliscono?
-2. Come intercetteresti una colonna rinominata o un tipo cambiato in una sorgente esterna?
-3. Quando un test mirato in SQL è necessario oltre ai test standard?
-4. Come organizzeresti l'adozione dei test in un progetto che non ne ha ancora?
+Ecco le query SQL esatte che dbt compila ed esegue su ClickHouse per i quattro test fondamentali más un **Singular Test di quadratura finanziaria** (`assert_fct_orders_matches_staging_revenue.sql`) che blocca qualsiasi perdita o moltiplicazione di centesimi lungo i join:
+
+```sql
+-- 1. Compilazione SQL di dbt per i test generici (unique + accepted_values + relationships)
+-- con ottimizzazione di finestra (WHERE occurred_date >= today() - 7):
+SELECT
+    'unique_fct_orders_order_id' AS test_name,
+    count() AS failing_keys
+FROM (
+    SELECT order_id
+    FROM analytics_prod.fct_orders
+    WHERE occurred_date >= today() - 7
+    GROUP BY order_id
+    HAVING count() > 1 OR order_id IS NULL
+)
+UNION ALL
+SELECT
+    'accepted_values_fct_orders_status' AS test_name,
+    count() AS failing_keys
+FROM analytics_prod.fct_orders
+WHERE occurred_date >= today() - 7
+  AND status NOT IN ('created', 'paid', 'shipped', 'completed', 'cancelled', 'refunded')
+UNION ALL
+SELECT
+    'relationships_fct_orders_customer_id' AS test_name,
+    count() AS failing_keys
+FROM analytics_prod.fct_orders AS child
+LEFT JOIN analytics_prod.dim_customers AS parent
+    ON child.customer_id = parent.customer_id
+WHERE child.occurred_date >= today() - 7
+  AND child.customer_id IS NOT NULL
+  AND parent.customer_id IS NULL;
+
+-- 2. Singular Test in tests/assert_fct_orders_matches_staging_revenue.sql
+-- Verifica che il LEFT JOIN nel mart non abbia moltiplicato né perso 1 solo centesimo rispetto allo staging!
+-- (In dbt un test singolare PASSA se restituisce 0 righe, FALLISCE se restituisce >= 1 righe):
+WITH staging_totals AS (
+    SELECT
+        toDate(occurred_at) AS dt,
+        count() AS stg_orders,
+        sum(amount_eur) AS stg_revenue_eur
+    FROM {{ ref('stg_shop__orders') }}
+    WHERE toDate(occurred_at) >= today() - 7
+    GROUP BY dt
+),
+mart_totals AS (
+    SELECT
+        occurred_date AS dt,
+        count() AS mart_orders,
+        sum(amount_eur) AS mart_revenue_eur
+    FROM {{ ref('fct_orders') }}
+    WHERE occurred_date >= today() - 7
+    GROUP BY dt
+)
+SELECT
+    s.dt,
+    s.stg_orders,
+    m.mart_orders,
+    s.stg_revenue_eur,
+    m.mart_revenue_eur,
+    abs(s.stg_revenue_eur - m.mart_revenue_eur) AS diff_eur
+FROM staging_totals AS s
+FULL OUTER JOIN mart_totals AS m
+    ON s.dt = m.dt
+WHERE s.stg_orders != m.mart_orders
+   OR abs(s.stg_revenue_eur - m.mart_revenue_eur) > 0.01;
+```
+
+Il risultato rende impossibile che il bug del *fan-out join* arrivi mai in produzione o nelle dashboard: non appena uno sviluppatore apre una pull request con il `LEFT JOIN` su `promo_code` duplicato e la pipeline CI lancia `dbt build`, sia il test `unique` su `order_id` sia il test singolare `assert_fct_orders_matches_staging_revenue` restituiscono righe di violazione (`mart_orders = 30.000` contro `stg_orders = 10.000`), la spunta di GitHub diventa rossa e il merge del codice viene bloccato automaticamente. Inoltre, con `contract: {enforced: true}`, se qualcuno prova a cambiare il tipo di `amount_eur` da `Decimal(12, 2)` a `String`, dbt fallisce all'istante con un errore di violazione del contratto.
+
+## Data Tests (sulle righe nel database) o Unit Tests dbt (sulla logica SQL con dati finti)
+
+A partire da dbt 1.8+, oltre ai classici **Data Tests** (che interrogano i dati reali presenti nel database dopo la costruzione della tabella), sono disponibili i **dbt Unit Tests** (che eseguono la logica SQL del modello su un piccolo set di righe finte *mockate* in YAML senza leggere le tabelle reali). Quando usare gli uni e quando gli altri?
+
+Il criterio di scelta è netto: **usate i Data Tests (`unique`, `not_null`, `accepted_values`, `relationships` e test singolari di quadratura) su tutti i modelli per verificare a ogni run che i dati reali arrivati oggi dalle sorgenti non contengano duplicati, buchi o valori corrotti, usate invece i dbt Unit Tests in fase di sviluppo e CI per collaudare formule SQL complesse (`CASE WHEN` di attribuzione, espressioni regolari di estrazione UTM, logiche di sconto a scaglioni) passando in input 5 righe di casi limite noti (`edge cases`) e verificando che la formula produca esattamente le 5 righe di output attese.**
+
+La confusione comune consiste nello scrivere Unit Test per ogni banale ridenominazione di colonna nello staging (sprecando ore a mantenere centinaia di righe di mock YAML inutili), oppure nell'affidarsi ai soli Data Test per una formula fiscale complessa dove nei dati di oggi un certo caso limite non si è ancora verificato ma esploderà a fine anno. Sbagliare questa scelta o appesantisce inutilmente la manutenzione dei file YAML, o lascia non testati i rami `ELSE` più delicati del codice SQL.
+
+Questo articolo non tratta i pacchetti esterni di test avanzati come `dbt-expectations` o `elementary-data` (che estendono i test generici con controlli su deviazione standard e anomalie storiche). Ricordate che quando in un modello la chiave primaria naturale è composta da più colonne (es. `order_id` + `order_line_number`), invece di concatenare le stringhe in SQL potete usare il test **`dbt_utils.unique_combination_of_columns`**.
+
+## Cinque domande prima di approvare i test e i contratti di un modello dbt
+
+1. Il modello dichiara chiaramente nel file YAML quale sia il suo **grano** (cosa rappresenta una singola riga) ed è protetto da un test `unique` + `not_null` (o `unique_combination_of_columns`) sulla chiave corrispondente?
+2. Tutte le tabelle usate sul lato destro di un `LEFT JOIN` hanno un test `unique` attivo sulla colonna usata nella condizione `ON`, impedendo moltiplicazioni silenziose delle righe (*fan-out*)?
+3. Sui modelli di `marts` e sugli `staging` condivisi è attivo **`contract: {enforced: true}`** con tutti i tipi di colonna dichiarati esplicitamente?
+4. In produzione e in CI utilizzate il comando unificato **`dbt build`** (anziché `dbt run` + `dbt test` separati) così che un fallimento di qualità su uno staging blocchi automaticamente l'aggiornamento dei marts a valle?
+5. Sulle tabelle incrementali di grandi dimensioni avete aggiunto ai test la clausola `where` sulla finestra temporale recente (es. ultimi 7 giorni) per mantenere l'esecuzione veloce ed economica?
+
+La metrica di qualità che certifica l'affidabilità del vostro progetto dbt è **`100% di modelli con test unique + not_null sulla chiave primaria`**, **`100% di marts con contract: enforced: true`** e **`0 pull request unite con dbt build in stato rosso`**.
+
+Di tutta questa lezione su test e contratti in dbt, tenete sempre a mente una sola regola: in SQL un `JOIN` sbagliato non dà mai errore di sintassi, moltiplica semplicemente il fatturato in silenzio. Se una tabella non ha un test `unique` sulla sua chiave primaria eseguito dentro `dbt build`, non potete fidarvi di nessuna somma calcolata sopra di essa.

@@ -16,76 +16,139 @@ learningObjectives:
   - Scegliere tra tempo di evento e tempo di arrivo e tra finestre tumbling e sliding
   - Definire garanzie di consegna e idempotenza per duplicati e replay
 binario: "ml-tabellare"
+formato: "articolo"
 autore: "Hermes"
 controllatoDa: "Argo"
 autorizzatoDa: "Giano"
 draft: false
-dateModified: 2026-09-07
+dateModified: 2026-11-13
 ---
+
 # Fondamenti di stream processing
 
-Siamo nel binario **ml-tabellare**, ma qui la tabella arriva in movimento: ogni evento conta perché arriva nel momento in cui è utile reagire. Questa lezione distingue ciò che merita un'elaborazione immediata da ciò che può aspettare tranquillamente il batch.
+Un'applicazione mobile di consegne a domicilio raggruppa gli ordini per fascia di quindici minuti usando l'orologio del server di ingestione invece del timestamp generato sul telefono del cliente. Quando una galleria stradale o un calo di rete ritarda di otto minuti l'invio dei pacchetti di 600 utenti e un retry di rete invia due volte lo stesso evento, il cruscotto operativo mostra un crollo improvviso alle 19:45 seguito da un picco artificiale alle 20:00 con il 14% di ordini duplicati. La causa non è un guasto di Kafka: è confondere il tempo di arrivo (*processing time*) con il tempo dell'evento (*event time*) e processare uno stream *at-least-once* senza chiavi di idempotenza.
 
-## L'idea in breve
+## Sei minuti in galleria e quattordici percento di ordini contati due volte
 
-Lo stream processing elabora ogni evento al suo arrivo in finestre temporali esplicite per decidere subito cosa richiede reazione immediata e cosa può attendere il batch. Non è un'alternativa al batch, è un altro regime decisionale.
+Questo è un caso ricostruito con numeri di esempio su quanto accade nelle architetture di streaming quando si applicano a un flusso continuo le abitudini dei job batch notturni. La piattaforma raccoglie gli eventi di checkout dai dispositivi mobili, li pubblica su un topic Kafka e alimenta in tempo reale la tabella ClickHouse che regola il prezzo dinamico di consegna quartiere per quartiere.
 
-## La procedura passo per passo
+Durante l'ora di punta del venerdì sera si verificano due fenomeni fisiologici sulle reti mobili:
+1. Centinaia di telefoni completano l'ordine alle 19:42 ma riescono a trasmettere il payload JSON al gateway solo alle 19:51 dopo aver ritrovato la connessione 4G. Poiché la pipeline raggruppa le finestre sul timestamp di ricezione del broker (`ingested_at`), la finestra `19:30-19:45` appare artificialmente vuota e la finestra `19:45-20:00` esplode attivando per errore il sovrapprezzo di alta domanda.
+2. Quando il client mobile non riceve l'ACK entro due secondi, ritenta l'invio dello stesso pacchetto: il broker registra entrambi i messaggi (*at-least-once delivery*) e la query analitica che usa `count()` invece di deduplicare su `event_id` gonfia i volumi del 14%.
 
-Per passare dai dati al sistema di streaming servono cinque decisioni in ordine.
+La causa di entrambe le anomalie è ignorare i tre pilastri teorici dello stream processing formalizzati nel modello Dataflow ([Akidau et al., 2015](https://doi.org/10.14778/2824032.2824076)): la separazione tra *event time* e *processing time*, la semantica delle finestre temporali (*windows* e *watermarks*) e la deduplicazione idempotente a valle.
 
-1. Separa gli eventi che richiedono reazione in secondi da quelli che tollerano ore di ritardo.
-2. Fissa per ogni flusso se conta il tempo di evento o il tempo di arrivo e dichiara la tolleranza al ritardo.
-3. Scegli finestre `tumbling` per conteggi fissi e `sliding` per medie mobili con sovrapposizione.
-4. Definisci garanzie di consegna e idempotenza per duplicati e replay prima di andare in produzione.
-5. Collega ogni metrica live a una soglia, un `owner` e un `runbook` di intervento.
+## Event time, finestre temporali e idempotenza end-to-end
 
-## Perché la velocità non basta
+Elaborare un flusso continuo e illimitato di eventi (*unbounded data*) senza distorsioni richiede tre meccanismi architetturali precisi.
 
-Un prodotto digitale genera eventi ogni secondo: click, pagamenti, errori e cambi di stato. La velocità da sola non decide. Serve distinguere gli eventi che chiedono reazione immediata da quelli che possono attendere il `batch`, e dichiarare quali garanzie rendono il risultato credibile. La scelta passa per tre coppie operative: tempo di evento contro tempo di arrivo, finestre `tumbling` contro `sliding`, consegna `at-least-once` contro `exactly-once`. Ogni coppia fissa ritardo tollerabile, errore accettabile e costo di correzione.
+Il primo meccanismo è la distinzione tra **Event Time** (l'istante fisico in cui il fatto si è verificato sul dispositivo o nel database sorgente, es. `occurred_at`) e **Processing Time** (l'istante in cui il server di analisi legge il messaggio, es. `ingested_at`). In qualsiasi sistema distribuito reale la rete introduce ritardi variabili e riordinamenti (*out-of-order events*): tutte le metriche di business, di fatturazione e di funnel devono essere ancorate esclusivamente a `occurred_at`, mentre la differenza `ingested_at - occurred_at` viene monitorata a parte come metrica di latenza dell'infrastruttura (*replication lag*).
 
-## Dati a riposo e dati in movimento
+Il secondo meccanismo è il taglio del flusso infinito in finestre finite (*windowing*) governate da una soglia di completezza (*watermark*). Le finestre fisse non sovrapposte (*tumbling windows*, es. blocchi contigui di 5 minuti `19:00-19:05`, `19:05-19:10`) assegnano ogni evento a un solo intervallo; le finestre scorrevoli (*sliding/hopping windows*, es. ultimi 15 minuti ricalcolati ogni minuto) smussano i picchi improvvisi; le finestre di sessione (*session windows*) raggruppano gli eventi dello stesso utente finché non trascorre un intervallo di inattività (es. 30 minuti di silenzio). Il *watermark* dichiara fino a quale ritardo massimo il sistema attende i ritardatari prima considerare chiusa una finestra.
 
-Il `batch` lavora su dati a riposo: insiemi finiti, completi e delimitati. È il censimento nazionale che raccoglie per mesi e analizza alla fine, con risultati deterministici e riletture multiple. Funziona per fatturazione mensile, training su storici e report finanziari trimestrali. Lo `stream` lavora su dati in movimento: flussi potenzialmente infiniti, incompleti e non ordinati. È il controllore del traffico aereo che decide rotte su posizione, velocità e meteo senza attendere tutti gli atterraggi. Ogni transazione, click o lettura da sensore viene processata all'arrivo, da sola o in piccole finestre.
+Il terzo meccanismo è l'idempotenza su consegna *at-least-once*. Poiché garantire che nessun messaggio vada perso in caso di crash di rete richiede che il produttore possa inviare lo stesso messaggio più volte, il motore analitico di destinazione deve assorbire i duplicati tramite una chiave deterministica (`event_id` o `(order_id, version)`) usando motori di deduplicazione (`ReplacingMergeTree`) o aggregazioni idempotenti.
 
-La vera differenza non è il tempo di risposta, ma il momento in cui il sistema è costretto a decidere. Il batch decide quando i dati sono completi: il numero finale è definitivo perché può sempre ricalcolare. Lo stream decide prima della completezza: la finestra si chiude, il conteggio esce, e se un evento arriva dopo non rifà la storia, la aggiunge o la ignora secondo le regole dichiarate.
+**Uno stream real-time produce numeri identici al batch contabile solo se raggruppa le finestre sull'event time, tollera i ritardi entro il watermark e neutralizza i retry di rete tramite chiavi di idempotenza.**
 
-Verdetto: usa lo `streaming` solo dove la decisione perde valore se aspetta. Per tutto il resto il `batch` costa meno e resta più affidabile.
+## Tre errori quando si progetta una pipeline di stream processing
 
-## Tempo di evento, tempo di arrivo e finestre
+Il blocco SQL qui sotto mostra una vista di streaming che raggruppa sul tempo di inserimento del server, conta i duplicati di rete e taglia fuori gli eventi arrivati con pochi secondi di ritardo:
 
-Il tempo di evento è il momento in cui l'accaduto è realmente avvenuto sul dispositivo o sul server; il tempo di arrivo è il momento in cui il sistema riceve l'evento. I due coincidono solo in condizioni ideali: un telefono in aereo, un client con cache o un servizio con coda producono eventi che arrivano in ritardo, con un gap anche di minuti. Se l'elaborazione usa il tempo di arrivo, un picco di traffico di venti minuti finisce conteggiato nella finestra sbagliata e la metrica si distorce proprio durante l'incidente, quando la leggi per decidere. La regola pratica: usa il tempo di evento per i fenomeni che i tuoi utenti percepiscono (latenza percepita, sessioni, acquisti) e dichiara la tolleranza al ritardo, l'intervallo massimo oltre il quale un evento in ritardo viene scartato o contato a parte.
+```sql
+-- ERRORE 1: raggruppa su now() / ingested_at invece che sull'event_time (occurred_at).
+-- ERRORE 2: usa count() grezzo su uno stream at-least-once pieno di retry duplicati.
+-- ERRORE 3: filtra ingested_at negli ultimi 5 minuti ignorando gli eventi nati prima ma arrivati tardi.
+SELECT
+    toStartOfFiveMinutes(ingested_at) AS finestra_errata,
+    count() AS ordini_gonfiati_dai_retry,
+    sum(amount_eur) AS ricavo_distorto_eur
+FROM raw_stream.checkout_events
+WHERE ingested_at >= now() - INTERVAL 5 MINUTE
+GROUP BY finestra_errata;
+```
 
-Le finestre `tumbling` e `sliding` rispondono a domande diverse. Una finestra `tumbling` è una sequenza di intervalli fissi e contigui, dal minuto 0 al minuto 1, dal minuto 1 al minuto 2 e così via; ogni evento appartiene a una sola finestra e i totali sono additivi e facili da confrontare. È la scelta giusta per conteggi che devono quadrare: transazioni al minuto, errori per slot temporale. Una finestra `sliding` si sposta con continuità, per esempio 60 minuti che avanzano ogni 5, e ogni evento appare in molte finestre; serve alle medie mobili e ai trend, dove conta la forma della curva.
+### Raggruppare le metriche di business sul processing time invece che sull'event time
 
-| Scelta | Opzione A | Opzione B | Quando scegli A | Quando scegli B |
-| --- | --- | --- | --- | --- |
-| Tempo | Tempo di evento | Tempo di arrivo | Conteggi di fenomeni percepiti, latenza | Monitoraggio di sistema, eventi puntuali |
-| Finestra | `tumbling` | `sliding` | Totali che devono quadrare | Medie mobili, trend |
-| Consegna | `at-least-once` | `exactly-once` | Contatori idempotenti | Pagamenti, saldi, stati |
+Usare `toStartOfFiveMinutes(ingested_at)` o `now()` come asse temporale del report sembra comodo perché la colonna `ingested_at` è sempre monotona crescente e non cambia mai nel passato. Non funziona perché confonde la storia del business con la salute della rete: se un connettore Kafka si ferma per dieci minuti per manutenzione e poi scarica in trenta secondi tutta la coda arretrata, il grafico basato su `ingested_at` mostra dieci minuti di vendite pari a zero seguiti da un minuto con mille volte il traffico normale.
 
-## Garanzie di consegna e idempotenza
+### Assumere che ogni messaggio dello stream sia unico senza chiave di deduplicazione
 
-La consegna `at-least-once` garantisce che nessun evento vada perso, ma ammette duplicati: se il consumatore fallisce dopo aver ricevuto un evento e prima di confermarlo, l'evento verrà riconsegnato. `exactly-once` garantisce che ogni evento produca un effetto una sola volta, ma costa coordinamento tra sorgenti, stato e sink. La differenza non è solo il costo: è la natura dell'output. Un contatore di click che conta un duplicato in più su mille è un errore tollerabile; un pagamento addebitato due volte no. La scelta va fatta sull'output, non sull'entusiasmo per la tecnologia.
+Applicare `count()` e `sum(amount_eur)` direttamente sulla tabella di atterraggio dello stream presuppone una consegna *exactly-once* perfetta dal telefono del cliente fino al disco del database. Nel mondo reale nessun client mobile o webhook esterno può garantire *exactly-once*: a ogni micro-disconnessione il client ritenta la chiamata HTTP e produce un secondo record con lo stesso `event_id`, gonfiando sistematicamente i totali.
 
-L'idempotenza è il piano B universale: se il sink accetta la stessa scrittura più volte con lo stesso risultato, `at-least-once` basta. Un pagamento è idempotente per design, con identificativo dell'ordine e stato: ripetere la stessa richiesta non cambia il saldo. Gli eventi devono quindi nascere con un `id` stabile attraverso i retry, altrimenti nessuna dichiarazione di garanzia regge.
+### Chiudere la finestra al secondo zero senza attendere il ritardo di propagazione
 
-## L'errore da evitare
+Interrogare la finestra del minuto appena concluso un istante dopo lo scoccare del secondo `:00` e salvarne il risultato in una tabella statica taglia fuori la coda fisiologica dello stream. Anche su un'infrastruttura sana, tra il clic dell'utente, il buffer del produttore, il broker Kafka e il flush del consumatore passano da 2 a 15 secondi: chiudere il calcolo senza margine di grazia (*grace period* / *watermark*) perde regolarmente l'ultimo 3-5% degli eventi di ogni minuto.
 
-L'errore tipico è usare lo `stream` come etichetta invece che come criterio di scelta. Si pubblicano numeri senza decisione, senza `baseline` e senza rischio residuo. Il dato sembra preciso ma non guida l'azione. La domanda di controllo resta una sola: se questo risultato fosse instabile, quale scelta sbaglierei.
+## Finestre su event time, deduplicazione su event_id e controllo di completezza
 
-Il secondo errore è confondere gli eventi con la loro copia: duplicare un evento per alimentare due pipeline non è stream processing, è raddoppiare il problema dei duplicati. Il terzo è dichiarare `exactly-once` dove non serve e poi scoprire che costa latenza e complessità, oppure dichiarare `at-least-once` per un saldo e scoprire i duplicati in fatturazione. Le garanzie si scrivono prima, sulla base dell'output, e si testano con il replay.
+Per costruire un'elaborazione in streaming solida e riconciliabile col data warehouse, applicate questi quattro criteri in ordine di priorità:
 
-## Il caso di Twitter e Heron
+1. Includete obbligatoriamente in ogni payload due timestamp distinti (`occurred_at` generato alla sorgente in UTC e `ingested_at` aggiunto dal broker) e un identificativo univoco deterministico `event_id` (es. UUIDv7 o hash naturale dell'operazione).
+2. Ancorate tutte le finestre temporali (`toStartOfFiveMinutes(occurred_at)`) esclusivamente a `occurred_at`, usando `ingested_at - occurred_at` solo per monitorare il ritardo della pipeline.
+3. Scrivete gli eventi su una tabella `ReplacingMergeTree` ordinata per `(toDate(occurred_at), event_id)` o deduplicate esplicitamente con `uniqExact(event_id)` e `argMax(amount_eur, ingested_at)` nelle query a bassa latenza.
+4. Esponete nei cruscotti in tempo reale solo le finestre il cui estremo superiore è più vecchio del watermark p99 di ritardo (es. `occurred_at < now() - INTERVAL 30 SECOND`).
 
-Nel 2015 Twitter presenta Heron, successore di Storm, per reggere i picchi di tweet durante eventi live con latenze sotto il secondo. Il motore nasce perché il volume durante le dirette supera ciò che il sistema precedente garantisce senza code. Heron separa scheduling, backpressure e garanzie di consegna per tenere il flusso stabile anche sotto spike. La lezione resta netta: batch per ciò che può aspettare e streaming per ciò che richiede reazione immediata con regole esplicite su ritardi e duplicati.
+Ecco lo schema e la query di finestra tumbling corretta in ClickHouse che deduplica i retry e rispetta l'event time:
 
-Heron documenta pubblicamente che il problema non era solo la velocità di processamento: era la capacità di mantenere latenza e ordine quando il carico esplode, perché un sistema che regge la media ma soffoca il picco non è operativo. Da quel caso deriva la pratica di progettare le pipeline sul picco, non sulla media.
+```sql
+CREATE TABLE raw_stream.checkout_events_dedup
+(
+    occurred_at DateTime64(3, 'UTC'),
+    ingested_at DateTime64(3, 'UTC'),
+    event_id String,
+    order_id UInt64,
+    district_id LowCardinality(String),
+    amount_eur Decimal(12, 2)
+)
+ENGINE = ReplacingMergeTree(ingested_at)
+PARTITION BY toYYYYMM(occurred_at)
+ORDER BY (district_id, toStartOfHour(occurred_at), event_id);
 
-## Domande per ripassare
+-- Finestra tumbling di 5 minuti sull'EVENT TIME (occurred_at), deduplicata per event_id
+-- ed escludendo gli ultimi 30 secondi ancora sotto watermark.
+WITH eventi_unici AS (
+    SELECT
+        event_id,
+        min(occurred_at) AS event_time,
+        any(district_id) AS district_id,
+        argMax(amount_eur, ingested_at) AS amount_eur,
+        max(dateDiff('second', occurred_at, ingested_at)) AS lag_secondi
+    FROM raw_stream.checkout_events_dedup
+    WHERE occurred_at >= now() - INTERVAL 2 HOUR
+      AND occurred_at < now() - INTERVAL 30 SECOND
+    GROUP BY event_id
+)
+SELECT
+    toStartOfFiveMinutes(event_time) AS finestra_5m,
+    district_id,
+    count() AS ordini_unici_verificati,
+    sum(amount_eur) AS ricavo_netto_eur,
+    quantile(0.99)(lag_secondi) AS watermark_lag_p99_sec
+FROM eventi_unici
+GROUP BY finestra_5m, district_id
+ORDER BY finestra_5m DESC, ricavo_netto_eur DESC;
+```
 
-1. Quando un evento richiede reazione in secondi invece di attesa batch?
-2. Quale differenza passa tra tempo di evento e tempo di arrivo nel tuo flusso?
-3. Quale finestra useresti per conteggi fissi e quale per medie mobili?
-4. Come gestisci duplicati e replay senza corrompere il conteggio?
-5. Quale output del tuo sistema tollererebbe un duplicato e quale non se lo può permettere?
+Con questa struttura i 600 ordini effettuati in galleria alle 19:42 e ricevuti alle 19:51 finiscono esattamente nella loro finestra naturale `19:40-19:45`, i pacchetti inviati due volte dal telefono vengono collassati da `GROUP BY event_id` azzerando il 14% di sovrastima, e la metrica `watermark_lag_p99_sec` dice in ogni istante agli operatori se la rete sta accumulando ritardo. Separare `occurred_at` da `ingested_at` nello schema JSON iniziale costa una riga di codice; accorgersi dopo sei mesi di non aver salvato il timestamp del dispositivo rende impossibile ricostruire la cronologia reale degli eventi.
+
+## Stream processing continuo sub-secondo o micro-batch a intervalli di minuti
+
+Prima ancora di scrivere il codice delle finestre, l'architetto deve decidere se un caso d'uso richiede davvero lo stream processing continuo (latenza da millisecondi a pochi secondi) o se basta un caricamento micro-batch / batch (ogni 15 minuti o ogni ora).
+
+Il criterio di scelta è netto: **usate lo stream processing continuo solo quando una macchina o un operatore umano prende una decisione operativa immediata entro pochi secondi dall'evento (blocco frodi su pagamenti, adeguamento dinamico dei prezzi, allerta su guasti di checkout o esaurimento scorte lampo), usate invece il micro-batch o il batch pianificato in dbt per tutta la reportistica direzionale, la contabilità finanziaria, l'attribuzione di marketing e le analisi di coorte.**
+
+La confusione comune consiste nel costruire una complessa pipeline Kafka + Flink + ClickHouse con latenza di 500 millisecondi per alimentare un report che l'amministratore delegato guarda una volta sola il lunedì mattina alle nove. Sbagliare questa scelta moltiplica per cinque i costi infrastrutturali e la complessità di gestione reperibilità (code, offset, ribilanciamento dei consumer, eventi fuori ordine) senza produrre alcun vantaggio economico per l'azienda.
+
+Questo articolo non tratta i motori di stato distribuito su grafo come Apache Flink con checkpoint su RocksDB né i join stream-to-stream con buffer temporale bidirezionale. Se un dispositivo client ha l'orologio di sistema completamente sballato (es. impostato sull'anno 2019), il gateway di ingestione deve correggere lo scarto confrontando il timestamp di invio col momento della richiesta HTTP.
+
+## Cinque domande prima di mandare in produzione una pipeline streaming
+
+1. Esiste un'azione automatica o umana concreta che cambia se il dato arriva in 3 secondi anziché in 30 minuti, giustificando il costo dello streaming rispetto al batch?
+2. Ogni evento trasporta sia il timestamp di creazione alla fonte (`occurred_at`) sia il timestamp di ricezione (`ingested_at`), e tutte le finestre di business aggregano sul primo?
+3. Ogni messaggio possiede un `event_id` univoco generato all'origine che permette a ClickHouse di deduplicare in modo deterministico i retry della consegna *at-least-once*?
+4. Avete misurato il 99° percentile del ritardo (`ingested_at - occurred_at`) e configurato il watermark delle finestre in modo da non dare per definitivi i secondi ancora in volo?
+5. Avete scelto il tipo di finestra corretto per il dominio (`tumbling` per conteggi contabili non sovrapposti, `sliding` per medie mobili di allerta, `session` per il comportamento utente)?
+
+La metrica regina per governare uno stream in produzione è il **lag di event-time al 99° percentile** (`quantile(0.99)(ingested_at - occurred_at)`): finché resta sotto la soglia del vostro watermark, le finestre esposte ai cruscotti sono complete e affidabili.
+
+Di tutti i principi dello stream processing, uno solo evita il 90% dei bug architetturali: non usate mai l'ora in cui avete ricevuto il messaggio per dire quando è successo il fatto, e non fidatevi mai che un messaggio arrivi una volta sola.

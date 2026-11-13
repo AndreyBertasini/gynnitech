@@ -3,8 +3,7 @@
 
 declare namespace App {
   interface Locals {
-    /** Contesto delle lezioni con formato: "3s", impostato dal template della lezione. */
-    lezione?: import('./lib/lezione/model').LezioneContext;
+    // (3s support removed)
   }
 }
 

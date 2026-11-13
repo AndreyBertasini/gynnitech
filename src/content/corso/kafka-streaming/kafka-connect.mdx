@@ -1,122 +1,196 @@
 ---
-title: "Kafka Connect: integrazione senza codice"
+title: "Kafka Connect: source, sink, Debezium CDC e Schema Registry"
 description: >-
-  Come usare Kafka Connect per integrare database, file system e servizi esterni senza scrivere consumer/producer.
+  Come integrare database operazionali e data warehouse con Kafka Connect:
+  architettura worker-task-topic interni, Change Data Capture con Debezium,
+  Single Message Transforms, Schema Registry e Dead Letter Queue.
 module: "Modulo 11: Kafka e streaming di eventi"
 order: 4
 category: Tecnico
 headerImage: /course-headers/kafka-streaming-kafka-connect-ginnytech-ad.webp
-headerImageAlt: >-
-  Kafka Connect - immagine ufficiale della lezione su GinnyTech
+headerImageAlt: "Kafka Connect: source, sink, Debezium CDC e Schema Registry - immagine ufficiale della lezione su GinnyTech, creata da AD"
 difficulty: advanced
-duration: 22 min
+duration: 26 min
 prerequisites:
-  - kafka-streaming/kafka-producers-consumers
+  - kafka-streaming/architettura-di-kafka
 learningObjectives:
-  - Configurare source e sink connector con converter, transform e topic di destinazione
-  - Attivare la dead letter queue con tolleranza agli errori su ogni sink
-  - Calibrare tasks.max e monitorare lag e tasso di errore con soglie di escalation
+  - Configurare Kafka Connect in modalità distribuita distinguendo worker, task e i tre topic interni di coordinamento
+  - Catturare mutazioni da PostgreSQL tramite Debezium CDC su WAL senza interrogare le tabelle con polling SQL
+  - Applicare Single Message Transforms (SMT), contratti Schema Registry e Dead Letter Queue per isolare record corrotti
 binario: "ml-tabellare"
+formato: "articolo"
 autore: "Hermes"
 controllatoDa: "Argo"
 autorizzatoDa: "Giano"
 draft: false
-dateModified: 2026-09-07
+dateModified: 2026-11-13
 ---
-# Kafka Connect: integrazione senza codice
 
-Questa lezione, nel binario **ml-tabellare** del modulo, ti mostra come portare dati dentro e fuori Kafka senza scrivere un solo producer o consumer: la disciplina resta la stessa, ma il codice diventa configurazione dichiarativa.
+# Kafka Connect: source, sink, Debezium CDC e Schema Registry
 
-## L'idea in una frase
+Un'azienda logistica italiana sincronizza il database PostgreSQL degli ordini verso ClickHouse ed Elasticsearch con tre script Python che interrogano `WHERE updated_at > last_run` ogni due minuti. Durante il picco del lunedì mattina gli script saturano la CPU del database primario, perdono tutte le righe cancellate con `DELETE` e si bloccano per sei ore appena un team aggiunge una colonna non prevista. La causa non è la lentezza di Python né il database: è usare query di polling scritte in casa invece di leggere il log di transazione binario tramite un framework distribuito con gestione degli schemi e coda di scarto.
 
-Kafka Connect è un runtime dichiarativo che sposta l'integrazione da codice duplicato a connector configurati, osservabili e recuperabili.
+## Tre script di polling e sei ore di buio operativo
 
-## La procedura in cinque passi
+Questo è un caso ricostruito con numeri di esempio su quanto accade quando l'integrazione tra database transazionali e motori analitici viene affidata a job schedulati artigianali. L'azienda gestisce 180.000 spedizioni al giorno su PostgreSQL e alimenta due destinazioni: ClickHouse per i cruscotti operativi e un indice di ricerca per l'assistenza clienti.
 
-1. Scegli il connector source o sink adatto alla sorgente e alla destinazione.
-2. Configura converter, transform leggere e topic di destinazione.
-3. Attiva la dead letter queue con tolleranza agli errori su ogni sink.
-4. Calibra `tasks.max` sul throughput reale e sulle partizioni disponibili.
-5. Monitora lag e tasso di errore con soglie di escalation esplicite.
+A metà mattina un operatore corregge un errore di fatturazione cancellando 420 righe duplicate con un comando `DELETE` diretto sul database. Poiché lo script di estrazione legge solo le righe presenti in tabella filtrando per `updated_at`, le 420 righe eliminate non vengono mai rilevate e restano vive in ClickHouse, gonfiando il fatturato giornaliero di 64.000 euro. Due ore dopo, un rilascio applicativo rinomina una colonna secondaria: il consumatore va in eccezione sul primo messaggio, si ferma senza salvare il punto di lettura e alla ripartenza scarica da zero gli ultimi due giorni, intasando il disco del database per l'intero pomeriggio.
 
-## Il problema che Connect risolve
+La causa di entrambi gli incidenti è strutturale: interrogare lo stato corrente di una tabella con `SELECT` periodiche perde la storia intermedia e le cancellazioni fisiche, mentre accoppiare produttore e consumatore senza un registro degli schemi e una Dead Letter Queue trasforma qualsiasi anomalia su un singolo messaggio in un blocco totale della pipeline.
 
-Prima o poi un team deve portare in Kafka dati che vivono in un database, in un SaaS o in un sistema operativo, e la tentazione è scrivere un microservizio diverso per ogni fonte. Kafka Connect evita questo con un'integrazione standardizzata e configurabile. La promessa "senza codice" va però presa con cautela: il valore reale dipende da come gestisci configurazione, offset, errori e osservabilità. Questa lezione mostra dove finisce il no code e dove comincia l'ingegneria vera.
+## Come funzionano Connect, il log WAL e lo Schema Registry
 
-Senza Connect, ogni nuova sorgente richiede un consumer o un producer scritto a mano, con retry, gestione errori e tracciamento degli offset. Moltiplica per dieci sistemi e ottieni dieci pezzi di codice quasi identici da mantenere, ognuno con i suoi bug. Connect sposta quel lavoro in una configurazione dichiarativa eseguita da un runtime già pronto.
+[Kafka Connect](https://kafka.apache.org/documentation/#connect) e [Debezium](https://debezium.io/documentation/) sostituiscono gli script su misura con un'architettura dichiarativa basata su tre meccanismi fisici.
 
-Leggi un connector come checklist di integrazione: sorgente, destinazione, converter, transform, dead letter queue, retry e lag. Un connector è affidabile quando fallisce in modo osservabile e recuperabile, non quando nasconde la complessità dietro poche righe di configurazione. La domanda da tenere a mente è dove finiscono i dati quando qualcosa va storto.
+Il primo meccanismo è la separazione tra `Worker`, `Connector` e `Task` coordinata da tre topic compattati interni a Kafka. I worker sono processi JVM senza stato locale che formano un cluster: il connettore definisce la configurazione logica e si divide in uno o più task che spostano fisicamente i dati. Lo stato risiede interamente in Kafka dentro `connect-configs` (configurazioni dei connettori), `connect-offsets` (posizioni di lettura raggiunte dalle sorgenti) e `connect-status` (stato di salute dei task): se un nodo worker muore, il cluster riassegna i suoi task ai nodi superstiti in pochi secondi ripartendo dall'ultimo offset confermato.
 
-## Source e sink connector
+Il secondo meccanismo è il Change Data Capture (CDC) basato sul log di transazione (`Write-Ahead Log`, WAL in PostgreSQL o `binlog` in MySQL). Invece di eseguire query pesanti sulle tabelle, Debezium apre uno slot di replica logica e legge il flusso binario che il database scrive comunque su disco per garantire la durabilità ACID: ogni `INSERT`, `UPDATE` e `DELETE` diventa un evento immutabile con stato precedente (`before`), stato nuovo (`after`) e codice operazione (`c`, `u`, `d`, `r`), con impatto quasi nullo sulla CPU del database e cattura garantita delle cancellazioni.
 
-Connect distingue due ruoli. Un source connector legge da un sistema esterno e scrive su Kafka: è il caso di Debezium per il change data capture da PostgreSQL, o di un connector S3 che legge file. Un sink connector fa il percorso inverso, legge da Kafka e scrive su un sistema esterno come ClickHouse, S3, Elasticsearch o una destinazione JDBC.
+Il terzo meccanismo è l'accoppiamento tra Single Message Transforms (SMT), Schema Registry e Dead Letter Queue (DLQ). Le SMT trasformano o mascherano i campi al volo dentro Connect senza bisogno di scrivere codice esterno; lo Schema Registry impone regole di compatibilità (`BACKWARD`, `FORWARD`, `FULL`) prima di accettare un nuovo formato; la DLQ intercetta nel connettore Sink i singoli messaggi non validi e li dirotta in un topic di quarantena allegando negli header il motivo esatto dell'errore.
 
-La maggior parte delle pipeline di analytics combina i due: cattura un cambiamento da un database operativo con un source connector e lo riversa nel data warehouse con un sink. Il punto delicato è quasi sempre la trasformazione e la gestione degli errori nel mezzo, non il trasporto in sé.
+**Una pipeline di integrazione è resiliente solo se legge il log binario delle transazioni anziché interrogare le tabelle, valida la compatibilità degli schemi a ogni evoluzione e isola i messaggi corrotti in una Dead Letter Queue senza fermare il flusso.**
 
-## Esempio: sink connector ClickHouse
+## Tre errori nella configurazione di Kafka Connect
+
+Il file JSON qui sotto mostra la configurazione tipica messa in produzione quando si avvia Kafka Connect con i parametri di esempio senza adeguarli al carico reale:
 
 ```json
 {
-  "name": "clickhouse-sink",
+  "name": "ordini-jdbc-source-fragile",
   "config": {
-    "connector.class": "com.clickhouse.kafka.connect.ClickHouseSinkConnector",
-    "topics": "user_events",
-    "clickhouse.url": "jdbc:clickhouse://localhost:8123",
-    "clickhouse.table": "user_events",
-    "tasks.max": "4",
-    "errors.tolerance": "all",
-    "errors.deadletterqueue.topic.name": "dlq_user_events"
+    "connector.class": "io.confluent.connect.jdbc.JdbcSourceConnector",
+    "connection.url": "jdbc:postgresql://db-prod:5432/ecommerce",
+    "mode": "timestamp",
+    "timestamp.column.name": "updated_at",
+    "poll.interval.ms": "1000",
+    "value.converter": "org.apache.kafka.connect.json.JsonConverter",
+    "value.converter.schemas.enable": "true",
+    "errors.tolerance": "none"
   }
 }
 ```
 
-Con questa configurazione, Connect consuma automaticamente dal topic `user_events`, scrive su ClickHouse e dirotta gli eventi problematici sul topic `dlq_user_events` per ispezione. Il parametro `tasks.max` controlla quante istanze parallele lavorano, mentre `errors.tolerance` su `all` evita che un singolo messaggio malformato fermi l'intero connector.
-
-## Dead letter queue
-
-La dead letter queue gestisce gli errori senza bloccare la pipeline. Quando un messaggio non può essere scritto, per esempio per formato non valido o vincolo violato, invece di fermare il connector lo si reindirizza a un topic DLQ. Da lì un processo separato, o un analista, può ispezionarlo e correggere il problema mentre il flusso principale continua a scorrere.
-
-È una scelta che cambia il comportamento sotto stress. Senza DLQ, un evento corrotto può fermare tutta l'ingestione; con la DLQ, l'errore resta circoscritto e visibile. È esattamente quel "fallire in modo osservabile e recuperabile" che separa un'integrazione robusta da una fragile.
-
-## Single message transform
-
-Connect supporta trasformazioni leggere sui messaggi senza uno stream processor esterno:
-
-```json
-"transforms": "addPrefix",
-"transforms.addPrefix.type": "org.apache.kafka.connect.transforms.RegexRouter",
-"transforms.addPrefix.regex": ".*",
-"transforms.addPrefix.replacement": "clickhouse.$0"
+```sql
+-- Query di polling eseguita ogni secondo dal connettore JDBC errato:
+-- scansiona la tabella, ignora i DELETE fisici e salta righe con updated_at identico.
+SELECT order_id, customer_id, status, amount_eur, updated_at
+FROM public.orders
+WHERE updated_at > TIMESTAMP '2026-10-12 10:00:00.000'
+ORDER BY updated_at ASC;
 ```
 
-Le single message transform vanno bene per operazioni semplici come rinominare un topic o aggiungere un campo. Per logica più articolata, che incrocia più messaggi o mantiene stato, conviene passare a Kafka Streams o a Flink invece di forzare le SMT oltre il loro scopo.
+### Usare il polling JDBC su timestamp invece del CDC sul log WAL
 
-## Come impostare la scelta di integrazione
+Configurare `JdbcSourceConnector` con `mode: "timestamp"` e intervallo a un secondo sembra la strada più semplice perché non richiede permessi di replica sul database. Non funziona in produzione per tre ragioni fisiche: martella il database con sessanta query al minuto che degradano le transazioni dei clienti, ignora completamente ogni riga rimossa con `DELETE` e perde i record quando due transazioni concorrenti scrivono lo stesso millisecondo in `updated_at` ma fanno commit in ordine inverso.
 
-La prima domanda non è "quale connector uso" ma "quale decisione dovrà migliorare grazie a questa integrazione". Una pipeline ha valore se riduce l'incertezza di una scelta concreta, non se aggiunge un'altra freccia tra due riquadri in un diagramma. Definisci in modo esplicito l'unità di lavoro (il topic, l'evento, lo schema, il connector stesso), il segnale osservato (lag, throughput, tasso di errore, compatibilità dello schema) e la baseline di lettura.
+### Abilitare JsonConverter con schemas.enable a true senza Schema Registry
 
-Prima di adottare un connector esistente controlla mapping degli schemi, gestione degli errori, throughput atteso, gestione delle credenziali e possibilità di replay. Un'integrazione che sembra semplice può diventare il punto meno governato dell'intera piattaforma proprio perché nessuno la tratta come codice da presidiare.
+Lasciare `JsonConverter` con `schemas.enable: "true"` è l'impostazione predefinita di molti esempi introduttivi e sembra innocua finché si testano dieci righe. In realtà costringe Kafka Connect a ripetere l'intero albero dello schema JSON dentro ogni singolo messaggio inviato sul topic: un record di ordine da 180 byte gonfia fino a 1.400 byte, moltiplicando per sette il traffico di rete, lo spazio disco sui broker e il tempo di serializzazione, senza offrire alcun controllo di compatibilità preventiva tra produttore e consumatore.
 
-## Errori comuni
+### Lasciare errors.tolerance a none nei connettori Sink senza Dead Letter Queue
 
-Il primo errore è trattare il "no code" come "no engineering" e non presidiare un connector come faresti con il codice. Il secondo è non controllare la qualità del dato in ingresso: schemi che cambiano, eventi duplicati e timezone incoerenti producono conclusioni false anche a valle di un'integrazione tecnicamente perfetta. Il terzo è confondere correlazione e causalità quando interpreti le metriche di prodotto alimentate dalla pipeline.
+Mantenere `errors.tolerance: "none"` in un connettore Sink sembra una scelta prudente per non perdere dati in caso di problemi. Nella pratica espone l'intera pipeline all'effetto della *poison pill* (pillola avvelenata): basta che un singolo messaggio su dieci milioni contenga una data fuori formato o un carattere inatteso perché il task vada in stato `FAILED` e blocchi l'ingestione di tutti i messaggi validi successivi, lasciando i cruscotti fermi nel mezzo della giornata lavorativa.
 
-Per ridurre questi rischi mantieni tre controlli minimi: una definizione esplicita della metrica di salute, un confronto per fonte e una verifica contro un periodo precedente. E soprattutto una dead letter queue su ogni sink, perché senza un posto dove far cadere gli errori, prima o poi sarà l'intera pipeline a cadere.
+## Configurazione Debezium CDC e Sink con Schema Registry e DLQ
 
-Verdetto: usa i connector per source e sink standard con dead letter queue sempre attiva, limita le transform ai ritocchi senza stato e sposta ogni logica con stato su Kafka Streams o Flink.
+Per mettere in produzione una pipeline tra PostgreSQL e il warehouse senza fermi né perdite di dati, applicate questi quattro criteri in ordine di priorità:
 
-*Riferimenti:*
+1. Usate Debezium sul log WAL (`pgoutput`) con una pubblicazione esplicita delle sole tabelle necessarie e configurate un intervallo di `heartbeat` per far avanzare sempre l'offset dello slot di replica anche quando le tabelle monitorate sono ferme.
+2. Serializzate i messaggi con Avro o Protobuf appoggiandovi allo Schema Registry in modalità di compatibilità `BACKWARD` o `FULL`, bandendo il JSON con schema incorporato in ogni messaggio.
+3. Applicate le Single Message Transforms direttamente nel connettore per appiattire l'involucro CDC o oscurare eventuali campi sensibili prima che lascino il perimetro di ingestione.
+4. Nei connettori Sink impostate `errors.tolerance: "all"` accompagnato da un topic di Dead Letter Queue con gli header diagnostici attivi (`errors.deadletterqueue.context.headers.enable: "true"`).
 
-- Confluent. (2024). "Kafka Connect Documentation." *docs.confluent.io.*
-- ClickHouse. (2024). "Kafka Connect Sink." *clickhouse.com/docs.*
+Ecco la coppia di configurazioni corrette (Source Debezium + Sink con DLQ):
 
-## L'esempio che fa da riferimento
+```json
+{
+  "name": "pg-ordini-cdc-source",
+  "config": {
+    "connector.class": "io.debezium.connector.postgresql.PostgresConnector",
+    "tasks.max": "1",
+    "database.hostname": "db-prod",
+    "database.port": "5432",
+    "database.user": "cdc_reader",
+    "database.dbname": "ecommerce",
+    "topic.prefix": "prod",
+    "table.include.list": "public.orders,public.order_items",
+    "plugin.name": "pgoutput",
+    "slot.name": "debezium_orders_slot",
+    "publication.name": "dbz_orders_pub",
+    "heartbeat.interval.ms": "10000",
+    "key.converter": "io.confluent.connect.avro.AvroConverter",
+    "key.converter.schema.registry.url": "http://schema-registry:8081",
+    "value.converter": "io.confluent.connect.avro.AvroConverter",
+    "value.converter.schema.registry.url": "http://schema-registry:8081",
+    "transforms": "unwrap,maskCard",
+    "transforms.unwrap.type": "io.debezium.transforms.ExtractNewRecordState",
+    "transforms.unwrap.drop.tombstones": "false",
+    "transforms.unwrap.delete.handling.mode": "rewrite",
+    "transforms.maskCard.type": "org.apache.kafka.connect.transforms.MaskField$Value",
+    "transforms.maskCard.fields": "billing_tax_code",
+    "transforms.maskCard.replacement": "***REDACTED***"
+  }
+}
+```
 
-Debezium è diventato il source connector di riferimento per portare il change data capture da PostgreSQL e MySQL dentro Kafka senza producer scritti a mano. Sul lato opposto, il sink verso ClickHouse documentato da ClickHouse mostra il pattern speculare: consumo continuo dal topic e scrittura analitica con dead letter queue per i record invalidi. Confluent, fondata nel 2014 dagli autori di Kafka, ha fatto di questo runtime dichiarativo uno strato standard della piattaforma. Il filo comune è la lezione del modulo: l'integrazione è affidabile quando fallisce in modo visibile e recuperabile.
+```json
+{
+  "name": "clickhouse-ordini-sink",
+  "config": {
+    "connector.class": "com.clickhouse.kafka.connect.ClickHouseSinkConnector",
+    "tasks.max": "4",
+    "topics": "prod.public.orders",
+    "hostname": "clickhouse-prod",
+    "port": "8123",
+    "database": "raw_cdc",
+    "key.converter": "io.confluent.connect.avro.AvroConverter",
+    "key.converter.schema.registry.url": "http://schema-registry:8081",
+    "value.converter": "io.confluent.connect.avro.AvroConverter",
+    "value.converter.schema.registry.url": "http://schema-registry:8081",
+    "errors.tolerance": "all",
+    "errors.deadletterqueue.topic.name": "dlq.clickhouse.orders",
+    "errors.deadletterqueue.topic.replication.factor": "3",
+    "errors.deadletterqueue.context.headers.enable": "true"
+  }
+}
+```
 
-## Domande per verificare la lezione
+```sql
+-- Tabella di destinazione in ClickHouse che riceve gli eventi CDC Debezium appiattiti
+-- e gestisce aggiornamenti e cancellazioni fisiche tramite il flag __deleted.
+CREATE TABLE raw_cdc.orders
+(
+    order_id UInt64,
+    customer_id UInt64,
+    status LowCardinality(String),
+    amount_eur Decimal(12, 2),
+    updated_at DateTime64(3, 'UTC'),
+    __deleted UInt8
+)
+ENGINE = ReplacingMergeTree(updated_at, __deleted)
+ORDER BY order_id;
+```
 
-1. Quale sistema esterno colleghi e usi un source o un sink connector?
-2. Dove finiscono i record invalidi e chi li ispeziona?
-3. Quale trasformazione fai dentro Connect e perché non richiede stato?
-4. Quale metrica di lag o errore ti dice che il connector sta degradando?
+Il risultato operativo cambia radicalmente: la latenza tra il commit su PostgreSQL e la visibilità in ClickHouse scende da minuti a meno di due secondi, il carico di lettura sul database primario si riduce del 90%, la dimensione dei messaggi cala dell'80% grazie ad Avro e le cancellazioni fisiche vengono propagate tramite il campo `__deleted` generato da `ExtractNewRecordState`. Attivare la DLQ è reversibile in un istante tramite una chiamata REST al worker; non averla configurata prima di un rilascio difettoso costa invece ore di fermo pipeline e complessi interventi manuali sugli offset di Kafka.
+
+## Trasformazione leggera con SMT o elaborazione stateful in Kafka Streams e Flink
+
+Quando i messaggi in transito devono essere modificati prima di atterrare nel sistema di destinazione, gli architetti devono scegliere tra due strumenti: le Single Message Transforms (SMT) integrate in Kafka Connect e un motore di stream processing dedicato come Kafka Streams o Apache Flink.
+
+Il criterio di scelta è netto: **usate le Single Message Transforms di Kafka Connect esclusivamente per operazioni sincrone, prive di stato e confinate al singolo messaggio (rinominare un campo, mascherare un dato personale, estrarre `after` dall'evento Debezium o instradare il topic), usate invece Kafka Streams o Apache Flink non appena la trasformazione richiede di unire due topic diversi (join), aggregare su finestre temporali o interrogare un servizio esterno via rete.**
+
+La confusione comune consiste nello scrivere SMT personalizzate in Java che fanno chiamate HTTP o interrogano un database per arricchire ogni messaggio al volo, oppure nell'alzare un intero cluster Flink solo per togliere tre colonne sensibili da un payload JSON. Sbagliare questa scelta ha conseguenze pesanti: una chiamata di rete sincrona da 50 millisecondi dentro una SMT blocca il thread di lettura di Connect e abbatte il throughput da 20.000 a 20 messaggi al secondo facendo accumulare il log WAL sul database sorgente, mentre mantenere un'infrastruttura Flink con stato distribuito per un semplice filtraggio di campi spreca memoria, nodi e ore di manutenzione operativa.
+
+Questo articolo non tratta la messa in sicurezza della rete tramite autenticazione mTLS e liste di controllo accessi (ACL) sui broker né il dimensionamento della memoria heap dei worker JVM. La configurazione dello slot di replica richiede che sul PostgreSQL sorgente sia attivo `wal_level = logical`.
+
+## Cinque domande prima di attivare un connettore in produzione
+
+1. I tre topic interni del cluster (`connect-configs`, `connect-offsets`, `connect-status`) sono stati creati con `cleanup.policy=compact` e `replication.factor` pari ad almeno tre?
+2. Se state usando Debezium su PostgreSQL, avete configurato `heartbeat.interval.ms` e un allarme sulla crescita in disco dello slot di replica nel caso in cui il connettore rimanga fermo?
+3. State usando lo Schema Registry con Avro o Protobuf anziché `JsonConverter` con lo schema ripetuto per intero dentro ogni messaggio?
+4. Ogni connettore Sink di produzione ha `errors.tolerance: "all"` e una Dead Letter Queue dedicata con gli header diagnostici attivi e monitorati?
+5. Avete verificato che nessuna Single Message Transform eseguita nel connettore compia chiamate di rete esterne o operazioni bloccanti?
+
+Le due metriche che separano un cluster Kafka Connect sano da una bomba a orologeria sono la dimensione in byte del ritardo dello slot di replica sul database sorgente (`pg_replication_slots`) e il conteggio dei messaggi che entrano ogni minuto nei topic di Dead Letter Queue: finché la prima resta piatta e la seconda è a zero, la replica scorre senza rischi per il database transazionale.
+
+Di tutta l'architettura, una cautela conta ordini di grandezza più del resto: monitorare sempre il ritardo dello slot WAL di Debezium e attivare l'heartbeat. Un connettore CDC dimenticato in pausa senza allarmi impedisce a PostgreSQL di liberare i vecchi file WAL fino a riempire il disco e fermare il database di produzione.

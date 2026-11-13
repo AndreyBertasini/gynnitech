@@ -16,81 +16,172 @@ learningObjectives:
   - Dichiarare le sorgenti in YAML e collegare i modelli con source() e ref()
   - Separare ambienti di sviluppo e produzione con schemi isolati
 binario: "ml-tabellare"
+formato: "articolo"
 autore: "Hermes"
 controllatoDa: "Argo"
 autorizzatoDa: "Giano"
 draft: false
-dateModified: 2026-09-07
+dateModified: 2026-11-13
 ---
 
 # Fondamenti di dbt e struttura del progetto
 
-Questa lezione appartiene al binario ml-tabellare: parliamo di tabelle, di come si organizzano in un progetto e di come si collegano tra loro. L'obiettivo è capire perché la struttura delle cartelle non è burocrazia, ma il primo strumento di fiducia sui dati.
+Un team avvia un progetto dbt con 80 file `.sql` buttati tutti nella stessa cartella radice `models/`, scrivendo dentro le query `FROM prod_raw.stripe_invoices` e `JOIN analytics.clean_users` invece di usare le macro `{{ source() }}` e `{{ ref() }}`. Quando viene lanciato `dbt run`, dbt non riesce a costruire il grafo delle dipendenze (DAG) ed esegue i modelli finali **prima** che i modelli intermedi siano stati aggiornati; ancora peggio, quando uno sviluppatore lancia `dbt run` dal proprio computer per fare una prova, sovrascrive per errore le tabelle di produzione perché gli schemi non sono isolati per target. La causa non è un difetto di dbt: è ignorare i tre meccanismi fondanti del framework (**costruzione del DAG tramite `source()` e `ref()`, gerarchia delle directory `staging/intermediate/marts` in `dbt_project.yml` e isolamento degli schemi tramite `profiles.yml`**).
 
-## L'idea in una frase
+## Modelli eseguiti nell'ordine sbagliato e produzione sovrascritta da un laptop
 
-La struttura di un progetto dbt assegna a ogni file un posto fisso tra fonti, trasformazioni e modelli di consumo, così ogni metrica ha un lignaggio tracciabile e un responsabile riconoscibile. Detto altrimenti: se sai dove sta ogni cosa, sai anche chi risponde di ogni numero.
+Questo è un caso ricostruito con numeri di esempio su quanto accade quando si usa dbt come un semplice esecutore di file SQL senza adottarne le primitive di compilazione. Il progetto trasforma i dati di CRM, pagamenti e tracking web su ClickHouse.
 
-## Come si costruisce, passo dopo passo
+Nel repository iniziale si sommano tre errori di impostazione:
+1. Nei file `.sql` i nomi delle tabelle sono scritti in modo statico (`FROM analytics.stg_users` invece di `FROM {{ ref('stg_users') }}`). Poiché dbt scopre quale modello dipende da quale altro modello **esclusivamente** analizzando le chiamate `{{ ref() }}` e `{{ source() }}`, per dbt quegli 80 modelli non hanno alcun legame tra loro: li avvia in ordine casuale su 4 thread paralleli, per cui `fct_orders` legge `stg_orders` prima che `stg_orders` abbia finito di caricarsi, producendo report incompleti di un giorno.
+2. Nel file `profiles.yml` sia il profilo locale degli sviluppatori sia il job notturno di produzione puntano allo stesso database/schema `analytics`: basta che uno sviluppatore provi un filtro `WHERE 1=0` sul proprio branch e lanci `dbt run` per azzerare in tempo reale i grafici dell'azienda.
+3. Non esiste alcuna dichiarazione `sources.yml` con controllo di freschezza (`dbt source freshness`), quindi dbt ricalcola i modelli anche quando il connettore di ingestione a monte è bloccato da due giorni.
 
-1. Dichiara ogni sorgente una sola volta in YAML, con nome, database e test di freschezza.
-2. Metti le pulizie senza logica di business nei modelli di `staging`, uno per sorgente.
-3. Sposta le regole condivise nei modelli `intermediate` e i tavoli finali nei `marts`, uno per dominio di consumo.
-4. Collega fonti e modelli solo con `source()` e `ref()`, mai con nomi di tabelle scritti a mano.
-5. Separa gli ambienti di sviluppo e produzione, così i test girano su schemi isolati e la produzione cambia solo al merge.
+La causa del disastro è non aver configurato l'albero del progetto, il compilatore Jinja del DAG e la separazione dei target.
 
-## Come è fatto un progetto dbt
+## Il Grafo Aciclico Diretto (DAG) via source/ref, dbt_project.yml e Target Isolation
 
-Un progetto dbt ben strutturato rende le decisioni data-driven più solide. Ogni file ha un posto fisso. La struttura tipica è questa:
+Un progetto dbt professionale trasforma una cartella di file SQL in una pipeline deterministica e sicura grazie a tre meccanismi architetturali.
 
-```text
-my_dbt_project/
-├── dbt_project.yml          ← configurazione principale
-├── packages.yml             ← dipendenze esterne
-├── profiles.yml             ← connessioni ai warehouse
-├── models/
-│   ├── staging/             ← dati grezzi puliti
-│   ├── intermediate/        ← trasformazioni business
-│   └── marts/               ← modelli per consumo business
-├── seeds/                   ← dati statici CSV
-├── snapshots/               ← storicizzazione dati
-├── tests/                   ← test SQL
-├── macros/                  ← funzioni riusabili
-├── analyses/                ← query ad-hoc
-└── docs/                    ← documentazione opzionale
+Il primo meccanismo è la **compilazione automatica del DAG tramite `{{ source('sorgente', 'tabella') }}` e `{{ ref('modello') }}`**. In dbt un modello è semplicemente un file `.sql` contenente un'unica istruzione `SELECT` (senza mai scrivere `CREATE TABLE` o `INSERT INTO`: a quello pensa dbt avvolgendo la vostra `SELECT` nel DDL corretto per ClickHouse). Quando sostituite i nomi fisici delle tabelle con `{{ source('stripe', 'invoices') }}` per le tabelle grezze e `{{ ref('stg_stripe__invoices') }}` per i modelli interni, dbt ottiene due superpoteri:
+1. Costruisce automaticamente il **DAG (*Directed Acyclic Graph*)**, garantendo matematicamente che tutti i genitori vengano completati prima dei figli e permettendo selezioni chirurgiche coi *graph operators* (es. `dbt build --select +fct_orders` esegue `fct_orders` e tutti i suoi antenati).
+2. Risolve dinamicamente il nome dello schema in base all'ambiente (`dev_mario.stg_stripe__invoices` sul laptop di Mario, `prod_analytics.stg_stripe__invoices` in produzione) senza cambiare una virgola nel codice SQL.
+
+Il secondo meccanismo è la **gerarchia delle directory allineata a `dbt_project.yml`**. La cartella `models/` è divisa in tre sottocartelle: `staging/<sorgente>/` (configurata in `dbt_project.yml` come `materialized: view` per non duplicare lo storage grezzo), `intermediate/<dominio>/` (`view` o `ephemeral`) e `marts/<dipartimento>/` (configurata come `materialized: table` o `incremental` con le opzioni `order_by` e `engine` specifiche di ClickHouse).
+
+Il terzo meccanismo è il **controllo di freschezza delle sorgenti (`freshness`) nel file `_<sorgente>__sources.yml`**. Dichiarando per ogni tabella sorgente la colonna `loaded_at_field` e le soglie `warn_after` / `error_after`, il comando `dbt source freshness` verifica prima del run che i dati a monte siano aggiornati.
+
+**Un progetto dbt è solido e scalabile solo se vieta qualsiasi riferimento SQL cablato fuori da `source()` e `ref()`, applica le configurazioni di layer a livello di cartella in `dbt_project.yml` e isola ogni sviluppatore in un proprio schema `dev_<nome>`.**
+
+## Tre errori nella struttura iniziale di un progetto dbt
+
+Il blocco di codice qui sotto mostra un modello dbt scritto violando le regole fondamentali: `CREATE TABLE` manuale, nomi di schema e tabelle cablati senza `source()`/`ref()` e logica di tre layer schiacciata insieme:
+
+```sql
+-- ERRORE 1: scrivere CREATE TABLE dentro un modello dbt (dbt genera già il DDL automaticamente!).
+-- ERRORE 2: cablare il nome fisico prod_raw.hubspot_deals e prod_analytics.stg_users invece di
+-- usare {{ source('hubspot', 'deals') }} e {{ ref('stg_app__users') }} -> rompe il DAG e sovrascrive prod!
+SELECT
+    d.deal_id,
+    u.user_id,
+    d.amount_eur,
+    d.closed_at
+FROM prod_raw.hubspot_deals AS d
+INNER JOIN prod_analytics.stg_users AS u
+    ON lower(trim(d.contact_email)) = u.email_clean
+WHERE d.deal_stage = 'closedwon';
 ```
 
-Il file `dbt_project.yml` definisce le configurazioni globali, inclusa la materializzazione dei modelli.
+### Scrivere nomi di schema e tabella statici invece di usare source() e ref()
 
-Una `view` è leggera e non persiste i dati. Una `table` è materializzata e più veloce da leggere. Una materializzazione `incremental` aggiorna solo le righe nuove nelle grandi tabelle. Una `ephemeral` resta una CTE inline e non viene mai materializzata.
+Cablare `FROM raw_db.orders` o `JOIN analytics.stg_customers` dentro un modello dbt disattiva il cuore stesso dello strumento. Senza `{{ source() }}` e `{{ ref() }}`, il grafo del lineage risulta spezzato, il comando `dbt build --select +fct_sales` non sa che deve prima aggiornare `stg_customers`, e qualsiasi esecuzione lanciata in ambiente di sviluppo o di Continuous Integration legge (o peggio scrive) sulle tabelle di produzione anziché sullo schema temporaneo isolato della pull request.
 
-Le funzioni `source()` e `ref()` collegano rispettivamente le fonti e i modelli. Da qui nascono lignaggio automatico, esecuzione ordinata e test di freschezza, perché dbt sa esattamente cosa dipende da cosa.
+### Ripetere i blocchi config() in ogni singolo file invece di usare dbt_project.yml
 
-## Comandi e ambienti
+Scrivere `{{ config(materialized='view', schema='staging') }}` in cima a tutti i 120 file della cartella `staging/` crea duplicazione inutile e porta rapidamente a incoerenze quando uno sviluppatore dimentica il blocco in un nuovo file. In dbt le impostazioni condivise da un intero layer (tipo di materializzazione predefinito, schema di destinazione, tag di dominio) si dichiarano **una sola volta** a livello di directory dentro `dbt_project.yml`, usando `{{ config(...) }}` nel singolo file `.sql` solo per proprietà specifiche di quella singola tabella (come `unique_key` e `order_by` su un modello incrementale).
 
-Il workflow ruota attorno a pochi comandi.
+### Condividere un unico schema di sviluppo (dev_shared) tra più membri del team
 
-`dbt run` esegue i modelli. `dbt test` lancia i test. `dbt docs generate` produce documentazione e lignaggio. `dbt build` combina `run`, `test`, `seed` e `snapshot` in un'unica passata.
+Configurare tutti i computer del team con lo stesso schema `target.schema = 'dbt_dev'` in `profiles.yml` provoca collisioni continue: mentre Anna sta testando una modifica a `stg_orders` che rinomina una colonna, Marco lancia `dbt run` sul proprio branch e sovrascrive la vista `dbt_dev.stg_orders` sotto i piedi di Anna tre secondi prima che lei lanci i suoi test. Ogni sviluppatore deve avere il proprio schema personale (`dbt_dev_anna`, `dbt_dev_marco`), mentre il server CI usa uno schema effimero per pull request (`dbt_ci_pr_142`) e solo l'orchestratore principale possiede le credenziali per scrivere nello schema `analytics_prod`.
 
-In integrazione continua si usa un comando mirato come `dbt build --select state:modified+ --defer --state ./target/`, che ricostruisce solo i modelli modificati e quelli a valle.
+## Configurazione standard: sources.yml, staging con source() e mart con ref()
 
-Il motore di tutto questo è Jinja. Jinja porta in dbt cicli, condizioni e variabili e permette di scrivere modelli parametrici e ambienti differenziati.
+Per impostare un progetto dbt ordinato, governato e sicuro su ClickHouse, applicate questi quattro criteri in ordine di priorità:
 
-## L'errore che svuota la struttura
+1. Organizzate `models/` nelle tre cartelle `staging/<sorgente>/`, `intermediate/<dominio>/` e `marts/<dipartimento>/`, seguendo la convenzione rigorosa dei nomi file: `stg_<sorgente>__<entita>.sql`, `int_<dominio>__<verbo>.sql`, `fct_<evento>.sql` e `dim_<entita>.sql`.
+2. In ogni sottocartella di `staging/<sorgente>/`, create il file `_<sorgente>__sources.yml` con la dichiarazione delle tabelle grezze e il controllo `freshness` (`warn_after: {count: 6, period: hour}`, `error_after: {count: 12, period: hour}`).
+3. Usate `{{ source() }}` **esclusivamente** dentro i modelli `stg_`, e usate `{{ ref() }}` in tutti i modelli `int_`, `fct_` e `dim_`.
+4. Configurate `profiles.yml` con target separati (`dev` con schema personale `dbt_dev_<utente>` e `prod` in sola scrittura per il service account dell'orchestratore).
 
-Il rischio più comune è usare la struttura come etichetta vuota: cartelle perfette, ma nessuno sa quale numero decide cosa. Se i grafici non portano a una decisione e le metriche non hanno una baseline, la struttura è solo scenografia.
+Ecco l'implementazione completa in SQL/Jinja del modello di staging e del modello di mart collegati nel DAG, seguiti dalla query su ClickHouse che verifica l'isolamento degli schemi tra `dev` e `prod`:
 
-La domanda di controllo è semplice: se il risultato fosse instabile, quale scelta sbaglieresti? Se la struttura non ti aiuta a rispondere, va semplificata.
+```sql
+-- 1. Modello di Staging: models/staging/hubspot/stg_hubspot__deals.sql
+-- Unico punto che legge {{ source('hubspot', 'deals') }}, standardizza i tipi e deduplica:
+WITH source_deals AS (
+    SELECT
+        deal_id,
+        contact_email,
+        deal_stage,
+        amount_eur,
+        closed_at,
+        _ingested_at
+    FROM {{ source('hubspot', 'deals') }}
+),
+deduplicated AS (
+    SELECT
+        deal_id,
+        lower(trim(contact_email)) AS contact_email_clean,
+        lower(deal_stage) AS deal_stage,
+        toDecimal64(amount_eur, 2) AS deal_amount_eur,
+        toDateTime(closed_at, 'UTC') AS closed_at_utc,
+        _ingested_at
+    FROM source_deals
+    ORDER BY _ingested_at DESC
+    LIMIT 1 BY deal_id
+)
+SELECT
+    deal_id,
+    contact_email_clean,
+    deal_stage,
+    deal_amount_eur,
+    closed_at_utc
+FROM deduplicated;
 
-Verdetto: sorgenti dichiarate una volta sola, `staging` senza logica di business, un mart per dominio di consumo; se un nuovo arrivato non trova un file in un minuto, la struttura va semplificata.
+-- 2. Modello di Mart: models/marts/sales/fct_deals_won.sql
+-- Configurato per ClickHouse con MergeTree e collegato nel DAG esclusivamente tramite {{ ref() }}:
+{{
+    config(
+        materialized = 'table',
+        engine = 'MergeTree()',
+        order_by = '(closed_date, deal_id)'
+    )
+}}
+SELECT
+    d.deal_id,
+    u.user_id,
+    u.company_segment,
+    toDate(d.closed_at_utc) AS closed_date,
+    d.deal_amount_eur
+FROM {{ ref('stg_hubspot__deals') }} AS d
+INNER JOIN {{ ref('stg_app__users') }} AS u
+    ON d.contact_email_clean = u.email_clean
+WHERE d.deal_stage = 'closedwon';
 
-## La convenzione che ha fatto scuola
+-- 3. Verifica in ClickHouse dell'isolamento degli ambienti (system.tables):
+-- Certifica che i test di sviluppo avvengano in dbt_dev_* senza mai toccare analytics_prod:
+SELECT
+    database AS schema_env,
+    name AS table_name,
+    engine,
+    total_rows,
+    metadata_modification_time AS last_built_at
+FROM system.tables
+WHERE database IN ('analytics_prod', 'dbt_dev_mario', 'dbt_ci_pr_142')
+  AND name IN ('stg_hubspot__deals', 'fct_deals_won')
+ORDER BY database ASC, name ASC;
+```
 
-dbt Labs, nata nel 2016 come Fishtown Analytics, ha codificato la struttura standard dei progetti nelle sue guide pubbliche e nei corsi: staging per le pulizie senza logica di business, modelli intermedi per le regole condivise, mart per i tavoli di consumo. Quella convenzione, con sorgenti dichiarate una volta sola e dipendenze tracciate dal lignaggio, è diventata il riferimento adottato dai team che usano dbt in produzione. È la prova che la struttura delle cartelle non è burocrazia: è il meccanismo che permette a un team in crescita di fidarsi dei numeri.
+Il risultato porta ordine matematico nel repository: quando lanciate `dbt build --select +fct_deals_won`, dbt legge il grafo generato da `source()` e `ref()`, verifica prima la freschezza di `hubspot.deals`, aggiorna in parallelo `stg_hubspot__deals` e `stg_app__users`, esegue i loro test e solo se passano costruisce `fct_deals_won` con motore `MergeTree()` ordinato per `(closed_date, deal_id)`. Inoltre la query su `system.tables` conferma che l'esecuzione di Mario ha scritto solo nel database `dbt_dev_mario`, lasciando intatto `analytics_prod`. Impostare fin dal giorno zero la struttura a tre cartelle e la regola del doppio underscore (`stg_sorgente__entita`) costa dieci minuti; rimettere le mani su cento query prive di `ref()` richiede settimane di riscrittura.
 
-## Domande per metterti alla prova
+## Organizzazione delle cartelle: per Sorgente nello Staging e per Dipartimento nei Marts
 
-1. Dove dichiareresti una nuova sorgente e quali informazioni minime includeresti?
-2. Cosa va in un modello di staging e cosa deve restarne fuori?
-3. Perché le dipendenze tra modelli passano da riferimenti dichiarati e non da nomi di tabelle scritti a mano?
-4. Come isoli i test di sviluppo dalla produzione in un progetto dbt?
+Una domanda ricorrente quando si disegna l'albero della directory `models/` riguarda il criterio di raggruppamento delle sottocartelle: bisogna dividere le cartelle **per sistema sorgente** (`stripe/`, `hubspot/`, `ga4/`) oppure **per dominio di business / dipartimento** (`finance/`, `marketing/`, `product/`)?
+
+Il criterio di scelta è netto: **organizzate le sottocartelle di `models/staging/` rigorosamente per sistema sorgente tecnico (`staging/stripe/`, `staging/hubspot/`, `staging/postgres_erp/`) perché i modelli di staging condividono le peculiarità di caricamento, i tipi di dato e gli schemi della stessa fonte, organizzate invece le sottocartelle di `models/intermediate/` e `models/marts/` rigorosamente per dominio di business e dipartimento (`marts/finance/`, `marts/marketing/`, `marts/core/`) perché chi consuma un Mart ragiona per processi aziendali che uniscono più fonti insieme, non per quale software SaaS abbia generato la riga.**
+
+La confusione comune consiste nel creare sottocartelle per dipartimento anche dentro `staging/` (`staging/marketing/stg_hubspot__deals.sql` e `staging/sales/stg_hubspot__deals_2.sql`), finendo per duplicare due volte lo staging della stessa tabella HubSpot perché sia il marketing sia le vendite la usano; oppure nel creare sottocartelle per sorgente dentro `marts/` (`marts/stripe/`), costringendo la BI a fare join manuali tra Stripe e l'ERP. Sbagliare questa simmetria (Sorgenti in ingresso $\rightarrow$ Domini di business in uscita) rompe la modularità del progetto.
+
+Questo articolo non tratta i progetti multi-repository (*dbt Mesh* con modelli `public` cross-project) né l'uso avanzato delle variabili Jinja `var()`. Ricordate sempre la convenzione del **doppio underscore (`__`)** nei nomi dei modelli (`stg_stripe__payment_intents`): se il nome della sorgente o della tabella contiene già un underscore singolo (`payment_intents`), il doppio underscore permette a chiunque (e agli script di governance) di separare senza ambiguità dove finisce il nome della sorgente (`stripe`) e dove inizia il nome dell'entità (`payment_intents`).
+
+## Cinque domande per verificare la struttura di un progetto dbt
+
+1. La cartella `models/` è divisa esattamente in `staging/` (sottocartelle per sorgente), `intermediate/` (sottocartelle per dominio) e `marts/` (sottocartelle per dipartimento), con i nomi file che rispettano i prefissi `stg_`, `int_`, `fct_` e `dim_`?
+2. Il 100% delle tabelle grezze è dichiarato nei file `_<sorgente>__sources.yml` con controllo di `freshness` attivo, e solo i modelli `stg_` contengono la macro `{{ source() }}`?
+3. Avete verificato che nessun file `.sql` contenga riferimenti statici a schemi/tabelle (`FROM db.tabella`), usando sempre `{{ ref('nome_modello') }}` per costruire il DAG completo?
+4. Le configurazioni comuni di layer (`materialized: view` per `staging`, `materialized: table` per `marts`) sono definite a livello di cartella in `dbt_project.yml` anziché copiate in ogni file?
+5. Il file `profiles.yml` isola ogni sviluppatore in un proprio schema personale (`dbt_dev_<nome>`) e le credenziali dello schema di produzione sono riservate esclusivamente al runner di CI/CD e all'orchestratore?
+
+La metrica strutturale per verificare l'integrità del grafo dbt è **`0 root models` non collegati a una `source()` o a un `seed`** nel manifesto compilato (`manifest.json`), accompagnata da **`100% di conformità alla naming convention (stg_ / int_ / fct_ / dim_)`**.
+
+Di tutti i fondamenti di dbt, scolpite nella memoria questa legge: `{{ source() }}` è l'unico ponte tra il mondo esterno e lo `staging`; `{{ ref() }}` è il filo che cuce tutto il resto del grafo. Non scrivete mai il nome fisico di una tabella dentro una `FROM`.

@@ -1,6 +1,8 @@
 import { BOOKING_URL, CONTACT_EMAIL, CREDLY_CLICKHOUSE_BADGE_URL, SITE_AUTHOR, SITE_NAME, SITE_URL } from '../consts';
 import { PERSON_CREDENTIALS, PERSON_SAME_AS, PERSON_TOPICS, PERSON_URL, personNode } from './entity';
-import { attr, convertLezioneLine, type AgentState } from './lezione/agent';
+function attr(tag: string, name: string): string | undefined {
+  return new RegExp(`\\b${name}="([^"]*)"`).exec(tag)?.[1];
+}
 
 export type AgentDocMeta = {
   title: string;
@@ -46,7 +48,6 @@ export function mdxToAgentMarkdown(body: string): string {
   let skippingImport = false;
   let skippingWidget = false;
   let contentStarted = false;
-  const lezioneState: AgentState = { passo: 0 };
 
   const quote = (line: string) => (inAside ? (line === '' ? '>' : `> ${line}`) : line);
 
@@ -99,17 +100,11 @@ export function mdxToAgentMarkdown(body: string): string {
     }
 
     if (skippingWidget) {
-      if (/\/>\s*$/.test(raw)) skippingWidget = false;
-      continue;
-    }
+          if (/\/>\s*$/.test(raw)) skippingWidget = false;
+          continue;
+        }
 
-    const lezione = convertLezioneLine(raw.trim(), lezioneState);
-    if (lezione !== null) {
-      for (const piece of lezione.split('\n')) pushProse(piece);
-      continue;
-    }
-
-    const widget = /^<([A-Z][A-Za-z0-9]*)\b/.exec(raw);
+        const widget = /^<([A-Z][A-Za-z0-9]*)\b/.exec(raw);
     if (widget && !KNOWN_COMPONENTS.has(widget[1])) {
       if (/\/>\s*$/.test(raw)) continue;
       if (!/>\s*$/.test(raw)) {

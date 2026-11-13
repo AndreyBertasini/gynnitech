@@ -19,194 +19,141 @@ learningObjectives:
   - Costruire una matrice di coorte con period_number, denominatore fisso e pivot per periodo
   - Leggere la retention per riga e per colonna e verificare la quadratura delle celle
 binario: "ml-tabellare"
+formato: "articolo"
 autore: "Hermes"
 controllatoDa: "Argo"
 autorizzatoDa: "Giano"
 draft: false
-dateModified: 2026-09-07
+dateModified: 2026-11-13
 ---
-import { SqlExercise } from '../../../components/SqlExercise';
 
 # Analisi di coorte in SQL: la matrice di retention
 
-Ogni mese di iscrizioni è una generazione a sé, e solo confrontando le generazioni tra loro capisci se il prodotto trattiene davvero. La matrice di coorte trasforma questa intuizione in una tabella leggibile: una riga per coorte, una colonna per periodo, e un denominatore che non cambia mai. In questa lezione la costruisci passo passo in SQL, fino ai controlli che impediscono di raccontare storie false.
+Un team marketing guarda il tasso di retention mensile aggregato dell'intera base utenti e festeggia perché è passato dal 28% al 34% in tre mesi, salvo scoprire sei settimane dopo che i nuovi utenti acquisiti con l'ultima campagna abbandonano all'85% già al primo mese. Il numero aggregato era salito solo perché i vecchi clienti storici, molto più fedeli, pesavano ancora sul totale e mascheravano il crollo delle nuove leve. La causa non è il calcolo della media: è guardare metriche aggregate invece di costruire una **matrice di coorte con denominatore fisso alla nascita**, separando l'effetto dell'età dell'utente dall'effetto del mese di acquisizione.
 
-## L'idea in una frase
+## Retention aggregata in crescita mentre le nuove coorti crollano all'85% di churn
 
-La `cohort analysis` misura, per ogni generazione di utenti nata nello stesso mese, quanta parte resta attiva periodo dopo periodo a parità di età dalla nascita.
+Questo è un caso ricostruito con numeri di esempio su quanto accade quando si misura la salute di un prodotto o di un e-commerce con una media globale invece che per coorti di ingresso.
 
-## Il percorso in cinque passi
+Una matrice di coorte ben costruita si legge lungo tre assi distinti, ciascuno dei quali risponde a una domanda diversa:
 
-1. Assegna ogni utente alla coorte del mese di iscrizione con `DATE_TRUNC` al mese e deduplica le attività a granularità mensile con `SELECT DISTINCT`.
-2. Calcola `period_number` come distanza in mesi tra mese di attività e mese di nascita con formula robusta al cambio di anno.
-3. Fissa il denominatore alla numerosità iniziale della coorte (`cohort_size`) e calcola `retention_pct` per coorte e periodo.
-4. Ruota la tabella con aggregazione condizionata (`MAX(CASE WHEN ...)`) per ottenere una colonna per periodo e una riga per coorte.
-5. Controlla che nessuna cella superi il 100% e marca come incomplete le coorti recenti con pochi periodi osservabili.
+| Asse di lettura | Cosa confronta | Domanda di business a cui risponde | Errore se letto male |
+| :--- | :--- | :--- | :--- |
+| **Orizzontale (per riga)** | La stessa coorte da `M0` a `M1, M2, M3...` | Quanto velocemente perdiamo gli utenti di quel mese di ingresso? | Usare come denominatore gli utenti attivi a `M1` invece di `M0` |
+| **Verticale (per colonna)** | Coorti diverse allo stesso `period_number` (es. tutte a `M1`) | Il prodotto sta migliorando o peggiorando l'onboarding nel tempo? | Confrontare coorti che non hanno ancora maturato quel periodo |
+| **Diagonale (mese calendario)** | Celle diverse che cadono nello stesso mese solare | C'è stato un evento esterno (promo, bug, festività) che ha colpito tutti? | Scambiare un picco stagionale di dicembre per un miglioramento strutturale |
 
-## Il problema che si vuole risolvere
+Senza questa scomposizione, qualsiasi modifica al prodotto o al mix di canali pubblicitari resta invisibile sotto la media generale.
 
-Un picco di iscrizioni sembra una buona notizia, finché qualcuno chiede quanti di quegli utenti sono ancora attivi tre mesi dopo. Il conteggio degli `utenti attivi mensili` non risponde: somma in un unico numero gli iscritti di ieri e i clienti di due anni fa. Una campagna può portare diecimila iscritti che spariscono in trenta giorni. Il totale cresce, poi si sgonfia, e non spiega nulla.
+## Coorte stabile, denominatore fisso a M0 e calcolo di period_number
 
-L'analisi di coorte ribalta la prospettiva: il momento di ingresso diventa la chiave di lettura. Ogni gruppo di utenti nati nello stesso periodo viene seguito separatamente nel tempo. La domanda diventa precisa e operativa, e si aggancia a due leve concrete: il canale di acquisizione e la revisione dell'`onboarding`.
+Il primo meccanismo è l'**assegnazione immutabile della coorte (`cohort_month`)**. Ogni utente deve appartenere a una sola coorte, definita dal mese del suo primo evento qualificante (prima iscrizione o primo acquisto pagato): `MIN(dateTrunc('month', event_date))` calcolato per `user_id` o `customer_id`. Se un utente viene assegnato a una coorte diversa a seconda del filtro temporale della query, l'intera matrice perde confrontabilità storica.
 
-| Fase | Cosa chiarire | Output |
-|------|---------------|--------|
-| Domanda | Quale scelta deve migliorare? | Decisione da prendere |
-| Misura | Quale segnale rappresenta il comportamento? | Metrica e sorgente |
-| Controllo | Quale baseline rende il confronto credibile? | Confronto tra coorti |
-| Azione | Cosa cambia dopo la lettura? | Prossimo passo operativo |
+Il secondo meccanismo è il **denominatore fisso alla nascita (`cohort_size` a `M0`)**. Il tasso di retention al mese `k` (`period_number = k`) si calcola sempre dividendo gli utenti attivi della coorte nel mese `k` per il numero totale di utenti nati in quella coorte a `M0` (`active_users_k / cohort_size_m0`). Dividere per gli utenti del mese `k - 1` misura invece la *retention step-by-step* (o il suo complemento, il *churn rate mensile*), che è una metrica diversa e non va mai mescolata nella stessa tabella senza dichiararlo.
 
-## Lo schema operativo prima di scrivere la query
+Il terzo meccanismo è l'**integrità dei periodi maturi**. Se oggi è il 13 novembre 2026, la coorte di ottobre 2026 ha maturato `M0` e `M1` parziale, ma non ha ancora maturato `M2`. In SQL bisogna escludere o marcare esplicitamente i periodi non ancora completati, evitando che un `0%` dovuto al calendario futuro venga letto come abbandono totale.
 
-Prima di toccare il codice conviene fissare cinque punti, perché quasi tutti gli errori di coorte nascono da ambiguità lasciate aperte. L'`unità di analisi` e il `segnale` vanno dichiarati con soglia esplicita. La `baseline` e l'output atteso devono restare stabili tra esecuzioni successive. E il rischio da presidiare è sempre lo stesso: un denominatore scelto male.
+**Una matrice di coorte è valida solo se ogni utente appartiene a una sola coorte stabile, il denominatore resta fisso a `M0` e i periodi non ancora maturati sono esclusi dal calcolo.**
 
-| Elemento | Specifica richiesta |
-|----------|---------------------|
-| Unità di analisi | Utente per coorte mensile e periodo di osservazione |
-| Segnale | Presenza di attività nel periodo, soglia dichiarata |
-| Baseline | Coorti adiacenti e media delle coorti mature |
-| Decisione | Matrice con percentuali e numerosità assolute |
-| Rischio | Denominatore incoerente tra coorti e periodi |
+## Tre errori comuni nelle query di coorte in SQL
 
-Le coorti recenti sono troncate a destra, cioè incomplete per costruzione. La coorte del mese scorso ha un solo periodo osservabile, mentre quella di sei mesi fa ne ha sei. Ogni colonna va confrontata solo tra coorti che l'hanno completata. La numerosità va sempre mostrata accanto alla percentuale, perché un 100% su quattro utenti non è un segnale.
-
-## Assegnare ogni utente alla sua coorte
-
-Si parte da due tabelle, `users` e `user_activity`. Il primo blocco assegna la coorte con `DATE_TRUNC` al mese e riduce l'attività a granularità mensile con `SELECT DISTINCT`. Senza questa deduplicazione, un utente iperattivo pesa più di uno che accede una sola volta e il conteggio degli attivi si gonfia. La scelta del mese è una convenzione operativa: con alta frequenza ha senso la settimana, con abbonamenti annuali il trimestre. L'importante è che coorte e periodo usino la stessa unità temporale, altrimenti `period_number` diventa ambiguo.
+Il blocco SQL qui sotto mostra l'errore classico di chi calcola la coorte dentro una finestra temporale già filtrata e divide per gli utenti attivi del periodo invece che per la dimensione iniziale a `M0`:
 
 ```sql
--- Passo 1: coorte di nascita e attività normalizzata al mese
-WITH user_cohorts AS (
-  SELECT
-    user_id,
-    -- mese di iscrizione: definisce la coorte di appartenenza
-    DATE_TRUNC('month', signup_date) AS cohort_month
-  FROM users
-),
-activity_by_month AS (
-  SELECT DISTINCT
-    uc.cohort_month,
-    uc.user_id,
-    -- mese di attività: granularità di osservazione
-    DATE_TRUNC('month', a.activity_date) AS activity_month
-  FROM user_cohorts AS uc
-  JOIN user_activity AS a ON uc.user_id = a.user_id
-)
-SELECT * FROM activity_by_month LIMIT 10;
+-- ERRORE 1: filtrare order_date >= '2026-08-01' PRIMA di trovare il primo acquisto!
+-- Un cliente storico del 2024 che compra ad agosto 2026 viene scambiato per un nuovo cliente di agosto!
+-- ERRORE 2: nessuna distinzione tra periodi maturati e periodi futuri incompleti!
+SELECT
+    dateTrunc('month', order_date) AS wrong_cohort_month,
+    uniqExact(customer_id) AS customers_count
+FROM analytics_prod.fct_orders
+WHERE order_date >= '2026-08-01'
+GROUP BY wrong_cohort_month;
 ```
 
-## Calcolare periodo e percentuale di retention
+### Calcolare la coorte di ingresso su una tabella già filtrata per data
 
-Il secondo passo trasforma due date in un `period_number` intero: lo zero è il mese di nascita della coorte, l'uno è il mese successivo. Il calcolo con `(anno * 12 + mese)` evita gli errori nel passaggio da dicembre a gennaio, dove una semplice differenza tra mesi darebbe un numero negativo. Il terzo passo fissa il denominatore (`cohort_size`) una volta sola alla nascita e lo riusa per ogni periodo. Il pivot finale rende la matrice leggibile, con una colonna per periodo. Si legge per righe seguendo il decadimento e per colonne confrontando generazioni diverse allo stesso stadio di vita.
+Se filtrate `WHERE order_date >= '2026-08-01'` prima di calcolare `MIN(order_date)` per cliente, ogni cliente fedele acquisito nel 2024 che effettua un ordine ad agosto 2026 verrà classificato come appartenente alla coorte di agosto 2026. La coorte va sempre calcolata sull'intera storia disponibile (o letta da `dim_customers.first_order_month`), e solo successivamente si filtrano le coorti da visualizzare.
+
+### Usare un denominatore mobile invece della dimensione iniziale a M0
+
+Dividere gli utenti attivi a `M3` per quelli attivi a `M2` invece che per quelli nati a `M0` produce percentuali che possono persino superare il 100% se alcuni clienti saltano un mese e tornano al successivo. La retention di coorte classica è sempre riferita alla popolazione iniziale `M0`.
+
+### Includere utenti che comprano a M2 ma non sono stati contati a M0
+
+Se la coorte è definita dalla data di registrazione (`signup_month`) e l'attività è definita dall'acquisto (`order_month`), assicuratevi che il denominatore `cohort_size` conti tutti gli iscritti di `M0` e non solo gli acquirenti di `M0`, altrimenti la retention di `M1` può superare il 100% quando chi si è iscritto a `M0` compra per la prima volta a `M1`.
+
+## Matrice di coorte con denominatore fisso e quadratura in ClickHouse
+
+Per costruire una matrice di coorte rigorosa in ClickHouse, seguite questi quattro passi:
+
+1. Calcolate `cohort_month` sull'intera storia del cliente (`MIN(dateTrunc('month', order_date))`).
+2. Calcolate `period_number = dateDiff('month', cohort_month, activity_month)` per ogni mese di attività successivo.
+3. Estraete `cohort_size` a `M0` con `MAX(IF(period_number = 0, active_customers, 0)) OVER (PARTITION BY cohort_month)` oppure con una CTE dedicata.
+4. Esponete sia i valori assoluti (`active_customers`) sia la percentuale (`retention_pct`) limitando i periodi a quelli già maturati.
+
+Ecco l'implementazione SQL completa in ClickHouse pronta per alimentare una dashboard o un modello dbt:
 
 ```sql
--- Passo 2: distanza in mesi tra attività e nascita della coorte
-cohort_activity AS (
-  SELECT
+-- Matrice di Coorte mensile con coorte stabile sull'intera storia e denominatore fisso a M0:
+WITH customer_cohorts AS (
+    SELECT
+        customer_id,
+        min(toStartOfMonth(order_date)) AS cohort_month
+    FROM analytics_prod.fct_orders
+    WHERE status = 'paid'
+    GROUP BY customer_id
+),
+monthly_activity AS (
+    SELECT
+        c.cohort_month,
+        toStartOfMonth(o.order_date) AS activity_month,
+        dateDiff('month', c.cohort_month, toStartOfMonth(o.order_date)) AS period_number,
+        uniqExact(o.customer_id) AS active_customers
+    FROM analytics_prod.fct_orders AS o
+    INNER JOIN customer_cohorts AS c
+        ON o.customer_id = c.customer_id
+    WHERE o.status = 'paid'
+      AND c.cohort_month >= '2026-01-01'
+    GROUP BY c.cohort_month, activity_month, period_number
+),
+with_cohort_size AS (
+    SELECT
+        cohort_month,
+        period_number,
+        active_customers,
+        maxIf(active_customers, period_number = 0) OVER (PARTITION BY cohort_month) AS cohort_size_m0
+    FROM monthly_activity
+)
+SELECT
     cohort_month,
-    user_id,
-    activity_month,
-    -- differenza robusta al cambio d'anno
-    (EXTRACT(YEAR FROM activity_month) * 12 + EXTRACT(MONTH FROM activity_month))
-    - (EXTRACT(YEAR FROM cohort_month) * 12 + EXTRACT(MONTH FROM cohort_month))
-      AS period_number
-  FROM activity_by_month
-)
-SELECT cohort_month, period_number, COUNT(DISTINCT user_id) AS utenti
-FROM cohort_activity
-GROUP BY cohort_month, period_number
-ORDER BY cohort_month, period_number;
+    cohort_size_m0,
+    period_number,
+    active_customers,
+    round(active_customers * 100.0 / nullIf(cohort_size_m0, 0), 2) AS retention_pct
+FROM with_cohort_size
+WHERE cohort_month <= addMonths(toStartOfMonth(today()), -period_number)
+ORDER BY cohort_month ASC, period_number ASC;
 ```
 
-```sql
--- Passo 3: numerosità fissa e percentuale per coorte e periodo
-cohort_size AS (
-  SELECT cohort_month, COUNT(DISTINCT user_id) AS num_users
-  FROM user_cohorts
-  GROUP BY cohort_month
-),
-cohort_retention AS (
-  SELECT
-    ca.cohort_month,
-    ca.period_number,
-    COUNT(DISTINCT ca.user_id) AS active_users,
-    cs.num_users AS cohort_size,
-    -- denominatore fisso alla nascita: mai ricalcolato sul periodo
-    ROUND(COUNT(DISTINCT ca.user_id) * 100.0 / cs.num_users, 1) AS retention_pct
-  FROM cohort_activity AS ca
-  JOIN cohort_size AS cs ON ca.cohort_month = cs.cohort_month
-  GROUP BY ca.cohort_month, ca.period_number, cs.num_users
-)
-SELECT * FROM cohort_retention ORDER BY cohort_month, period_number;
-```
+In questa query `customer_cohorts` scansiona l'intera storia degli ordini pagati per fissare `cohort_month` in modo immutabile, `maxIf(..., period_number = 0) OVER (PARTITION BY cohort_month)` propaga il denominatore fisso `M0` su tutte le righe della coorte e il filtro finale `WHERE cohort_month <= addMonths(...)` garantisce che non compaiano celle parziali o future. Leggendo la tabella risultante per riga, potete misurare la velocità di decadimento di ciascuna coorte mese dopo mese; leggendola per colonna al `period_number = 1` o `period_number = 3`, potete verificare oggettivamente se le modifiche all'onboarding o alle campagne di acquisizione degli ultimi trimestri hanno alzato o abbassato la tenuta dei nuovi clienti rispetto alle coorti storiche.
 
-```sql
--- Pivot: una colonna per periodo, una riga per coorte
-SELECT
-  cohort_month,
-  MAX(CASE WHEN period_number = 0 THEN retention_pct END) AS month_0,
-  MAX(CASE WHEN period_number = 1 THEN retention_pct END) AS month_1,
-  MAX(CASE WHEN period_number = 2 THEN retention_pct END) AS month_2,
-  MAX(CASE WHEN period_number = 3 THEN retention_pct END) AS month_3
-FROM cohort_retention
-GROUP BY cohort_month
-ORDER BY cohort_month;
-```
+Per rendere la matrice immediatamente azionabile dal team marketing e finance, conviene affiancare alla `retention_pct` basata sul conteggio clienti anche la *Revenue Retention* (rapporto tra il fatturato generato dalla coorte al mese `k` e il fatturato generato dalla stessa coorte a `M0`): in molti modelli B2B o ad abbonamento, la retention numerica può scendere all'80% mentre la Net Dollar Retention supera il 110% grazie agli upgrade dei clienti rimasti attivi.
 
-## Leggere la matrice senza farsi ingannare dai totali
+## Coorte per prima azione vs Coorte per data di registrazione
 
-Una matrice ben costruita si legge in due direzioni. In orizzontale si segue il decadimento naturale: calo rapido nei primi periodi, poi appiattimento sullo zoccolo di utenti fedeli. In verticale si confrontano coorti diverse allo stesso stadio. Se la colonna del mese tre sale, il prodotto sta davvero migliorando; se scende mentre il totale cresce, la crescita è fatta di utenti che non restano. La regola pratica è tenere `retention_pct` e numerosità sempre insieme: una coorte piccola produce percentuali ballerine, e le coorti recenti vanno marcate come incomplete.
+Quando progettate la matrice per un SaaS o un e-commerce, dovete scegliere se definire `M0` sulla **data di registrazione (`signup_month`)** oppure sulla **data del primo acquisto (`first_order_month`)**.
 
-## Dove l'analisi deraglia più spesso
+Il criterio di scelta è netto: **usate `first_order_month` quando misurate la retention economica e il riacquisto (e-commerce, B2B transazionale, LTV), usate invece `signup_month` quando misurate l'attivazione e la tenuta d'uso del prodotto (SaaS freemium o trial), mantenendo però coerente l'evento di attività con la definizione di `M0`.**
 
-Il primo errore è confondere coorte e periodo, mescolando utenti di età diversa nella stessa media. Il secondo è il denominatore mobile: dividere gli attivi del mese tre per gli attivi del mese due, invece che per gli iscritti iniziali. Poi vengono i dettagli di bordo. Gli iscritti di fine mese hanno pochi giorni per agire. La stagionalità rende non confrontabili coorti nate in mesi diversi. La matrice resta un'evidenza condizionata da periodo e definizione di attività, quindi prima di agire conviene ricontrollare `baseline` e soglie.
+La confusione comune consiste nel mescolare i due criteri nella stessa matrice senza dichiararlo, generando percentuali superiori al 100% o confronti impossibili tra reparti.
 
-## Verificare i numeri prima di fidarsi
+## Cinque domande prima di pubblicare una matrice di coorte
 
-Tre controlli rapidi separano un'analisi solida da una suggestiva. La quadratura impone che la somma degli attivi per periodo non superi mai la numerosità della coorte. La stabilità alla ridefinizione richiede che, cambiando la soglia di attività, la forma delle curve resti simile. Il confronto con una misura indipendente, come rinnovi o `login`, chiede coerenza tra fonti diverse. Il punto di flesso, con scarto tra periodi consecutivi calcolato via `LAG`, dice dove l'`onboarding` smette di contare e inizia la fedeltà vera.
+1. La `cohort_month` di ogni utente è calcolata sull'intera storia disponibile e non su una finestra già filtrata?
+2. Il denominatore di ogni cella è fisso alla dimensione iniziale `cohort_size_m0` della coorte?
+3. La definizione di `M0` e quella di attività successiva sono coerenti così che a `M0` la retention sia esattamente `100.00%`?
+4. I periodi non ancora completamente maturati rispetto alla data odierna sono stati esclusi o segnalati?
+5. Avete verificato che la somma delle coorti a `M0` quadri con il totale dei nuovi clienti acquisiti nel periodo?
 
-```sql
--- Sanity check: nessuna cella sopra il 100%, coorti quadrate col totale
-SELECT
-  cohort_month,
-  -- ogni periodo deve restare entro la numerosità iniziale
-  MIN(retention_pct) AS min_pct,
-  MAX(retention_pct) AS max_pct,
-  SUM(CASE WHEN retention_pct > 100 THEN 1 ELSE 0 END) AS celle_anomale
-FROM cohort_retention
-GROUP BY cohort_month
-ORDER BY cohort_month;
-```
-
-```sql
--- Punto di flesso: dove il calo tra periodi consecutivi si attenua
-SELECT
-  cohort_month,
-  period_number,
-  retention_pct,
-  -- differenza rispetto al periodo precedente della stessa coorte
-  retention_pct - LAG(retention_pct) OVER (
-    PARTITION BY cohort_month ORDER BY period_number
-  ) AS variazione_punti
-FROM cohort_retention
-ORDER BY cohort_month, period_number;
-```
-
-## Portare la coorte dentro le decisioni di prodotto
-
-L'analisi vale solo se cambia una scelta. Il primo uso è segmentare per canale o piano tariffario, aggiungendo la dimensione alla chiave di coorte. Il secondo è valutare gli esperimenti, confrontando la curva delle coorti trattate con quella delle precedenti. Per la segmentazione per intensità d'uso nel mese zero si dividono gli utenti in quintili con `NTILE` e si confronta la `retention` a tre mesi. Per rendere l'analisi ripetibile conviene versionare la query, con soglia di attività e fuso orario dichiarati, e ricalcolare la matrice con la stessa definizione.
-
-In sintesi: usa la granularità mensile come base, scendi alla settimana solo con coorti di migliaia di utenti e tieni fisso il denominatore alla nascita.
-
-Verdetto: la granularità mensile vince come default: scendi alla settimana solo con coorti di migliaia di utenti e tieni sempre il denominatore fisso alla nascita.
-
-## Il caso Peloton: quando il totale inganna
-
-Peloton, durante il picco pandemico del 2020 e 2021, mostrò un boom di iscrizioni trainato dalle palestre chiuse. La matrice di coorte raccontò una storia diversa dal totale: le coorti nate nel picco ebbero una retention a dodici mesi molto più bassa delle coorti precedenti. Chi guardava solo il totale pianificò scorte e assunzioni come se la crescita fosse strutturale. Chi lesse le coorti capì che la domanda era transitoria, e nel febbraio 2022 l'azienda annunciò un taglio di circa 2800 posti con revisione delle previsioni.
-
-## Domande per chiudere la lezione
-
-1. Quale denominatore rende confrontabile la `retention` tra coorti e perché deve restare fisso alla nascita?
-2. Come distingui una coorte matura da una troncata a destra nella lettura della matrice?
-3. Perché la deduplicazione mensile con `SELECT DISTINCT` evita `retention` sopra il cento per cento?
-4. Quando una `JOIN` tra coorte e attività gonfia il tasso e quale `JOIN` sceglieresti al suo posto?
+La metrica di controllo della matrice è **retention a `M0` = `100.00%` per ogni riga** e **monotonia o coerenza dei volumi**: nessuna cella di retention pura può superare il denominatore iniziale di iscrizione o primo acquisto. Se riscontrate una cella superiore al 100%, verificate immediatamente che la definizione di `M0` e l'evento di attività successiva usino la stessa identità utente risolta e non mescolino utenti anonimi con utenti autenticati.

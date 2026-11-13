@@ -17,90 +17,137 @@ learningObjectives:
   - Fissare grain, freshness e baseline per ogni pannello prima di disegnarlo
   - Collegare ogni soglia a un owner, un runbook e un criterio di priorità
 binario: "ml-tabellare"
+formato: "articolo"
 autore: "Hermes"
 controllatoDa: "Argo"
 autorizzatoDa: "Giano"
 draft: false
-dateModified: 2026-09-07
+dateModified: 2026-11-13
 ---
+
 # Dashboard real-time e monitoring operativo
 
-Siamo nel binario **ml-tabellare**, ma la tabella qui non è solo dati: è la vista che qualcuno guarda mentre decide sotto pressione. La lezione è sui cruscotti operativi, dove ogni numero deve accendere un'azione.
+Durante il Black Friday una piattaforma e-commerce proietta in sala controllo una dashboard Grafana con sedici pannelli che si aggiornano ogni cinque secondi interrogando direttamente la tabella grezza degli eventi in ClickHouse. Quaranta operatori tengono la pagina aperta sul proprio browser: il database riceve 192 query pesanti al secondo, la CPU dei nodi sale al 100% rallentando l'ingestione da Kafka e il grafico degli ordini mostra l'ultimo minuto in corso sempre dimezzato, scatenando il panico per un falso crollo delle vendite. La causa non è il picco di traffico dei clienti: è puntare una dashboard ad auto-refresh sulla tabella raw invece che su viste pre-aggregate ed esporre il minuto incompleto senza baseline storica.
 
-## Che cosa rende operativa una dashboard
+## Quaranta browser aperti e il falso crollo dell'ultimo minuto
 
-Una dashboard operativa mostra pochi parametri vitali con freshness e soglie esplicite per ridurre il tempo tra segnale e intervento corretto. Tutto il resto è arredamento: bello, ma inutile in sala operativa.
+Questo è un caso ricostruito con numeri di esempio su quanto accade quando si disegna una dashboard operativa in tempo reale con le stesse query di un report analitico statico. L'azienda incassa 1.200 ordini al minuto durante la giornata di punta e vuole sorvegliare il tasso di errore dei pagamenti e il volume di ordini per gateway bancario.
 
-## Il percorso di progettazione
+Il team costruisce una dashboard di sedici grafici con auto-refresh impostato a `5s`. Ogni pannello lancia una `SELECT ... FROM raw_events WHERE occurred_at >= now() - INTERVAL 24 HOUR`:
+1. Con 40 persone collegate contemporaneamente, 16 pannelli diviso 5 secondi per 40 browser generano $3,2 	imes 40 = 128$ scansioni al secondo su centinaia di milioni di righe grezze, saturando il pool di thread di ClickHouse.
+2. Il grafico principale a linee raggruppa per `toStartOfMinute(occurred_at)` fino a `now()`. Quando un dirigente guarda lo schermo al secondo `:12` del minuto corrente, l'ultimo punto a destra della curva contiene solo 12 secondi di ordini anziché 60: la linea precipita dell'80% a ogni singolo minuto dando l'illusione ottica di un blocco totale del sito.
+3. Infine, un contatore mostra "42 pagamenti rifiutati nell'ultimo minuto" in rosso acceso, ma nessuno in sala sa se alle 11:00 del venerdì 42 rifiuti su 1.200 tentativi (3,5%) siano un numero fisiologico o un'anomalia rispetto alla settimana precedente.
 
-Cinque decisioni, nell'ordine giusto.
+La causa di questo triplo cortocircuito è violare le tre regole d'oro delle dashboard real-time: leggere esclusivamente da tabelle pre-aggregate al minuto, tagliare il bucket temporale incompleto e affiancare a ogni numero corrente la sua baseline dello stesso giorno e ora.
 
-1. Definisci quale decisione operativa la vista deve accelerare e chi interviene.
-2. Fissa `grain`, `freshness` minima e `baseline` per ogni pannello prima di disegnarlo.
-3. Separa viste operative da viste analitiche per utenti, latenza e sorgenti.
-4. Collega ogni soglia a un `owner`, un `runbook` e un criterio di priorità.
-5. Misura tempo tra segnale e azione corretta e rimuovi i grafici che non lo riducono.
+## Pre-aggregazione di lettura, taglio del bucket aperto e confronto di baseline
 
-## Il problema sotto pressione
+Una dashboard operativa che regge centinaia di utenti simultanei con tempi di risposta sotto i 30 millisecondi e guida decisioni immediate poggia su tre meccanismi fisici e visivi.
 
-In sala operativa tutti guardano la stessa dashboard ma interpretano colori e soglie in modo diverso. Servono `grain`, `freshness`, `owner`, `runbook` e gerarchia chiara tra sintomo, diagnosi e azione. La dashboard riesce quando riduce il tempo tra segnale e azione corretta, non quando aggiunge grafici. Leggila dal punto di vista di chi reagisce sotto pressione. Cosa guardo prima. Quale variazione è grave. Quale dato è fresco. Chi decide l'intervento.
+Il primo meccanismo è il disaccoppiamento tra lo stream di ingestione e le query dei pannelli tramite tabelle di rollup pre-aggregate (alimentate da Materialized Views). Se un evento grezzo produce 20.000 righe al secondo ma il pannello mostra l'andamento al minuto per cinque metodi di pagamento, la tabella di rollup `agg_payments_1m` scrive appena 5 righe al minuto ($7.200$ righe in 24 ore contro $1,7$ miliardi di eventi grezzi): anche se cento operatori aggiornano la pagina ogni cinque secondi, leggere 7.200 righe in RAM su ClickHouse costa meno di 2 millisecondi.
 
-La pressione cambia tutto. Un analista ha tempo per aprire, esplorare e formare un'ipotesi; chi è di turno alle tre di notte deve capire in dieci secondi se il numero che vede è fuori controllo e cosa fare. Ogni elemento della vista va letto in quelle condizioni: il titolo del pannello deve dire cosa misura, non cosa mostra; la soglia colorata deve dire quando è un problema, non quando è diverso; l'owner deve dire chi sveglia, non chi sa. Se un pannello richiede più di un'occhiata per produrre una decisione, non è un pannello operativo.
+Il secondo meccanismo è l'esclusione del bucket temporale ancora aperto (*incomplete bucket clipping*) combinata con l'indicatore di freschezza (*freshness SLA*). In una serie temporale aggregata al minuto, il minuto corrente (`toStartOfMinute(now())`) è per definizione incompleto finché non scocca il minuto successivo più il tempo di watermark dello stream. La query della serie storica deve fermarsi a `finestra_1m < toStartOfMinute(now())`, mentre un pannello separato di stato espone `dateDiff('second', max(ingested_at), now())` per avvisare immediatamente se la pipeline ha smesso di ricevere dati (distinguendo "zero ordini perché il sito è fermo" da "zero ordini perché il connettore Kafka è morto").
 
-## Dashboard analitica e dashboard operativa
+Il terzo meccanismo è l'ancoraggio alla baseline stagionale e al runbook operativo. Un numero assoluto in tempo reale senza termine di paragone è rumore visivo: ogni curva del giorno corrente va sovrapposta nello stesso grafico o nella stessa query alla mediana o al valore registrato esattamente $7$ giorni prima alla stessa ora (`now() - INTERVAL 7 DAY`), e ogni soglia di allarme deve riportare nel titolo del pannello il proprietario (*owner*) e l'azione immediata da eseguire (es. *"Se error_rate > 8% per 3 min -> On-Call Checkout: attivare failover su Gateway B"*).
 
-Una dashboard operativa non è una dashboard analitica più veloce. È un paradigma diverso per finalità, utenti e architettura. La dashboard analitica risponde a domande esplorative su passato e strategia: tasso di `churn` enterprise nel trimestre, `ROI` per campagna, correlazione tra uso di una feature e `retention` a novanta giorni. I suoi utenti sono analyst, product manager e direzione. Le azioni sono allocazione di budget e roadmap. Le sorgenti sono warehouse come `Snowflake`, `BigQuery` o `Redshift` con `ETL` batch orari o giornalieri, dove ore di ritardo sono accettabili. La metafora è la risonanza magnetica: analisi profonda a posteriori per diagnosi complesse. La dashboard operativa risponde a una sola domanda urgente su cosa si sta rompendo adesso. Vive sul presente con latenza di secondi e parla a chi interviene subito. La metafora è il monitor in terapia intensiva: pochi vitali, soglie chiare e allarme prima che sia tardi.
+**Una dashboard real-time è operativa solo se interroga tabelle pre-aggregate al minuto, nasconde il bucket corrente incompleto, mostra il ritardo del dato e confronta ogni metrica con la baseline di sette giorni prima.**
 
-La confusione tra i due regimi produce danni concreti, per tre motivi. Primo, i consumatori sono diversi: il numero che serve a chi interviene è il numero che disturba chi esplora, perché operativo significa pochi e urgenti. Secondo, la latenza è un contratto diverso: una vista operativa che aggrega su dati batch con quattro ore di ritardo mostra un passato stabile e rassicurante, proprio quando serve il contrario. Terzo, lo stack: se il pannello operativo interroga la stessa warehouse dei report finanziari, il costo e la concorrenza delle query degradano entrambe le viste. Separare le sorgenti è una decisione economica prima ancora che tecnica.
+## Tre errori nella progettazione di dashboard su flussi in tempo reale
 
-| Dimensione | Analitica | Operativa |
-| --- | --- | --- |
-| Domanda | Cosa è successo, perché | Cosa si sta rompendo ora |
-| Utenti | Analyst, PM, direzione | Turno operativo, on-call |
-| Latenza | Ore o giorni | Secondi |
-| Sorgente | Warehouse, ETL batch | Stream, ClickHouse, agenti |
-| Numero di pannelli | Ampio, esplorativo | Ristretto, vitale |
-| Azione | Budget, roadmap | Runbook, escalation |
+Il blocco SQL qui sotto mostra la query tipica di un pannello Grafana mal progettato: interroga la tabella raw, include il minuto corrente parziale e non offre né baseline né controllo di freschezza:
 
-Verdetto: tieni operative e analitiche su stack e latenze diverse, con poche metriche vitali per intervenire e analisi profonde solo dove serve decidere sul lungo periodo.
+```sql
+-- ERRORE 1: interroga la tabella raw da miliardi di righe a ogni auto-refresh di 5 secondi.
+-- ERRORE 2: include il minuto corrente incompleto (fino a now()), facendo crollare l'ultimo punto.
+-- ERRORE 3: restituisce solo il conteggio grezzo senza tasso percentuale né confronto a -7 giorni.
+SELECT
+    toStartOfMinute(occurred_at) AS minuto,
+    countIf(status = 'failed') AS pagamenti_falliti
+FROM raw_stream.payment_events
+WHERE occurred_at >= now() - INTERVAL 6 HOUR
+  AND occurred_at <= now()
+GROUP BY minuto
+ORDER BY minuto ASC;
+```
 
-## Le parti di un pannello che decide
+### Puntare i pannelli con auto-refresh sulla tabella raw degli eventi
 
-Un pannello operativo si compone di cinque elementi leggibili in un colpo d'occhio, senza aprire nulla.
+Collegare una dashboard che si aggiorna automaticamente ogni 5 o 10 secondi direttamente alla tabella atomica `raw_stream.payment_events` trasforma lo strumento di monitoraggio in un attacco Denial-of-Service interno contro il proprio database. Poiché i pannelli di monitoraggio chiedono sempre gli stessi raggruppamenti temporali (ultimo minuto, ultimi 5 minuti, ultime 6 ore), ricalcolare l'aggregazione da zero sui dati grezzi per ogni scheda del browser aperta in azienda spreca il 99% della CPU del cluster.
 
-- **Metrica e grain**: cosa conta esattamente e a quale granularità temporale.
-- **Freshness**: l'istante dell'ultimo dato, perché un grafico fermo da venti minuti va letto come problema.
-- **Baseline**: il valore atteso a cui comparare, di solito la stessa fascia oraria dei giorni precedenti.
-- **Soglia**: il valore che accende l'azione, con severità e priorità.
-- **Owner e runbook**: chi interviene e quale procedura segue.
+### Includere il minuto o l'ora ancora in corso nel grafico a linee
 
-Un errore comune è disegnare la soglia dopo il colore: prima esiste il valore che rende giusta l'azione, poi esiste la linea colorata che lo rappresenta. Se la soglia non è scritta da nessuna parte, il rosso non è un avviso, è un'opinione.
+Terminare il filtro temporale con `WHERE occurred_at <= now()` in un grafico raggruppato per minuto o per quarto d'ora crea il celebre "crollo a scogliera" (*cliff effect*) sull'estremo destro del grafico. Al secondo `:05` di ogni minuto il grafico mostra un dodicesimo del traffico del minuto precedente: chi guarda il monitor in sala operativa non riesce mai a capire a colpo d'occhio se quel crollo verticale sia l'inizio di un incidente vero o semplicemente il fatto che il minuto è appena cominciato.
 
-## L'errore da evitare
+### Mostrare contatori assoluti senza tasso relativo, baseline e indicatore di staleness
 
-L'errore tipico è usare la dashboard come etichetta invece che come criterio di scelta. Si mostrano numeri senza decisione, senza `baseline` e senza rischio residuo. Il dato sembra preciso ma non guida l'azione. Prima di aggiungere un grafico verifica che chiarisca scelta, segnale, errore possibile, confronto e raccomandazione.
+Esporre un pannello gigante col numero `"18 errori nell'ultimo minuto"` o `"0 errori nell'ultimo minuto"` senza denominatorie e senza età dell'ultimo evento induce in errore in entrambe le direzioni: 18 errori alle tre di notte su 20 tentativi (90% di fallimento) sono un blocco critico, mentre 18 errori a mezzogiorno del Black Friday su 2.000 pagamenti (0,9%) sono normali; viceversa, leggere `"0 errori"` quando in realtà il connettore si è bloccato venti minuti fa dà una falsa sicurezza mentre il sistema è cieco.
 
-Il secondo errore è confondere freschezza e correttezza: un numero aggiornato al secondo può arrivare da un flusso con duplicati, timezone incoerenti o perdite, e nessuna velocità di refresh sana un dato sporco. Il terzo è trattare il colore come gerarchia: se ogni pannello è rosso perché ogni metrica ha una soglia statica, il rosso smette di segnalare; soglie dinamiche e rate limiting servono a non trasformare la sala operativa in un allarme permanente.
+## Query di dashboard su tabella rollup con taglio del minuto aperto e baseline a 7 giorni
 
-## Il punto di riferimento: Grafana
+Per costruire pannelli real-time veloci, leggibili in tre secondi e privi di falsi allarmi visivi, applicate questi quattro criteri in ordine di priorità:
 
-Grafana, rilasciata nel 2014, diventa lo standard per dashboard operative con refresh in secondi su sorgenti come ClickHouse. Il pattern vincente separa pochi pannelli vitali con soglie chiare da viste analitiche su warehouse batch. Ogni pannello porta freshness, baseline e owner, così chi è di turno sa cosa guardare prima e quando intervenire. La lezione resta quella: una vista operativa vale solo se riduce il tempo tra segnale e azione corretta.
+1. Alimentate tutte le dashboard operative a refresh frequente (`5s`–`30s`) esclusivamente da tabelle di rollup al minuto mantenute da Materialized Views, vietando le query dirette sulle tabelle raw.
+2. Fermate sempre l'estremo destro dei grafici a linee all'ultimo bucket completamente chiuso (`minuto < toStartOfMinute(now())`), esponendo in un indicatore dedicato i secondi trascorsi dall'ultimo evento ricevuto (`freshness_lag_sec`).
+3. Affiancate nella stessa query la metrica corrente e il valore registrato nella stessa identica finestra di 7 giorni prima (`minuto - INTERVAL 7 DAY`), calcolando sia il tasso percentuale sia lo scostamento dalla baseline.
+4. Limitate la dashboard operativa a 5–7 pannelli essenziali, scrivendo nel sottotitolo di ciascuno la soglia, il team responsabile e il link al runbook di intervento.
 
-Grafana non è l'unico strumento possibile e non è necessario alla lezione: resta però l'esempio più documentato del cambio di paradigma, perché la stessa installazione che interroga ClickHouse ogni cinque secondi per la sala operativa alimenta anche viste esplorative a finestre orarie per l'analisi. Il confine tra le due esperienze non è tracciato dallo strumento ma dal progetto della vista: quali sorgenti, quale frequenza, quali soglie, quale owner. Su quel confine si gioca la qualità operativa, indipendentemente dal prodotto che disegni le righe.
+Ecco la query corretta in ClickHouse per alimentare il pannello principale di monitoraggio dei pagamenti leggendo dalla tabella pre-aggregata `agg_payments_1m`:
 
-## Checklist prima di pubblicare una dashboard operativa
+```sql
+WITH oggi AS (
+    SELECT
+        minuto,
+        sumMerge(tentativi_state) AS tentativi_oggi,
+        sumMerge(falliti_state) AS falliti_oggi,
+        maxMerge(ultimo_ingest_state) AS ultimo_ingest
+    FROM realtime.agg_payments_1m
+    -- Escludiamo il minuto corrente incompleto per evitare il falso crollo a destra:
+    WHERE minuto >= toStartOfMinute(now()) - INTERVAL 3 HOUR
+      AND minuto < toStartOfMinute(now())
+    GROUP BY minuto
+),
+settimana_scorsa AS (
+    SELECT
+        minuto + INTERVAL 7 DAY AS minuto_allineato,
+        sumMerge(tentativi_state) AS tentativi_7d,
+        sumMerge(falliti_state) AS falliti_7d
+    FROM realtime.agg_payments_1m
+    WHERE minuto >= toStartOfMinute(now()) - INTERVAL 7 DAY - INTERVAL 3 HOUR
+      AND minuto < toStartOfMinute(now()) - INTERVAL 7 DAY
+    GROUP BY minuto_allineato
+)
+SELECT
+    o.minuto,
+    o.tentativi_oggi,
+    round(o.falliti_oggi * 100.0 / nullIf(o.tentativi_oggi, 0), 2) AS error_rate_oggi_pct,
+    round(s.falliti_7d * 100.0 / nullIf(s.tentativi_7d, 0), 2) AS error_rate_baseline_7d_pct,
+    dateDiff('second', o.ultimo_ingest, now()) AS freshness_lag_sec
+FROM oggi AS o
+LEFT JOIN settimana_scorsa AS s
+    ON o.minuto = s.minuto_allineato
+ORDER BY o.minuto ASC;
+```
 
-- Ogni pannello ha scritto da qualche parte: metrica, grain, freshness, baseline e soglia.
-- Ogni soglia ha un owner, una severità e un runbook collegato.
-- Chi è di turno, guardando solo la vista, sa cosa fa scattare una pagina notturna.
-- La sorgente dei pannelli vitali è separata dalle warehouse batch dei report.
-- Esiste una misura del tempo medio tra segnale e intervento, e viene rivista.
-- I duplicati e i ritardi del flusso sono dichiarati, non assorbiti dal pannello.
+Il risultato trasforma sia il carico sul server sia l'esperienza in sala controllo: interrogare 180 minuti della tabella `agg_payments_1m` legge poche centinaia di righe in 3 millisecondi anche con cento browser aperti; la linea del grafico resta stabile fino all'ultimo minuto concluso senza mai mostrare falsi crolli; il confronto immediato tra `error_rate_oggi_pct` e `error_rate_baseline_7d_pct` mostra subito se il 3,5% di errori è identico a venerdì scorso; e `freshness_lag_sec` fa scattare un avviso giallo non appena il ritardo dei dati supera i 30 secondi. Aggiungere `AND minuto < toStartOfMinute(now())` richiede dieci secondi; lasciare che il team di reperibilità apra falsi incidenti per un grafico che crolla a ogni inizio minuto brucia fiducia e concentrazione.
 
-## Domande per ripassare
+## Dashboard operativa di sala controllo o dashboard analitica di esplorazione
 
-1. Quando serve una vista operativa e quando basta una analitica?
-2. Quale freshness minima dichiari per ogni pannello critico?
-3. Chi è owner di ogni soglia e quale runbook segue?
-4. Quale grafico rimuoveresti perché non accelera alcuna decisione?
-5. Come riconosci che un numero è fresco, ma non per questo affidabile?
+In azienda si tende spesso a creare un unico cruscotto ibrido che cerca di servire contemporaneamente chi gestisce le emergenze in tempo reale e chi analizza i trend di business. In realtà esistono due strumenti incompatibili per architettura e pubblico: la **dashboard operativa real-time** (NOC / war room) e la **dashboard analitica direzionale** (BI esplorativa).
+
+Il criterio di scelta è netto: **costruite una dashboard operativa real-time su ClickHouse (auto-refresh a 10–30 secondi, zero filtri complessi, massimo 6 pannelli su rollup al minuto con soglie e runbook) solo per chi deve intervenire entro cinque minuti su un'anomalia tecnica o commerciale in corso, costruite invece una dashboard analitica su marts dbt (aggiornamento orario o giornaliero, filtri multi-dimensione per categoria, coorte e campagna) per product manager, marketing e direzione.**
+
+La confusione comune consiste nell'aggiungere venti menu a tendina di filtro (regione, dispositivo, codice sconto, campagna UTM) a una dashboard in tempo reale al secondo, oppure nell'impostare un refresh automatico di 10 secondi su un report finanziario mensile. Sbagliare questa separazione produce cruscotti lenti che nessuno sa come usare durante un incidente e sovraccarica il database con ricalcoli continui di metriche che cambiano una volta al giorno.
+
+Questo articolo non tratta la configurazione del caching HTTP sul reverse proxy davanti a Grafana o Superset né il calcolo statistico degli allarmi automatici (trattato nella lezione successiva sull'anomaly detection). Se la dashboard viene esposta direttamente a migliaia di clienti esterni dentro un prodotto SaaS, oltre alle tabelle di rollup è indispensabile interporre un livello di cache applicativa (es. Redis con TTL di 5–10 secondi) o usare le query cache native di ClickHouse (`SET use_query_cache = 1`).
+
+## Cinque domande prima di pubblicare una dashboard real-time
+
+1. Ogni singolo pannello della dashboard legge da una tabella pre-aggregata (rollup al minuto o all'ora) anziché fare scansioni dirette sulla tabella raw degli eventi?
+2. I grafici a linee escludono il bucket temporale attualmente in corso (`minuto < toStartOfMinute(now())`) così da non mostrare mai l'ultimo punto artificialmente crollato?
+3. È presente in alto nella dashboard un indicatore visibile di freschezza (`now() - max(ingested_at)`) che segnala subito se il flusso dati si è fermato?
+4. Ogni metrica chiave mostra accanto al valore corrente il tasso relativo (percentuale) e la baseline storica dello stesso giorno e ora della settimana precedente (`-7d`)?
+5. Ad ogni pannello di allerta sono associati un proprietario (*owner*) esplicito e l'azione concreta da intraprendere se la curva supera la soglia?
+
+La metrica tecnica che certifica una dashboard real-time ben ingegnerizzata è il **99° percentile del tempo di esecuzione delle query dei pannelli sotto carico concorrente**: leggendo da tabelle `AggregatingMergeTree` al minuto, tutte le query della pagina devono completarsi in meno di 50 millisecondi.
+
+Di tutta la progettazione delle dashboard in tempo reale, una sola regola visiva salva le notti di chi è in reperibilità: non disegnare mai un minuto che non è ancora finito, e non mostrare mai il numero di oggi senza la linea di sette giorni fa.

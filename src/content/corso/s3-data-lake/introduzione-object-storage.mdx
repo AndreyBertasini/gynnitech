@@ -20,81 +20,136 @@ learningObjectives:
   - Progettare naming, formati e zone del lake pensando a chi leggerà i dati
   - Impostare versioning, encryption e lifecycle sulle zone del lake
 binario: "ml-tabellare"
+formato: "articolo"
 autore: "Hermes"
 controllatoDa: "Argo"
 autorizzatoDa: "Giano"
 draft: false
-dateModified: 2026-09-07
+dateModified: 2026-11-13
 ---
+
 # Object storage: come funziona davvero
 
-Questa lezione, come le altre del binario **ml-tabellare**, parte da un'osservazione che sembra banale e invece decide tutto: `S3` non è un filesystem remoto. È object storage: ogni dato è un oggetto indirizzato da una `chiave` dentro un `bucket`, con `metadati` propri e API dedicate. Modello di consistenza, costi di richiesta e pattern di accesso sono quindi diversi da quelli di una cartella locale. Molte scelte di data lake falliscono perché trattano `bucket` e `prefissi` come directory tradizionali. Questa lezione è la fondazione tecnica del modulo: capire oggetti, `chiavi`, `prefissi` e API evita errori di performance, governance e costi prima di parlare di query engine.
+Un team di ingegneria dati tratta un bucket Amazon S3 come un disco di rete condiviso: scarica i CSV grezzi mescolati ai Parquet trasformati nella stessa cartella `/data/`, esegue alla fine di ogni job un comando `aws s3 mv s3://lake/staging/2026-11/ s3://lake/prod/2026-11/` su 80.000 piccoli file e non attiva il versioning del bucket. La rinomina della directory impiega quaranta minuti fatturando 160.000 chiamate API (`COPY` + `DELETE`), mentre un job errato sovrascrive senza possibilità di recupero l'intera estrazione storica del CRM. La causa non è un malfunzionamento di S3: è trattare un archivio di oggetti immutabili a spazio piatto (*flat key-value object store*) come se fosse un file system gerarchico POSIX.
 
-## L'idea in una frase
+## Quaranta minuti per rinominare una cartella e uno storico sovrascritto
 
-L'object storage conserva ogni dato come oggetto indirizzato da una `chiave` dentro un `bucket`, con `metadati` propri e API dedicate invece di cartelle e file tradizionali.
+Questo è un caso ricostruito con numeri di esempio su quanto accade quando si progetta un data lake su S3 applicando le abitudini dei file system Linux o Windows. L'azienda raccoglie 25 TB di dati aziendali da CRM, ERP ed eventi web in un unico bucket S3.
 
-## Come procedere, passo dopo passo
+Nella prima versione della piattaforma compaiono tre problemi ricorrenti:
+1. Alla fine del caricamento notturno, lo script di orchestrazione sposta i file dalla directory temporanea alla directory di produzione con `s3 mv`: mentre su un disco locale Linux `mv /staging /prod` aggiorna un solo puntatore inode in un millisecondo ($O(1)$), su S3 non esistono vere cartelle e l'operazione deve copiare byte per byte e poi cancellare tutti gli 80.000 oggetti uno per uno ($O(N)$), bloccando la pipeline per 40 minuti.
+2. Tutti i file vengono riversati in percorsi improvvisati (`s3://company-data/dump_finale_v2/clienti.csv`) senza separare i dati grezzi immutabili (*raw*) dai dati puliti (*curated*), trasformando il bucket in una palude di dati (*data swamp*).
+3. Senza S3 Versioning attivo, un bug nello script di estrazione sovrascrive `clienti.parquet` con un file vuoto da 0 byte, distruggendo istantaneamente l'unica copia esistente.
 
-1. Definisci `bucket`, `prefissi` e convenzione di naming a partire dalle query previste.
-2. Scegli formato colonnare e partizionamento coerenti con i filtri ricorrenti.
-3. Imposta `versioning`, `encryption` e `lifecycle` sulle zone del lake.
-4. Assegna a ogni ruolo il minimo privilegio su `bucket` e `prefissi`.
-5. Verifica con una query reale che costi, latenza e accessi restino sotto controllo.
+La causa di questi incidenti è non comprendere la natura fisica dell'object storage e non organizzare il data lake in zone governate.
 
-## Il problema concreto
+## Spazio di chiavi piatto, immutabilità degli oggetti e architettura multi-zona
 
-Il problema non è sapere che l'object storage esiste: è smettere di usarlo come un disco condiviso. Chi rinomina e sposta milioni di oggetti come fossero file locali scopre dopo costi di richiesta, latenza e una semantica di consistenza che il filesystem non aveva.
+Un object storage moderno (Amazon S3, Google Cloud Storage, Cloudflare R2, MinIO) raggiunge una durabilità di undici nove ($99,999999999\%$) e una scalabilità virtualmente infinita rinunciando a tre caratteristiche dei file system POSIX e sostituendole con primitive HTTP REST.
 
-La domanda operativa è una sola: ogni oggetto deve restare ritrovabile, leggibile e protetto per chi lo userà tra sei mesi, senza chiedere a chi lo ha scritto.
+Il primo meccanismo è lo **spazio di chiavi piatto (*flat namespace*) con prefissi logici**. Dentro un bucket S3 non esiste alcuna gerarchia di directory fisiche: esiste solo una tabella hash gigantesca in cui la chiave dell'oggetto è l'intera stringa `"curated/sales/orders/year=2026/month=11/part-001.parquet"`. La barra `/` è solo un carattere nel nome della chiave che la console grafica e le API `ListObjectsV2` (con parametro `Prefix` e `Delimiter='/'`) usano per simulare visivamente le cartelle. Per questo motivo non è possibile "rinominare una cartella" né modificare una singola riga a metà di un file: ogni oggetto è **immutabile** e può solo essere scritto per intero (`PUT`) o sostituito da una nuova versione.
 
-## Come ragionare sulla decisione
+Il secondo meccanismo è la **separazione fisica del data lake in tre zone (Raw/Landing, Curated/Silver, Analytics/Gold)**. La zona **Raw** riceve i dati nel formato esatto della sorgente in modalità rigorosamente *append-only* (mai sovrascrivere, mai cancellare manualmente), permettendo di ricostruire qualsiasi tabella a distanza di anni. La zona **Curated** contiene i dati validati, deduplicati, tipizzati e convertiti in formato colonnare compresso (**Apache Parquet** con Zstandard) o gestiti tramite table format (Apache Iceberg / Delta Lake). La zona **Analytics** espone le tabelle aggregate pronte per i motori SQL (ClickHouse, Athena, Trino).
 
-Prima di toccare un `bucket`, conviene fissare una sequenza che va dalla decisione all'azione misurabile.
+Il terzo meccanismo è la triade di protezione del bucket: **Versioning**, **Crittografia di default (SSE-S3 / SSE-KMS)** e **Blocchi di accesso pubblico (`BlockPublicAccess`)**. Con il Versioning attivo, una scrittura accidentale o una `DELETE` non distrugge i byte precedenti ma aggiunge un nuovo `VersionId` (o un *Delete Marker*), consentendo il ripristino immediato dello stato precedente.
 
-| Passaggio | Domanda da fare | Output atteso |
-|---|---|---|
-| Decisione | Che cosa cambia se capiamo meglio l'object storage? | Scelta esplicita |
-| Segnale | Quale dato osservabile riduce l'incertezza? | Metrica o evento |
-| Baseline | Rispetto a cosa interpretiamo il risultato? | Confronto credibile |
-| Vincolo | Che cosa può falsare la lettura? | Assunzione da dichiarare |
-| Azione | Quale passo operativo segue? | Raccomandazione controllabile |
+**Un data lake su object storage rimane veloce, economico e sicuro solo se evita rinomine di prefissi e piccoli file, separa rigidamente le zone Raw/Curated/Analytics in formato Parquet e protegge i bucket con Versioning ed Encryption fin dal giorno zero.**
 
-Un modello robusto separa quattro blocchi: la decisione da supportare, i segnali osservabili, il meccanismo che li collega e i guardrail contro gli errori di interpretazione. L'obiettivo del modulo è chiaro: passare da un `bucket` con file a un data lake leggibile e governato.
+## Tre errori quando si usa S3 come un file system tradizionale
 
-## Formalizzare la decisione
+Il blocco SQL qui sotto mostra l'impatto su un motore analitico (ClickHouse o Athena) quando i dati vengono buttati su S3 in formato CSV non compresso, senza convenzione di prefissi Hive e sovrascrivendo lo stesso file ogni notte:
 
-Formalizzare serve a evitare due errori opposti: trattare tutto come opinione, oppure ridurre il tema a una checklist cieca.
+```sql
+-- ERRORE 1: lettura diretta di un unico file CSV sovrascritto ogni giorno in una cartella piatta,
+-- senza tipi di dato binari, senza compressione colonnare e senza partizioni nel prefisso S3!
+SELECT
+    country,
+    count() AS ordini_totali,
+    sum(toDecimal64(amount_str, 2)) AS ricavo_eur
+FROM s3(
+    'https://s3.eu-central-1.amazonaws.com/azienda-palude-dati/dump_varie/ordini_completi_v2_final.csv',
+    'CSVWithNames'
+)
+WHERE order_date >= '2026-11-01'
+GROUP BY country;
+```
 
-| Elemento | Definizione operativa |
-|---|---|
-| Decisione supportata | Quale scelta migliora quando l'object storage viene definito bene |
-| Input | Dati, vincoli, segmentazioni e segnali tipici del modulo S3 e data lake |
-| Meccanismo | Regole con cui il team passa da osservazioni a interpretazione |
-| Guardrail | Controlli che evitano letture opportunistiche, confondenti o fuori contesto |
-| Output | Query, memo, dashboard, design o raccomandazione difendibile |
+### Eseguire spostamenti o rinomine di directory (s3 mv) nelle pipeline ETL
 
-Il criterio operativo resta semplice: se due persone esperte leggono la stessa definizione e guardano lo stesso materiale, devono arrivare a conclusioni comparabili sugli stessi trade-off.
+Costruire pipeline che scrivono migliaia di file in `s3://bucket/temp/` e poi eseguono `aws s3 mv` verso `s3://bucket/final/` trasforma un'operazione di metadati in una tempesta di traffico fisico. Poiché la chiave fa parte dell'identità immutabile dell'oggetto, cambiare il prefisso di 50.000 file da 10 MB obbliga S3 a copiare 500 GB di dati e fatturare 50.000 richieste `PUT/COPY` più 50.000 `DELETE`. Per rendere atomico il passaggio in produzione senza spostare un solo byte si usano i manifesti metadati di **Apache Iceberg** o **Delta Lake**, non la copia fisica dei prefissi.
 
-## Object storage come scelta architetturale
+### Salvare file testuali CSV o JSON non compressi nelle zone Curated e Analytics
 
-L'object storage non è solo spazio economico dove accumulare file. È una scelta architetturale che decide come i dati verranno trovati, protetti, versionati e riusati. La competenza sta nel progettare `bucket`, `prefissi`, formati, zone e `lifecycle` pensando a chi dovrà leggere quei dati tra sei mesi, non solo a come salvarli oggi.
+Mantenere i dati in CSV o JSON oltre la zona di atterraggio iniziale (*Raw*) moltiplica per dieci i costi di storage e di interrogazione. Un file CSV da 100 GB con 50 colonne obbliga il motore di query a scaricare via rete tutti i 100 GB anche quando la `SELECT` legge solo due colonne (`country` e `amount`); convertendo lo stesso dataset in **Parquet compresso con Zstandard**, il peso su S3 scende a circa 12–15 GB e il motore scarica tramite *byte-range requests* solo i pochi megabyte delle due colonne richieste.
 
-Un esempio valido non deve essere grande: una tabella con baseline e due segmenti, una query che verifica una definizione, o un memo di dieci righe. La qualità dipende dalla tracciabilità: chi legge deve capire quale metrica hai scelto, quale alternativa hai scartato e quale evidenza ti farebbe cambiare idea.
+### Disabilitare il Versioning sulla zona Raw o sovrascrivere gli estratti giornalieri
 
-## I due errori che costano di più
+Scrivere ogni notte sul percorso fisso `s3://lake/raw/crm/customers.parquet` sovrascrivendo il file del giorno prima su un bucket privo di Versioning viola la regola aurea del data lake. Se la sorgente invia per tre giorni un'estrazione parziale o corrotta, avete perso per sempre la fotografia storica e non potete più ricostruire lo stato del database a una data passata.
 
-L'errore più frequente è scambiare familiarità con comprensione: trattare `bucket` e `prefissi` come cartelle locali, con rinomine e spostamenti massivi che su object storage costano richieste e tempo. Il secondo errore è accumulare storage economico senza una semantica che renda i dati riusabili: salvare tutto oggi e scoprire tra sei mesi che nessuno sa cosa contiene ogni `prefisso`.
+## Convenzione di naming standard e interrogazione Parquet su S3 da ClickHouse
 
-## Il caso Amazon S3
+Per strutturare il vostro data lake su S3 in modo ordinato, governato e interrogabile ad alte prestazioni, applicate questi quattro criteri in ordine di priorità:
 
-Amazon S3 è stato lanciato nel 2006 come servizio di object storage e da allora ospita una parte enorme dei data lake aziendali. AWS lo descrive con una durabilità di progetto pari a undici nove, ottenuta con repliche ridondanti su più strutture. Il punto rilevante per questa lezione è che quella durabilità riguarda la conservazione dei byte, non la leggibilità dei dati: chiavi confuse, formati chiusi e permessi larghi restano comprensibili solo a chi li ha scritti. S3 dimostra così la tesi della lezione: lo storage economico risolve la conservazione, mentre chiavi, prefissi, formati e lifecycle decidono se il lake resta interrogabile.
+1. Adottate uno schema di naming gerarchico standardizzato per i prefissi: `s3://<azienda>-lake-<env>/<zona>/<dominio>/<tabella>/year=YYYY/month=MM/part-<uuid>.parquet`.
+2. Nella zona `raw/` scrivete sempre in append aggiungendo la data/ora di estrazione (`extracted_date=YYYY-MM-DD`), attivando **S3 Versioning**, `BlockPublicAccess` totale e crittografia `SSE-KMS` o `SSE-S3`.
+3. Nelle zone `curated/` e `analytics/` salvate esclusivamente file **Parquet compressi (`zstd`)** di dimensione compresa tra **128 MB e 512 MB** ciascuno.
+4. Sfruttate il globbing sui prefissi Hive (`year=2026/month=11/*.parquet`) per scaricare solo le partizioni necessarie.
 
-Verdetto: l'object storage vince sul filesystem quando progetti `bucket`, `prefissi`, formati e zone pensando a chi leggerà i dati tra sei mesi: la durabilità di S3 conserva i byte, ma chiavi, prefissi, formati e `lifecycle` decidono se il lake resta interrogabile.
+Ecco come interrogare ed esportare correttamente dati Parquet strutturati su S3 da ClickHouse sfruttando il partizionamento dei prefissi e la compressione Zstandard:
 
-## Domande per verificare quello che hai capito
+```sql
+-- 1. Scrittura diretta dalla zona raw alla zona curated su S3 in formato Parquet compresso ZSTD
+-- con partizionamento Hive nel prefisso (nessun rename successivo necessario):
+INSERT INTO FUNCTION s3(
+    'https://s3.eu-central-1.amazonaws.com/acme-lake-prod/curated/sales/orders/year=2026/month=11/orders_2026_11.parquet',
+    'Parquet'
+)
+SETTINGS output_format_parquet_compression_method = 'zstd'
+SELECT
+    order_id,
+    customer_id,
+    toDate(occurred_at) AS order_date,
+    country_code,
+    amount_eur
+FROM raw_stream.orders_ingested
+WHERE toYYYYMM(occurred_at) = 202611;
 
-1. Quale differenza tra `chiave` S3 e percorso di filesystem cambia il tuo layout di `bucket` e `prefissi`?
-2. Quali `metadati` assegni a ogni oggetto per renderlo ritrovabile tra sei mesi?
-3. Quale convenzione di naming per `prefissi`, formati e zone adotti nel tuo lake?
-4. Quale controllo su costi di richiesta, `versioning` e permessi esegui prima di pubblicare i dati?
+-- 2. Interrogazione selettiva sulla zona curated S3: legge solo il prefisso del mese 11
+-- e scarica via HTTP Range solo le colonne country_code e amount_eur dal file Parquet:
+SELECT
+    country_code,
+    count() AS ordini_mese,
+    sum(amount_eur) AS fatturato_mese_eur,
+    _path AS s3_object_key
+FROM s3(
+    'https://s3.eu-central-1.amazonaws.com/acme-lake-prod/curated/sales/orders/year=2026/month=11/*.parquet',
+    'Parquet'
+)
+WHERE order_date >= '2026-11-01'
+GROUP BY country_code, s3_object_key
+ORDER BY fatturato_mese_eur DESC;
+```
+
+Il risultato mostra il salto di efficienza: invece di rinominare 80.000 piccoli file impiegando 40 minuti, la pipeline produce direttamente nella zona `curated/sales/orders/year=2026/month=11/` file Parquet ben dimensionati; e la query analitica successiva legge solo i megabyte compressi delle due colonne richieste per il mese di novembre, rispondendo in meno di un secondo invece di scansionare l'intero storico aziendale in CSV. Progettare fin dal primo giorno le tre zone e il formato Parquet costa zero euro aggiuntivi; dover rimettere ordine in un bucket unico pieno di 10 milioni di file CSV dal nome incoerente richiede mesi di bonifica.
+
+## Bucket unico multi-prefisso o Bucket separati per zona e ambiente
+
+Nella progettazione iniziale dell'infrastruttura S3, il team deve decidere se creare **un singolo bucket con prefissi `/raw`, `/curated`, `/analytics`** oppure **bucket fisicamente distinti per zona e ambiente** (`acme-lake-prod-raw`, `acme-lake-prod-curated`, `acme-lake-prod-analytics`).
+
+Il criterio di scelta è netto: **usate bucket S3 fisicamente separati per ambiente (`dev`, `staging`, `prod`) e per zona di sicurezza (`raw` vs `curated`/`analytics`) nelle aziende strutturate dove i permessi IAM, le chiavi di crittografia KMS, le regole di versioning e i cicli di vita sono diversi tra i dati grezzi con PII e le tabelle pulite, usate invece un singolo bucket per ambiente diviso in prefissi `/raw/`, `/curated/`, `/analytics/` solo in team snelli con un unico dominio amministrativo dove tutte le zone condividono la stessa chiave KMS e i permessi sono delegati a Lake Formation o al catalogo.**
+
+La confusione comune consiste nel creare un nuovo bucket per ogni singola tabella (sbattendo rapidamente contro la quota predefinita di 100–1.000 bucket per account AWS), oppure nel mescolare dati di sviluppo e dati di produzione nello stesso bucket dove una lifecycle policy sbagliata creata per pulire i test cancella per errore i dati reali. Sbagliare questa scelta o complica la gestione dell'account cloud, o espone i dati di produzione a cancellazioni accidentali da ambienti di test.
+
+Questo articolo non tratta i dettagli delle classi di archiviazione fredda (Glacier) né i metadati transazionali di Apache Iceberg, affrontati nelle prossime lezioni del modulo. Ricordate che su S3 i limiti di throughput delle richieste (`3.500 PUT/COPY/POST/DELETE` e `5.500 GET/HEAD` al secondo) scalano automaticamente **per prefisso**: distribuire i dati in partizioni `year=YYYY/month=MM/day=DD/` aiuta anche S3 a parallelizzare il carico interno.
+
+## Cinque domande prima di aprire il primo bucket del data lake
+
+1. Avete separato chiaramente gli ambienti (`dev`, `prod`) e strutturato le tre zone (`raw`, `curated`, `analytics`) con la convenzione `<zona>/<dominio>/<tabella>/year=YYYY/month=MM/`?
+2. Sul bucket sono attivi `BlockPublicAccess` completo, crittografia predefinita (`SSE-S3` o `SSE-KMS`) e **Versioning** (almeno sui dati sorgente non riproducibili)?
+3. Avete bandito dalle pipeline qualsiasi operazione di spostamento/rinomina massiva (`s3 mv` su migliaia di oggetti), scrivendo direttamente nel prefisso definitivo o usando table format come Iceberg?
+4. Tutte le tabelle nelle zone `curated` e `analytics` sono salvate in formato colonnare **Parquet** compresso (`zstd` o `snappy`) invece che in CSV o JSON?
+5. I job di scrittura aggregano i dati in file da 128–512 MB evitando di generare milioni di micro-file da pochi kilobyte?
+
+La metrica di controllo per valutare la salute strutturale di un bucket data lake è la **dimensione media degli oggetti nella zona Curated** ($\text{Total Bytes} / \text{Object Count}$): un valore sano si colloca tra **100 MB e 500 MB per file**, mai sotto pochi megabyte.
+
+Di tutto il funzionamento dell'object storage, tenete fermo un solo principio: S3 non è un disco rigido dove si spostano cartelle e si modificano righe sul posto; è un archivio immutabile dove i prefissi sono filtri di lettura e i file grandi in Parquet sono la chiave della velocità.

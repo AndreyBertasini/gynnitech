@@ -19,203 +19,155 @@ learningObjectives:
   - Generare una date spine e densificare la serie con LEFT JOIN e COALESCE selettivo
   - Calcolare medie mobili e confronti anno su anno con frame ROWS e LAG a scarto fisso
 binario: "ml-tabellare"
+formato: "articolo"
 autore: "Hermes"
 controllatoDa: "Argo"
 autorizzatoDa: "Giano"
 draft: false
-dateModified: 2026-09-07
+dateModified: 2026-11-13
 ---
+
 # Date spine e metriche temporali in SQL
 
-Anche questa lezione appartiene al binario **ml-tabellare**: spine, medie mobili e candele si costruiscono tutte con query su tabelle.
+Un e-commerce B2B chiuso nei weekend e nei giorni festivi calcola la media mobile a 7 giorni del fatturato direttamente sulla tabella `fct_orders` usando `ROWS BETWEEN 6 PRECEDING AND CURRENT ROW`, e confronta ogni giorno con lo stesso giorno dell'anno precedente usando `LAG(revenue, 365)`. Poiché mancano circa 110 giorni all'anno senza ordini, `ROWS BETWEEN 6 PRECEDING` legge indietro di 10 giorni reali invece di 7, e `LAG(revenue, 365)` confronta il 13 novembre 2026 con maggio 2025. La causa non è SQL: è calcolare metriche temporali su una **serie sparsa con buchi di calendario** invece di generare una **Date Spine continua** e densificare la serie prima di applicare `ROWS` e `LAG`.
 
-## L'idea in una frase
+## Confronto anno su anno spostato di sei mesi per 110 giorni mancanti nella tabella
 
-La date spine impone una riga per ogni giorno del periodo, così che zeri reali e assenze restano distinguibili in ogni metrica temporale.
+Questo è un caso ricostruito con numeri di esempio su quanto accade quando si applicano window functions posizionali (`ROWS`, `LAG(col, N)`) su una serie storica incompleta.
 
-## Il percorso in cinque passi
+Generare una Date Spine e densificare i dati trasforma una serie irregolare in una griglia temporale esatta:
 
-1. Genera una colonna di date consecutive con `generate_series` o `GENERATE_DATE_ARRAY` e con estremi pari alla finestra di analisi.
-2. Aggrega i fatti alla stessa granularità della spina prima di agganciarli, per evitare moltiplicazioni di righe.
-3. Aggancia i fatti con `LEFT JOIN` guidata dalla spina e riempi con `COALESCE(..., 0)` solo conteggi e importi, mai prezzi e tassi.
-4. Calcola medie mobili e totali rolling con finestra `ROWS BETWEEN` su serie densificata e confronta l'anno precedente con scarto fisso.
-5. Filtra solo sulla colonna della spina e materializza la serie quando la stessa logica compare in più query.
+| Operazione | Senza Date Spine (serie sparsa) | Con Date Spine (serie densa: 1 riga = 1 giorno) |
+| :--- | :--- | :--- |
+| `ROWS BETWEEN 6 PRECEDING AND CURRENT ROW` | Legge 7 giorni **con vendite** (magari 10 giorni solari) | Legge esattamente **7 giorni di calendario** |
+| `LAG(revenue, 365)` / `LAG(revenue, 7)` | Salta indietro di 365 righe (mese sbagliato) | Confronta esattamente con `-365` giorni o `-7` giorni |
+| Grafici in BI | Linee spezzate o collegate in diagonale sui buchi | Zero reali visibili (`0.00 €`) nei giorni senza vendite |
+| `COALESCE` su metriche | Non applicabile sui giorni assenti | `COALESCE(revenue, 0)` per i volumi, `NULL` per prezzi medi |
 
-## Perché raggruppare per data racconta una storia a buchi
+Senza una Date Spine continua, nessuna metrica rolling basata su `ROWS` e nessun `LAG` a scarto fisso può essere considerata affidabile.
 
-Una tabella con due ordini il tre marzo e uno il sei marzo produce una query spontanea con due sole righe. Il quattro, il cinque e il sette marzo non esistono nell'output. Per un report tabellare è quasi accettabile, mentre per un grafico è una trappola, perché la libreria unisce i punti esistenti. Per i calcoli è peggio: una media mobile su righe sparse divide per i giorni presenti invece che per sette e gonfia il risultato proprio nei periodi fiacchi.
+## Generazione Date Spine, COALESCE selettivo e LAG a scarto fisso
+
+Il primo meccanismo è la **generazione della Date Spine continua**. In ClickHouse potete generare qualsiasi intervallo di date in memoria senza tabelle di supporto usando `arrayJoin(range(toUInt32(toDate('2025-01-01')), toUInt32(today() + 1), 1))` convertito con `toDate(...)`, oppure `SELECT addDays(toDate('2025-01-01'), number) AS calendar_date FROM numbers(...)`. Questa griglia garantisce esattamente 1 riga per ogni giorno di calendario, inclusi weekend e festivi.
+
+Il secondo meccanismo è la **densificazione tramite `LEFT JOIN` e `COALESCE` selettivo**. Unendo la Date Spine (`LEFT JOIN`) con le vendite aggregate per giorno, i giorni senza ordini producono `NULL`. Qui bisogna applicare il `COALESCE` in modo selettivo: per le metriche **additive di flusso** (`revenue_eur`, `orders_count`) si sostituisce `NULL` con `0` (`COALESCE(revenue_eur, 0)`), perché in quel giorno si è venduto effettivamente zero; per le metriche **di stato o rapporto** (`avg_order_value`, `unit_price`), invece, bisogna lasciare `NULL` (non `0`), altrimenti la media mobile dei prezzi verrebbe abbassata artificialmente dai giorni di chiusura.
+
+Il terzo meccanismo è l'**applicazione sicura di `ROWS` e `LAG` a scarto fisso sulla serie densificata**. Una volta che `1 riga = 1 giorno` è garantito matematicamente, `AVG(revenue_eur) OVER (ORDER BY calendar_date ROWS BETWEEN 6 PRECEDING AND CURRENT ROW)` è esattamente la media mobile a 7 giorni di calendario, e `LAG(revenue_eur, 7)` confronta esattamente ogni martedì con il martedì della settimana precedente.
+
+**Densificate sempre le serie temporali con una Date Spine prima di usare `ROWS` o `LAG` a scarto fisso, applicando `COALESCE(..., 0)` solo alle metriche additive.**
+
+## Tre errori comuni con Date Spine e metriche rolling
+
+Il blocco SQL qui sotto mostra l'errore tipico di chi usa `COALESCE(..., 0)` anche sul prezzo medio e dimentica di filtrare i giorni parziali o di controllare la granularità multi-dimensione:
 
 ```sql
--- Ricavo giornaliero: semplice, ma i giorni vuoti spariscono
+-- ERRORE 1: COALESCE(avg_ticket, 0) trasforma i giorni senza vendite in scontrino medio 0€,
+-- crollando la media mobile dei prezzi!
+-- ERRORE 2: LAG(revenue, 365) su una serie NON densificata confronta date completamente sfasate!
 SELECT
-  DATE(creato_il) AS giorno,      -- tronca il timestamp al giorno
-  SUM(importo) AS ricavo          -- somma degli ordini del giorno
-FROM ordini
-WHERE creato_il >= DATE '2026-03-01'
-  AND creato_il < DATE '2026-03-08'
-GROUP BY 1
-ORDER BY 1;
+    calendar_date,
+    coalesce(revenue_eur, 0) AS rev,
+    coalesce(avg_order_value, 0) AS wrong_aov_zero_filled,
+    avg(wrong_aov_zero_filled) OVER (ORDER BY calendar_date ROWS BETWEEN 6 PRECEDING AND CURRENT ROW) AS broken_ma7_aov
+FROM dense_daily_sales;
 ```
 
-Lo stesso buco si apre con conteggi distinti per giorno e con troncamenti settimanali con settimane parziali ai bordi. Il punto concettuale è uno solo: in SQL le righe mancanti non sono zeri ma assenze. Finché non esiste una riga per ogni giorno, nessuna aggregazione distingue zero vendite da giorno non considerato.
+### Riempire con zero (COALESCE 0) anche le medie, i tassi e i prezzi
 
-## Costruire una colonna di date consecutive su ogni dialetto
+Trasformare `NULL` in `0` su `conversion_rate` o `avg_order_value` nei giorni in cui il negozio era chiuso o non c'è stato traffico falsa tutte le medie mobili successive. Le quantità additive (`orders`, `revenue`, `sessions`) diventano `0`; i rapporti e i prezzi restano `NULL` così che `AVG()` li ignori correttamente.
 
-Una date spine è una tabella con una riga per ogni giorno dell'intervallo analizzato. Il modo di generarla cambia per dialetto, ma il risultato è identico: una sola colonna `giorno`. Gli estremi devono coincidere con la finestra di analisi da entrambi i lati. La granularità va decisa prima, perché mescolare granularità diverse produce duplicati silenziosi. Per analisi ricorrenti conviene una tabella calendario persistente con attributi di settimana, festività e mese fiscale.
+### Fare CROSS JOIN tra Date Spine e migliaia di SKU senza filtrare i periodi attivi
 
-```sql
--- PostgreSQL e DuckDB: generate_series, la via più leggibile
-SELECT giorno::DATE AS giorno
-FROM generate_series(DATE '2026-03-01', DATE '2026-03-31', INTERVAL '1 day') AS giorno;
-```
+Se dovete densificare per `(calendar_date, product_id)`, moltiplicare 730 giorni per 50.000 SKU genera 36,5 milioni di righe quasi tutte a zero. Limitate sempre la `CROSS JOIN` alla finestra attiva di ciascun prodotto (`calendar_date BETWEEN first_sale_date AND last_sale_date`) per mantenere le query veloci e leggere.
 
-```sql
--- BigQuery: generazione di array poi esploso in righe
-SELECT d AS giorno
-FROM UNNEST(
-  GENERATE_DATE_ARRAY(DATE '2026-03-01', DATE '2026-03-31', INTERVAL 1 DAY)
-) AS d;
-```
+### Usare LAG(revenue, 365) senza considerare gli anni bisestili o i giorni della settimana
 
-```sql
--- Snowflake e Databricks: tabella di sistema con indice di riga
-SELECT DATEADD(DAY, SEQ4(), DATE '2026-03-01') AS giorno
-FROM TABLE(GENERATOR(ROWCOUNT => 31));
-```
+Confrontare `LAG(revenue, 365)` confronta il venerdì 13 novembre 2026 con il giovedì 13 novembre 2025: nel retail e nell'e-commerce, l'effetto giorno della settimana pesa fino al 40%. Per confronti operativi puliti, usate `LAG(revenue, 364)` (esattamente 52 settimane prima, stesso giorno della settimana) oppure `LAG(revenue, 7)` per la settimana precedente.
 
-## Densificare la serie con la join che riempie i vuoti
+## Date Spine, Media Mobile 7gg e Confronto YoY a 52 settimane in ClickHouse
 
-Con la spina pronta il pattern è sempre lo stesso: spina a sinistra, fatti a destra, trasformazione delle assenze in zeri dove ha senso. Aggregare i fatti per giorno prima della `JOIN` evita di moltiplicare le righe quando un giorno ha molti ordini. Partire dai fatti con `JOIN` inversa funziona, ma rende la query illeggibile appena si aggiunge una seconda metrica.
+Per costruire una serie temporale densificata e calcolare metriche rolling esatte in ClickHouse, applicate questi quattro passi:
+
+1. Generate la `date_spine` continua dall'inizio dello storico fino a `today() - 1` (escludendo la giornata odierna ancora in corso se cercate confronti completi).
+2. Aggregate gli ordini per `order_date` in una CTE separata prima della `LEFT JOIN` per garantire unicità sulla data.
+3. Eseguite `date_spine LEFT JOIN daily_orders`, applicando `COALESCE(..., 0)` solo a `orders_count` e `revenue_eur`.
+4. Calcolate la media mobile a 7 giorni con `ROWS BETWEEN 6 PRECEDING AND CURRENT ROW` e il confronto con la stessa giornata di 52 settimane fa tramite `lagInFrame(revenue_eur, 364)`.
+
+Ecco la query SQL completa in ClickHouse:
 
 ```sql
--- Ricavo giornaliero densificato: ogni giorno compare, anche a zero
-WITH spine AS (
-  -- una riga per giorno di marzo 2026
-  SELECT giorno::DATE AS giorno
-  FROM generate_series(DATE '2026-03-01', DATE '2026-03-31', INTERVAL '1 day') AS giorno
+-- Date Spine continua, densificazione con COALESCE selettivo, Media Mobile 7gg e YoY a 52 settimane:
+WITH date_spine AS (
+    SELECT addDays(toDate('2025-01-01'), number) AS calendar_date
+    FROM numbers(dateDiff('day', toDate('2025-01-01'), today()))
 ),
-vendite AS (
-  -- aggrega gli ordini per giorno prima della join: meno righe da agganciare
-  SELECT DATE(creato_il) AS giorno, SUM(importo) AS ricavo
-  FROM ordini
-  WHERE creato_il >= DATE '2026-03-01'
-    AND creato_il < DATE '2026-04-01'
-  GROUP BY 1
+daily_orders AS (
+    SELECT
+        order_date,
+        count() AS orders_count,
+        sum(revenue_eur) AS revenue_eur,
+        avg(revenue_eur) AS avg_order_value
+    FROM analytics_prod.fct_orders
+    WHERE status = 'paid'
+      AND order_date >= '2025-01-01'
+      AND order_date < today()
+    GROUP BY order_date
+),
+dense_series AS (
+    SELECT
+        s.calendar_date,
+        coalesce(d.orders_count, 0) AS orders_count,
+        coalesce(d.revenue_eur, 0.00) AS revenue_eur,
+        d.avg_order_value AS avg_order_value_nullable
+    FROM date_spine AS s
+    LEFT JOIN daily_orders AS d
+        ON s.calendar_date = d.order_date
 )
 SELECT
-  s.giorno,
-  COALESCE(v.ricavo, 0) AS ricavo   -- giorno senza ordini: zero, non assenza
-FROM spine AS s
-LEFT JOIN vendite AS v
-  ON v.giorno = s.giorno
-ORDER BY s.giorno;
+    calendar_date,
+    orders_count,
+    revenue_eur,
+    round(avg(revenue_eur) OVER (
+        ORDER BY calendar_date ASC
+        ROWS BETWEEN 6 PRECEDING AND CURRENT ROW
+    ), 2) AS ma7_revenue_eur,
+    round(avg(avg_order_value_nullable) OVER (
+        ORDER BY calendar_date ASC
+        ROWS BETWEEN 6 PRECEDING AND CURRENT ROW
+    ), 2) AS ma7_aov_eur,
+    lagInFrame(revenue_eur, 7) OVER (
+        ORDER BY calendar_date ASC
+        ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING
+    ) AS revenue_prev_week_eur,
+    lagInFrame(revenue_eur, 364) OVER (
+        ORDER BY calendar_date ASC
+        ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING
+    ) AS revenue_52w_ago_eur
+FROM dense_series
+ORDER BY calendar_date DESC
+LIMIT 30;
 ```
 
-| Variante | Cosa succede ai giorni vuoti | Quando usarla |
-|---|---|---|
-| `INNER JOIN` tra spine e fatti | Spariscono di nuovo | Mai, vanifica la spine |
-| `LEFT JOIN` + `COALESCE(..., 0)` | Diventano zeri | Ricavi, conteggi, quantità |
-| `LEFT JOIN` senza `COALESCE` | Restano `NULL` | Prezzi e tassi, dove lo zero sarebbe falso |
+In questa query `date_spine` garantisce zero buchi, `ma7_revenue_eur` include correttamente gli zeri dei giorni di chiusura, `ma7_aov_eur` ignora i giorni senza ordini grazie al `NULL` preservato e `revenue_52w_ago_eur` confronta esattamente lo stesso giorno della settimana di un anno prima. Questo approccio elimina alla radice le false oscillazioni che confondono i team commerciali ogni lunedì mattina: invece di vedere un picco artificiale o un crollo inspiegabile causato da un ponte festivo o da un giorno di chiusura, la curva della media mobile a 7 giorni scorre su una base temporale perfettamente uniforme.
 
-La terza riga della tabella è la più importante: densificare non significa sempre mettere zero. Per una metrica intensiva come il prezzo medio, il valore di un giorno senza osservazioni resta sconosciuto, e scriverci zero corrompe le medie successive.
+Un ulteriore vantaggio della Date Spine costruita in SQL è la possibilità di estenderla facilmente a dimensioni multiple, ad esempio per paese o per canale di acquisizione, generando la griglia cartesiana `(calendar_date, channel)` solo per i canali attivi nel periodo. In questo modo ogni dashboard di Looker, Metabase o Superset riceve una tabella già pronta per essere graficata senza dover scrivere formule complesse lato frontend, e i confronti settimanali o annuali mantengono la stessa identica semantica su qualsiasi strumento aziendale.
 
-## Medie mobili e totali rolling con le window function
+Ricordate infine di documentare chiaramente nello schema YAML di dbt quali colonne usano `COALESCE(..., 0)` (metriche additive di volume e ricavo) e quali restano `NULL` nei giorni senza attività (prezzi medi, scontrino medio, tassi di conversione), così da evitare che un analista applichi una media aritmetica errata a valle.
 
-La media mobile su serie densificata usa una finestra per righe ordinata per `giorno`. Con una riga per giorno, la finestra di sette righe copre esattamente sette giorni di calendario; sui dati sparsi coprirebbe invece le ultime righe esistenti anche su tre settimane, e la media resterebbe alta pure con vendite ferme da giorni. I primi giorni della serie hanno finestra parziale e vanno filtrati oppure segnalati come transitori. Per totali cumulati da inizio anno la finestra con inizio non limitato resta più economica di una auto-`JOIN`.
+## Date Spine in SQL vs riempimento dei buchi nel tool di BI
 
-```sql
--- Media mobile a 7 giorni e totale rolling a 28 giorni sul ricavo densificato
-WITH giornaliero AS (
-  -- la CTE densificata del paragrafo precedente: un giorno, una riga
-  SELECT s.giorno, COALESCE(v.ricavo, 0) AS ricavo
-  FROM spine AS s
-  LEFT JOIN vendite AS v ON v.giorno = s.giorno
-)
-SELECT
-  giorno,
-  ricavo,
-  AVG(ricavo) OVER (
-    ORDER BY giorno
-    ROWS BETWEEN 6 PRECEDING AND CURRENT ROW  -- finestra di 7 righe: oggi + 6 giorni prima
-  ) AS media_mobile_7g,
-  SUM(ricavo) OVER (
-    ORDER BY giorno
-    ROWS BETWEEN 27 PRECEDING AND CURRENT ROW -- totale degli ultimi 28 giorni
-  ) AS totale_rolling_28g
-FROM giornaliero
-ORDER BY giorno;
-```
+Per gestire i giorni mancanti nelle serie temporali, potete **costruire la Date Spine nei modelli SQL/dbt** oppure **lasciare che il tool di BI (Looker, Metabase, Superset) riempia i buchi visivamente**.
 
-## Confronti con l'anno precedente senza autojoin contorte
+Il criterio di scelta è netto: **costruite sempre la Date Spine nei modelli SQL/dbt (`fct_daily_metrics`) quando dovete calcolare medie mobili, cumulativi o variazioni `LAG` a scarto fisso, perché i tool di BI riempiono solo l'asse visivo del grafico e non correggono le formule SQL sottostanti.**
 
-La variazione anno su anno con `LAG` a scarto fisso evita una auto-`JOIN` sulla data meno un anno. Lo scarto pari a cinquantadue settimane allinea il giorno della settimana e risulta più stabile dello scarto di trecentosessantacinque giorni, che sfasa weekend e festività. Per metriche mensili l'equivalente è lo scarto di dodici periodi su serie mensile. La protezione contro divisione per zero con `NULLIF` resta obbligatoria per i nuovi segmenti.
+La confusione comune consiste nel vedere una linea continua su Metabase e credere che la media mobile calcolata a monte sia corretta: se mancavano i weekend nella tabella SQL, la media mobile a 7 righe resta matematicamente sbagliata anche se il grafico sembra continuo.
 
-```sql
--- Ricavo giornaliero contro stesso giorno dell'anno prima e variazione percentuale
-SELECT
-  giorno,
-  ricavo,
-  LAG(ricavo, 364) OVER (ORDER BY giorno) AS ricavo_anno_prima,
-  -- 364 = 52 settimane: allinea il giorno della settimana, più stabile del 365
-  CASE
-    WHEN LAG(ricavo, 364) OVER (ORDER BY giorno) = 0 THEN NULL  -- evita la divisione per zero
-    ELSE (ricavo - LAG(ricavo, 364) OVER (ORDER BY giorno))
-       / LAG(ricavo, 364) OVER (ORDER BY giorno)
-  END AS variazione_yoy
-FROM giornaliero
-ORDER BY giorno;
-```
+## Cinque domande prima di pubblicare una serie temporale rolling
 
-## Candele giornaliere quando servono davvero
+1. La vostra tabella di partenza garantisce esattamente `1 riga = 1 giorno` senza buchi prima di applicare `ROWS` o `LAG`?
+2. Avete applicato `COALESCE(..., 0)` **solo** alle metriche additive di flusso, lasciando `NULL` su medie, tassi e prezzi?
+3. Avete escluso la giornata odierna in corso (`< today()`) se calcolate medie mobili su giorni completi?
+4. Per i confronti anno su anno nel retail o B2B, state usando lo scarto di **52 settimane (`364` giorni)** per allineare il giorno della settimana?
+5. Avete verificato che `count()` della serie densificata corrisponda esattamente a `dateDiff('day', start_date, end_date)`?
 
-Aperto, massimo, minimo e chiuso (`OHLC`) riassumono una serie intraday con primo e ultimo prezzo più gli estremi toccati. Servono in tesoreria e monitoraggio prezzi, dove la volatilità dentro il giorno conta quanto il livello. In SQL si ottengono con aggregazione per giorno più numerazione con `ROW_NUMBER` ordinata per orario. Il trucco con massimo condizionato estrae un valore posizionale dentro un raggruppamento per giorno, perché esiste una sola prima riga per giorno.
-
-```sql
--- Candela giornaliera dei prezzi: primo, massimo, minimo e ultimo prezzo del giorno
-WITH prezzi_ordinati AS (
-  SELECT
-    DATE(ts) AS giorno,          -- giorno di calendario della quotazione
-    prezzo,                     -- prezzo rilevato in quel momento
-    ROW_NUMBER() OVER (PARTITION BY DATE(ts) ORDER BY ts) AS rn_asc,
-    -- numero di riga dal mattino: 1 = prima quotazione = apertura
-    ROW_NUMBER() OVER (PARTITION BY DATE(ts) ORDER BY ts DESC) AS rn_desc
-    -- numero di riga dalla sera: 1 = ultima quotazione = chiusura
-  FROM quotazioni
-  WHERE ts >= TIMESTAMP '2026-03-01 00:00:00'
-    AND ts < TIMESTAMP '2026-04-01 00:00:00'
-)
-SELECT
-  giorno,
-  MAX(CASE WHEN rn_asc = 1 THEN prezzo END) AS apertura,   -- primo prezzo del giorno
-  MAX(prezzo) AS massimo,                                  -- estremo superiore
-  MIN(prezzo) AS minimo,                                   -- estremo inferiore
-  MAX(CASE WHEN rn_desc = 1 THEN prezzo END) AS chiusura   -- ultimo prezzo del giorno
-FROM prezzi_ordinati
-GROUP BY giorno
-ORDER BY giorno;
-```
-
-Apertura e chiusura hanno senso solo con ordinamento temporale totale e criteri secondari a parità di timestamp. Se i giorni senza quotazioni devono comparire, la spina torna in gioco con `LEFT JOIN`, ricordando che per i prezzi l'assenza resta `NULL` e mai zero.
-
-## Quanto costa una spina e come tenerla sotto controllo
-
-Una spina giornaliera su tre anni sono circa millecento righe: non è mai un problema. I costi nascono con granularità fine incrociata con dimensioni ad alta cardinalità, come giorni per prodotto per magazzino. Tre regole tengono i costi in ordine: generare solo l'intervallo che serve, densificare dopo aver aggregato e materializzare la serie per report ricorrenti. La clausola di filtro sui fatti deve restare dentro il passaggio dei fatti, prima della `JOIN`. Filtrare dopo la `LEFT JOIN` sul risultato trasforma silenziosamente la `LEFT JOIN` in `INNER JOIN` per tutte le righe a zero.
-
-## Quando la date spine è la scelta sbagliata
-
-La spina aggiunge righe senza informazione quando l'analisi riguarda solo giorni con attività, come tassi per giorno di campagna. Se la metrica è già una fotografia periodica, come saldi di fine mese, la serie è completa per costruzione. Per finestre lunghe a granularità fine conviene preaggregare prima di densificare, oppure densificare solo l'ultimo tratto mobile mostrato dal report. Per confronti tra coorti con compleanno diverso serve una spina di interi da zero a `N` giorni dall'evento origine, e non una spina di date di calendario.
-
-In sintesi: usa righe per finestra temporale su serie densificata e mai su dati sparsi, con scarto di cinquantadue settimane per confronti annuali su dati settimanali.
-
-Verdetto: densifica sempre con la spina prima di calcolare medie mobili e usa lo scarto di cinquantadue settimane per i confronti annuali; su dati sparsi le finestre per righe mentono.
-
-## Il caso Johns Hopkins: la media mobile che ha reso leggibile la pandemia
-
-La Johns Hopkins University e Our World in Data, dal 2020, pubblicarono i contagi giornalieri con media mobile a sette giorni per levigare ritardi di notifica e crolli festivi. La media a sette giorni rese leggibili picchi e inversioni che i dati grezzi giornalieri nascondevano tra oscillazioni spurie. Le dashboard dichiararono in modo esplicito finestra e riempimento dei giorni mancanti. Il caso mostra perché la densificazione con spina e finestra per righe divenne lo standard per ogni serie epidemiologica e finanziaria successiva.
-
-## Domande per chiudere la lezione
-
-1. Perché una media mobile su dati sparsi gonfia il risultato nei periodi fiacchi?
-2. Quando un giorno vuoto deve diventare zero con `COALESCE` e quando deve restare `NULL`?
-3. Perché lo scarto di cinquantadue settimane stabilizza il confronto annuale su dati settimanali?
-4. Quale filtro trasforma per errore una `LEFT JOIN` con spina in una `INNER JOIN`?
+La metrica di controllo per una Date Spine è la **continuità del calendario**: `count() = uniqExact(calendar_date)` e `dateDiff('day', min(calendar_date), max(calendar_date)) + 1 = count()`. Inserire questa verifica come test automatico nei modelli dbt di staging temporale garantisce che nessun giorno mancante o duplicato possa mai falsare le medie mobili, i confronti annuali, le previsioni di cassa, i budget di marketing o i totali cumulativi esposti nei report aziendali di direzione e controllo settimanale e mensile.

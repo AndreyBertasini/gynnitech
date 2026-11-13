@@ -132,7 +132,6 @@ export type PipelineRuleResult = { regola: string; esito: "PASS" | "FAIL"; nota:
  * Usata sia da validate:content sia dalla pipeline batch (single source of truth).
  */
 export function checkLessonPipeline(body: string, frontmatterBinario: unknown, formato?: unknown): PipelineRuleResult[] {
-    const tre = formato === "3s";
     const articolo = formato === "articolo";
     const results: PipelineRuleResult[] = [];
     const h2Titles = extractH2Titles(body);
@@ -149,11 +148,8 @@ export function checkLessonPipeline(body: string, frontmatterBinario: unknown, f
         (s) => s.text.length > 0 && countSentences(s.text) <= 4 && !/\$|\\\(|\\\[|\\frac|\\log|\\sum/.test(s.text),
     );
     const stepsSection = sections.find((s) => /^\s*(1[.)]|[-*]\s+)/m.test(s.text));
-    // Formato 3s: il concetto sta nelle figure (<Slide>), il passo-passo negli schemi (<Schema>).
     // Formato articolo: il principio è la riga in grassetto, il passo-passo l'elenco numerato dei criteri.
-    const regola1 = tre
-        ? /<Slide\b/.test(body) && /<Schema\b/.test(body)
-        : articolo
+        const regola1 = articolo
             ? /^\*\*[^*\n]+\*\*\s*$/m.test(body.replace(/`[^`\n]*`/g, "x")) && /^\s*1[.)]\s/m.test(body)
             : Boolean(definitionSection && stepsSection && definitionSection.title !== stepsSection.title);
     if (regola1) {
@@ -169,9 +165,7 @@ export function checkLessonPipeline(body: string, frontmatterBinario: unknown, f
     // Regola 2 — autoverifica in chiusura (titolo libero).
     const lastSection = sections.length > 0 ? sections[sections.length - 1] : undefined;
     const questionCount = lastSection ? countNumberedQuestions(lastSection.text) : 0;
-    // Formato 3s: l'autoverifica finale è il QuizExercise del Riepilogo.
-    const quizCount = lastSection && /<QuizExercise\b/.test(lastSection.text) ? (lastSection.text.match(/\bcorrectIndex\s*:/g) ?? []).length : 0;
-    const regola2 = tre ? quizCount >= 3 && quizCount <= 5 : Boolean(lastSection && questionCount >= 3 && questionCount <= 5);
+    const regola2 = Boolean(lastSection && questionCount >= 3 && questionCount <= 5);
     if (regola2) {
         results.push({ regola: "regola_2_retrieval_attivo", esito: "PASS", nota: "" });
     } else {

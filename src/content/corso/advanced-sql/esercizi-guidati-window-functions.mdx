@@ -20,247 +20,174 @@ learningObjectives:
   - Ricostruire sessioni ed episodi con flag di rottura e somma cumulata su ordinamento totale
   - Calcolare durata, conversione e canale di ingresso per sessione con FIRST_VALUE e mediana
 binario: "ml-tabellare"
+formato: "articolo"
 autore: "Hermes"
 controllatoDa: "Argo"
 autorizzatoDa: "Giano"
 draft: false
-dateModified: 2026-09-07
+dateModified: 2026-11-13
 ---
 
 # Sessionizzazione e raggruppamento comportamentale
 
-Questa lezione appartiene al binario **ml-tabellare**: sessioni, episodi e viaggi si ricostruiscono tutti con query su tabelle di eventi.
+Un prodotto B2B raccoglie milioni di eventi grezzi dal frontend senza affidarsi al `session_id` generato dai cookie del browser, che viene azzerato ogni volta che l'utente cambia scheda o apre un link da un'email. Quando il team di prodotto prova a calcolare la durata media delle sessioni e il tasso di conversione per visita, i risultati sono inutilizzabili: le sessioni risultano spezzate in decine di micro-visite da 2 secondi, e il canale di ingresso `utm_source` sparisce dopo il primo clic. La causa non è il tracking: è non applicare la **sessionizzazione comportamentale in SQL tramite `LAG()`, flag di rottura e somma cumulata**, l'unico metodo deterministico per ricostruire episodi d'uso reali direttamente sopra il flusso di eventi.
 
-## L'idea in una frase
+## Micro-visite spezzate da 2 secondi e canali persi dopo il primo clic
 
-La sessionization trasforma sequenze piatte di eventi in blocchi operativi delimitati da inattività o cambi di stato, per misurare conversione e durata.
+Questo è un caso ricostruito con numeri di esempio su quanto accade quando si delega la definizione di "sessione" al client invece di calcolarla in modo riproducibile nel data warehouse.
 
-## Il percorso in cinque passi
+La sessionizzazione in SQL trasforma una sequenza piatta di eventi utente in episodi strutturati e analizzabili:
 
-1. Misura la distribuzione dei `gap` tra eventi successivi dello stesso utente con `LAG` e fissa una soglia di inattività difendibile dai dati.
-2. Marca ogni evento con flag di nuova sessione (`is_new_session`) quando il `gap` supera la soglia o quando scatta un confine logico.
-3. Trasforma il flag in numero di sessione con `SUM() OVER ()` ordinata per tempo e aggrega per utente e sessione.
-4. Calcola durata, profondità e conversione per sessione con mediana e quota di sessioni mono-evento separate dalla media.
-5. Congela le sessioni chiuse oltre una finestra di guardia e ricalcola solo eventi recenti più coda di trascinamento.
+| Fase della pipeline | Operazione SQL | Output generato | Errore se omessa |
+| :--- | :--- | :--- | :--- |
+| 1. Ordinamento totale | `ORDER BY occurred_at, event_id` | Sequenza univoca per `user_id` | Eventi simultanei invertiti tra un run e l'altro |
+| 2. Calcolo del gap | `LAG(occurred_at) OVER (...)` | Secondi di inattività dall'evento precedente | Impossibile rilevare le pause tra visite |
+| 3. Flag di rottura | `CASE WHEN gap > 1800 OR gap IS NULL THEN 1 ELSE 0 END` | `is_new_session` (`1` o `0`) | Il primo evento di ogni utente resta senza etichetta |
+| 4. Somma cumulata | `SUM(is_new_session) OVER (... ROWS UNBOUNDED PRECEDING)` | `session_seq` (`1, 2, 3...`) | Eventi non raggruppabili in episodi distinti |
 
-## Perché gli eventi grezzi non bastano per decidere
+Con questi quattro passaggi, ogni evento eredita un `session_id` deterministico (`concat(user_id, '-', session_seq)`) che non dipende dai capricci dei browser o degli ad-blocker.
 
-I log arrivano come righe ordinate per tempo ma senza confini. Aggregare per giorno risponde a quanti eventi ci sono stati ieri, non a quanti tentativi reali di acquisto. Un utente con quaranta eventi in un giorno può essere molto coinvolto oppure uno script in loop, e la differenza si vede solo ricostruendo le sequenze. La sessionizzazione introduce un livello intermedio con durata, profondità e conversione per blocco. Solo a quel punto si confronta il comportamento tra coorti e canali. Lavorare per sessioni riduce anche di ordini di grandezza le righe delle analisi successive.
+## Flag di rottura, somma cumulata, FIRST_VALUE e mediana della durata
 
-| Livello di aggregazione | Riga tipica | Domanda a cui risponde |
-|---|---|---|
-| Evento | un click alle 8:02:14 | cosa è successo esattamente |
-| Sessione | 5 eventi in 12 minuti | cosa voleva fare l'utente in quel blocco |
-| Utente / giorno | 3 sessioni in un giorno | quanto vale quel cliente questa settimana |
+Il primo meccanismo è il **pattern Gap-and-Islands con flag di rottura e somma cumulata**. Per ogni `user_id`, si calcola la differenza in minuti o secondi rispetto all'evento immediatamente precedente tramite `LAG(occurred_at)`. Se `prev_occurred_at IS NULL` (primo evento assoluto dell'utente) oppure se la distanza temporale supera la soglia di inattività scelta (standard di settore: `1800` secondi = 30 minuti per web/SaaS, `300` secondi = 5 minuti per app mobile ad alta frequenza), si emette `is_new_session = 1`, altrimenti `0`. Applicando poi `SUM(is_new_session) OVER (PARTITION BY user_id ORDER BY occurred_at, event_id ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)`, ogni visita riceve un indice intero progressivo.
 
-## La soglia di inattività come decisione di prodotto
+Il secondo meccanismo è l'**ereditarietà del canale di ingresso e della landing page con `FIRST_VALUE`**. Una volta costruito il `session_id` logico, il canale `utm_source` e la `landing_page` sono presenti quasi sempre solo sul primo evento della visita. Applicando `FIRST_VALUE(utm_source) OVER (PARTITION BY session_id ORDER BY occurred_at, event_id ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING)` si propaga l'origine della visita su tutta la sessione, permettendo di aggregare poi per canale con un semplice `GROUP BY session_id`.
 
-Nessuna sessione esiste nei dati: esiste una convenzione legata al prodotto. Trenta minuti è lo standard ereditato dai sistemi di web analytics, ma per consegne rapide è troppo lungo e per configuratori complessi è troppo corto. La scelta merita un grafico della distribuzione dei `gap` su scala logaritmica, con valle tra `gap` brevi dentro la sessione e `gap` lunghi tra sessioni. Il secondo controllo è la sensibilità: ricalcolo del numero di sessioni e della conversione a novecento, milleottocento e tremilaseicento secondi. Se i numeri si muovono di pochi punti, la soglia è robusta e si può congelare.
+Il terzo meccanismo è l'**uso della mediana (`quantile(0.5)`) invece della media aritmetica per la durata delle sessioni**. Le distribuzioni di durata delle sessioni sono fortemente asimmetriche: il 40% delle visite dura meno di 20 secondi, mentre una piccola frazione di utenti lascia la scheda aperta per 4 ore falsando la media verso l'alto. La mediana (`quantileExact(0.5)(duration_sec)` in ClickHouse) misura la durata tipica reale senza farsi trascinare dai valori estremi, affiancata dalla quota di sessioni convertite (`has_converted = 1`).
+
+**Ricostruite le sessioni in SQL con `LAG()`, flag di rottura e somma cumulata su ordinamento totale, propagando il canale di ingresso con `FIRST_VALUE` e misurando la durata tipica con la mediana.**
+
+## Tre errori comuni nella sessionizzazione comportamentale
+
+Il blocco SQL qui sotto mostra l'errore tipico di chi calcola la somma cumulata senza `ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW` e dimentica la chiave di spareggio `event_id`:
 
 ```sql
--- Gap in secondi calcolato su timestamp assoluti, senza conversioni di fuso
+-- ERRORE 1: manca event_id nell'ORDER BY -> due eventi nello stesso secondo hanno ordine casuale!
+-- ERRORE 2: manca ROWS UNBOUNDED PRECEDING -> il default RANGE somma insieme eventi simultanei!
+-- ERRORE 3: usare AVG(duration_sec) senza filtrare o usare la mediana nasconde i rimbalzi!
 SELECT
-  user_id,
-  event_time,
-  -- Recupera l'istante precedente dello stesso utente
-  LAG(event_time) OVER (PARTITION BY user_id ORDER BY event_time) AS prev_event_time,
-  -- Differenza in secondi rispetto all'evento precedente
-  EXTRACT(EPOCH FROM (
-    event_time - LAG(event_time) OVER (PARTITION BY user_id ORDER BY event_time)
-  )) AS gap_s
-FROM raw_events;
-```
-
-Il risultato va letto prima di fissare la soglia, con mediana, novantesimo e novantanovesimo percentile e quota di `gap` sopra i trenta minuti. Sessionizzare su timestamp assoluti con aritmetica in `epoch` evita rotture da fuso orario, con conversioni solo in presentazione.
-
-## Il pattern a due passaggi con flag e somma cumulativa
-
-Quasi ogni sessionizzazione segue lo stesso scheletro in due passaggi. Il primo marca ogni evento con flag binario di apertura sessione. Il secondo trasforma la sequenza di zeri e uni in identificativo con somma cumulativa ordinata per tempo. Tre dettagli decidono la tenuta in produzione: ordinamento totale con tiebreaker, calcolo unico della finestra e chiave vera data dalla coppia `user_id` e numero.
-
-```sql
-WITH events_with_gap AS (
-  SELECT
     user_id,
-    event_time,
-    event_type,
-    -- Flag 1 quando l'evento apre una nuova sessione
-    CASE
-      WHEN LAG(event_time) OVER (PARTITION BY user_id ORDER BY event_time) IS NULL THEN 1
-      WHEN EXTRACT(EPOCH FROM (
-        event_time - LAG(event_time) OVER (PARTITION BY user_id ORDER BY event_time)
-      )) > 1800 THEN 1
-      ELSE 0
-    END AS is_new_session
-  FROM raw_events
-),
-events_with_session AS (
-  SELECT
-    *,
-    -- Somma cumulativa del flag: genera il numero di sessione per utente
-    SUM(is_new_session) OVER (
-      PARTITION BY user_id ORDER BY event_time ROWS UNBOUNDED PRECEDING
-    ) AS session_number
-  FROM events_with_gap
-)
-SELECT
-  user_id,
-  session_number,
-  MIN(event_time) AS session_start,
-  MAX(event_time) AS session_end,
-  COUNT(*) AS events_in_session,
-  -- Durata in secondi tra primo e ultimo evento della sessione
-  EXTRACT(EPOCH FROM (MAX(event_time) - MIN(event_time))) AS session_duration_s
-FROM events_with_session
-GROUP BY user_id, session_number;
+    occurred_at,
+    sum(is_new_session) OVER (PARTITION BY user_id ORDER BY occurred_at) AS unstable_session_idx
+FROM analytics_prod.fct_events_with_flags;
 ```
 
-La durata merita attenzione: una sessione con un solo evento ha durata zero per costruzione. Meglio mediana, percentili e quota di sessioni mono-evento separati, invece di una media che mescola comportamenti diversi.
+### Usare il frame di default RANGE nella somma cumulata del flag di rottura
 
-## Quando il confine non è il tempo ma un cambio di stato
+Se due eventi dello stesso utente hanno lo stesso timestamp al secondo e il primo dei due apre una nuova sessione (`is_new_session = 1`), il frame implicito `RANGE` li valuta insieme. Il risultato è corretto solo per caso se l'altro evento ha `0`, ma se si mescolano ordinamenti o si usano altri flag, l'assenza di `ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW` abbinata a `event_id` rende il calcolo non deterministico.
 
-Non tutti i raggruppamenti nascono da un `gap` temporale. Una pagina di ringraziamento chiude la sessione anche dopo pochi secondi, un `logout` chiude sempre, e un cambio di stato del sensore apre un nuovo episodio. La struttura della query non cambia: cambia solo la condizione dentro il `CASE`. Con sensori che campionano ogni minuto l'obiettivo può essere isolare sequenze sopra i trenta gradi lunghe almeno cinque letture. Il confronto con valore mancante richiede ramo esplicito con `IS NULL`, perché altrimenti il primo record perde l'episodio iniziale.
+### Sessionizzare usando una soglia uguale per web SaaS, e-commerce e app mobile
+
+Applicare ciecamente 30 minuti a qualunque prodotto porta a distorsioni: su un'app di food delivery o di trading, due aperture a distanza di 20 minuti sono chiaramente due sessioni distinte; su un tool B2B di reportistica dove l'utente legge un documento per 35 minuti prima di cliccare, 30 minuti spezzano una singola sessione di lavoro in due. La soglia di inattività va calibrata osservando il 90° percentile dei gap intra-visita del vostro prodotto.
+
+### Calcolare la durata media della sessione includendo le sessioni a evento singolo (0 secondi)
+
+Le sessioni con un solo evento (`events_count = 1`) hanno durata `0` secondi perché non esiste un secondo evento per misurare `max(occurred_at) - min(occurred_at)`. Mescolarle nella media insieme alle sessioni multi-evento abbassa artificialmente la durata media: conviene sempre riportare separatamente il **Bounce Rate** (quota di sessioni a 1 evento) e la **Mediana della durata sulle sessioni multi-evento**.
+
+## Pipeline completa di sessionizzazione, canale di ingresso e mediana in ClickHouse
+
+Per costruire una tabella di sessioni robusta e pronta per dbt in ClickHouse, applicate questi quattro passi:
+
+1. Calcolate il gap temporale dal precedente evento di ciascun `user_id` ordinando per `(occurred_at ASC, event_id ASC)`.
+2. Generate `is_new_session = 1` quando `prev_occurred_at IS NULL` o `gap_sec > 1800` (30 minuti) o cambia il giorno solare se richiesto dal business.
+3. Sommate `is_new_session` con `ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW` per ottenere `session_seq` e `session_id`.
+4. Aggregate per `session_id` estraendo `entry_utm_source`, `duration_sec`, `events_count`, `has_converted` e calcolando infine la mediana per canale.
+
+Ecco l'implementazione SQL completa in ClickHouse:
 
 ```sql
-WITH temp_flagged AS (
-  SELECT
-    sensor_id,
-    measured_at,
-    temperature,
-    -- Stato 0 = surriscaldamento, 1 = normale
-    CASE WHEN temperature > 30 THEN 0 ELSE 1 END AS state,
-    -- Stato precedente dello stesso sensore
-    LAG(CASE WHEN temperature > 30 THEN 0 ELSE 1 END)
-      OVER (PARTITION BY sensor_id ORDER BY measured_at) AS prev_state
-  FROM sensor_readings
+-- Sessionizzazione comportamentale completa in ClickHouse con canale di ingresso e mediana:
+WITH events_with_lag AS (
+    SELECT
+        user_id,
+        event_id,
+        occurred_at,
+        event_name,
+        utm_source,
+        lagInFrame(occurred_at, 1, NULL) OVER (
+            PARTITION BY user_id
+            ORDER BY occurred_at ASC, event_id ASC
+            ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING
+        ) AS prev_occurred_at
+    FROM analytics_prod.fct_product_events
+    WHERE event_date >= today() - 30
+      AND user_id != ''
 ),
-state_changes AS (
-  SELECT
-    *,
-    -- Nuovo episodio a ogni cambio di stato o al primo record
-    CASE WHEN state != prev_state OR prev_state IS NULL THEN 1 ELSE 0 END AS is_new_episode
-  FROM temp_flagged
-)
-SELECT
-  sensor_id,
-  -- Identificativo progressivo di episodio per sensore
-  SUM(is_new_episode) OVER (
-    PARTITION BY sensor_id ORDER BY measured_at ROWS UNBOUNDED PRECEDING
-  ) AS episode_id,
-  MIN(measured_at) AS episode_start,
-  MAX(measured_at) AS episode_end,
-  MAX(temperature) AS peak_temp,
-  COUNT(*) AS readings_in_episode
-FROM state_changes
-WHERE state = 0  -- tiene solo gli episodi caldi, scarta i periodi normali
-GROUP BY sensor_id, episode_id
-HAVING COUNT(*) >= 5;  -- almeno 5 letture consecutive sopra soglia
-```
-
-Lo stesso schema gestisce confini misti di tempo ed evento con condizione composta. Conviene registrare anche il motivo di apertura in colonna dedicata, perché in debug la prima domanda riguarda sempre il perché della separazione.
-
-## Sessioni di guida e telemetria su scala reale
-
-Su flotte connesse la sessionizzazione diventa rilevazione di viaggi, con trigger su cambio, velocità e posizione. Una sosta breve al semaforo non chiude il viaggio, mentre una sosta lunga con cambio in sosta e spostamento reale spesso sì. La logica va eseguita in batch lato server, con soglia di spostamento che filtra il rumore del segnale da fermo. Partizionare per `vin` e data evita smistamenti ingestibili, perché la finestra resta confinata a un veicolo per volta.
-
-```sql
-WITH vehicle_events AS (
-  SELECT
-    vin,
-    event_time,
-    gear,   -- 'P', 'D', 'R', 'N': P indica sosta con cambio in parking
-    speed,
-    lat, lon,
-    -- Stato precedente dello stesso veicolo
-    LAG(gear) OVER (PARTITION BY vin ORDER BY event_time) AS prev_gear,
-    LAG(lat) OVER (PARTITION BY vin ORDER BY event_time) AS prev_lat,
-    LAG(lon) OVER (PARTITION BY vin ORDER BY event_time) AS prev_lon
-  FROM telemetry
+session_flags AS (
+    SELECT
+        user_id,
+        event_id,
+        occurred_at,
+        event_name,
+        utm_source,
+        if(
+            prev_occurred_at IS NULL OR dateDiff('second', prev_occurred_at, occurred_at) > 1800,
+            1,
+            0
+        ) AS is_new_session
+    FROM events_with_lag
 ),
-trip_starts AS (
-  SELECT
-    *,
-    -- Nuovo viaggio al primo evento o dopo sosta con spostamento reale
-    CASE
-      WHEN prev_gear IS NULL THEN 1
-      WHEN prev_gear = 'P' AND gear = 'D'
-        AND haversine(prev_lat, prev_lon, lat, lon) > 0.1 THEN 1
-      ELSE 0
-    END AS is_new_trip
-  FROM vehicle_events
+events_sessionized AS (
+    SELECT
+        user_id,
+        event_id,
+        occurred_at,
+        event_name,
+        utm_source,
+        concat(
+            user_id, '-',
+            toString(
+                sum(is_new_session) OVER (
+                    PARTITION BY user_id
+                    ORDER BY occurred_at ASC, event_id ASC
+                    ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+                )
+            )
+        ) AS session_id
+    FROM session_flags
+),
+sessions_summary AS (
+    SELECT
+        session_id,
+        user_id,
+        argMin(utm_source, (occurred_at, event_id)) AS entry_utm_source,
+        min(occurred_at) AS session_started_at,
+        max(occurred_at) AS session_ended_at,
+        dateDiff('second', session_started_at, session_ended_at) AS duration_sec,
+        count() AS events_count,
+        max(if(event_name = 'order_completed', 1, 0)) AS has_converted
+    FROM events_sessionized
+    GROUP BY session_id, user_id
 )
 SELECT
-  vin,
-  -- Identificativo progressivo di viaggio per veicolo
-  SUM(is_new_trip) OVER (
-    PARTITION BY vin ORDER BY event_time ROWS UNBOUNDED PRECEDING
-  ) AS trip_id,
-  COUNT(*) AS events,
-  MAX(speed) AS max_speed,
-  MAX(event_time) - MIN(event_time) AS duration
-FROM trip_starts
-GROUP BY vin, trip_id;
+    if(entry_utm_source = '', '(direct)', entry_utm_source) AS channel,
+    count() AS total_sessions,
+    round(countIf(events_count = 1) * 100.0 / count(), 2) AS bounce_rate_pct,
+    round(quantileIf(0.5)(duration_sec, events_count > 1), 1) AS median_engaged_duration_sec,
+    round(sum(has_converted) * 100.0 / count(), 2) AS session_conversion_rate_pct
+FROM sessions_summary
+GROUP BY channel
+ORDER BY total_sessions DESC;
 ```
 
-## Attribuzione e metriche dentro la sessione
+In questa query ogni passaggio è trasparente e verificabile: `events_with_lag` calcola il gap senza perdere il primo evento, `events_sessionized` assegna un `session_id` univoco, `sessions_summary` estrae il canale di ingresso con `argMin(utm_source, (occurred_at, event_id))` e la `SELECT` finale separa il `bounce_rate_pct` dalla `median_engaged_duration_sec` calcolata solo sulle sessioni multi-evento. Questo modello `fct_sessions` diventa così la base unica e condivisa per tre analisi diverse: il team marketing legge la qualità del traffico per canale senza farsi ingannare dai cookie azzerati, il team di prodotto misura quanto tempo reale trascorrono gli utenti attivi dentro l'applicazione senza distorsioni da schede dimenticate aperte, e l'analytics engineer può collegare ogni conversione alla sessione esatta che l'ha generata.
 
-Una volta delimitate le sessioni serve sapere cosa è successo dentro: conversione, canale di ingresso e durata reale. L'attribuzione al canale del primo evento mostra il `FIRST_VALUE` usato bene, senza sottoquery lente. La durata mediana resta più robusta della media contro outlier e rimbalzi. Attribuire tutto al primo tocco sovrastima i canali di scoperta, mentre la conversione per sessione e per utente rispondono a domande diverse: mescolare i denominatori crea litigi sui numeri.
+Quando implementate questa pipeline in dbt come modello incrementale giornaliero, ricordate di includere un *lookback* di almeno 24 ore (o di riprocessare gli ultimi due giorni completi) per non spezzare a metà le sessioni che attraversano la mezzanotte. Inoltre, aggiungete un test di quadratura che verifichi che il numero totale di eventi raggruppati nelle sessioni coincida al 100% con il totale degli eventi validi in ingresso.
 
-```sql
-WITH session_events AS (
-  SELECT
-    user_id,
-    session_number,
-    event_time,
-    event_type,
-    channel,
-    -- Canale del primo evento della sessione, propagato a ogni riga
-    FIRST_VALUE(channel) OVER (
-      PARTITION BY user_id, session_number ORDER BY event_time
-    ) AS session_entry_channel,
-    -- Istante del primo evento: serve per durate e ordinamenti
-    FIRST_VALUE(event_time) OVER (
-      PARTITION BY user_id, session_number ORDER BY event_time
-    ) AS session_start_time
-  FROM events_with_session
-)
-SELECT
-  session_entry_channel,
-  COUNT(DISTINCT (user_id, session_number)) AS sessions,
-  -- Quota di sessioni con almeno un acquisto: conversione per canale di ingresso
-  COUNT(DISTINCT CASE WHEN event_type = 'purchase'
-    THEN (user_id, session_number) END) * 1.0
-    / COUNT(DISTINCT (user_id, session_number)) AS conv_rate,
-  -- Durata mediana: più robusta della media contro outlier e bounce
-  PERCENTILE_CONT(0.5) WITHIN GROUP (
-    ORDER BY EXTRACT(EPOCH FROM (event_time - session_start_time))
-  ) AS median_duration_s
-FROM session_events
-GROUP BY session_entry_channel;
-```
+## Sessionizzazione server-side in SQL vs session_id dal browser
 
-Per sequenze più fini le funzioni di scorrimento (`LAG` e `LEAD`) ricostruiscono pagina precedente e successiva e tempi tra carrello e acquisto. La metrica di attrito più utile resta la probabilità di passaggio condizionata, calcolata per sessione e non per evento.
+Per raggruppare gli eventi in sessioni, potete scegliere tra **ricostruire le sessioni in SQL nel warehouse** oppure **fidarvi del `session_id` inviato dal SDK frontend**.
 
-## I modi più costosi per sbagliare la sessionizzazione
+Il criterio di scelta è netto: **usate la sessionizzazione in SQL nel warehouse come fonte autorevole per tutti i modelli `fct_sessions` e le analisi di conversione multi-dispositivo o cross-domain (perché applica una regola uniforme, gestisce gli eventi server-side che non hanno cookie e permette di ricalcolare lo storico se cambiate la soglia), usate il `session_id` del browser solo come segnale ausiliario per il debugging real-time nel collettore.**
 
-Il primo errore tratta l'identità utente come affidabile, mentre cookie resettati, login multipli e traffico da più dispositivi creano identità parallele. Il sintomo è una marea di sessioni mono-evento, che invita a controllare la copertura dell'identificativo prima di abbassare la soglia. Il secondo errore ignora i duplicati da retry e ricariche, che azzerano i `gap` e fondono sessioni da separare: serve deduplica prima della finestra. Il terzo errore impone una soglia unica a segmenti diversi con ritmi diversi e appiattisce le differenze da trovare. La soluzione pragmatica parametrizza la soglia per segmento in tabella di configurazione.
+La confusione comune consiste nel mescolare eventi backend (es. `invoice_paid` da webhook) che arrivano senza `session_id` del browser: la sessionizzazione in SQL su `user_id` li ricongiunge automaticamente alla sessione attiva se avvengono entro la finestra temporale.
 
-## Come rendere la logica stabile in produzione
+## Cinque domande prima di pubblicare un modello di sessionizzazione
 
-La sessionizzazione notturna richiede incrementalità, con congelamento delle sessioni chiuse oltre una finestra di guardia di ventiquattro o quarantotto ore. Il test automatico impone quadratura delle righe, coerenza temporale con fine mai precedente all'inizio e banda storica sul numero di sessioni a parità di traffico. Le assunzioni su soglia, identità, deduplica e fuso vanno documentate in tabella di configurazione versionata. Il controllo più trascurato confronta sempre la metrica sessionizzata con una `baseline` semplice per utente-giorno e tratta il disaccordo come informazione preziosa sulla definizione stessa.
+1. L'ordinamento usato per `LAG` e per la somma cumulata include una chiave univoca di spareggio (`event_id ASC`) oltre a `occurred_at ASC`?
+2. Il primo evento di ogni utente (`prev_occurred_at IS NULL`) genera sempre `is_new_session = 1`?
+3. Avete calibrato la soglia di inattività (es. 1800 secondi) sulla distribuzione reale dei gap del vostro prodotto?
+4. Il canale di ingresso (`entry_utm_source`) viene estratto dal primo evento cronologico della sessione anziché dall'ultimo?
+5. State misurando la durata tipica con la **mediana sulle sessioni multi-evento**, tenendo separato il **Bounce Rate** delle sessioni a 1 evento?
 
-Riferimenti: Kaushik 2010 sul framework di sessionizzazione web, documentazione Google Analytics 2024 per la definizione operativa di sessione a trenta minuti e Suthar e Patel 2023 sui pattern clickstream con window function.
-
-In sintesi: usa primo tocco per l'ingresso e ultimo tocco per la chiusura, dichiara sempre quale vista guida la decisione, con finestra per righe e ordinamento totale con tiebreaker.
-
-Verdetto: primo tocco per l'ingresso e ultimo tocco per la chiusura, con finestra per righe e ordinamento totale con tiebreaker; dichiara sempre quale vista guida la decisione.
-
-## L'esempio di Google Analytics: una soglia che è convenzione, non legge
-
-Google Analytics definisce dal 2024 come standard una sessione con timeout di trenta minuti, pari a milleottocento secondi di inattività. La documentazione operativa fissa anche la chiusura a mezzanotte e all'arrivo di nuove informazioni di campagna. Il framework di Kaushik del 2010 aveva già distinto visite e visitatori con metriche per sessione come rimbalzo e durata. Suthar e Patel, nel 2023, mostrarono gli stessi pattern con window function su dati clickstream reali. La soglia resta una convenzione da validare sui propri `gap`, non una legge fisica.
-
-## Domande per chiudere la lezione
-
-1. Perché l'ordinamento deve essere totale con tiebreaker prima di calcolare flag e somma cumulativa?
-2. Quando una soglia unica di milleottocento secondi deforma le metriche tra segmenti diversi?
-3. Quale deduplica applicaresti prima della finestra per evitare `gap` azzerati da eventi gemelli?
-4. Perché la conversione per sessione e quella per utente rispondono a domande diverse?
+La metrica di controllo della sessionizzazione è la **conservazione degli eventi**: la somma di `events_count` su tutte le righe di `sessions_summary` deve essere uguale al 100% al numero di eventi validi in ingresso.

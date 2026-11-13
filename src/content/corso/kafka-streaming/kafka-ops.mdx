@@ -17,80 +17,159 @@ learningObjectives:
   - Applicare il tuning I/O con page cache, partizioni calibrate e compressione zstd
   - Pianificare retention e replica MirrorMaker 2 per riprocessare dopo un errore
 binario: "ml-tabellare"
+formato: "articolo"
 autore: "Hermes"
 controllatoDa: "Argo"
 autorizzatoDa: "Giano"
 draft: false
-dateModified: 2026-09-07
+dateModified: 2026-11-13
 ---
+
 # Kafka in produzione: monitoring e operations
 
-Questa lezione chiude il percorso tecnico del binario **ml-tabellare**: un cluster si giudica nei momenti difficili, e l'operatività è la disciplina che trasforma ogni metrica in un'azione di escalation precisa e reversibile.
+Un cluster Kafka di produzione ha tre nodi da 64 GB di RAM ciascuno, ma un amministratore assegna 56 GB di heap (`-Xmx56g`) alla JVM di Kafka e nessuno monitora la metrica delle partizioni sotto-replicate. Durante un'operazione di replay in cui un consumer rilegge i dati di due giorni prima, il kernel Linux non ha più RAM libera per il page cache del file system, inizia a leggere tutto dai dischi fisici saturando l'I/O al 100%, le pause di Garbage Collection della JVM fanno cadere i broker fuori dall'ISR e l'intero cluster si congela per quaranta minuti. La causa non è l'hardware insufficiente: è togliere RAM al page cache del sistema operativo per darla all'heap Java e non monitorare i quattro segnali vitali del cluster (`UnderReplicatedPartitions`, `ActiveControllerCount`, `RequestHandlerAvgIdlePercent` e `ConsumerLag`).
 
-## L'idea in una frase
+## Cinquantasei gigabyte di heap Java che affamano il page cache di Linux
 
-Gestire Kafka in produzione significa leggere poche metriche con soglie esplicite e trasformare ogni segnale in un'azione di escalation reversibile.
+Questo è un caso ricostruito con numeri di esempio su quanto accade quando un cluster Apache Kafka viene gestito come una normale applicazione enterprise Java anziché come un sistema di storage basato sul kernel del sistema operativo. Il cluster gira su tre macchine con 64 GB di RAM e gestisce un flusso costante di 80 MB/s in ingresso.
 
-## La procedura in cinque passi
+Convinto che "più memoria ha Java e più Kafka va veloce", il sistemista imposta `-Xms56g -Xmx56g` lasciando solo 8 GB al sistema operativo Linux:
+1. Finché tutti i consumer leggono in tempo reale, i pochi gigabyte rimasti al kernel bastano appena a tenere in cache gli ultimi secondi.
+2. Alle 10:30 il team di analytics lancia un backfill su ClickHouse per rileggere le ultime 48 ore del topic principale (*catch-up read*). Poiché il page cache di Linux è ridotto al minimo, i broker devono andare a leggere ogni singolo segmento dai dischi fisici (*cache miss*), portando l'utilizzo del disco al 100% e rallentando anche le scritture dei producer in tempo reale.
+3. Sotto pressione, la JVM da 56 GB avvia una pausa di Garbage Collection (*Stop-The-World*) di 14 secondi: durante quei 14 secondi il broker non risponde agli heartbeat, viene espulso dall'ISR di tutte le partizioni e scatena un rimbalzo caotico dei leader su tutto il cluster.
 
-1. Controlla le partizioni sotto-replicate e scala se restano sopra zero oltre un minuto.
-2. Leggi il trend del consumer lag: una crescita lineare chiede più capacità.
-3. Controlla il rapporto di idle dei thread e l'uso disco con soglie di escalation.
-4. Applica il tuning I/O: page cache, partizioni calibrate e compressione `zstd`.
-5. Fissa retention e replica MirrorMaker 2 per poter riprocessare dopo un errore.
+La causa del collasso è ignorare l'architettura zero-copy di Kafka: Kafka non mette i messaggi nell'heap Java, ma si affida interamente al **page cache del sistema operativo Linux** e alla chiamata di sistema `sendfile()` per trasferire i byte dal cache del disco direttamente alla scheda di rete.
 
-## Cosa rende osservabile un cluster
+## Page Cache e Zero-Copy, i quattro segnali vitali JMX e replica MirrorMaker 2
 
-Un cluster funziona davvero solo quando resta comprensibile nei momenti difficili: consumer lag che cresce, broker sotto pressione, partizioni sbilanciate, retention quasi piena, leader election inattese. Questa lezione porta il modulo dal design all'esercizio quotidiano. Le operations non sono un capitolo finale, sono la condizione perché Kafka sia usabile con fiducia. Leggile come un runbook: quali metriche anticipano un incidente, quali soglie richiedono escalation, quali azioni sono reversibili e quali cambiano la durabilità dei dati.
+Governare un cluster Kafka in produzione con latenze di pochi millisecondi e zero interruzioni poggia su tre pilastri operativi.
 
-Il problema operativo non è conoscere Kafka in astratto, ma decidere cosa fare quando i segnali sono ambigui. Una metrica utile deve dirti quale decisione cambia: aggiungi istanze, sposti partizioni, allunghi la retention, fai escalation. Per ogni segnale tieni a mente quattro cose: la decisione che potrebbe cambiare, il dato osservabile, la baseline di lettura e il rischio che resta dopo l'intervento. Se un grafico non risponde a queste domande, decora una dashboard ma non guida l'operatività.
+Il primo pilastro è il **dimensionamento della memoria a favore del Page Cache OS e la compressione end-to-end (`zstd`)**. A un broker Kafka bastano **6–8 GB di heap JVM** (`-Xms6g -Xmx6g` con garbage collector `G1GC` e `-XX:MaxGCPauseMillis=20`) anche su macchine da 64 o 128 GB di RAM: i restanti 56–120 GB devono rimanere liberi come memoria di sistema non allocata, che il kernel Linux usa automaticamente come page cache dei file di log. Quando il producer comprime i blocchi con `zstd` e sul topic è impostato `compression.type=producer`, il broker scrive sul disco e tiene in page cache direttamente i byte già compressi senza mai decomprimerli né ricomprimerli, triplicando la capacità effettiva della RAM e del disco.
 
-## Metriche essenziali da monitorare
+Il secondo pilastro è il **monitoraggio continuo delle quattro metriche JMX critiche del broker** più il lag in tempo dei consumer. La prima è `OfflinePartitionsCount`, che deve essere sempre `0` (se è `> 0`, una partizione non ha alcun leader attivo ed è indisponibile in lettura e scrittura). La seconda è `ActiveControllerCount`, la cui somma su tutto il cluster deve essere esattamente `1` (`0` significa cluster acefalo, `> 1` significa *split-brain*). La terza è `UnderReplicatedPartitions`, che deve essere `0` (se è `> 0`, un broker non riesce a tenere il passo coi leader o è caduto). La quarta coppia è `RequestHandlerAvgIdlePercent` e `NetworkProcessorAvgIdlePercent`, che misura la percentuale di tempo libero dei thread di I/O e rete (se scende sotto il `30%`, il broker è saturo).
 
-Quattro metriche coprono la maggior parte degli incidenti.
+Il terzo pilastro è il **controllo del Consumer Lag espresso in secondi di ritardo** e il **Disaster Recovery con MirrorMaker 2 (MM2)**. Misurare il lag solo in numero di messaggi (`10.000 messaggi indietro`) è ambiguo: 10.000 messaggi su un topic da 50.000 msg/s sono 0,2 secondi di ritardo, mentre su un topic di ordini da 2 msg/s sono quasi due ore di blocco. Per il disaster recovery tra data center o regioni cloud, MirrorMaker 2 replica sia i topic sia gli offset tradotti dei consumer group (`emit.checkpoints.enabled=true`), permettendo ai consumer di ripartire sul cluster secondario dal punto esatto in cui erano arrivati.
 
-| Metrica | Cosa misura | Soglia di allarme |
-|---------|-------------|-------------------|
-| **Under-replicated partitions** | Partizioni senza il numero configurato di ISR | >0 per più di 1 minuto |
-| **Consumer lag** | Offset lag tra ultimo messaggio prodotto e ultimo consumato | >100K o in crescita |
-| **Request handler idle ratio** | % tempo in cui i thread sono idle | &lt;0.2 (80% busy → sovraccarico) |
-| **Disk usage** | Spazio disco usato dai log | >70% → pianifica espansione |
+**Un cluster Kafka in produzione resta veloce e stabile solo se riserva l'85% della RAM della macchina al page cache del sistema operativo, mantiene i byte compressi con `zstd` dal producer al consumer e allerta istantaneamente su partizioni offline, sotto-replicate o lag temporale crescente.**
 
-La più importante è il consumer lag, ma conta il trend, non il valore assoluto. Un lag di 100K su 10M di messaggi al secondo equivale a circa 10ms, quindi è irrilevante. Se invece il lag cresce in modo lineare, il consumer non tiene il passo e servono più istanze o più partizioni.
+## Tre errori nella gestione operativa di un cluster Kafka
 
-## Tuning per il throughput
+Il blocco SQL qui sotto mostra una tabella e una query di monitoraggio che commettono i tre errori tipici di chi gestisce Kafka in produzione: guardare solo il conteggio dei messaggi senza tradurlo in secondi di ritardo, ignorare le partizioni sotto-replicate e forzare la ricompressione dei messaggi sul broker:
 
-Kafka è I/O bound, quindi le ottimizzazioni che contano riguardano dischi, rete e memoria, non la CPU. La page cache del sistema operativo è centrale: Kafka non usa una cache propria, si appoggia alla page cache del kernel, perciò RAM extra per il sistema operativo rende più dell'heap Java extra. Il parametro `num.partitions` regola il parallelismo, con un compromesso: più partizioni danno più throughput ma anche più overhead di coordinamento. Una regola pratica fissa le partizioni al massimo tra throughput target diviso 10 e thread dei consumer per due. La compressione `zstd`, infine, arriva fino al 90% di riduzione e si decomprime più velocemente della lettura di dati non compressi.
+```sql
+-- ERRORE 1: monitorare solo il lag assoluto in numero di messaggi senza rapportarlo alla velocità
+-- di produzione (velocity), trattando allo stesso modo 5.000 log tecnici e 5.000 bonifici bancari!
+-- ERRORE 2: non registrare né allertare su UnderReplicatedPartitions e OfflinePartitionsCount.
+CREATE TABLE monitoring.kafka_lag_naive
+(
+    checked_at DateTime,
+    consumer_group String,
+    topic String,
+    lag_messages UInt64
+)
+ENGINE = MergeTree
+ORDER BY (checked_at, consumer_group);
 
-## Disaster recovery: backup e restore
+-- Soglia statica cieca che ignora il tempo reale di arretrato e la salute delle repliche dei broker:
+SELECT
+    consumer_group,
+    topic,
+    max(lag_messages) AS max_lag_msg
+FROM monitoring.kafka_lag_naive
+WHERE checked_at >= now() - INTERVAL 5 MINUTE
+GROUP BY consumer_group, topic
+HAVING max_lag_msg > 100000;
+```
 
-Kafka non ha un backup nativo, perché è già replicato. Per il disaster recovery cross-region si usa MirrorMaker 2, che replica i topic tra cluster in datacenter diversi. La retention è la rete di sicurezza: con 30 giorni di retention puoi riprocessare qualsiasi pipeline dal log dopo una corruzione a valle. In pratica la retention non è solo costo storage, è la capacità di rifare i conti dopo un errore.
+### Assegnare più di 8–12 GB di RAM all'heap della JVM sottraendoli al page cache Linux
 
-## Esempio: diagnosticare un lag che cresce
+Configurare `-Xmx32g` o `-Xmx56g` su un broker Kafka da 64 GB di RAM pensando di velocizzare il server ottiene l'esatto contrario. Poiché Kafka delega al page cache del kernel Linux il mantenimento in RAM dei segmenti caldi del log, gonfiare l'heap Java produce un doppio danno: allunga drasticamente le pause del Garbage Collector (facendo scadere le sessioni dei broker nel cluster) e costringe i consumer a servire le letture dai dischi fisici anziché dalla memoria RAM del sistema operativo.
 
-Il caso tipico è un lag che cresce durante un picco di traffico: bisogna capire dove sta il collo di bottiglia, nel producer, nei broker, nella cardinalità delle partizioni o nei consumer. La decisione richiede metriche coordinate, non una dashboard generica piena di segnali non azionabili. La tabella mostra come leggere i segnali tipici.
+### Impostare sul topic un codec di compressione diverso da compression.type=producer
 
-| Evidenza osservata | Lettura prudente | Azione consigliata |
-|---|---|---|
-| Il lag cresce solo su alcune partizioni | Quelle partizioni hanno chiavi calde | Rivedere la chiave o aumentare le partizioni |
-| Il lag cresce su tutto il consumer group | I consumer non hanno capacità sufficiente | Aggiungere istanze fino al numero di partizioni |
-| Il throughput dei broker è saturo | Il collo di bottiglia è a monte dei consumer | Stimare il trade-off tra costo broker e SLA |
+Configurare sul topic del broker `compression.type=gzip` mentre i producer inviano i batch compressi in `lz4` o `zstd` distrugge la CPU dei broker. Quando il codec del topic non coincide con quello del producer (o non è impostato su `producer`), il broker deve decomprimere in memoria ogni singolo batch ricevuto dal client, riassemblare i record e ricomprimerli da zero col nuovo algoritmo prima di scriverli su disco, azzerando il vantaggio del trasferimento zero-copy.
 
-## Errori tipici da evitare
+### Monitorare il consumer lag in numero di messaggi invece che in secondi di tempo indietro
 
-L'errore più frequente è usare il monitoring come etichetta invece che come processo. Succede quando mostri un grafico senza una decisione, una metrica senza baseline o una conclusione senza dire quale assunzione potrebbe invalidarla. La domanda di controllo è: se questo risultato fosse instabile, quale scelta sbaglieresti?
+Impostare un allarme globale `lag_messages > 100000` fallisce sui topic più importanti dell'azienda. Se il topic `invoices.issued.v1` produce 20 fatture al minuto e il consumer di fatturazione si blocca completamente dopo un rilascio alle 09:00 del mattino, per raggiungere la soglia di 100.000 messaggi di lag ci vorranno tre giorni e mezzo: per 84 ore consecutive la fatturazione è morta e il sistema di monitoraggio segna tutto verde.
 
-Sul lato dati ci sono tre trappole. La prima è lavorare su aggregati troppo presto, perché una media globale nasconde segmenti che si muovono in direzioni opposte. La seconda è non controllare la qualità del dato: eventi duplicati, tracking incompleto, timezone incoerenti e cambi di definizione producono conclusioni false. La terza è confondere correlazione e causalità. Tre controlli minimi riducono il rischio: definizione esplicita della metrica, confronto per segmento e verifica contro un periodo precedente.
+## Osservabilità in ClickHouse su metriche JMX e Time-Lag in secondi
 
-## L'esempio che fa da riferimento
+Per mettere in sicurezza un cluster Kafka in produzione e rilevare in meno di un minuto qualsiasi degrado di broker o consumer, applicate questi quattro criteri in ordine di priorità:
 
-La documentazione operativa di Confluent del 2024 consolida le metriche nate dall'esercizio di Kafka su larga scala: partizioni sotto-replicate, lag dei consumer, saturazione dei thread e spazio disco. Al Kafka Summit 2022 i resoconti di esercizio hanno mostrato lo stesso schema decisionale: il trend del lag guida il capacity planning e la retention decide la capacità di riprocessare dopo un errore. MirrorMaker 2 è lo strumento standard per la replica cross-region quando un singolo cluster non basta. Il filo comune è operativo: ogni metrica esiste per un'azione di escalation precisa.
+1. Limitate l'heap JVM dei broker a `6G`–`8G` con `G1GC`, impostate `vm.swappiness=1` su Linux e imponete `compression.type=producer` sui topic con producer configurati su `zstd`.
+2. Raccogliete ogni 15 secondi in ClickHouse (tramite Prometheus/Vector) i quattro indicatori vitali del cluster (`offline_partitions`, `under_replicated_partitions`, `active_controllers`, `request_handler_idle_pct`).
+3. Calcolate per ogni consumer group il **Time Lag in secondi** dividendo il lag dei messaggi per il tasso di produzione al secondo del topic (oppure sottraendo il timestamp dell'ultimo messaggio committato dall'ora corrente).
+4. Attivate un alert immediato `P1` se `offline_partitions > 0`, `active_controllers != 1`, `under_replicated_partitions > 0` per più di 3 minuti, o se il `time_lag_seconds` di un consumer critico supera la sua SLA (es. 120 secondi).
 
-Verdetto: la più importante è il consumer lag, ma conta il trend, non il valore assoluto: una crescita lineare chiede più capacità, e ogni metrica esiste per un'azione di escalation reversibile, non per decorare una dashboard.
+Ecco lo schema e la query di controllo operativo in ClickHouse che incrocia la salute dei broker e il lag temporale reale dei consumer group:
 
-## Domande per verificare la lezione
+```sql
+CREATE TABLE monitoring.kafka_cluster_health
+(
+    collected_at DateTime('UTC'),
+    cluster_name LowCardinality(String),
+    offline_partitions UInt32,
+    under_replicated_partitions UInt32,
+    active_controllers UInt8,
+    min_handler_idle_pct Float32,
+    min_disk_free_pct Float32
+)
+ENGINE = MergeTree
+PARTITION BY toYYYYMM(collected_at)
+ORDER BY (cluster_name, collected_at);
 
-1. Quale metrica guardi per prima quando il lag cresce e quale trend ti fa scalare?
-2. Quale soglia di partizioni sotto-replicate fa scattare l'escalation nel tuo runbook?
-3. Quanta retention tieni e quale incidente ti permette di riprocessare?
-4. Quale azione è reversibile e quale cambia la durabilità dei dati?
+CREATE TABLE monitoring.kafka_consumer_lag
+(
+    collected_at DateTime('UTC'),
+    consumer_group LowCardinality(String),
+    topic LowCardinality(String),
+    lag_messages UInt64,
+    topic_in_rate_msg_per_sec Float64,
+    last_committed_event_time DateTime('UTC')
+)
+ENGINE = MergeTree
+PARTITION BY toYYYYMM(collected_at)
+ORDER BY (consumer_group, topic, collected_at);
+
+-- Query di diagnostica e alerting combinato: calcola il lag in SECONDI reali e verifica che non sia in crescita:
+SELECT
+    consumer_group,
+    topic,
+    argMax(lag_messages, collected_at) AS current_lag_msg,
+    -- Lag temporale esatto: distanza in secondi tra adesso e il timestamp dell'ultimo evento elaborato:
+    dateDiff('second', argMax(last_committed_event_time, collected_at), now()) AS time_lag_sec,
+    -- Stima dei secondi necessari a smaltire la coda al ritmo attuale di ingresso:
+    round(current_lag_msg / greatest(argMax(topic_in_rate_msg_per_sec, collected_at), 0.1), 1) AS drain_estimate_sec,
+    max(lag_messages) - min(lag_messages) AS crescita_lag_ultimi_5m
+FROM monitoring.kafka_consumer_lag
+WHERE collected_at >= now() - INTERVAL 5 MINUTE
+GROUP BY consumer_group, topic
+HAVING time_lag_sec > 120
+   AND crescita_lag_ultimi_5m >= 0
+ORDER BY time_lag_sec DESC;
+```
+
+Il risultato cambia radicalmente la reattività operativa: riducendo l'heap JVM a 6 GB e lasciando 58 GB di page cache a Linux con compressione `zstd`, anche quando un consumer lancia un replay di più ore la maggior parte dei blocchi viene servita dalla RAM o letta in modo compresso riducendo di cinque volte l'I/O su disco; inoltre, se il consumer delle fatture a basso volume (20 msg/min) si blocca, dopo esattamente due minuti `time_lag_sec` supera `120` e fa scattare l'avviso anche se `current_lag_msg` è di sole 40 righe. Monitorare il lag in secondi anziché in righe costa una sottrazione tra timestamp; accorgersi dopo tre giorni che le fatture sono ferme perché non avevano ancora superato la soglia di 100.000 messaggi trasforma un piccolo intoppo in un incidente aziendale.
+
+## Cluster Kafka auto-gestito o servizio gestito con Tiered Storage
+
+Sul fronte delle operations infrastrutturali, la decisione strategica più importante riguarda il modello di gestione dello storage e dei broker: gestire in proprio dischi locali grandi per tutta la retention o adottare il **Tiered Storage (KIP-405)** / un servizio gestito con disaccoppiamento tra calcolo e storage su S3.
+
+Il criterio di scelta è netto: **usate dischi NVMe locali dimensionati solo per le ultime 12–24 ore di dati caldi abbinati al Tiered Storage su object storage (S3 / GCS / MinIO) quando dovete conservare settimane o mesi di storico per audit e replay analitici, mantenete invece l'intera retention esclusivamente sui dischi locali dei broker solo quando la finestra di conservazione richiesta è breve (3–7 giorni) e il volume complessivo resta sotto i pochi terabyte per nodo.**
+
+La confusione comune consiste nell'aggiungere dieci nuovi broker con CPU costose al cluster Kafka solo perché lo spazio disco per tenere 30 giorni di log si sta esaurendo, anche se la CPU dei broker attuali è usata appena al 10%. Sbagliare questa scelta lega linearmente il costo di calcolo al volume di archivio storico e rende lentissimi i ribilanciamenti dei dati quando un nodo disco da 10 TB si guasta e deve essere ricostruito via rete.
+
+Questo articolo non tratta la configurazione della sicurezza mTLS / SASL SCRAM e delle ACL per topic né la migrazione da ZooKeeper a KRaft (ormai standard). Ricordate che su Linux, oltre a `vm.swappiness=1`, è fondamentale alzare il limite dei file aperti (`ulimit -n 100000`) e il numero massimo di aree di memoria mappate (`vm.max_map_count=262144`) per evitare che i broker vadano in crash all'aumentare dei segmenti di log.
+
+## Cinque domande di verifica operativa per un cluster Kafka in produzione
+
+1. L'heap JVM dei broker è limitato a 6–8 GB con `G1GC`, lasciando almeno il 75–85% della RAM della macchina libera per il page cache del sistema operativo Linux?
+2. I producer comprimono i batch con `zstd` (o `lz4`) e i topic sono configurati con `compression.type=producer` per preservare il percorso zero-copy senza ricompressioni sulla CPU del broker?
+3. Avete allarmi attivi 24/7 su `OfflinePartitionsCount > 0`, `ActiveControllerCount != 1`, `UnderReplicatedPartitions > 0` e disco occupato oltre il `75%`?
+4. Il ritardo dei consumer group viene misurato e allertato in **secondi di tempo indietro** (`now() - last_committed_event_time`) anziché solo sul numero grezzo di messaggi?
+5. Avete testato almeno una volta nell'ultimo trimestre la procedura di replay degli offset o il failover su MirrorMaker 2 verificando che i consumer a valle (ClickHouse) assorbano il ricalcolo in modo idempotente?
+
+La metrica di efficienza hardware che certifica un cluster Kafka ben regolato è il **rapporto tra letture da page cache e letture da disco fisico** (visibile dal fatto che il throughput di rete in uscita verso i consumer supera ampiamente le letture da disco riportate da `iostat`), unito a `RequestHandlerAvgIdlePercent > 50%`.
+
+Di tutte le regole di operations su Kafka, una sola evita i disastri più dolorosi: Kafka vive nel page cache del kernel Linux, non nell'heap di Java. Date la RAM al sistema operativo, comprimete con `zstd` alla fonte e misurate sempre i ritardi in secondi, mai solo in righe.

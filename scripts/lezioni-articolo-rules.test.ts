@@ -84,9 +84,29 @@ describe('checkLezioneArticolo', () => {
     expect(errori({ ...senza, s1: `${senza.s1}\n\nVedi [la fonte](https://example.com/caso).` })).not.toMatch(/R9/);
   });
 
-  test('R10: un <Slide> o un <Percorso /> rimasti sono errori', () => {
+  test('R10: un <Slide>, <Percorso />, <SqlExercise> o la frase «Una sessione, tre blocchi» sono errori', () => {
     expect(errori(con('s2', '<Slide sezione="1" titolo="x" messaggio="y">'))).toMatch(/R10/);
     expect(errori(con('s2', '<Percorso />'))).toMatch(/R10/);
+    expect(errori(con('s2', '<SqlExercise query="SELECT 1" />'))).toMatch(/R10/);
+    expect(errori(con('s1', 'Una sessione, tre blocchi: ecco come funziona.'))).toMatch(/R10/);
+  });
+
+  test('R2 con profilo A e profilo B: getArticoloProfile distingue moduli strategici e moduli engineering (fino a 2400 parole)', async () => {
+    const mod = await import('./lezioni-articolo-rules');
+    expect(mod.getArticoloProfile('panoramica')).toBe('A');
+    expect(mod.getArticoloProfile('analisi-prodotto')).toBe('A');
+    expect(mod.getArticoloProfile('gestione-data-driven')).toBe('A');
+    expect(mod.getArticoloProfile('analytics-engineering')).toBe('B');
+    expect(mod.getArticoloProfile('kafka-streaming')).toBe('B');
+    expect(mod.getArticoloProfile('real-time-analytics')).toBe('B');
+    expect(mod.ARTICOLO_PROFILES.A.targetMinWords).toBe(1400);
+    expect(mod.ARTICOLO_PROFILES.A.targetMaxWords).toBe(1900);
+    expect(mod.ARTICOLO_PROFILES.B.targetMinWords).toBe(1600);
+    expect(mod.ARTICOLO_PROFILES.B.targetMaxWords).toBe(2400);
+
+    const pB = { ...parti(), s5: `## Il caso difficile\n\n${parole(800)}` }; // ~2.100 parole totali
+    const rawB = [`---\ntitle: "Prova B"\ndescription: "Lezione B."\nmodule: "real-time-analytics"\nformato: "articolo"\n---`, '# Prova B', ...ORDINE.map((k) => pB[k])].join('\n\n');
+    expect(checkLezioneArticolo(rawB, 'src/content/corso/real-time-analytics/prova.mdx').errors).toEqual([]);
   });
 
   test('R11: un elenco puntato in sezione 4 è un avviso, in sezione 6 no', () => {

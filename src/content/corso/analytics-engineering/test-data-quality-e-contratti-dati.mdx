@@ -16,144 +16,153 @@ learningObjectives:
   - Derivare metriche semplici, derivate e rapporto da misure condivise
   - Verificare che ogni metrica abbia una sola definizione e un responsabile
 binario: "ml-tabellare"
+formato: "articolo"
 autore: "Hermes"
 controllatoDa: "Argo"
 autorizzatoDa: "Giano"
 draft: false
-dateModified: 2026-09-07
+dateModified: 2026-11-13
 ---
 
 # Semantic layer e definizioni delle metriche
 
-Questa lezione appartiene al binario ml-tabellare: le tabelle ci sono, ma il vero problema è che ognuno le legge a modo suo. Il semantic layer risolve esattamente questo: una sola definizione per ogni numero, condivisa da tutti.
+Anche dopo aver costruito una tabella `fct_orders` perfetta e testata in dbt, tre reparti estraggono un "Valore Medio dell'Ordine (`AOV`)" diverso: il team marketing calcola `avg(gross_amount_eur)` includendo gli ordini annullati, il team finanza calcola `sum(net_amount_eur) / count(distinct order_id)` sugli ordini pagati, e un analista su Excel fa la media delle medie giornaliere (`avg(daily_aov)`) sbagliando il peso dei giorni di punta. La causa non è un errore nella tabella `fct_orders`: è lasciare che le formule di aggregazione delle metriche (rapporti, tassi, conteggi distinti) vengano riscritte dentro ciascuno strumento di BI o foglio di calcolo invece di centralizzarle nel **Semantic Layer di dbt (MetricFlow)**.
 
-## L'idea in una frase
+## Una tabella perfetta in dbt ma tre formule diverse per l'AOV nei report
 
-Lo strato semantico fissa una sola definizione condivisa per ogni metrica, così due dashboard non possono mostrare due valori diversi con lo stesso nome. Se il nome è lo stesso, il numero deve essere lo stesso: tutto qui.
+Questo è un caso ricostruito con numeri di esempio su perché le sole tabelle SQL (`fct_` e `dim_`) non bastano a garantire che tutta l'azienda parli la stessa lingua numerica. La tabella `marts.fct_orders` è certificata e senza duplicati, ma contiene sia ordini completati sia ordini annullati, sia importi lordi sia importi netti di IVA e sconti.
 
-## Come si procede, in cinque passi
+Quando i vari strumenti a valle (Metabase, Tableau, notebook Python, fogli Google) interrogano `fct_orders` si verificano tre divergenze matematiche:
+1. Per calcolare il tasso di conversione o il valore medio dell'ordine (`AOV`), ogni strumento deve scrivere la propria formula `SUM(...) / COUNT(...)`: il marketing dimentica il filtro `WHERE status = 'completed'`, mentre il prodotto usa `gross_amount` invece di `net_amount`.
+2. Un manager crea una tabella pre-aggregata per giorno e paese (`fct_orders_daily`) con la colonna `daily_aov = net_revenue / orders` e poi nella dashboard mensile calcola `AVG(daily_aov)`: facendo la **media delle medie** tra il lunedì (1.000 ordini da 100 €) e la domenica (10 ordini da 50 €), ottiene un AOV falso di `75,00 €` invece del vero rapporto dei totali `(100.000 + 500) / 1.010 = 99,50 €`.
+3. Quando la direzione decide di escludere gli ordini B2B gratuiti di campionatura dal calcolo dell'`AOV` ufficiale, il team deve aprire e modificare a mano 45 grafici sparsi in tre strumenti diversi.
 
-1. Elenca le metriche contestate, quelle con lo stesso nome e valori diversi tra dashboard.
-2. Per ciascuna fissa formula, tabella di base, filtri, dimensioni consentite, granularità temporale e responsabile.
-3. Descrivi entità, dimensioni e misure di base nei modelli semantici e deriva da lì le metriche semplici, derivate e rapporto.
-4. Fai generare le query dallo strato semantico invece di riscrivere la logica in ogni strumento di consumo.
-5. Monitora l'adozione contando le definizioni duplicate residue e il tempo speso a riconciliare i numeri tra team.
+La causa di questi errori è la mancanza di un **Semantic Layer**: un registro centrale versionato in Git dove ogni metrica aziendale (numeratore, denominatore, filtri obbligatori e proprietario) è definita una sola volta in modo dichiarativo.
 
-## Cos'è un semantic layer
+## Semantic Models (Entità, Dimensioni, Misure) e Metriche (Simple, Ratio, Derived)
 
-Lo strato semantico è un'interfaccia tra i dati grezzi o modellati e gli strumenti di consumo come BI, fogli di calcolo e applicazioni. Definisce le metriche, cioè cosa misuri, le dimensioni, cioè come raggruppi, e i percorsi di join, cioè come colleghi le tabelle. Non è una nuova tabella: è un contratto semantico condiviso.
+Il Semantic Layer di dbt (basato su **MetricFlow**) separa la struttura fisica delle tabelle dal calcolo dinamico delle metriche attraverso due astrazioni dichiarative in YAML.
 
-Una definizione di metrica raccoglie tutto ciò che serve a leggere un numero senza ambiguità. Per il ricavo ricorrente mensile, ad esempio, la formula è la somma degli importi di abbonamento. Si calcola sul mart degli abbonamenti dove lo stato vale attivo.
+Il primo meccanismo è il **`semantic_model` composto da Entità (`entities`), Dimensioni (`dimensions`) e Misure (`measures`)**. Sopra una tabella di mart (es. `ref('fct_orders')`), il modello semantico dichiara tre elementi:
+1. **Entities** (i ganci per i join): la chiave primaria della tabella (`order_id` di tipo `primary`) e le chiavi esterne (`customer_id` di tipo `foreign`) che permettono a MetricFlow di unire automaticamente `fct_orders` con `dim_customers` senza che l'utente scriva alcun `JOIN`.
+2. **Dimensions** (gli assi di raggruppamento e filtro): l'asse temporale primario (`agg_time_dimension: occurred_date`) e gli attributi categorici (`country_code`, `payment_method`, `customer_segment`).
+3. **Measures** (le aggregazioni atomiche di base): i mattoni matematici su cui si applicano `sum`, `count`, `count_distinct`, `min`, `max` (es. `net_revenue_eur = sum(net_amount_eur)` e `completed_orders = count_distinct(order_id)`).
 
-Le dimensioni collegabili sono paese del cliente, tipo di piano e canale di acquisizione. Le granularità temporali vanno dal giorno all'anno. Il responsabile è il team finanza e l'aggiornamento è giornaliero.
+Il secondo meccanismo è il catalogo delle **`metrics` tipizzate (`simple`, `ratio`, `derived`, `cumulative`)**. Una metrica **`simple`** espone una singola misura con un filtro di business cablato (es. `net_revenue` con filtro `status = 'completed'`). Una metrica **`ratio`** (o **`derived`**) definisce il rapporto tra due metriche (`aov = net_revenue / completed_orders` o `roas = net_revenue / ad_spend`): qualunque sia il livello di raggruppamento chiesto dall'utente (per ora, per mese, per paese o totale annuo), il Semantic Layer calcola **sempre prima la somma del numeratore e la somma del denominatore sul grano richiesto e solo alla fine esegue la divisione**, rendendo matematicamente impossibile l'errore della "media delle medie".
 
-Prima dello strato semantico ogni analista riscriveva questa definizione a modo suo. Ora tutti referenziano lo stesso nome con un significato univoco.
+Il terzo meccanismo è la **governance della metrica (`owner`, `description`, `label`)**: ogni metrica ufficiale ha una sola definizione in Git e un responsabile nominativo.
 
-## MetricFlow in dbt
+**Un Semantic Layer garantisce coerenza matematica in tutta l'azienda solo se definisce entità, dimensioni e misure una sola volta nei modelli semantici e calcola le metriche di rapporto (`ratio` / `derived`) sempre come divisione degli aggregati al livello di raggruppamento richiesto.**
 
-Nel 2023 dbt ha introdotto uno strato semantico nativo basato su MetricFlow.
+## Tre errori nella definizione e nel calcolo delle metriche analitiche
 
-Lo compongono tre parti. I modelli semantici in YAML definiscono entità, dimensioni e misure di base. Le metriche, anchesse in YAML, definiscono metriche derivate dalle misure. Il server MetricFlow traduce le richieste in SQL ottimizzato.
+Il blocco SQL qui sotto mostra il classico errore matematico che avviene quando si pre-calcolano rapporti o conteggi distinti in una tabella intermedia e poi li si ri-aggrega in dashboard per mese o trimestre:
 
-Definizione di un modello semantico:
-
-```yaml
-semantic_models:
-- name: subscriptions
-  model: ref('mrt_finance__subscriptions')
-  entities:
-    - name: subscription
-      type: primary
-      expr: subscription_id
-    - name: customer
-      type: foreign
-      expr: customer_id
-  dimensions:
-    - name: plan_type
-      type: categorical
-      expr: plan
-    - name: customer_country
-      type: categorical
-      expr: country_code
-    - name: subscription_started
-      type: time
-      type_params:
-        time_granularity: month
-      expr: started_at
-  measures:
-    - name: monthly_amount
-      description: "Monthly subscription amount in EUR"
-      agg: sum
-      expr: amount_eur
-    - name: active_subscriptions
-      description: "Count of active subscriptions"
-      agg: count
-      expr: 1
+```sql
+-- ERRORE 1: pre-calcolare il rapporto (daily_aov) e gli utenti unici giornalieri (daily_unique_users)
+-- come numeri fissi e poi farne AVG() e SUM() quando la dashboard raggruppa per mese!
+WITH tabella_giornaliera_sbagliata AS (
+    SELECT
+        toDate(occurred_at) AS dt,
+        country_code,
+        sum(net_amount_eur) / count() AS daily_aov_precalcolato,
+        uniqExact(customer_id) AS daily_unique_customers
+    FROM analytics_prod.fct_orders
+    WHERE status = 'completed'
+    GROUP BY dt, country_code
+)
+SELECT
+    toStartOfMonth(dt) AS mese,
+    -- SBAGLIATO: la media delle medie giornaliere dà lo stesso peso a un giorno da 10 ordini e uno da 10.000!
+    round(avg(daily_aov_precalcolato), 2) AS aov_mensile_errato,
+    -- SBAGLIATO: sommare i clienti unici dei 30 giorni conta 30 volte lo stesso cliente abituale!
+    sum(daily_unique_customers) AS clienti_unici_mensili_gonfiati
+FROM tabella_giornaliera_sbagliata
+GROUP BY mese;
 ```
 
-Definizione di metriche derivate:
+### Fare la media delle medie (AVG di una colonna rapporto pre-calcolata)
 
-```yaml
-metrics:
-- name: mrr
-  description: "Monthly Recurring Revenue"
-  label: "MRR"
-  type: simple
-  type_params:
-    measure: monthly_amount
-  filter: |
-    {{ Dimension('subscription_status') }} = 'active'
+Salvare una colonna `conversion_rate`, `aov` o `margin_pct` dentro una tabella aggregata per giorno/canale e lasciare che lo strumento di BI applichi `AVG(conversion_rate)` quando l'utente guarda il trimestre produce numeri gravemente distorti (*paradosso di Simpson / media non ponderata*). Le metriche di rapporto non sono **mai additive né mediabili**: devono essere conservate nei loro componenti additivi elementari (numeratore `sum_revenue` e denominatore `count_orders`) ed essere divise solo all'ultimo stadio della query (`SUM(numeratore) / NULLIF(SUM(denominatore), 0)`).
 
-- name: arr
-  description: "Annualized Run Rate"
-  label: "ARR"
-  type: derived
-  type_params:
-    expr: mrr * 12
-    metrics:
-      - name: mrr
+### Sommare conteggi distinti (`COUNT DISTINCT`) su finestre temporali o dimensioni diverse
 
-- name: mrr_growth_rate
-  description: "MRR growth rate vs same month last year"
-  type: ratio
-  type_params:
-    numerator: mrr - mrr_1y_ago
-    denominator: mrr_1y_ago
+Così come i rapporti non si possono mediare, i conteggi distinti (`unique_customers`, `active_users`) pre-calcolati al giorno non si possono **mai sommare** per ottenere il totale della settimana o del mese. Se il cliente `C-10` acquista lunedì, mercoledì e venerdì, compare con valore `1` in ciascuno dei tre giorni: sommare i conteggi giornalieri restituisce `3 clienti` invece di `1`. Per aggregare conteggi distinti su più dimensioni senza rileggere la tabella atomica in ClickHouse si usano esclusivamente gli stati binari HyperLogLog/Bitmap (`uniqState` / `uniqMerge`), oppure si lascia che il Semantic Layer esegua `count_distinct(customer_id)` sul grano richiesto.
+
+### Duplicare la stessa metrica con nomi simili per accontentare singoli reparti
+
+Creare nel catalogo `mrr_v1`, `mrr_finance`, `mrr_sales_new` e `mrr_board` senza distinguere chiaramente il significato semantico riporta il caos dentro lo strato governato. Se esistono due concetti di business genuinamente diversi, devono avere **nomi di dominio inequivocabili** (`gross_invoiced_revenue_eur` vs `net_collected_mrr_eur`), descrizioni esplicite dei filtri applicati e un unico responsabile (`owner`) che approva qualsiasi modifica in pull request.
+
+## Definizione MetricFlow e query SQL generata per Metriche Semplici, Ratio e Derivate
+
+Per costruire un livello semantico solido e interrogabile (tramite MetricFlow o viste semantiche su ClickHouse), applicate questi quattro criteri in ordine di priorità:
+
+1. Dichiarate il `semantic_model` sopra la tabella di mart (`fct_orders`) specificando l'entità primaria (`order_id`), le entità esterne (`customer_id`), la dimensione temporale (`occurred_date`) e le **misure additive atomiche** (`net_revenue_eur`, `gross_revenue_eur`, `orders_count`, `active_customers_count`).
+2. Definite le metriche di business componendo le misure: metriche **`simple`** con filtro obbligatorio (`status = 'completed'`), metriche **`ratio`** (`aov_net_eur = net_revenue_completed / completed_orders`) e metriche **`derived`** (`net_margin_eur = net_revenue_completed - cogs_eur`).
+3. Assegnate a ogni metrica nel blocco `meta` un `owner` (es. `finance-team@azienda.it`) e un `tier` (`tier_1_board`).
+4. Verificate con una query di audit che il calcolo del rapporto avvenga sempre come `SUM(num) / nullIf(SUM(den), 0)` a qualsiasi granularità temporale o geografica.
+
+Ecco come il modello semantico YAML si traduce nella query SQL deterministica eseguita su ClickHouse (con giunzione automatica su `dim_customers`, applicazione dei filtri della metrica e calcolo esatto di metriche `simple`, `ratio` e `derived`):
+
+```sql
+-- Query SQL deterministica generata dal Semantic Layer (unisce automaticamente fct_orders e dim_customers
+-- tramite l'entità customer_id e calcola misure semplici, ratio AOV e derived Net Margin senza media delle medie):
+WITH misure_base_filtrate AS (
+    SELECT
+        toStartOfMonth(o.occurred_date) AS metric_time_month,
+        c.company_segment AS customer__company_segment,
+        o.country_code AS order__country_code,
+        -- Misura 1 (simple): net_revenue_completed_eur (include il filtro semantico status = 'completed')
+        sumIf(o.net_amount_eur, o.status = 'completed') AS m_net_revenue_eur,
+        -- Misura 2 (simple): cogs_completed_eur
+        sumIf(o.cogs_amount_eur, o.status = 'completed') AS m_cogs_eur,
+        -- Misura 3 (simple): completed_orders_count
+        uniqExactIf(o.order_id, o.status = 'completed') AS m_completed_orders,
+        -- Misura 4 (non-additive): active_paying_customers
+        uniqExactIf(o.customer_id, o.status = 'completed') AS m_paying_customers
+    FROM {{ ref('fct_orders') }} AS o
+    LEFT JOIN {{ ref('dim_customers') }} AS c
+        ON o.customer_id = c.customer_id
+    WHERE o.occurred_date >= '2026-01-01'
+    GROUP BY metric_time_month, customer__company_segment, order__country_code
+)
+SELECT
+    metric_time_month,
+    customer__company_segment,
+    order__country_code,
+    -- Metriche Simple:
+    m_net_revenue_eur AS net_revenue_eur,
+    m_completed_orders AS completed_orders,
+    m_paying_customers AS paying_customers,
+    -- Metrica Ratio (AOV = numeratore aggregato / denominatore aggregato al grano richiesto):
+    round(m_net_revenue_eur / nullIf(m_completed_orders, 0), 2) AS aov_net_eur,
+    -- Metrica Derived (Net Margin = net_revenue - cogs) e Margin %:
+    (m_net_revenue_eur - m_cogs_eur) AS net_contribution_margin_eur,
+    round((m_net_revenue_eur - m_cogs_eur) * 100.0 / nullIf(m_net_revenue_eur, 0), 2) AS net_margin_pct
+FROM misure_base_filtrate
+ORDER BY metric_time_month DESC, net_revenue_eur DESC;
 ```
 
-Con queste definizioni un analista può chiedere il ricavo ricorrente per tipo di piano sugli ultimi dodici mesi senza scrivere SQL, perché MetricFlow genera la query corretta al posto suo.
+Il risultato garantisce la quadratura perfetta su qualsiasi dimensione: che l'utente chieda `aov_net_eur` raggruppato per `(mese, segmento, paese)` o per l'intero anno 2026 senza dimensioni, la query aggrega sempre prima `m_net_revenue_eur` e `m_completed_orders` (con il filtro `o.status = 'completed'` iniettato automaticamente dalla definizione della metrica) e solo alla fine esegue la divisione `m_net_revenue_eur / nullIf(m_completed_orders, 0)`. Nel caso visto prima (lunedì 1.000 ordini da 100 € e domenica 10 ordini da 50 €), il Semantic Layer restituisce esattamente **`99,50 €`** invece dell'errato `75,00 €`, e `paying_customers` usa `uniqExactIf` sul grano richiesto senza mai sommare i conteggi giornalieri.
 
-## Perché le definizioni contano
+## Metriche calcolate nel Semantic Layer (MetricFlow) o Colonne Pre-calcolate nei Marts SQL
 
-Centralizzare le metriche evita tre danni concreti.
+Quando conviene codificare un indicatore dentro la tabella fisica del **Mart SQL (`fct_`, `dim_`)** e quando conviene definirlo nel **Semantic Layer (`metrics`)**?
 
-Il primo è reputazionale: numeri divergenti erodono la fiducia nei dati più in fretta di un dato mancante.
+Il criterio di scelta è netto: **calcolate e salvate fisicamente dentro la tabella del Mart SQL (`fct_orders`) tutti gli attributi e gli importi che sono veri a livello di singola riga atomica e puramente additivi (es. `net_amount_eur = gross_amount_eur - discount_eur - vat_eur`, `delivery_days = delivered_date - ordered_date`, `is_first_order = 1`), definite invece esclusivamente nel Semantic Layer tutte le metriche non-additive che dipendono dalla finestra e dalle dimensioni di aggregazione scelte dall'utente al momento della query (tutti i rapporti come `AOV`, `Conversion Rate`, `ROAS`, `Churn Rate`, `Retention %` e tutti i conteggi distinti come `MAU`, `Unique Buyers`).**
 
-Il secondo è finanziario: decisioni prese su definizioni diverse portano a investire nel posto sbagliato.
+La confusione comune consiste nel cercare di pre-calcolare `conversion_rate` o `roas` dentro una tabella SQL fissa: non appena un utente in BI filtra per dispositivo mobile o raggruppa per settimana invece che per giorno, quella colonna pre-calcolata diventa matematicamente inutilizzabile. Separare i fatti additivi di riga (nel Mart) dalle formule di aggregazione e rapporto (nel Semantic Layer) risolve il problema alla radice.
 
-Il terzo è organizzativo: gli analisti che riconciliano definizioni tra team rubano tempo all'analisi vera.
+Questo articolo non tratta la configurazione del server GraphQL/JDBC del dbt Semantic Layer per le integrazioni dirette con Excel, Google Sheets e Tableau. Se utilizzate uno strumento di BI open source (come Metabase o Apache Superset) sopra ClickHouse senza il server commerciale dbt Cloud, potete ottenere la stessa identica garanzia matematica salvando le misure nel Mart come stati componibili (`SimpleAggregateFunction(sum)` e `AggregateFunction(uniq)`) ed esponendo le formule `ratio` nelle Metriche ufficiali del dataset certificato.
 
-Il caso tipico è doppio. Vendite e prodotto usano entrambi l'espressione `cliente attivo`, ma uno conta i contratti aperti e l'altro gli eventi degli ultimi trenta giorni.
+## Cinque domande per validare il vostro catalogo delle metriche
 
-Lo strato semantico dichiara granularità, filtri e responsabile e impedisce che la stessa parola porti a due decisioni diverse.
+1. Ogni metrica direzionale dell'azienda (`MRR`, `CAC`, `LTV`, `AOV`, `ROAS`, `Churn Rate`) ha **una e una sola definizione formale** versionata nel repository Git con un `owner` nominativo e una descrizione chiara dei filtri inclusi/esclusi?
+2. Avete eliminato dalle tabelle SQL ogni colonna rapporto pre-aggregata che gli utenti potrebbero erroneamente mediare con `AVG()`, esponendo le metriche di rapporto (`ratio` / `derived`) sempre come `SUM(numeratore) / NULLIF(SUM(denominatore), 0)`?
+3. Tutte le metriche basate su conteggi distinti (`Unique Users`, `Active Customers`) vengono ricalcolate sul grano esatto della query (o tramite `uniqState`/`uniqMerge` in ClickHouse) senza mai sommare conteggi giornalieri?
+4. I filtri di validità del business (es. `status = 'completed'`, `is_test_account = 0`) sono incorporati direttamente nella definizione della misura/metrica così che nessun analista possa dimenticarli?
+5. Prima di creare una nuova metrica nel catalogo, verificate che non esista già un sinonimo e fate approvare la formula dal responsabile del dominio finanziario o commerciale?
 
-*Riferimenti:* dbt Labs (2024), MetricFlow Documentation (2024), Adevinta (2023).
+La metrica di successo del Semantic Layer è **`0 discrepanze sui KPI di bordo tra report di reparti diversi`**: quando la stessa metrica viene interrogata da tre strumenti differenti, deve restituire lo stesso numero fino al secondo decimale.
 
-## L'errore che lascia due numeri per un nome
-
-Il rischio è usare lo strato semantico come etichetta invece che come processo: grafici senza decisione, metriche senza baseline, conclusioni che non dichiarano le assunzioni critiche. La piattaforma c'è, ma ognuno continua a definire i numeri per conto suo.
-
-La domanda di controllo resta la stessa, cioè quale scelta sbaglieresti se il risultato fosse instabile. Se due dashboard dicono due cose diverse, la scelta è già sbagliata prima di partire.
-
-Verdetto: una metrica, una definizione, un responsabile; se lo stesso nome ha due formule, il problema non è tecnico ma di governo.
-
-## Il caso Adevinta
-
-Adevinta, gruppo norvegese che controlla marketplace come Leboncoin, Subito e InfoJobs, ha costruito uno strato semantico unificato sui suoi dati. Ogni paese mappa le proprie strutture su modelli condivisi per annunci, profili e transazioni, e le metriche vengono definite una volta sola. Il tempo per produrre un report confrontabile tra paesi è sceso da 3 giorni a 3 ore e gli errori di riconciliazione sono spariti. È la prova che una definizione condivisa vale più di qualsiasi dashboard veloce.
-
-## Domande per metterti alla prova
-
-1. Come risolveresti due dashboard che mostrano valori diversi per la stessa metrica?
-2. Quali elementi servono per definire una metrica senza ambiguità?
-3. Quando una metrica va modellata come derivata e quando come rapporto?
-4. Come misureresti che lo strato semantico sta funzionando per i team?
+Di tutta la lezione sul Semantic Layer, tenete a mente una sola legge matematica: le somme appartengono alle tabelle, le divisioni e i conteggi distinti appartengono al livello semantico. Non sommate mai gli utenti unici giornalieri e non fate mai la media delle medie.

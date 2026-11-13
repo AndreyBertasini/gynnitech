@@ -19,311 +19,143 @@ learningObjectives:
   - Assegnare utenti a coorti stabili e calcolare la retention con denominatore fisso alla nascita
   - Implementare modelli di attribuzione last-click, lineare e time decay con crediti che quadrano col ricavo
 binario: "ml-tabellare"
+formato: "articolo"
 autore: "Hermes"
 controllatoDa: "Argo"
 autorizzatoDa: "Giano"
 draft: false
-dateModified: 2026-09-07
+dateModified: 2026-11-13
 ---
-import { SqlExercise } from '../../../components/SqlExercise';
 
 # Coorti, attribuzione e percorsi in SQL
 
-Un totale in crescita può nascondere un'emorragia: gli utenti attivi salgono mentre la coorte più vecchia perde metà dei suoi membri in sessanta giorni. Per vedere questo serve la coorte; per capire chi ha davvero generato le conversioni serve l'attribuzione. Qui le due analisi viaggiano insieme, con query che assegnano crediti e sequenze senza farsi ingannare dalle medie.
+Un team marketing confronta il rendimento dei canali di acquisizione sommando le conversioni dichiarate da Meta Ads, Google Ads e dal modello interno di attribuzione multi-touch: il fatturato attribuito ai canali somma a 185.000 € mentre il fatturato reale incassato nell'ERP nello stesso mese è di 112.000 €. La causa non è solo il doppio conteggio tra piattaforme pubblicitarie: è un modello di attribuzione in SQL che assegna `100%` del ricavo dell'ordine a ogni touchpoint della sessione invece di ripartire i crediti in modo che **la somma dei crediti per ordine quadri al centesimo con il ricavo reale**.
 
-## L'idea in una frase
+## Centoottantacinquemila euro attribuiti a fronte di centododicimila incassati
 
-Attribution e path analytics separano generazioni di utenti e percorsi di contatto per assegnare il merito della conversione senza farsi ingannare dalle medie aggregate.
+Questo è un caso ricostruito con numeri di esempio su quanto accade quando si calcolano percorsi di conversione e attribuzione multi-touch in SQL senza vincolare la somma dei pesi a `1.00` per ciascuna conversione.
 
-## Il percorso in cinque passi
+Ogni modello di attribuzione risponde a una domanda diversa sul percorso dell'utente prima dell'acquisto:
 
-1. Assegna ogni utente a una coorte stabile con `data_attivazione` calcolata una volta sola su evento di ingresso esplicito.
-2. Calcola la `retention` a scadenze fisse con denominatore fisso alla nascita e sole coorti con finestra completa.
-3. Assegna il credito di conversione con modello dichiarato tra ultimo tocco, primo tocco, lineare e decadimento temporale.
-4. Estrai le sequenze ordinate di contatto con `STRING_AGG` e confronta convertiti e non convertiti con soglia minima di volume.
-5. Verifica che la somma dei crediti torni col ricavo vero e che ogni utente appartenga a una sola coorte.
+| Modello di attribuzione | Regola di ripartizione del credito | Quando usarlo | Rischio se implementato male |
+| :--- | :--- | :--- | :--- |
+| **First-Touch** | `100%` al primo touchpoint nella finestra | Valutare quali canali generano nuova domanda e scoperta | Ignora i canali che chiudono la vendita |
+| **Last-Touch (non diretto)** | `100%` all'ultimo touchpoint utile | Ottimizzare campagne a risposta diretta | Sottostima l'intero funnel superiore (SEO, social) |
+| **Lineare** | `1 / N` uguale per ciascuno degli `N` touchpoint | Dare visibilità equilibrata a tutto il percorso | Premia canali passivi che generano molti clic a basso valore |
+| **Time Decay** | Peso crescente esponenzialmente verso la conversione | Cicli B2B lunghi dove l'ultimo contatto pesa di più | Somma dei pesi diversa da `1.0` se non normalizzata |
 
-## Perché le medie aggregate mentono sulle coorti
+Qualunque modello scegliate, vale una legge contabile ferrea: per ogni `order_id`, la somma dei crediti distribuiti tra tutti i touchpoint deve essere esattamente uguale al valore netto dell'ordine.
 
-Un prodotto in abbonamento può mostrare utenti attivi in crescita mentre la coorte più vecchia perde oltre metà degli utenti in sessanta giorni. Il totale cresce perché l'acquisizione copre l'emorragia, non perché il prodotto trattiene meglio. La coorte fissa l'origine condivisa e cambia il denominatore di ogni metrica successiva. In SQL la distinzione passa da un passaggio che calcola la `data_attivazione` una volta sola e poi non la tocca più.
+## Attribuzione Last-Touch, Lineare e Time Decay con normalizzazione a 1.00
+
+Il primo meccanismo è la **finestra di lookback esplicita prima della conversione**. Un clic su un annuncio avvenuto otto mesi fa non dovrebbe ricevere credito per un acquisto impulsivo di oggi. In SQL si uniscono i touchpoint del cliente (`user_id` o `resolved_user_id`) agli ordini imponendo `touch_at BETWEEN order_at - INTERVAL 30 DAY AND order_at`, scartando tutti i contatti successivi all'acquisto o troppo lontani nel tempo.
+
+Il secondo meccanismo è il **calcolo dei pesi normalizzati per ordine**. Nel modello lineare con `N = count() OVER (PARTITION BY order_id)` touchpoint nella finestra, ogni contatto riceve `revenue_eur / N`. Nel modello Time Decay, ogni contatto riceve un peso grezzo `exp(-lambda * days_before_order)` (ad esempio con dimezzamento ogni 7 giorni: `pow(0.5, days_before_order / 7.0)`), e poi si divide quel peso per la somma dei pesi di quell'ordine: `raw_weight / sum(raw_weight) OVER (PARTITION BY order_id)`. Questa normalizzazione garantisce matematicamente che i crediti sommino al 100% dell'ordine.
+
+Il terzo meccanismo è l'**aggregazione dei percorsi di conversione (`arrayStringConcat` o `groupArray`)**. Ordinando i touchpoint per `(touch_at ASC, event_id ASC)` e collassando i canali consecutivi identici (`Meta -> Meta -> Google` diventa `Meta -> Google`), potete identificare le sequenze di canali più redditizie e capire quali combinazioni funzionano in sinergia invece di valutare ogni canale in isolamento.
+
+**Un modello di attribuzione in SQL è affidabile solo quando delimita una finestra di lookback esplicita e normalizza i pesi di ogni ordine affinché la somma dei crediti quadri al centesimo con il ricavo netto.**
+
+## Tre errori comuni nell'attribuzione multi-touch in SQL
+
+Il blocco SQL qui sotto mostra l'errore tipico di chi unisce tutti i touchpoint agli ordini e somma `revenue_eur` senza dividere per il numero di contatti o senza normalizzare i pesi:
 
 ```sql
--- Una riga per utente: l'origine della coorte non si ricalcola mai
-WITH coorte AS (
-  SELECT
-    user_id,
-    DATE_TRUNC('month', MIN(event_date)) AS mese_coorte, -- origine condivisa
-    MIN(event_date) AS data_attivazione
-  FROM eventi
-  WHERE tipo_evento = 'attivazione' -- solo l'evento che definisce l'ingresso
-  GROUP BY user_id
-)
-SELECT mese_coorte, COUNT(*) AS utenti
-FROM coorte
-GROUP BY mese_coorte
-ORDER BY mese_coorte;
+-- ERRORE 1: unire i touchpoint agli ordini e sommare o.revenue_eur per canale!
+-- Se un ordine da 100€ ha avuto 4 touchpoint, viene contato per 400€ totali!
+-- ERRORE 2: nessuna finestra di lookback -> un clic di 2 anni fa riceve credito!
+SELECT
+    t.channel,
+    sum(o.revenue_eur) AS inflated_attributed_revenue_eur
+FROM analytics_prod.fct_orders AS o
+INNER JOIN analytics_prod.fct_touchpoints AS t
+    ON o.user_id = t.user_id
+   AND t.occurred_at <= o.order_at
+GROUP BY t.channel;
 ```
 
-Il filtro su `tipo_evento` di ingresso va concordato con chi legge i numeri, perché definisce la coorte. Usare il minimo su tutti gli eventi senza filtro sposta l'origine e assegna coorti sbagliate. Centralizzare l'assegnazione in una vista condivisa evita che tre dashboard definiscano la coorte in tre modi diversi.
+### Sommare il ricavo intero dell'ordine su ogni riga dopo la JOIN con i touchpoint
 
-## Come definire la coorte giusta in SQL
+Fare `INNER JOIN` tra ordini e touchpoint moltiplica la riga dell'ordine per `N` volte. Sommare `o.revenue_eur` senza dividere per `N` o senza applicare pesi normalizzati a `1.00` gonfia il fatturato attribuito proporzionalmente alla lunghezza media del percorso utente.
 
-Le coorti comportamentali raggruppano per ciò che l'utente ha fatto e non solo per quando è arrivato. Chi completa l'`onboarding` contro chi si ferma, chi compra da mobile contro desktop: esperienze diverse, gruppi diversi. La struttura non cambia, con un passaggio che assegna un'etichetta stabile per `user_id`.
+### Includere touchpoint successivi all'acquisto o privi di finestra temporale
 
-```sql
--- Coorte comportamentale: l'etichetta dipende dal primo canale osservato
-WITH primo_contatto AS (
-  SELECT
-    user_id,
-    -- il primo canale visto definisce il gruppo di appartenenza
-    FIRST_VALUE(canale) OVER (
-      PARTITION BY user_id ORDER BY event_date ASC
-      ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING
-    ) AS canale_ingresso,
-    MIN(event_date) AS data_attivazione
-  FROM eventi
-  WHERE tipo_evento = 'attivazione'
-  GROUP BY user_id, canale, event_date
-)
-SELECT canale_ingresso, COUNT(*) AS utenti
-FROM (SELECT DISTINCT user_id, canale_ingresso FROM primo_contatto) s
-GROUP BY canale_ingresso;
-```
+Dimenticare `t.occurred_at <= o.order_at` attribuisce la conversione a un'email di conferma ordine o a un clic avvenuto giorni dopo l'acquisto. Allo stesso modo, omettere il limite inferiore (`>= o.order_at - INTERVAL 30 DAY`) sporca l'attribuzione con campagne obsolete che non hanno più alcuna relazione causale con la decisione corrente.
 
-La granularità temporale è un compromesso esplicito tra dettaglio e stabilità. Coorti giornaliere con poche decine di attivazioni producono tassi ballerini, mentre coorti mensili nascondono eventi dentro il mese. La regola pratica parte dal mese e scende alla settimana solo sopra qualche migliaio di utenti. La coorte mobile, che ricalcola l'appartenenza a ogni periodo, serve per segmentare il comportamento corrente e non per misurare la `retention`.
+### Non escludere il traffico diretto interno o i redirect di pagamento
 
-## La retention a scadenze fisse senza barare sul denominatore
+Se il gateway di pagamento (`paypal.com` o `stripe.com`) compare come referrer al rientro dal checkout, un modello Last-Touch ingenuo attribuirà il 100% delle vendite a PayPal. I domini di pagamento e i redirect tecnici vanno filtrati prima di costruire la tabella `fct_touchpoints`.
 
-La `retention` conta i membri della coorte attivi nel periodo diviso la dimensione originaria, sempre fissa e mai ricalcolata. L'errore più diffuso include utenti che non hanno ancora avuto il tempo di tornare e deprime il tasso per costruzione. La correzione filtra le sole coorti mature con finestra completa. La `LEFT JOIN` mantiene nel denominatore anche chi non è mai tornato, mentre la `INNER JOIN` gonfia il tasso anche di dieci o venti punti.
+## Attribuzione Last-Touch, Lineare e Time Decay con quadratura in ClickHouse
+
+Per implementare un modello multi-touch verificabile in ClickHouse, applicate questi quattro passi:
+
+1. Unite ordini pagati e touchpoint validi nella finestra di lookback di 30 giorni (`touch_at BETWEEN order_at - INTERVAL 30 DAY AND order_at`).
+2. Calcolate per ciascun `(order_id, touchpoint)` il rango temporale (`row_number` crescente e decrescente) e il peso grezzo Time Decay `pow(0.5, dateDiff('hour', touch_at, order_at) / 168.0)`.
+3. Normalizzate ogni peso dividendo per `sum(raw_weight) OVER (PARTITION BY order_id)`.
+4. Aggregate per canale e verificate che la somma dei ricavi attribuiti di ciascun modello quadri esattamente con il ricavo totale degli ordini con almeno un touchpoint.
+
+Ecco la query SQL completa in ClickHouse:
 
 ```sql
--- Retention a 30 giorni: solo coorti con finestra di osservazione completa
-WITH coorte AS (
-  SELECT user_id, MIN(event_date) AS data_attivazione
-  FROM eventi
-  WHERE tipo_evento = 'attivazione'
-  GROUP BY user_id
+-- Attribuzione Multi-Touch (Last-Touch, Lineare, Time Decay) con quadratura garantita al centesimo:
+WITH order_touchpoints AS (
+    SELECT
+        o.order_id,
+        o.revenue_eur,
+        t.channel,
+        t.occurred_at AS touch_at,
+        o.order_at,
+        row_number() OVER (PARTITION BY o.order_id ORDER BY t.occurred_at DESC, t.event_id DESC) AS rn_desc,
+        count() OVER (PARTITION BY o.order_id) AS touch_count,
+        pow(0.5, dateDiff('hour', t.occurred_at, o.order_at) / 168.0) AS raw_decay_weight
+    FROM analytics_prod.fct_orders AS o
+    INNER JOIN analytics_prod.fct_touchpoints AS t
+        ON o.user_id = t.user_id
+       AND t.occurred_at BETWEEN o.order_at - INTERVAL 30 DAY AND o.order_at
+    WHERE o.status = 'paid'
+      AND o.order_at >= today() - 30
 ),
-retention_30 AS (
-  SELECT
-    c.user_id,
-    c.data_attivazione,
-    -- 1 se esiste almeno un evento nella finestra giorno 1-30
-    MAX(CASE
-      WHEN e.event_date > c.data_attivazione
-       AND e.event_date <= c.data_attivazione + INTERVAL '30 days'
-      THEN 1 ELSE 0
-    END) AS ritenuto
-  FROM coorte c
-  LEFT JOIN eventi e ON e.user_id = c.user_id
-  GROUP BY c.user_id, c.data_attivazione
+weighted_touches AS (
+    SELECT
+        order_id,
+        revenue_eur,
+        channel,
+        if(rn_desc = 1, 1.0, 0.0) AS weight_last_touch,
+        1.0 / touch_count AS weight_linear,
+        raw_decay_weight / sum(raw_decay_weight) OVER (PARTITION BY order_id) AS weight_time_decay
+    FROM order_touchpoints
 )
 SELECT
-  DATE_TRUNC('month', data_attivazione) AS mese_coorte,
-  COUNT(*) AS utenti,
-  -- solo coorti la cui finestra di 30 giorni è già chiusa
-  SUM(CASE WHEN data_attivazione <= CURRENT_DATE - INTERVAL '30 days'
-    THEN ritenuto ELSE 0 END)::float
-  / NULLIF(SUM(CASE WHEN data_attivazione <= CURRENT_DATE - INTERVAL '30 days'
-    THEN 1 ELSE 0 END), 0) AS retention_30
-FROM retention_30
-GROUP BY 1
-ORDER BY 1;
+    channel,
+    round(sum(revenue_eur * weight_last_touch), 2) AS rev_last_touch_eur,
+    round(sum(revenue_eur * weight_linear), 2) AS rev_linear_eur,
+    round(sum(revenue_eur * weight_time_decay), 2) AS rev_time_decay_eur
+FROM weighted_touches
+GROUP BY channel
+ORDER BY rev_time_decay_eur DESC;
 ```
 
-La `retention` puntuale su un giorno esatto è severa e adatta a prodotti quotidiani, mentre quella per finestra su almeno un'attività è stabile e adatta a prodotti settimanali. A parità di dati i due numeri differiscono anche di trenta punti, quindi la scelta va sempre dichiarata.
+In questa query tutti e tre i modelli (`rev_last_touch_eur`, `rev_linear_eur`, `rev_time_decay_eur`) condividono la stessa identica base di ordini e garantiscono che la somma verticale di ciascuna colonna eguagli esattamente il fatturato totale degli ordini attribuiti. Affiancando i tre modelli nella stessa tabella, il team marketing vede subito quali canali fungono da apripista (più alti nel lineare e nel time decay rispetto al last-touch) e quali fungono da finalizzatori.
 
-## Le curve di retention che si leggono davvero
+Per completare l'analisi in produzione, conviene affiancare a questa tabella una seconda vista sui **percorsi di conversione aggregati** (`arrayStringConcat(groupArray(channel), ' -> ')` ordinato per `occurred_at`), così da individuare le sequenze ricorrenti che precedono gli ordini ad alto scontrino. Inoltre, ricordate di gestire esplicitamente gli ordini che non hanno alcun touchpoint nella finestra di 30 giorni tramite una `LEFT JOIN` invece di una `INNER JOIN` quando dovete riconciliare il totale dei ricavi aziendali con il CFO: in quel modo il 100% del fatturato trova collocazione tra canali attribuiti e quota `(direct / unattributed)`.
 
-Una singola percentuale a trenta giorni dice poco, mentre la curva a uno, sette, quattordici, trenta, sessanta e novanta giorni dice quasi tutto. Un crollo precoce poi piatto indica `onboarding` debole, mentre un declino lento senza stabilizzazione indica valore non continuato. La query tipica unisce la coorte a una spina di scadenze e aggrega per coorte e scadenza, con sole coorti mature per ciascuna scadenza.
+Infine, salvate i pesi per `(order_id, touchpoint_id)` in un modello intermedio `int_order_attribution` prima di aggregare per canale: questo vi permette di unire il margine lordo o il costo del venduto (`COGS`) a livello di singolo ordine e calcolare il **ROAS sul margine netto** per ciascun modello di attribuzione.
 
-```sql
--- Tabella di coorte: una riga per coorte, una colonna per scadenza
-WITH coorte AS (
-  SELECT user_id, MIN(event_date) AS data_attivazione
-  FROM eventi
-  WHERE tipo_evento = 'attivazione'
-  GROUP BY user_id
-),
-scadenze AS (
-  -- spine di offset in giorni: il calendario dei controlli
-  SELECT * FROM (VALUES (1), (7), (14), (30), (60), (90)) AS t(giorno)
-),
-base AS (
-  SELECT
-    DATE_TRUNC('month', c.data_attivazione) AS mese_coorte,
-    s.giorno,
-    COUNT(DISTINCT c.user_id) AS denominatore,
-    -- membri della coorte con almeno un evento entro la scadenza
-    COUNT(DISTINCT CASE
-      WHEN e.event_date > c.data_attivazione
-       AND e.event_date <= c.data_attivazione + (s.giorno || ' days')::interval
-      THEN e.user_id
-    END) AS ritenuti
-  FROM coorte c
-  CROSS JOIN scadenze s
-  LEFT JOIN eventi e ON e.user_id = c.user_id
-  -- solo coorti mature per ciascuna scadenza
-  WHERE c.data_attivazione <= CURRENT_DATE - (s.giorno || ' days')::interval
-  GROUP BY 1, 2
-)
-SELECT mese_coorte, giorno, ritenuti::float / NULLIF(denominatore, 0) AS retention
-FROM base
-ORDER BY mese_coorte, giorno;
-```
+## Modelli di attribuzione in SQL vs piattaforme di attribuzione proprietarie
 
-La lettura per riga mostra l'invecchiamento di una coorte, quella per colonna il miglioramento tra generazioni. La diagonale temporale rivela shock esterni quando tutte le coorti perdono utenti nella stessa settimana di calendario.
+Per misurare il contributo dei canali di marketing, potete **implementare i modelli trasparenti in SQL/dbt nel data warehouse** oppure **affidarvi a una piattaforma black-box esterna**.
 
-| Forma della curva | Diagnosi probabile | Dove intervenire |
-|---|---|---|
-| Crollo giorno 1-7, poi piatta | Onboarding debole | Primi passi, attivazione, email di benvenuto |
-| Declino lento e continuo | Valore non continuato | Feature di ritorno, abitudini, notifiche |
-| Tutte le coorti cadono nello stesso mese di calendario | Shock esterno | Outage, prezzi, stagionalità, concorrenza |
-| Coorti recenti sistematicamente peggiori | Acquisizione diluita | Qualità del traffico, targeting, sconti aggressivi |
+Il criterio di scelta è netto: **costruite i modelli di attribuzione in SQL/dbt quando volete pieno controllo sulla finestra di lookback, sui margini netti dell'ERP (non sul lordo del carrello) e sulla quadratura contabile al 100%, riservando eventuali test di incrementalità geografica o holdout sperimentali a esperimenti dedicati.**
 
-## I modelli di attribuzione scritti come query difendibili
+La confusione comune consiste nel credere che un modello multi-touch in SQL misuri la *causalità incrementale*: l'attribuzione ripartisce un credito osservato tra touchpoint correlati, ma solo un esperimento con gruppo di controllo misura l'effetto causale reale di una campagna.
 
-Davanti a una conversione preceduta da più contatti serve una regola di credito dichiarata. Non esiste il modello giusto in assoluto, ma solo quello le cui ipotesi reggono alla domanda sul budget. L'ultimo tocco assegna tutto al contatto finale con ordinamento discendente, mentre il primo tocco premia chi apre i percorsi. Il lineare divide in parti uguali tra tutti i tocchi, mentre il decadimento temporale pesa di più i contatti recenti, con pesi che si dimezzano a ritroso e normalizzazione che conserva il valore reale.
+## Cinque domande prima di pubblicare un modello di attribuzione
 
-```sql
--- Last-click: tutto il merito all'ultimo punto di contatto
-SELECT
-  conversion_id,
-  FIRST_VALUE(canale) OVER (
-    PARTITION BY conversion_id ORDER BY istante_contatto DESC
-    ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING
-  ) AS canale_accredito
-FROM punti_contatto;
-```
+1. La somma dei crediti distribuiti per ogni `order_id` è normalizzata a `1.00` e quadra al centesimo con il ricavo netto?
+2. Avete definito una finestra di lookback esplicita (es. 30 giorni) e verificato che `touch_at <= order_at`?
+3. I domini dei gateway di pagamento e i redirect tecnici interni sono stati esclusi dai touchpoint validi?
+4. Avete confrontato almeno due modelli (es. Last-Touch e Time Decay) per individuare i canali di scoperta sottostimati?
+5. Gli ordini privi di qualsiasi touchpoint tracciato (`(unattributed / direct)`) sono mostrati esplicitamente invece di essere nascosti?
 
-```sql
--- Modello lineare: il valore si divide in parti uguali
-WITH pesi AS (
-  SELECT *,
-    -- ogni tocco vale uno fratto il numero di tocchi
-    1.0 / COUNT(*) OVER (PARTITION BY conversion_id) AS peso
-  FROM punti_contatto
-)
-SELECT canale, SUM(valore_conversione * peso) AS ricavo_attribuito
-FROM pesi
-GROUP BY canale;
-```
-
-```sql
--- Time decay: i contatti recenti pesano il doppio dei precedenti
-WITH ordinati AS (
-  SELECT *,
-    ROW_NUMBER() OVER (
-      PARTITION BY conversion_id ORDER BY istante_contatto DESC
-    ) AS rango_recenza -- 1 = ultimo tocco prima dell'acquisto
-  FROM punti_contatto
-),
-con_pesi AS (
-  SELECT *,
-    POWER(0.5, rango_recenza - 1) AS peso_grezzo,
-    SUM(POWER(0.5, rango_recenza - 1))
-      OVER (PARTITION BY conversion_id) AS peso_totale
-  FROM ordinati
-)
-SELECT canale,
-  SUM(valore_conversione * peso_grezzo / peso_totale) AS ricavo_attribuito
-FROM con_pesi
-GROUP BY canale;
-```
-
-Prima di adottare un modello conviene calcolarne tre in parallelo sulla stessa tabella. Se ultimo tocco e lineare assegnano allo stesso canale quote molto diverse, la decisione dipende più dal modello che dai dati e va discussa apertamente. Oltre pochi canali il calcolo equo dei contributi marginali esce da SQL e passa a strumenti esterni, ma anche la tabella grezza delle combinazioni mostra quali accoppiate convertono davvero.
-
-```sql
--- Base per Shapley semplificato: tasso di conversione per combinazione
-WITH combo AS (
-  SELECT user_id, conversion_id,
-    STRING_AGG(DISTINCT canale, ',' ORDER BY canale) AS insieme_canali,
-    MAX(valore_conversione) AS valore
-  FROM punti_contatto
-  GROUP BY user_id, conversion_id
-)
-SELECT insieme_canali,
-  COUNT(*) AS utenti,
-  SUM(CASE WHEN valore > 0 THEN 1 ELSE 0 END)::float / COUNT(*) AS tasso_conv,
-  SUM(valore) AS valore_totale
-FROM combo
-GROUP BY insieme_canali
-ORDER BY valore_totale DESC;
-```
-
-## Dai crediti ai percorsi con le sequenze che convertono
-
-L'attribuzione dice quanto vale ciascun canale, mentre l'analisi dei percorsi chiede quali sequenze portano alla conversione tenendo conto dell'ordine. L'estrazione dei percorsi frequenti aggrega stringhe ordinate per `istante_contatto`. Il risultato tipico è concentrato: pochi percorsi coprono metà delle conversioni. La coda di sequenze rare sotto qualche decina di casi va trattata con sospetto, perché quasi sempre riflette fortuna e non segnale.
-
-```sql
--- I dieci percorsi di conversione più frequenti
-WITH percorsi AS (
-  SELECT user_id, conversion_id,
-    -- la sequenza ordinata per istante è il percorso
-    STRING_AGG(canale, ' → ' ORDER BY istante_contatto) AS percorso,
-    COUNT(*) AS lunghezza
-  FROM punti_contatto
-  GROUP BY user_id, conversion_id
-)
-SELECT percorso,
-  COUNT(*) AS conversioni,
-  ROUND(COUNT(*) * 100.0 / SUM(COUNT(*)) OVER (), 1) AS pct_totale
-FROM percorsi
-GROUP BY percorso
-ORDER BY conversioni DESC
-LIMIT 10;
-```
-
-Il passo successivo confronta i percorsi dei convertiti con quelli dei non convertiti. Una sequenza frequentissima in entrambi i gruppi non distingue nulla, mentre una sequenza rara con tasso di conversione multiplo della media merita indagine, con soglia minima di volume prima di spostare budget.
-
-## Quando coorti, attribuzione e percorsi si rompono
-
-Il bias di sopravvivenza nasce quando la coorte usa informazioni future e seleziona retrospettivamente i migliori: la definizione può usare solo informazioni disponibili all'istante di origine. La finestra di attribuzione va calibrata sul ciclo di acquisto reale, con giorni per consegne rapide, settimane per commercio elettronico e mesi per vendite complesse. La cannibalizzazione tra canali resta invisibile ai modelli a regole fisse, perché intercettano domanda esistente invece di crearne di nuova e richiedono esperimenti con spegnimento controllato. La granularità eccessiva dei percorsi moltiplica le sequenze fino a rendere ogni percorso unico: per questo conviene restare su cinque o sei etichette robuste.
-
-```sql
--- Finestra di attribuzione parametrizzata: solo tocchi recenti contano
-WITH finestra AS (
-  SELECT *,
-    -- azzera il peso dei tocchi fuori finestra prima di normalizzare
-    CASE WHEN istante_contatto >= istante_conversione - INTERVAL '7 days'
-      THEN POWER(0.5, rango_recenza - 1) ELSE 0 END AS peso_finestra
-  FROM ordinati
-)
-SELECT canale, SUM(valore_conversione * peso_finestra
-  / NULLIF(SUM(peso_finestra) OVER (PARTITION BY conversion_id), 0))
-FROM finestra
-GROUP BY canale;
-```
-
-## Mettere tutto in produzione senza perdere fiducia nei numeri
-
-Il passaggio in produzione stratifica i dati in viste per eventi grezzi, coorti stabili, tabelle di `retention` e crediti per canale. Ogni strato dipende solo da quello sotto, e ridefinire la coorte in un solo punto propaga la correzione ovunque. I controlli non negoziabili impongono conservazione dei crediti sul ricavo vero, `retention` mai sopra uno, appartenenza a una sola coorte e nessuna conversione senza percorso.
-
-```sql
--- Test di conservazione: il credito totale deve tornare col ricavo vero
-SELECT
-  SUM(ricavo_attribuito) AS totale_attribuito,
-  (SELECT SUM(valore_conversione) FROM conversioni) AS ricavo_vero,
-  ABS(SUM(ricavo_attribuito)
-    - (SELECT SUM(valore_conversione) FROM conversioni))
-    / (SELECT SUM(valore_conversione) FROM conversioni) AS scarto_relativo
-FROM mart_attribuzione;
--- scarto_relativo sopra 0.001 significa pesi non normalizzati o join duplicate
-```
-
-Sul piano operativo conviene ricalcolare in modo incrementale solo utenti nuovi e finestre appena chiuse, invece di ricostruire anni di storia ogni notte. I parametri che cambiano le decisioni, come finestra, definizione di attivo e granularità, vanno esposti come variabili documentate. Una buona prassi fissa le soglie prima di guardare i dati, con doppio modello concorde per spostare budget e lift con volume minimo per intervenire sui percorsi.
-
-In sintesi: usa ultimo tocco per le chiusure, primo tocco per la scoperta e decadimento temporale come compromesso operativo, ma sposta budget solo quando due modelli concordano.
-
-Verdetto: ultimo tocco per le chiusure, primo tocco per la scoperta e decadimento temporale come compromesso; sposta budget solo quando due modelli concordano.
-
-## Il caso Procter & Gamble: quando i crediti non creano vendite
-
-Procter & Gamble, nel 2017, tagliò circa 200 milioni di dollari di spesa pubblicitaria digitale senza registrare cali di vendite. Il caso mostrò che gran parte dei contatti attribuiti dai report intercettava domanda esistente invece di crearne di nuova. La lezione per l'attribuzione è diretta: ultimo tocco e modelli a regole fisse sovrastimano i canali di chiusura. Solo esperimenti con spegnimento controllato e confronto contro gruppi non esposti misurano l'incremento reale.
-
-## Domande per chiudere la lezione
-
-1. Perché la `INNER JOIN` tra coorte ed eventi gonfia la `retention` rispetto alla `LEFT JOIN`?
-2. Quando una coorte va esclusa dal calcolo per finestra di osservazione incompleta?
-3. Quale modello di attribuzione premia la chiusura e quale premia la scoperta?
-4. Perché la somma dei crediti deve tornare col ricavo vero entro una tolleranza stretta?
+La metrica di controllo dell'attribuzione è il **Revenue Attribution Reconciliation Delta**: la differenza tra `sum(attributed_revenue)` e `sum(net_order_revenue)` deve essere esattamente **`0.00 €`**. Aggiungere questo test automatico in dbt impedisce che modifiche ai pesi o alle finestre di lookback introducano discrepanze contabili silenziose tra i report marketing, le chiusure mensili e il bilancio aziendale consolidato di gruppo e controllo.

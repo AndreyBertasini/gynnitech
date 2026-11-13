@@ -17,60 +17,145 @@ learningObjectives:
   - Definire permessi a livello di colonna e riga con Lake Formation
   - Tracciare il lineage dalla sorgente alla dashboard per risalire ai numeri sospetti
 binario: "ml-tabellare"
+formato: "articolo"
 autore: "Hermes"
 controllatoDa: "Argo"
 autorizzatoDa: "Giano"
 draft: false
-dateModified: 2026-09-07
+dateModified: 2026-11-13
 ---
+
 # Catalogo dati e governance su S3
 
-Questa lezione del binario `ml-tabellare` cambia prospettiva: finora abbiamo costruito il lake, ora impariamo a governarlo. Un lake senza catalogo diventa in fretta una lista di percorsi `S3` che capiscono in pochi. Governare quei dati non vuol dire bloccare tutto: vuol dire sapere cosa esiste, chi lo possiede, chi può leggerlo e con quali limiti. Conta meno la definizione e più la decisione che cambia quando un dataset diventa scopribile, descritto, classificato e affidabile.
+Un'azienda ha 300 tabelle Parquet distribuite su S3, ma per nascondere le colonne con dati personali (email, codice fiscale, stipendio) agli analisti di marketing e limitare i country manager ai soli dati della propria nazione il team duplica fisicamente i file Parquet su S3 in dodici cartelle diverse (`curated_marketing/`, `curated_it/`, `curated_fr/`). Dopo sei mesi le dodici copie divergono nei totali, il costo di storage e ETL si moltiplica per sei e quando un dirigente contesta un numero in dashboard nessuno sa da quale script o tabella sorgente derivi quel campo. La causa non è la complessità normativa: è gestire permessi e metadati duplicando i file fisici su S3 invece di usare un **Data Catalog centralizzato con controllo accessi granulare (RBAC/TBAC) e Data Lineage**.
 
-## La governance in una frase
+## Dodici copie fisiche della stessa tabella per nascondere tre colonne PII
 
-La governance del lake rende ogni tabella scopribile, classificata e leggibile solo dai ruoli autorizzati, con proprietario e percorso dei dati sempre tracciati. È il livello che separa un archivio da una risorsa aziendale.
+Questo è un caso ricostruito con numeri di esempio su quanto accade quando si tenta di governare l'accesso a un data lake usando unicamente i permessi a livello di oggetto S3 (`s3:GetObject`). L'azienda raccoglie nella tabella `curated.customers_orders` sia i dati transazionali sia i dati sensibili dei clienti europei.
 
-## Il percorso di implementazione, in sei passi
+Poiché una policy IAM su S3 può solo autorizzare o bloccare la lettura dell'intero file Parquet (non può oscurare singole colonne o filtrare singole righe dentro il file), gli ingegneri cadono nella trappola della duplicazione fisica:
+1. Creano un job notturno che legge `customers_orders` e scrive una copia fisica senza email per il marketing, una copia filtrata `country = 'IT'` per la filiale italiana, una per la Francia e una per la Germania.
+2. Quando il team analytics aggiunge una nuova colonna di sconto alla tabella madre, si dimentica di aggiornare tre dei dodici job derivati: alle riunioni mensili il marketing e la filiale italiana presentano fatturati diversi per lo stesso mese.
+3. Un crawler automatico lasciato attivo in produzione sovrascrive i tipi di colonna nel catalogo dopo aver incontrato un file temporaneo sporco, rompendo tutte le viste SQL a valle.
 
-1. Registra ogni tabella nel `Glue Catalog` con schema, formato e posizione unici.
-2. Classifica le colonne con dati personali e assegna un proprietario a ogni dataset.
-3. Definisci in `Lake Formation` chi vede quali tabelle, colonne e righe per ruolo.
-4. Verifica con un ruolo di prova che il marketing veda aggregati e la finanza veda transazioni senza dati personali esposti.
-5. Traccia il percorso dalla sorgente alla dashboard e risali la catena al primo numero sospetto.
-6. Riesamina permessi, classificazioni e proprietari a ogni nuovo dataset prima di pubblicarlo.
+La causa del caos è non separare il livello fisico di archiviazione (un'unica copia autorevole del file Parquet/Iceberg su S3) dal livello logico di catalogo, autorizzazione granulare e tracciabilità (*lineage*).
 
-## Glue Data Catalog: il punto unico dei metadati
+## Metastore Centralizzato, sicurezza Column/Row-Level (Lake Formation) e Lineage
 
-`Glue` registra i metadati delle tabelle: nomi colonne, tipi, partizioni, formato, posizione `S3`. Ogni tabella diventa interrogabile da `Athena`, `Redshift Spectrum`, `EMR` e `Glue ETL`. Senza `Glue` dovresti definire lo schema in ogni tool separatamente. Con `Glue` lo definisci una volta e tutti i tool lo vedono.
+Una governance moderna del data lake elimina la duplicazione dei file e rende ogni numero verificabile grazie a tre pilastri architetturali.
 
-Il `crawler` è il processo automatico che scansiona `S3`, inferisce lo schema e crea o aggiorna le definizioni delle tabelle. Funziona bene con dati semi-strutturati che cambiano schema nel tempo.
+Il primo pilastro è il **Catalogo Dati Centralizzato (AWS Glue Data Catalog / Apache Polaris / Unity Catalog) gestito come codice**. Il catalogo è l'unica fonte di verità che mappa un nome logico (`curated_sales.fct_orders`) alla posizione S3, al formato (`ICEBERG` o `PARQUET`), alla lista tipizzata delle colonne, all'owner del dominio e alla classificazione di riservatezza (`sensitivity = PII`). In produzione gli schemi del catalogo non devono essere indovinati a caso da crawler notturni, ma **dichiarati esplicitamente via DDL / Terraform o tramite il commit di dbt / Iceberg** (*schema-as-code*).
 
-## Lake Formation: dal permesso binario al controllo granulare
+Il secondo pilastro è il **Controllo Accessi Granulare su Colonne, Righe e Tag (AWS Lake Formation / Apache Ranger)**. Invece di dare agli utenti l'accesso diretto in lettura al bucket S3, il bucket viene chiuso e i query engine (Athena, Trino, Redshift Spectrum, EMR) passano attraverso **Lake Formation**. Su quell'unica copia fisica della tabella su S3, Lake Formation applica due filtri dinamici complementari. Con la **Column-Level Security**, associando il tag `PII=true` alle colonne `email`, `phone` e `tax_id`, il ruolo `MarketingAnalyst` vede e interroga tutte le colonne commerciali della tabella ma riceve accesso negato (o mascheramento) sulle tre colonne PII. Con la **Row-Level Security (*Data Cells Filter*)**, associando al ruolo `CountryManager_IT` il filtro predicativo `country_code = 'IT'`, quando l'utente esegue `SELECT sum(amount_eur) FROM fct_orders` il motore restituisce esclusivamente le righe italiane, leggendo dallo stesso identico file Parquet usato dal resto dell'azienda.
 
-Senza `Lake Formation` il controllo accessi su `S3` è binario: accesso al `bucket` sì o no. Con `Lake Formation` puoi definire chi vede quali colonne, chi vede quali righe tramite filtri e chi vede quali tabelle o database.
+Il terzo pilastro è il **Data Lineage end-to-end (OpenLineage / grafo di dbt)**. Ogni tabella e colonna nel catalogo conserva il grafo orientato dei suoi antenati (da quale topic Kafka o tabella ERP proviene) e dei suoi discendenti (quali modelli dbt e quali dashboard BI la consumano): prima di modificare una colonna o quando un KPI appare anomalo, basta interrogare il lineage per risalire in 30 secondi alla causa radice.
 
-Un esempio rende l'idea: l'analyst marketing vede la tabella `customers` ma senza le colonne PII come email e telefono, e solo i clienti EU. Verdetto: permessi binari sul `bucket` per i casi semplici, `Lake Formation` con sicurezza a colonna e riga appena entrano dati personali nel lake.
+**La governance su S3 funziona solo se mantiene un'unica copia fisica di ogni tabella registrata nel catalogo come codice, applica filtri di riga e colonna via tag e traccia il lineage completo dalla sorgente alla dashboard.**
 
-## Data lineage: sapere da dove arrivano i numeri
+## Tre errori che trasformano il catalogo dati in un collo di bottiglia insicuro
 
-Sapere da dove vengono i dati serve a fidarsi del risultato e a fare debug. `Glue`, `Athena` e strumenti come `DataHub` o `OpenLineage` tracciano in automatico il percorso da `S3` alla tabella `Glue` alla query `Athena` alla dashboard. Quando una dashboard mostra numeri sbagliati, risali il `lineage` fino alla sorgente invece di tirare a indovinare.
+Il blocco SQL qui sotto mostra l'antipattern della proliferazione di tabelle duplicate per gestire i permessi a mano e l'assenza di metadati di ownership e classificazione PII nel catalogo:
 
-*Riferimenti:*
-- AWS. (2024). "AWS Glue Developer Guide." *docs.aws.amazon.com/glue.*
-- AWS. (2024). "AWS Lake Formation." *aws.amazon.com/lake-formation/.*
+```sql
+-- ERRORE 1: duplicare fisicamente su S3 la stessa tabella in 4 copie separate solo per togliere
+-- la colonna email o filtrare per paese (spreco di storage, ETL quadruplicato e numeri divergenti!).
+CREATE TABLE glue_catalog.orders_copy_for_marketing
+LOCATION 's3://acme-lake-prod/curated/copies/orders_no_pii/'
+AS SELECT order_id, customer_id, country_code, amount_eur
+FROM glue_catalog.orders_master;
 
-## Gli errori che fanno fallire la governance
+CREATE TABLE glue_catalog.orders_copy_for_italy_manager
+LOCATION 's3://acme-lake-prod/curated/copies/orders_only_it/'
+AS SELECT order_id, customer_id, country_code, amount_eur
+FROM glue_catalog.orders_master
+WHERE country_code = 'IT';
+```
 
-Il primo errore è registrare tabelle nel catalogo senza proprietario né classificazione, così nessuno sa chi autorizza l'accesso ai dati personali. Il secondo è restare su permessi binari a livello di `bucket` quando il lake contiene `PII`, perché un solo ruolo troppo ampio espone colonne che dovrebbero restare nascoste. Il terzo è trascurare il `lineage`: quando una dashboard mostra numeri sospetti, il team ricostruisce il percorso a mano invece di risalire la catena in minuti.
+### Duplicare fisicamente i file su S3 per implementare permessi per team o filiale
 
-## Come si è costruito il mercato: Glue 2017, Lake Formation 2019
+Creare copie fisiche separate di una tabella da centinaia di gigabyte per ogni reparto o nazione (`orders_marketing`, `orders_finance`, `orders_it`, `orders_es`) viola il principio dell'unica fonte di verità (*Single Source of Truth*). Non appena uno dei job di copia fallisce o viene modificato con un giorno di ritardo rispetto agli altri, i reparti leggono versioni diverse della storia aziendale. Con i *Data Cells Filters* di Lake Formation (o le *Row Policies* e *Column Grants* di ClickHouse / Trino), dieci team diversi interrogano un'unica tabella fisica vedendo ciascuno solo il proprio sottoinsieme autorizzato.
 
-AWS presenta Glue nel 2017 come catalogo e servizio di integrazione che registra schema e posizione delle tabelle una sola volta per tutti i motori. Nel 2019 aggiunge Lake Formation per portare permessi a livello di colonna e riga sopra lo stesso catalogo. La sequenza mostra la direzione del settore: prima un unico punto di verità sui metadati, poi controlli granulari senza duplicare i dati. Un lake senza questi due strati resta una lista di percorsi S3 che capiscono in pochi.
+### Lasciare che i Glue Crawler sovrascrivano gli schemi di produzione senza controllo
 
-## Domande finali di verifica
+Pianificare un AWS Glue Crawler che scansiona ogni notte le cartelle della zona `curated/` con il permesso di modificare lo schema delle tabelle esistenti è una fonte continua di incidenti. Se per un errore a monte un file presenta un campo numerico valorizzato a `null` o con formato leggermente diverso, il crawler può cambiare il tipo della colonna da `DECIMAL(12,2)` a `STRING` o creare una tabella duplicata `orders_a8f92`, facendo fallire istantaneamente tutte le pipeline dbt e le viste BI collegate. Gli schemi della zona `curated/` vanno gestiti in modo deterministico da Iceberg o da codice DDL/dbt.
 
-1. Quale metadato del `Glue Catalog` rende una tabella interrogabile da `Athena` senza ridefinire lo schema?
-2. Quando la sicurezza a livello di colonna protegge meglio del permesso binario sul `bucket`?
-3. Quale filtro di riga applica la regola che limita il marketing ai soli clienti europei?
-4. Quale passaggio del `lineage` segui per primo quando una dashboard mostra numeri sospetti?
+### Concedere permessi per singolo utente invece che tramite Tag (TBAC)
+
+Assegnare i permessi nel catalogo nominando manualmente ciascuna delle 300 tabelle e 4.000 colonne per ciascuno dei 50 utenti crea una matrice di 6 milioni di regole impossibile da mantenere e verificare in sede di audit. Con il **Tag-Based Access Control (LF-TBAC)** si classificano le tabelle e le colonne con pochi tag semantici (`domain = finance | marketing`, `confidentiality = public | internal | pii`) e si assegnano i permessi ai ruoli sui tag: quando nasce una nuova tabella con il tag `confidentiality = pii`, eredita istantaneamente la protezione senza dover toccare alcuna policy utente.
+
+## Registrazione governata nel catalogo, filtri riga/colonna e audit del lineage
+
+Per implementare un catalogo governato con permessi granulari e lineage tracciabile (sia su Lake Formation / Athena sia su ClickHouse), applicate questi quattro criteri in ordine di priorità:
+
+1. Registrate ogni tabella nel catalogo specificando nelle proprietà (`TBLPROPERTIES` / `COMMENT`) l'`owner`, il `domain`, il livello di `sla_tier` e la classificazione delle colonne PII.
+2. Attivate il controllo accessi granulare su quell'unica tabella fisica: mascherate o escludete le colonne con tag `pii` per i ruoli analitici generali e applicate una *Row Policy* (`country_code = ...`) per i ruoli regionali.
+3. Alimentate una tabella di catalogo e lineage (`data_catalog_lineage`) dai metadati di dbt (`manifest.json`) o OpenLineage per sapere in ogni istante quali dashboard dipendono da quale tabella S3.
+4. Eseguite un controllo automatico che blocchi in CI qualsiasi tabella di produzione priva di `owner` o con colonne sensibili non classificate.
+
+Ecco l'implementazione SQL completa (mostrata con le primitive di sicurezza riga/colonna e di audit del catalogo/lineage in ClickHouse sopra lo strato S3/Lakehouse):
+
+```sql
+-- 1. Tabella unica autorevole con metadati di governance e commenti di classificazione PII:
+CREATE TABLE lakehouse.fct_orders_governed
+(
+    order_id UInt64 COMMENT 'tag:public',
+    occurred_date Date COMMENT 'tag:public',
+    country_code LowCardinality(String) COMMENT 'tag:public',
+    customer_email String COMMENT 'tag:pii_high',
+    customer_tax_id String COMMENT 'tag:pii_high',
+    amount_eur Decimal(12, 2) COMMENT 'tag:confidential'
+)
+ENGINE = MergeTree
+PARTITION BY toYYYYMM(occurred_date)
+ORDER BY (country_code, occurred_date, order_id)
+COMMENT 'owner=team-data-platform;domain=sales;sla=daily_07am;source=s3://acme-lake-prod/curated/sales/orders/';
+
+-- 2. Controllo accessi granulare SENZA duplicare la tabella:
+-- (a) Il ruolo marketing_analyst può leggere solo le colonne non-PII:
+GRANT SELECT(order_id, occurred_date, country_code, amount_eur)
+ON lakehouse.fct_orders_governed TO role_marketing_analyst;
+
+-- (b) Row Policy (equivalente al Data Cell Filter di Lake Formation):
+-- il country manager Italia vede solo le righe con country_code = 'IT' sulla stessa tabella!
+CREATE ROW POLICY IF NOT EXISTS policy_italy_only
+ON lakehouse.fct_orders_governed
+FOR SELECT USING country_code = 'IT'
+TO role_country_manager_it;
+
+-- 3. Query di Governance e Lineage: individua tabelle prive di owner, colonne PII esposte
+-- e tutte le dashboard a valle impattate da una modifica a fct_orders_governed:
+SELECT
+    upstream_s3_path,
+    catalog_table,
+    table_owner,
+    pii_columns_count,
+    groupArray(downstream_dashboard) AS impacted_dashboards,
+    max(last_schema_check_at) AS last_verified_at
+FROM governance.catalog_lineage_registry
+WHERE catalog_table = 'lakehouse.fct_orders_governed'
+GROUP BY upstream_s3_path, catalog_table, table_owner, pii_columns_count;
+```
+
+Il risultato elimina la giungla delle copie: le dodici tabelle duplicate su S3 vengono cancellate liberando l'85% dello spazio disco e dei job ETL; quando un utente col ruolo `role_marketing_analyst` e `role_country_manager_it` interroga `lakehouse.fct_orders_governed`, legge l'unica copia certificata vedendo solo le colonne autorizzate e le sole righe con `country_code = 'IT'`; e quando il team deve modificare la tabella o spiegare un numero al CFO, la query su `catalog_lineage_registry` elenca istantaneamente la sorgente S3, il proprietario e le dashboard impattate. Configurare una Row Policy e i tag sul catalogo richiede pochi minuti; mantenere dodici copie fisiche disallineate distrugge la credibilità dei dati aziendali.
+
+## Gestione dello schema tramite DDL/dbt come codice o scoperta automatica con Crawler
+
+Per mantenere aggiornato il catalogo dati quando arrivano nuovi dataset su S3, i team devono scegliere tra due modalità operative: **Schema-as-Code (DDL deterministico da Terraform, dbt o Iceberg)** oppure **scoperta automatica schedulata (AWS Glue Crawlers)**.
+
+Il criterio di scelta è netto: **usate rigorosamente Schema-as-Code (registrazione deterministica tramite Iceberg, dbt o Terraform) per tutte le tabelle delle zone `curated/` e `analytics/` di produzione dove un cambio imprevisto di tipo o nome colonna romperebbe i contratti a valle, riservate invece i Glue Crawler (eseguiti on-demand o con policy `LOG` anziché `UPDATE_IN_DATABASE`) esclusivamente all'esplorazione iniziale di nuovi file sconosciuti depositati nella zona `raw/` di atterraggio.**
+
+La confusione comune consiste nel lasciare che i crawler modifichino liberamente le tabelle del catalogo di produzione ogni notte prima del giro di dbt. Sbagliare questa scelta trasforma il catalogo da "contratto stabile che protegge gli utenti dai dati sporchi" a "specchio passivo che propaga istantaneamente qualsiasi errore del file sorgente a tutta l'azienda".
+
+Questo articolo non tratta la condivisione federata cross-account (*AWS Resource Access Manager* con Lake Formation o *Delta Sharing*) né i cataloghi data mesh multi-cloud. Ricordate che quando attivate Lake Formation su un database del Glue Catalog esistente, dovete revocare il permesso predefinito legacy `IAMAllowedPrincipals` (`Super` su tutte le tabelle), altrimenti Lake Formation lascerà passare chiunque possieda i vecchi permessi IAM ignorando i vostri filtri di riga e colonna.
+
+## Cinque domande per verificare la governance del vostro data lake
+
+1. Ogni tabella delle zone `curated/` e `analytics/` è registrata nel catalogo tramite codice versionato (Iceberg / dbt / Terraform) con i crawler disabilitati o impostati in sola notifica?
+2. Avete eliminato tutte le copie fisiche di tabelle create solo per nascondere colonne o filtrare righe, sostituendole con permessi di colonna e filtri di riga (*Data Cells Filters* / *Row Policies*)?
+3. Avete adottato il controllo accessi basato su tag (**TBAC**, es. `confidentiality=pii`, `domain=sales`) e revocato il gruppo legacy `IAMAllowedPrincipals` su Lake Formation?
+4. Ogni tabella del catalogo espone chiaramente nei metadati il team proprietario (`owner`), il dominio di business e la classificazione di tutte le colonne contenenti dati personali (PII)?
+5. Prima di deprecare una colonna o quando un KPI appare anomalo in dashboard, potete interrogare il grafo di lineage (dbt / OpenLineage) per vedere in meno di un minuto l'intera catena dalla sorgente S3 al grafico?
+
+La metrica di maturità della governance sul data lake è la **copertura del catalogo certificato**: **100% delle tabelle `curated`/`analytics` dotate di `owner`, tag di riservatezza e lineage attivo**, con **0 copie fisiche ridondanti create per motivi di permesso**.
+
+Di tutta la governance sul data lake, tenete ferma una sola regola architetturale: i dati si scrivono su S3 una volta sola per ciascuna zona; chi può vedere quale riga e quale colonna si decide nel catalogo, mai duplicando i file Parquet.

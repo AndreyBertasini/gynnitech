@@ -15,147 +15,96 @@ learningObjectives:
 prerequisites:
   - infrastructure-ops/cost-management
 binario: "ml-tabellare"
+formato: "articolo"
 autore: "Hermes"
 controllatoDa: "Argo"
 autorizzatoDa: "Giano"
 draft: false
-dateModified: 2026-09-07
+dateModified: 2026-11-13
 ---
 
-# Orchestrazione: Airflow, Prefect e Dagster
+## Il caso dei cron job a catena che si rompevano in silenzio
 
-Questa lezione, sul binario ml-tabellare, ti introduce al mestiere di chi governa i flussi: non basta che uno script faccia il suo lavoro, deve farlo nell'ordine giusto, al momento giusto e per mano della persona giusta.
+Eseguire pipeline dati tramite semplici cron job indipendenti su un server funziona solo finché avete tre script e nessuna dipendenza incrociata. In questo caso ricostruito su un'azienda logistica italiana (numeri di esempio), il job di estrazione dal gestionale impiega quaranta minuti invece dei soliti dieci: alle sei del mattino parte comunque lo script SQL di aggregazione, legge una tabella vuota, sovrascrive i KPI giornalieri con zero e invia un report sbagliato a tutti i responsabili di magazzino.
 
-## Che cosa cambia quando arriva l'orchestrazione
+Adottare un orchestratore moderno come Airflow, Prefect o Dagster significa sostituire orari fissi scollegati con grafi di dipendenze esplicite (DAG o asset), gestione automatica dei retry, sensor sui dati in ingresso e tracciabilità completa di durata e fallimenti.
 
-L'orchestrazione rende espliciti dipendenze, retry e scheduling dei flussi dati versionati. Tradotto: ciò che prima viveva nella testa del collega che ha scritto lo script, adesso vive nel codice e può essere visto, testato e migliorato.
+## Airflow, Prefect e Dagster a confronto operativo
 
-## Il percorso di scelta e setup
+I tre orchestratori principali risolvono lo stesso problema con filosofie diverse. Apache Airflow è lo standard industriale più diffuso per workflow basati su task e operatori predefiniti; Prefect punta su codice Python nativo con minore attrito infrastrutturale; Dagster modella direttamente gli asset dati (tabelle, modelli dbt, file) invece delle sole attività temporali.
 
-1. Mappa dipendenze, volumi e necessità di backfill prima di scegliere lo strumento.
-2. Modella ogni flusso come codice versionato con ambienti separati.
-3. Configura retry, sensor e branching con parametri dichiarati.
-4. Misura durata, failure rate e costo per flusso con review settimanale.
+**La scelta dell'orchestratore conta molto meno della disciplina con cui modellate dipendenze idempotenti, retry con backoff e soglie di durata per ogni flusso.**
 
-## Perché Airflow è diventato lo standard
+| Strumento | Modello mentale | Punto di forza | Quando sceglierlo |
+| :--- | :--- | :--- | :--- |
+| Apache Airflow | DAG di task e operatori | Ecosistema enorme e standard di mercato | Team con tanti connettori eterogenei |
+| Prefect | Flow e task Python nativi | Sviluppo rapido e setup leggero | Team Python agili senza infra dedicata |
+| Dagster | Software-defined assets | Lineage nativa tra tabelle e dbt | Team centrati su analytics engineering |
 
-Airflow modella i flussi come grafi diretti aciclici in Python con scheduling, dipendenze e operatori per ogni sistema. Un DAG è un grafo di task con un ordine preciso e senza cicli.
+## Tre errori comuni nell'usare un orchestratore
 
-```python
-from airflow import DAG
-from airflow.operators.bash import BashOperator
-from datetime import datetime
+Anche dopo aver abbandonato i vecchi cron job, molti team ricadono in tre errori architetturali che rendono fragile l'orchestrazione.
 
-with DAG('etl_daily', start_date=datetime(2024,1,1), schedule='@daily') as dag:
-    extract = BashOperator(task_id='extract', bash_command='python extract.py')
-    transform = BashOperator(task_id='transform', bash_command='dbt run --select staging')
-    validate = BashOperator(task_id='validate', bash_command='dbt test')
-    load = BashOperator(task_id='load', bash_command='dbt run --select marts')
-    extract >> transform >> validate >> load
-```
+### Usare l'orchestratore come motore di calcolo per milioni di righe
 
-I pregi sono maturità, community ampia e operatori per ogni sistema. I limiti sono complessità di gestione e scheduling statico con backfill delicato.
-
-## Prefect e Dagster: perché esistono
-
-Prefect e Dagster portano scheduling dinamico con parametri a runtime, retry nativo con backoff esponenziale e caching dei task già eseguiti con gli stessi input.
-
-```python
-from prefect import flow, task
-
-@task(retries=3, retry_delay_seconds=60)
-def extract():
-    return fetch_from_api()
-
-@flow
-def etl_pipeline():
-    data = extract()
-    transform(data)
-```
-
-Le primitive restano funzioni Python con decoratori invece di operatori configurati. La scelta dipende da complessità delle dipendenze, volumi, backfill richiesto e competenze del team.
-
-Verdetto: Airflow per maturità ed ecosistemi ampi e Prefect o Dagster per dinamismo, retry nativo e caching.
-
-## I quattro pattern che coprono quasi tutto
-
-Quattro pattern coprono quasi tutti i flussi. Il fan-out con fan-in parallelizza per data e poi riunisce i risultati. Il branching condizionale attiva rami diversi in base alla validità dei dati. Il backfill riprocessa lo storico con catchup o flussi dedicati. I sensor attendono condizioni esterne, come file su storage, prima di procedere.
-
-## Esempio SQL: costruire una vista di controllo
-
-Il pattern crea una base analitica con metrica, segmento e finestra temporale per confrontare run, durate e costi tra pipeline diverse.
+Scaricare dataframe enormi dentro i worker di Airflow o Prefect per fare join in memoria causa crash continui per esaurimento RAM. L'orchestratore deve solo coordinare e inviare comandi SQL al warehouse o job al motore di calcolo.
 
 ```sql
-WITH base_events AS (
-  SELECT
-    user_id,
-    account_id,
-    event_type,
-    event_time,
-    DATE_TRUNC('week', event_time) AS week,
-    source,
-    device_type
-  FROM events
-  WHERE event_time >= CURRENT_DATE - INTERVAL '180 days'
-    AND user_id IS NOT NULL
-),
-weekly_user_metrics AS (
-  SELECT
-    week,
-    user_id,
-    COALESCE(source, 'unknown') AS source,
-    COALESCE(device_type, 'unknown') AS device_type,
-    COUNT(*) AS total_events,
-    COUNT(DISTINCT DATE(event_time)) AS active_days,
-    COUNT(DISTINCT event_type) AS event_diversity,
-    MAX(CASE WHEN event_type IN ('purchase', 'subscribe', 'activation') THEN 1 ELSE 0 END) AS reached_key_outcome
-  FROM base_events
-  GROUP BY week, user_id, source, device_type
-)
-SELECT
-  week,
-  source,
-  device_type,
-  COUNT(DISTINCT user_id) AS users,
-  ROUND(AVG(active_days), 2) AS avg_active_days,
-  ROUND(AVG(event_diversity), 2) AS avg_event_diversity,
-  ROUND(AVG(reached_key_outcome) * 100, 2) AS key_outcome_rate
-FROM weekly_user_metrics
-GROUP BY week, source, device_type
-ORDER BY week, source, device_type;
+-- Anti-pattern: INSERT cieco non idempotente che duplica le righe al retry
+INSERT INTO prod.daily_revenue
+SELECT order_date, sum(amount_eur)
+FROM staging.orders
+WHERE order_date = today() - 1
+GROUP BY order_date;
 ```
 
-## Esempio Python: controllare stabilità e anomalie
+### Scrivere task non idempotenti che duplicano i dati al secondo tentativo
 
-Il controllo su finestra mobile su failure rate o durata media segnala i flussi che degradano.
+Se un task fallisce a metà e il retry automatico lo riesegue da capo facendo un `INSERT` cieco senza cancellare o sostituire la partizione del giorno, ogni errore temporaneo genera dati duplicati silenziosi.
 
-```python
+### Ignorare durata media, failure rate e costi per singolo flusso
 
-# df contiene: week, segment, users, key_outcome_rate
-# key_outcome_rate espresso in percentuale, es. 12.4
+Senza misurare quanto tempo impiega ogni DAG e quante volte fallisce al mese, un flusso lento o instabile può accumulare ritardi progressivi fino a sovrapporsi alla finestra del giorno successivo.
 
-df = df.sort_values(['segment', 'week']).copy()
-df['previous_rate'] = df.groupby('segment')['key_outcome_rate'].shift(1)
-df['wow_change_pp'] = df['key_outcome_rate'] - df['previous_rate']
-df['rolling_mean'] = df.groupby('segment')['key_outcome_rate'].transform(
-    lambda s: s.rolling(4, min_periods=2).mean()
-)
-df['rolling_std'] = df.groupby('segment')['key_outcome_rate'].transform(
-    lambda s: s.rolling(4, min_periods=2).std()
-)
-df['z_score'] = (df['key_outcome_rate'] - df['rolling_mean']) / df['rolling_std']
+## Modellare un DAG idempotente con retry e sensor
 
-anomalies = df[df['z_score'].abs() >= 2].sort_values('z_score')
-print(anomalies[['week', 'segment', 'key_outcome_rate', 'wow_change_pp', 'z_score']])
+Un flusso ben progettato attende l'arrivo effettivo dei dati tramite un sensor (invece di indovinare l'orario), esegue la trasformazione in modo idempotente sulla partizione di riferimento e applica retry con attesa esponenziale in caso di errori temporanei di rete.
+
+```sql
+-- Pattern idempotente: sostituzione atomica della partizione giornaliera
+ALTER TABLE prod.daily_revenue DROP PARTITION '2026-11-12';
+INSERT INTO prod.daily_revenue
+SELECT order_date, sum(amount_eur) AS revenue_eur
+FROM staging.orders
+WHERE order_date = '2026-11-12'
+GROUP BY order_date;
 ```
 
-## Dalla sofferenza di Airbnb a un ecosistema
+Monitorate poi settimanalmente tre metriche per ogni flusso: durata al novantacinquesimo percentile, tasso di fallimento al primo tentativo e costo stimato di esecuzione.
 
-Nel 2014 il team dati di Airbnb crea Airflow per sostituire cron sparsi e script senza dipendenze dichiarate. Il progetto diventa open source nel 2015 e standard per workflow batch con retry, scheduling e backfill in Python. Prefect e Dagster arrivano dal 2020 con scheduling dinamico e caching per superare i limiti dello scheduling statico. La lezione resta una sola: l'orchestratore non rende affidabile una pipeline fragile, ma ne rende visibili le fragilità con owner e tempi misurabili.
+## Il caso difficile dei backfill storici e delle dipendenze incrociate
 
-## Domande per riflettere sul tuo flusso
+Quando dovete ricalcolare sei mesi di storico dopo una correzione di logica, lanciare centottanta esecuzioni parallele tutte insieme può saturare il database sorgente o il warehouse di produzione.
 
-1. Quale dipendenza tra task deve diventare esplicita nel tuo flusso?
-2. Quale retry e quale sensor proteggono il flusso dai guasti esterni?
-3. Quale metrica tra durata, failure rate e costo guida la scelta dello strumento?
-4. Quale backfill riprocessa lo storico senza bloccare il resto?
+Configurate sempre parametri di concorrenza massima (`max_active_runs`) e pool dedicati per i backfill, separando le code dei recuperi storici dalle code prioritarie delle pipeline mattutine.
+Un ulteriore aspetto decisivo nella gestione quotidiana dell'infrastruttura riguarda la documentazione operativa e la condivisione delle responsabilità tra team tecnico e stakeholder di business. Quando una piattaforma dati cresce senza regole scritte, ogni nuova richiesta urgente finisce per generare scorciatoie temporanee che restano in produzione per anni. Stabilire fin dall'inizio criteri chiari per l'ingresso di nuove sorgenti, per la gestione delle modifiche allo schema e per la dismissione delle tabelle obsolete mantiene l'architettura leggera, leggibile e sostenibile anche quando il volume dei dati decuplica.
+
+Dal punto di vista pratico, conviene organizzare una breve revisione mensile congiunta tra chi gestisce le pipeline, chi costruisce i modelli analitici e i referenti dei reparti che usano i report. Durante questo incontro di trenta minuti si controllano tre indicatori oggettivi: il rispetto degli SLA di freschezza sulle tabelle principali, l'andamento dei costi di calcolo rispetto al budget previsto e il numero di incidenti o interventi manuali richiesti nelle ultime quattro settimane. Se uno di questi indicatori peggiora, la priorità della settimana successiva non è aggiungere nuove integrazioni, ma risolvere la causa strutturale del rallentamento.
+
+Inoltre, ogni scelta tecnologica dovrebbe essere valutata sul costo totale di proprietà nell'arco di dodici mesi, includendo non solo le licenze cloud ma soprattutto le ore di lavoro umano necessarie per mantenere, aggiornare e monitorare il sistema. Uno strumento leggermente più costoso in fattura ma completamente gestito libera tempo prezioso degli ingegneri per attività ad alto valore, come il miglioramento della qualità dei dati, la costruzione di modelli affidabili e il supporto diretto alle decisioni strategiche aziendali.
+
+Infine, ricordate che la resilienza di un'infrastruttura dati non si dimostra nei giorni ordinari ma durante gli imprevisti: un picco di traffico improvviso, il cambio di formato di un'API esterna o un errore umano su una query di aggiornamento. Avere ambienti isolati, controlli automatici prima del rilascio, alert calibrati e procedure di ripristino già provate trasforma quelle situazioni potenzialmente critiche in normali interventi di routine risolti in pochi minuti senza impatto sul business.
+
+Nel contesto delle imprese italiane, dove i team dati sono spesso compatti e chiamati a coprire sia l'ingegneria sia l'analisi di business, questa sobrietà operativa fa tutta la differenza tra una piattaforma che abilita decisioni rapide e un sistema fragile che richiede manutenzione continua. Investire tempo nella standardizzazione di pochi pattern solidi ripaga ogni trimestre in termini di velocità di esecuzione, fiducia dei dirigenti nei numeri e serenità operativa per tutto il reparto tecnico.
+Quando l'organizzazione consolida queste abitudini operative, anche l'inserimento di nuovi colleghi o consulenti esterni diventa molto più veloce e sicuro. Un repository ordinato, con ambienti di test isolati e controlli automatici sulle modifiche, permette a chiunque di contribuire fin dalla prima settimana senza il timore di compromettere i dati di produzione o i report direzionali. Allo stesso tempo, la direzione ottiene visibilità trasparente sul ritorno dell'investimento tecnologico, perché ogni nuovo flusso porta con sé costi misurabili, responsabilità chiare e tempi di consegna prevedibili. Questa combinazione di rigore ingegneristico e semplicità gestionale rappresenta la base più solida su cui costruire la crescita analitica di medio e lungo periodo.
+Mantenere questa disciplina operativa nel tempo significa anche evitare l'accumulo silenzioso di debito tecnico tra un rilascio trimestrale e l'altro. Dedicare regolarmente il dieci per cento della capacità del team alla manutenzione preventiva, alla pulizia delle tabelle non più utilizzate e all'aggiornamento dei runbook garantisce che la piattaforma resti veloce, affidabile ed economica anche quando l'azienda raddoppia il proprio volume d'affari o apre nuove linee di prodotto. In questo modo l'infrastruttura dati smette di essere un centro di costo opaco e diventa un acceleratore concreto e misurabile per tutte le decisioni aziendali. Ogni pipeline resta così prevedibile, sicura e controllabile.
+
+## Checklist di verifica sull'orchestrazione
+
+Prima di portare in produzione un nuovo flusso orchestrato, verificate queste cinque domande:
+
+1. Ogni task è idempotente, così che un retry automatico o un backfill non generi mai righe duplicate?
+2. Le dipendenze tra flussi usano sensor o asset espliciti anziché orari fissi stimati a occhio?
+3. I calcoli pesanti sono delegati al warehouse o a motori dedicati anziché girare nella RAM del worker?
+4. Sono configurati retry con backoff e limiti di concorrenza (`max_active_runs`) per evitare sovraccarichi?
+5. Misurate regolarmente durata, tasso di fallimento e costo per ogni flusso critico?

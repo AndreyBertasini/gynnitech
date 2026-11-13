@@ -3,7 +3,91 @@
  * Con `senzaCodice: true` nel frontmatter (modulo 4) R4 chiede un «documento» sbagliato e uno giusto al posto dei blocchi sql, e R12 vieta ogni blocco di codice.
  */
 import matter from 'gray-matter';
-import { TAG_LEZIONE, type Esito } from './lezioni-3s-rules';
+
+export type Esito = { errors: string[]; warnings: string[] };
+
+export const TAG_LEZIONE = [
+  'Percorso',
+  'Obiettivi',
+  'Slide',
+  'Schema',
+  'Passo',
+  'Confronto',
+  'Lato',
+  'Criterio',
+  'Passi',
+  'Fase',
+  'Opzioni',
+  'Opzione',
+  'MiniTabella',
+  'TabellaDati',
+  'Barre',
+  'Barra',
+  'NumeriGrandi',
+  'Numero',
+  'Relazioni',
+  'Nodo',
+  'Pattern',
+  'ErroreTipico',
+  'Messaggio',
+  'Domanda',
+] as const;
+
+export type ArticoloProfile = 'A' | 'B';
+
+export const ARTICOLO_PROFILES: Record<
+  ArticoloProfile,
+  { minWords: number; maxWords: number; targetMinWords: number; targetMaxWords: number }
+> = {
+  A: { minWords: 1300, maxWords: 1900, targetMinWords: 1400, targetMaxWords: 1900 },
+  B: { minWords: 1300, maxWords: 2400, targetMinWords: 1600, targetMaxWords: 2400 },
+};
+
+const PROFILE_B_MODULES = new Set([
+  'sql',
+  'sql-fondamenti',
+  'advanced-sql',
+  'python',
+  'python-per-dati',
+  'statistica',
+  'significativita-statistica',
+  'matematica-analisi-dati',
+  'visualizzazione',
+  'dashboard-visualizzazione',
+  'ab-testing',
+  'ab-testing-sperimentazione',
+  'data-engineering',
+  'data-engineering-pipeline',
+  'data-warehousing',
+  's3-data-lake',
+  'infrastructure-ops',
+  'machine-learning',
+  'machine-learning-fondamenti',
+  'marketing-data-science',
+  'analytics-engineering',
+  'kafka',
+  'kafka-streaming',
+  'real-time-analytics',
+  'cloud',
+  'cloud-data-platform',
+  'docker',
+  'docker-container',
+  'ai',
+  'ai-per-data-analytics',
+  'ai-data-workflows',
+  'agentic-ai-data-workflows',
+]);
+
+export function getArticoloProfile(moduleOrRel = ''): ArticoloProfile {
+  const normalized = moduleOrRel.replace(/\\/g, '/').toLowerCase();
+  const segments = normalized.split('/').filter(Boolean);
+  for (const slug of PROFILE_B_MODULES) {
+    if (normalized === slug || segments.includes(slug)) {
+      return 'B';
+    }
+  }
+  return 'A';
+}
 
 export const PAROLE_MIN = 1300;
 export const PAROLE_MAX = 1900;
@@ -28,7 +112,7 @@ const DICHIARAZIONE_ESEMPIO = /caso ricostruito|esempio costruito|numeri di esem
 const LINK_ESTERNO = /\]\(https?:\/\//;
 const SECONDA_PERSONA = /(?<![\p{L}\p{N}_])(tu|ti|te|tuo|tua|tuoi|tue|puoi|devi|hai|vuoi|sai)(?![\p{L}\p{N}_])/iu;
 const EMOJI = /\p{Extended_Pictographic}/u;
-const RESTO_3S = new RegExp(`<(${TAG_LEZIONE.join('|')})\\b|QuizExercise|^\\s*import\\s`);
+const RESTO_3S = new RegExp(`<(${TAG_LEZIONE.join('|')})\\b|QuizExercise|SqlExercise|una sessione,\\s*tre blocchi|^\\s*import\\s`, 'i');
 
 type Riga = { testo: string; codice: boolean; lingua: string };
 type Sezione = { titolo: string; righe: Riga[] };
@@ -108,9 +192,14 @@ export function checkLezioneArticolo(raw: string, rel: string): Esito {
     errore('R1', `servono ${SEZIONI_ATTESE} sezioni H2 (caso, meccanismo, errore, soluzione, caso difficile, checklist); trovate ${sezioni.length}`);
   }
 
+  const profile =
+    getArticoloProfile(rel) === 'B' || (typeof data.module === 'string' && getArticoloProfile(data.module) === 'B')
+      ? 'B'
+      : 'A';
+  const { minWords, maxWords } = ARTICOLO_PROFILES[profile];
   const parole = testoProsa.join(' ').split(/\s+/).filter(Boolean).length;
-  if (parole < PAROLE_MIN || parole > PAROLE_MAX) {
-    errore('R2', `${parole} parole di prosa (codice escluso); ammesse ${PAROLE_MIN}–${PAROLE_MAX}`);
+  if (parole < minWords || parole > maxWords) {
+    errore('R2', `${parole} parole di prosa (codice escluso, profilo ${profile}); ammesse ${minWords}–${maxWords}`);
   }
 
   if (sezioni.length === SEZIONI_ATTESE) {

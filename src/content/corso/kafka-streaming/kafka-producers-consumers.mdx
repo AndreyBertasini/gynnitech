@@ -17,86 +17,171 @@ learningObjectives:
   - Scegliere la chiave di partizionamento sulla distribuzione reale del traffico
   - Versionare lo schema dei messaggi per garantire compatibilità tra team
 binario: "ml-tabellare"
+formato: "articolo"
 autore: "Hermes"
 controllatoDa: "Argo"
 autorizzatoDa: "Giano"
 draft: false
-dateModified: 2026-09-07
+dateModified: 2026-11-13
 ---
 
 # Producer, consumer e serializzazione
 
-Questa lezione appartiene al binario **ml-tabellare** e ti porta dal lato pratico del modulo: producer e consumer non sono client da configurare, ma contratti da progettare, e ogni parametro dichiara una garanzia esplicita su perdita, ordine, duplicati e formato.
+Un consumer Kafka scarica lotti di 500 ordini per inserirli in ClickHouse con `enable.auto.commit=true` ogni cinque secondi, mentre il producer usa `country_code` come chiave di partizionamento dove l'Italia rappresenta l'88% del business. Quando un inserimento nel database fallisce tre secondi dopo il commit automatico in background, i 500 ordini vengono persi per sempre; allo stesso tempo, la partizione associata alla chiave `'IT'` satura un singolo worker mentre gli altri undici restano fermi a guardare. La causa non è la lentezza del database: è lasciare l'auto-commit attivo prima della scrittura su disco e scegliere una chiave di partizionamento fortemente asimmetrica (*data skew*).
 
-## L'idea in una frase
+## Cinquecento ordini saltati dall'auto-commit e undici worker fermi
 
-Producer e consumer robusti sono contratti eseguibili che dichiarano garanzie esplicite su perdita accettabile, ordine, duplicati e formato dei messaggi.
+Questo è un caso ricostruito con numeri di esempio su quanto accade quando producer e consumer vengono avviati con le impostazioni predefinite delle librerie client. La pipeline legge dal topic `orders.created.v1` a 12 partizioni e inserisce i batch nella tabella analitica aziendale.
 
-## La procedura in sei passi
+Nel codice di produzione si combinano tre difetti classici:
+1. Il consumer lascia attivo `enable.auto.commit=true` (`auto.commit.interval.ms=5000`). Al secondo `00` il consumer esegue `poll()` e riceve 500 messaggi; al secondo `05`, mentre la query di inserimento su ClickHouse è ancora bloccata per un rallentamento di rete, il timer interno del client scatta e salva su Kafka il nuovo offset come "già completato"; al secondo `07` il processo va in crash per timeout. Al riavvio il consumer riparte dall'offset successivo e i 500 ordini non sono mai stati scritti nel database.
+2. Il producer imposta come chiave del messaggio `key = country_code`. Poiché l'88% dei clienti compra dall'Italia (`'IT'`), l'hash `murmur2('IT') mod 12` manda l'88% di tutti i messaggi dell'azienda sulla sola partizione 3, lasciando scariche le altre undici.
+3. I messaggi sono serializzati in JSON non compresso con nomi di campo lunghi ripetuti su ogni riga, saturando la banda di rete a 120 MB/s.
 
-1. Dichiara la garanzia di delivery: perdita accettabile, ordine necessario, duplicati tollerati.
-2. Imposta `acks` di conseguenza: `all` per dati critici, `1` per analytics tolleranti.
-3. Attiva l'idempotenza del producer e rendi il consumer tollerante ai duplicati.
-4. Scegli la chiave guardando la distribuzione reale del traffico, non le ipotesi.
-5. Fissa il formato come interfaccia pubblica con schema versionato e check di compatibilità.
-6. Configura il commit degli offset dopo il processamento, con gestione esplicita dei crash.
+La causa del triplo guasto è non legare il commit dell'offset alla conferma di scrittura del database, ignorare la distribuzione statistica della chiave di partizionamento e non attivare batching e compressione sul producer.
 
-## Cosa promette davvero un producer
+## Idempotenza del producer, commit sincrono post-scrittura e distribuzione delle chiavi
 
-Un producer sembra semplice finché un retry duplica eventi, un consumer resta indietro o una serializzazione rompe un servizio a valle. Il lavoro professionale è progettare chiavi, `acks`, batch, commit degli offset e formato del messaggio come parti dello stesso contratto. Producer e consumer robusti non sono client configurati bene: sono contratti eseguibili tra sistemi. Ogni scelta risponde a una domanda: quale garanzia prometti su perdita accettabile, duplicati tollerati, ordine necessario, compatibilità del formato e recupero dopo un errore.
+Costruire client Kafka che non perdono né duplicano messaggi sul broker e sfruttano tutte le partizioni in parallelo richiede tre meccanismi precisi lato producer e lato consumer.
 
-Inviare un messaggio sembra banale: istanzi un client e invochi un metodo di produzione. La differenza tra implementazione ingenua e professionale si misura in durabilità, throughput e latenza. Un producer non spedisce ogni messaggio subito sulla rete. Usa un accumulatore di record, un buffer dove i messaggi sono raggruppati in batch per partizione, e un thread di invio in background che spedisce i batch ai broker. La competenza sta nel configurare questo meccanismo sul caso d'uso.
+Il primo meccanismo è il **Producer Idempotente con micro-batching compresso** (`enable.idempotence=true`, `acks=all`, `linger.ms`, `compression.type=zstd`). Quando l'idempotenza è attiva, il broker assegna a ogni istanza del producer un `Producer ID` (`PID`) e il client allega a ogni batch un numero di sequenza monotono (`seq`) per partizione: se il producer invia un batch, il broker lo salva ma l'`ACK` si perde sulla rete e il producer ritenta l'invio, il broker riconosce il numero di sequenza già visto e scarta silenziosamente il duplicato senza scriverlo una seconda volta nel log. Abbinando `linger.ms=20` e `compression.type=zstd`, il producer attende fino a 20 millisecondi per raggruppare centinaia di eventi nello stesso blocco compresso, riducendo dell'80% il traffico di rete e le operazioni di I/O.
 
-## La configurazione che decide la durabilità
+Il secondo meccanismo è il **commit manuale dell'offset strettamente successivo alla persistenza (*commit-after-write*)** unito al controllo di `max.poll.interval.ms`. Disabilitando `enable.auto.commit=false`, il consumer segue un ciclo atomico: legge il batch con `poll()`, scrive e attende l'esito positivo dell'`INSERT` su ClickHouse, e solo a quel punto chiama `commitSync()`. Se il consumer cade prima dell'`INSERT`, al riavvio rileggerà lo stesso batch (garanzia *at-least-once*).
 
-La configurazione più critica è `acks`, che definisce la garanzia sulla scrittura. Qui dichiari in modo esplicito quanto rischi in cambio di latenza più bassa.
+Il terzo meccanismo è la **scelta di una chiave di partizionamento ad alta cardinalità uniforme**. La chiave non serve a "filtrare" i dati, ma a garantire l'ordine per singola entità distribuendo uniformemente il carico tra le $P$ partizioni: usare `order_id` o `customer_id` (milioni di valori distinti) spalma i messaggi in parti uguali ($\approx 1/P$ per partizione), evitando l'*hot spotting* causato da chiavi a bassa cardinalità come paese, piattaforma o tipo di evento.
 
-| Valore di `acks` | Garanzia | Quando usarlo |
-|---|---|---|
-| 0 | Nessuna conferma, throughput massimo | Telemetria sacrificabile, log non critici |
-| 1 | Conferma dal solo leader | Analytics dove un evento perso ogni tanto non sposta le metriche |
-| all | Conferma da tutte le ISR, nessuna perdita | Transazioni e dati che non possono andare persi |
+**Un'integrazione client Kafka è affidabile e scalabile solo se attiva l'idempotenza con compressione sul producer, usa una chiave ad alta cardinalità uniforme ed esegue il commit manuale degli offset solo dopo che il database di destinazione ha confermato la scrittura.**
 
-La scelta non è solo tecnica. È una decisione di prodotto travestita da parametro: stai fissando una soglia di rischio accettabile.
+## Tre errori nell'implementazione di producer e consumer per l'analytics
 
-## Chiavi, ordine e partizionamento
+Il blocco qui sotto mostra la configurazione e la tabella di ingestione vulnerabili: auto-commit attivo, chiave a bassa cardinalità (`country_code`) che sbilancia le partizioni e assenza di deduplicazione in caso di ribilanciamento del consumer:
 
-La chiave decide la partizione, e la partizione decide l'ordine. Kafka garantisce l'ordine solo dentro la singola partizione, quindi se gli eventi di un ordine devono arrivare in sequenza devi usare `order_id` come chiave. Il rovescio è che una chiave a bassa cardinalità, o una chiave calda, concentra il traffico su poche partizioni e sbilancia i consumer. La scelta della chiave è quindi un compromesso tra ordine e parallelismo, e va fatta sui pattern di accesso reali, non su un'ipotesi astratta.
+```sql
+-- ERRORE 1: tabella Kafka Engine configurata con auto-commit implicito senza gestione batch
+-- e chiave di partizionamento basata su country_code (88% del traffico finisce su 1 sola partizione).
+CREATE TABLE raw_stream.kafka_orders_skewed
+(
+    country_code String,
+    order_id UInt64,
+    occurred_at DateTime,
+    amount_eur Decimal(12, 2)
+)
+ENGINE = Kafka
+SETTINGS
+    kafka_broker_list = 'kafka-1:9092',
+    kafka_topic_list = 'orders.by_country_bad.v1',
+    kafka_group_name = 'cg-analytics-autocommit-bad',
+    kafka_format = 'JSONEachRow',
+    kafka_max_block_size = 1;
 
-## Consumer e gestione degli offset
+-- Query di diagnostica che rivela il grave sbilanciamento (skew) sulla partizione 3:
+SELECT
+    _partition AS partizione_kafka,
+    count() AS messaggi_letti
+FROM raw_stream.kafka_orders_skewed
+GROUP BY partizione_kafka;
+```
 
-Dal lato consumer, il punto delicato è il commit degli offset, cioè il modo in cui Kafka registra cosa hai già letto. Se committi prima di processare, un crash fa perdere il messaggio, con delivery al massimo una volta. Se committi dopo, un crash a metà lavoro fa rileggere lo stesso messaggio, con delivery almeno una volta, e l'applicazione deve essere idempotente per non duplicare gli effetti. Anche la scelta tra commit automatico e manuale è una dichiarazione di garanzia, non una preferenza stilistica.
+### Lasciare enable.auto.commit=true nei consumer che scrivono su database esterni
 
-## Esempio: progettare il contratto degli eventi
+Affidarsi a `enable.auto.commit=true` significa delegare a un cronometro cieco la decisione se un dato è stato salvato o meno. Il timer dell'auto-commit non sa nulla di cosa stia facendo il vostro codice applicativo: non appena la chiamata `poll()` successiva o il thread di background scatta, gli offset restituiti dalla `poll()` precedente vengono marcati come completati anche se la transazione sul database di destinazione è andata in rollback un istante dopo.
 
-Il contratto si progetta su un flusso concreto, per esempio transazioni: la domanda non è qual è la configurazione corretta in assoluto, ma quale scelta diventa meno rischiosa se progettata bene. La tabella mostra come leggere le situazioni tipiche.
+### Usare un attributo categorico (paese, canale, stato) come chiave del messaggio
 
-| Situazione | Lettura prudente | Decisione |
-|---|---|---|
-| Un retry sembra duplicare eventi | Il producer non è idempotente | Attivare l'idempotenza e rendere il consumer tollerante ai duplicati |
-| Una partizione riceve molto più traffico | La chiave scelta crea hotspot | Rivedere la chiave o aumentare la cardinalità |
-| Un servizio a valle si rompe dopo un deploy | Il formato del messaggio è cambiato in modo incompatibile | Versionare lo schema e garantire la compatibilità |
-| Il consumer accumula lag | Capacità di consumo insufficiente | Aggiungere istanze fino al numero di partizioni |
+Scegliere `country_code`, `payment_method` o `event_type` come chiave di partizionamento Kafka è l'errore più comune di chi confonde la chiave di partizione di un broker con la clausola `PARTITION BY` di un database. Se un topic ha 12 partizioni ma la chiave assume solo 3 valori (`'WEB'`, `'IOS'`, `'ANDROID'`), 9 partizioni su 12 rimarranno per sempre a zero messaggi (0% di utilizzo) e le 3 partizioni attive diventeranno il collo di bottiglia insuperabile dell'intera pipeline.
 
-## Serializzazione e compatibilità del formato
+### Eseguire elaborazioni lunghe nel loop di poll superando max.poll.interval.ms
 
-Il formato del messaggio è parte del contratto quanto chiave e `acks`. JSON è leggibile e flessibile ma verboso e senza garanzie di schema, mentre Avro o Protobuf con schema registry rendono esplicita la struttura e permettono di evolvere il formato senza rompere i consumer. La regola è semplice: appena più di un team legge un topic, il formato smette di essere un dettaglio implementativo e diventa un'interfaccia pubblica, con tutte le responsabilità di compatibilità che ne derivano.
+Scaricare 10.000 messaggi in una singola `poll()` e impiegare sei minuti per arricchirli chiamando un'API esterna prima di invocare la `poll()` successiva scatena una tempesta di ribilanciamenti (*rebalance storm*). Se il tempo tra due chiamate a `poll()` supera `max.poll.interval.ms` (predefinito 5 minuti), il broker considera il consumer morto, gli revoca le partizioni e le riassegna a un altro nodo del gruppo: quando il primo consumer finisce il suo lavoro e tenta di fare `commitSync()`, fallisce con `CommitFailedException` mentre il secondo nodo sta già rielaborando gli stessi identici messaggi.
 
-## Errori tipici da evitare
+## Configurazione producer/consumer ottimizzata e ingestione bilanciata in ClickHouse
 
-L'errore più frequente è trattare producer e consumer come configurazioni da copiare invece che come contratti da progettare. Succede quando scegli `acks` senza chiederti quanta perdita è accettabile, o una chiave senza guardare la distribuzione reale del traffico. Il sintomo è costante: tutto funziona in sviluppo e si rompe sotto carico.
+Per implementare producer e consumer ad alto throughput senza perdite né sbilanciamenti, applicate questi quattro criteri in ordine di priorità:
 
-Tre controlli minimi riducono il rischio. Primo, dichiarare la garanzia di delivery promessa. Secondo, verificare la distribuzione delle chiavi su un campione di traffico reale prima della produzione. Terzo, versionare lo schema dei messaggi e testare la compatibilità prima di ogni cambio di formato.
+1. Configurate ogni producer con `acks=all`, `enable.idempotence=true`, `linger.ms=20`, `batch.size=65536` e `compression.type=zstd`, usando `order_id` o `customer_id` come chiave di partizionamento.
+2. Nei consumer applicativi impostate sempre `enable.auto.commit=false`, calibrate `max.poll.records` (es. 2.000–10.000 record) in modo che l'`INSERT` batch su ClickHouse termini in meno di 2 secondi, ed eseguite `commitSync()` solo dopo la conferma del database.
+3. Quando usate il motore nativo `ENGINE = Kafka` in ClickHouse, impostate `kafka_max_block_size = 65536` e `kafka_flush_interval_ms = 2000` per creare part grandi ed efficienti.
+4. Salvate i metadati virtuali `_topic`, `_partition` e `_offset` nella tabella di destinazione per avere tracciabilità forense completa e deduplicazione esatta.
 
-## L'esempio che fa da riferimento
+Ecco la configurazione corretta dell'ingestione in ClickHouse con salvataggio delle colonne virtuali di offset e verifica dell'uniformità tra le partizioni:
 
-Kafka nasce in LinkedIn per collegare decine di sistemi produttori e consumatori senza una rete ingestibile di pipeline punto a punto, e viene pubblicato open source nel 2011. Il disegno di chiavi che decidono la partizione, conferme di scrittura configurabili e offset gestiti dai consumer viene da quell'esperienza operativa. Nel 2014 gli stessi ingegneri fondano Confluent e portano lo stesso modello sul mercato, con producer idempotenti e serializzazione governata. Da quel percorso discende la regola della lezione: ogni parametro del client è una garanzia dichiarata, non un dettaglio.
+```sql
+-- 1. Tabella Kafka Engine con blocchi da 65.536 righe per evitare "Too many parts"
+CREATE TABLE raw_stream.kafka_orders_queue
+(
+    order_id UInt64,
+    customer_id UInt64,
+    occurred_at DateTime64(3, 'UTC'),
+    amount_eur Decimal(12, 2)
+)
+ENGINE = Kafka
+SETTINGS
+    kafka_broker_list = 'kafka-1:9092,kafka-2:9092,kafka-3:9092',
+    kafka_topic_list = 'orders.created.v1',
+    kafka_group_name = 'cg-clickhouse-orders-prod',
+    kafka_format = 'JSONEachRow',
+    kafka_max_block_size = 65536,
+    kafka_flush_interval_ms = 2000,
+    kafka_skip_broken_messages = 0;
 
-Verdetto: ogni parametro del client è una garanzia dichiarata, non un dettaglio: `acks=all` per i dati critici e `1` per l'analytics tollerante, chiave scelta sulla distribuzione reale del traffico, e schema versionato appena più di un team legge il topic.
+-- 2. Tabella MergeTree di destinazione che registra _partition e _offset per audit e dedup
+CREATE TABLE raw_stream.orders_ingested
+(
+    order_id UInt64,
+    customer_id UInt64,
+    occurred_at DateTime64(3, 'UTC'),
+    amount_eur Decimal(12, 2),
+    kafka_partition UInt32,
+    kafka_offset UInt64,
+    ingested_at DateTime DEFAULT now()
+)
+ENGINE = ReplacingMergeTree(kafka_offset)
+PARTITION BY toYYYYMM(occurred_at)
+ORDER BY (toDate(occurred_at), order_id);
 
-## Domande per verificare la lezione
+-- 3. Materialized View che sposta i blocchi esponendo le colonne virtuali _partition e _offset
+CREATE MATERIALIZED VIEW raw_stream.mv_orders_ingested
+TO raw_stream.orders_ingested
+AS SELECT
+    order_id,
+    customer_id,
+    occurred_at,
+    amount_eur,
+    _partition AS kafka_partition,
+    _offset AS kafka_offset
+FROM raw_stream.kafka_orders_queue;
 
-1. Quale livello di `acks` hai scelto e quanta perdita di dati dichiari accettabile?
-2. Quale chiave di partizionamento usi e come hai verificato la distribuzione del traffico?
-3. Quando committi gli offset e come gestisci i duplicati dopo un crash?
-4. Quale formato di serializzazione usi e come garantisci la compatibilità tra team?
+-- 4. Verifica del bilanciamento tra le 12 partizioni (scarto < 2% grazie a key = order_id)
+SELECT
+    kafka_partition,
+    count() AS righe_scritte,
+    max(kafka_offset) AS ultimo_offset_salvato
+FROM raw_stream.orders_ingested
+WHERE occurred_at >= now() - INTERVAL 1 HOUR
+GROUP BY kafka_partition
+ORDER BY kafka_partition ASC;
+```
+
+Il risultato sistema ogni punto debole: usando `order_id` come chiave del producer, la query di controllo mostra che tutte e 12 le partizioni ricevono circa l'8,3% del traffico ciascuna, moltiplicando per dodici la velocità di ingestione; il blocco da `65536` righe su `ENGINE = Kafka` committa gli offset su Kafka solo dopo che la Materialized View ha scritto con successo la part su disco in `orders_ingested`; e la presenza di `kafka_partition` e `kafka_offset` nella tabella finale permette di verificare in qualsiasi istante se manca anche un solo offset nella sequenza. Disabilitare l'auto-commit e scegliere la chiave giusta richiede cinque minuti; recuperare i dati persi da un auto-commit scattato durante un timeout del database è impossibile se il producer non li ha salvati altrove.
+
+## Serializzazione binaria compatta Avro/Protobuf o testo JSON con compressione Zstandard
+
+La scelta del formato di serializzazione con cui i producer codificano i messaggi dentro Kafka impatta direttamente sulla larghezza di banda, sulla CPU dei broker e sulla sicurezza di evoluzione dello schema: l'alternativa principale è tra **formati binari tipizzati con Schema Registry (Apache Avro, Protobuf)** e **JSON testuale compresso a livello di blocco (`compression.type=zstd`)**.
+
+Il criterio di scelta è netto: **adottate Avro o Protobuf con Schema Registry quando lavorate in un'organizzazione con più team indipendenti, volumi elevati (> 5.000 eventi/s) e necessità di bloccare alla fonte i produttori che inviano tipi di dato errati, usate invece JSON compresso con `zstd` solo per pipeline interne a un singolo team o integrazioni rapide con webhook di terze parti dove la leggibilità immediata del payload prevale e la validazione avviene in ingresso con JSON Schema.**
+
+La confusione comune consiste nel mandare JSON non compresso su Kafka lamentandosi dei costi di rete cloud tra Availability Zone, oppure nel credere che basti passare ad Avro senza attivare comunque la compressione di batch sul producer. Sbagliare questa scelta o spreca fino al 75% di banda e spazio disco per ripetere milioni di volte i nomi delle chiavi JSON (`"transaction_timestamp_utc": ...`), o lascia passare in produzione stringhe al posto di numeri che fanno schiantare l'ingestione a valle.
+
+Questo articolo non tratta le transazioni multi-topic con `isolation.level=read_committed` né la scrittura di partizionatori custom in Java/Python. Ricordate che su Kafka la compressione (`zstd` o `lz4`) lavora sull'intero batch accumulato in `linger.ms`, non sul singolo messaggio isolato: se `linger.ms=0` e ogni batch contiene un solo messaggio JSON di 300 byte, il rapporto di compressione sarà quasi nullo.
+
+## Cinque domande prima di mettere in produzione un producer o consumer Kafka
+
+1. Il producer ha attivi `acks=all`, `enable.idempotence=true`, `compression.type=zstd` e un `linger.ms` tra 10 e 50 millisecondi per formare batch efficienti?
+2. La chiave di partizionamento scelta ha un'alta cardinalità e una distribuzione uniforme (verificata controllando che tutte le partizioni del topic crescano alla stessa velocità)?
+3. Il consumer ha `enable.auto.commit=false` ed esegue il commit degli offset esclusivamente **dopo** che il batch è stato scritto e confermato su disco nel database di destinazione?
+4. La tabella di destinazione in ClickHouse è idempotente rispetto a una rilettura dello stesso batch (grazie a `ReplacingMergeTree` su `event_id` o `(kafka_partition, kafka_offset)`)?
+5. Il tempo massimo impiegato dal consumer per processare un singolo lotto di `max.poll.records` è inferiore a un terzo di `max.poll.interval.ms`, evitando falsi ribilanciamenti sotto carico?
+
+La metrica di controllo per certificare l'equilibrio del partizionamento è il **coefficiente di skew tra partizioni** ($\max(\text{msg}_p) / \text{avg}(\text{msg}_p)$): con una chiave ben scelta come `order_id` o `user_id`, questo rapporto deve rimanere sempre inferiore a `1,05` (meno del 5% di scarto tra la partizione più carica e la media).
+
+Di tutta l'ingegneria dei client Kafka, una sola regola protegge i vostri dati dai crash notturni: non confermate mai a Kafka di aver letto un messaggio finché quel messaggio non è salvo sul disco del vostro database.

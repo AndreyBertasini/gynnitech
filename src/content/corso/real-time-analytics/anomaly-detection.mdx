@@ -5,7 +5,6 @@ description: >-
 module: "Modulo 12: Real-time analytics con ClickHouse"
 order: 7
 category: Tecnico
-  Alerting e anomaly detection - immagine ufficiale della lezione su GinnyTech
 headerImage: /course-headers/real-time-analytics-anomaly-detection-ginnytech-ad-v3.webp
 headerImageAlt: >-
   Alerting e anomaly detection su stream - immagine ufficiale della lezione su GinnyTech, creata da AD
@@ -18,68 +17,146 @@ learningObjectives:
   - Scegliere tra soglie, Z-score/IQR e Isolation Forest in base alla metrica
   - Fissare severità, owner e rate limiting per ridurre i falsi positivi
 binario: "ml-tabellare"
+formato: "articolo"
 autore: "Hermes"
 controllatoDa: "Argo"
 autorizzatoDa: "Giano"
 draft: false
-dateModified: 2026-09-07
+dateModified: 2026-11-13
 ---
+
 # Alerting e anomaly detection su stream
 
-Il binario di questa lezione è **ml-tabellare**, ma il gioco cambia: ogni riga che arriva va confrontata con un passato che si muove con lei. L'obiettivo è svegliare una persona solo quando serve davvero, non a ogni rumore di fondo.
+Un team di piattaforma imposta un allarme automatico che invia un messaggio urgente su Slack e telefona al reperibile ogni volta che gli ordini scendono sotto i 50 al minuto. L'allarme suona tutte le notti alle due in punto quando gli utenti vanno a dormire, mentre la domenica pomeriggio non si accorge che il checkout su iOS si è rotto facendo perdere il 35% delle vendite per quattro ore, perché il traffico totale resta comunque a 65 ordini al minuto. La causa non è lo strumento di notifica: è usare soglie statiche globali invece di baseline stagionali per fascia oraria e segmento con persistenza multi-finestra.
 
-## L'idea in breve
+## Chiamate notturne alle due e un blocco iOS invisibile per quattro ore
 
-L'anomaly detection su stream confronta ogni metrica con una baseline adattiva per svegliare una persona solo quando serve un intervento umano. Meno falsi allarmi, più fiducia in ogni segnale.
+Questo è un caso ricostruito con numeri di esempio su quanto accade quando gli allarmi in tempo reale vengono configurati con un singolo numero fisso (*hardcoded threshold*). L'e-commerce registra in media 110 ordini al minuto nelle ore centrali del giorno e 12 ordini al minuto tra l'una e le cinque del mattino.
 
-## Il percorso in cinque passi
+Dopo un disservizio passato, un ingegnere configura la regola `ALERT IF orders_per_minute < 50`:
+1. Ogni singola notte, non appena scocca l'01:15 e il traffico fisiologico scende a 48 ordini al minuto, l'allarme inizia a sparare una notifica ogni sessanta secondi fino alle sette del mattino. Dopo quattro notti di falsi positivi (*alert fatigue*), il team silenzia il canale di avviso.
+2. Due settimane dopo, alle 15:00 di domenica, un aggiornamento dell'app mobile rompe il pulsante di conferma ordine su iOS. In quella fascia oraria la piattaforma dovrebbe registrare 100 ordini al minuto (60 da web/Android e 40 da iOS); con iOS azzerato il volume scende a 60 ordini al minuto. Poiché $60 > 50$, la soglia statica globale non scatta mai e l'azienda perde 180.000 euro di ordini prima che il servizio clienti segnali il problema il lunedì mattina.
 
-Per costruire un sistema di alert che regga il traffico reale:
+La causa del doppio fallimento è ignorare la stagionalità intrinseca delle serie storiche umane (ora del giorno e giorno della settimana) e monitorare solo il totale aggregato senza scomporre le dimensioni critiche.
 
-1. Definisci quale metrica merita un alert e quale azione umana deve seguire.
-2. Costruisci baseline adattive per fascia oraria invece di soglie statiche.
-3. Fissa severità, `owner` e rate limiting per evitare duplicati e rumore.
-4. Arricchisci ogni alert con contesto su inizio, `baseline` e impatto atteso.
-5. Misura falsi positivi e detection reale e ritaratura soglie ogni settimana.
+## Baseline stagionali, Z-score robusto (MAD) e isteresi multi-finestra
 
-## Soglie statiche e soglie dinamiche
+Un motore di anomaly detection in tempo reale che cattura i guasti veri senza svegliare il team a vuoto si fonda su tre meccanismi statistici e operativi ([Chandola et al., 2009](https://doi.org/10.1145/1541880.1541882)).
 
-Il modo più semplice di rilevare un'anomalia è la soglia statica: se `error_rate` supera l'uno per cento, manda un alert. Funziona finché il traffico è stabile. Se una campagna raddoppia il volume, l'alert scatta anche su sistema sano. La soglia dinamica confronta il valore con una `baseline` adattiva: se `error_rate` supera media mobile a sette giorni più tre deviazioni standard, manda un alert.
+Il primo meccanismo è la **baseline condizionata a giorno della settimana e fascia oraria**. Il volume di traffico alle 03:00 del martedì non è confrontabile con le 11:00 del martedì, ma è direttamente confrontabile con le 03:00 degli ultimi quattro o otto martedì. Per ogni combinazione di `(giorno_settimana, minuto_del_giorno, segmento)` si calcola la distribuzione storica delle ultime $N$ settimane alla stessa identica ora, trasformando una curva fortemente stagionale in residui stazionari.
+
+Il secondo meccanismo è il punteggio di anomalia robusto basato su mediana e scarto assoluto mediano (**MAD**, *Median Absolute Deviation*) o intervallo interquartile (**IQR**) al posto di media e deviazione standard classiche. Nelle serie reali in streaming basta che due settimane fa ci sia stato un Black Friday o un incidente di 20 minuti perché la media aritmetica $\mu$ e la deviazione standard $\sigma$ risultino gonfiate, rendendo lo Z-score classico cieco alle anomalie successive. Lo Z-score robusto confronta il valore corrente $x_t$ con la mediana storica $M$:
+$$Z_{	ext{robusto}} = rac{x_t - M}{1,4826 \cdot 	ext{median}(|x - M|)}$$
+affiancato da una guardia di volume minimo (es. almeno 20 eventi attesi nella finestra) per non far scattare allarmi su fluttuazioni casuali di piccoli numeri.
+
+Il terzo meccanismo è il **filtro di persistenza (*N-of-M windows*) con rate limiting e deduplicazione**. Un singolo minuto anomalo può dipendere da un micro-ritardo di rete; richiedere che l'anomalia persista per almeno $3$ minuti consecutivi (o $3$ finestre su $5$) abbatte dell'85% i falsi allarmi transitori, mentre il raggruppamento dell'allerta per chiave di incidente evita di mandare 60 messaggi identici in un'ora.
+
+**Un allarme su stream è azionabile solo se misura lo scostamento dalla mediana della stessa ora e giorno della settimana, richiede persistenza su più minuti consecutivi e tace quando il volume atteso è troppo basso per essere statisticamente significativo.**
+
+## Tre errori nella configurazione degli alert in tempo reale
+
+Il blocco SQL qui sotto mostra la regola di alerting fragile che usa una soglia statica, scatta su un singolo minuto isolato e ignora la dimensione piattaforma:
 
 ```sql
-WITH stats AS (
-  SELECT AVG(error_rate) OVER (ORDER BY minute ROWS 10080 PRECEDING) AS baseline,
-         STDDEV(error_rate) OVER (...) AS stddev
-  FROM metrics
-)
-SELECT * FROM stats WHERE error_rate > baseline + 3 * stddev;
+-- ERRORE 1: soglia statica (< 50) che ignora la notte e il giorno della settimana.
+-- ERRORE 2: valuta un singolo minuto (anche l'ultimo incompleto) senza persistenza su 3 minuti.
+-- ERRORE 3: nessuna scomposizione per piattaforma (il crollo di iOS viene coperto da Web).
+SELECT
+    toStartOfMinute(occurred_at) AS minuto,
+    count() AS ordini_totali,
+    'CRITICAL: Ordini sotto soglia 50!' AS messaggio_allarme
+FROM raw_stream.checkout_events
+WHERE occurred_at >= now() - INTERVAL 1 MINUTE
+GROUP BY minuto
+HAVING ordini_totali < 50;
 ```
 
-La `baseline` si muove con il volume e i falsi positivi crollano. Questa è la prima leva per ridurre il rumore.
+### Usare soglie statiche fisse su metriche soggette a ciclo giorno-notte
 
-## Tre livelli di sofisticazione
+Scrivere `HAVING ordini_totali < 50` per una metrica legata al comportamento umano garantisce matematicamente due errori opposti: di notte la soglia è troppo alta e genera falsi positivi continui; nelle ore di punta la soglia è troppo bassa e lascia passare inosservati cali del 40% o 50% finché il totale rimane sopra 50. Le soglie statiche hanno senso solo per invarianti fisici dell'infrastruttura (es. disco pieno al 90% o CPU oltre il 95% per 15 minuti), mai per volumi di business.
 
-Le tecniche stanno su una scala. Al primo livello c'è l'approccio a soglie: semplice e veloce ma rumoroso. È adatto a metriche stabili come l'health check che smette di rispondere. Al secondo livello stanno metodi statistici come `Z-score` o `IQR`: sensibili ai cambi di distribuzione e adatti a metriche con pattern noti come throughput orario con picchi attesi. Al terzo livello arrivano metodi come `Isolation Forest` o `LSTM`, che catturano pattern non lineari con stagionalità multiple e interazioni tra variabili. Salire di livello costa complessità e manutenzione e va giustificato dalla metrica.
+### Calcolare media e deviazione standard senza proteggersi dagli outlier passati
 
-Verdetto: parti da soglie dinamiche su baseline adattive e sali a metodi statistici o ML solo dove stagionalità e interazioni lo richiedono.
+Sostituire la soglia fissa con `avg(ordini) - 3 * stddevPop(ordini)` sulle ultime quattro settimane sembra la soluzione statistica corretta. Fallisce non appena nelle quattro settimane precedenti è presente una giornata di campagna promozionale o un precedente blackout: quel singolo evento estremo moltiplica per quattro la deviazione standard $\sigma$, allargando a tal punto la banda di tolleranza $[\mu - 3\sigma, \mu + 3\sigma]$ che la soglia inferiore diventa negativa e l'allarme non può più scattare per un mese intero.
 
-## Le regole per un buon sistema di alert
+### Sparare una notifica al primo minuto anomalo senza persistenza né guardia di volume
 
-Ogni alert deve richiedere un'azione umana: senza azione è un log, non un alert. La priorità riflette impatto su business e non rarità statistica, con `P1` che sveglia di notte e `P3` che attende il giorno dopo. Serve rate limiting con al massimo un alert al minuto per stesso problema, perché i duplicati non aggiungono informazione. Ogni alert porta contesto: non CPU sopra il novanta per cento ma quale host, contro quale `baseline`, da quando e con quale impatto su checkout.
+Valutare l'allarme su un'unica finestra di 60 secondi e su segmenti con soli 2 o 3 ordini al minuto inonda la reperibilità di rumore statistico. Se un segmento fa in media 2 ordini al minuto, ricevere 0 ordini per un minuto ha una probabilità di Poisson $e^{-2} pprox 13,5\%$: accade fisiologicamente otto volte ogni ora senza che ci sia alcun guasto tecnico.
 
-## Gli errori da evitare
+## Rilevazione di anomalie in ClickHouse con mediana stagionale, MAD e persistenza 3-su-3
 
-L'errore più frequente è trattare detection come etichetta invece che come criterio di scelta, con numeri senza decisione, senza `baseline` e senza rischio residuo. Gli altri tre sono medie globali premature che nascondono segmenti opposti, qualità del dato con duplicati e timezone incoerenti e scambi tra correlazione e causalità. Ogni analisi porta definizione esplicita, confronto per segmento e verifica contro periodo precedente o controllo.
+Per implementare un sistema di anomaly detection in SQL direttamente sulle tabelle di rollup in ClickHouse, applicate questi quattro criteri in ordine di priorità:
 
-Riferimenti: Netflix Technology Blog (2018), Radon con Robust PCA per anomaly detection; Hochenbaum e colleghi (2017), Automatic Anomaly Detection in the Cloud su KDD 2017.
+1. Calcolate la baseline per ogni segmento (`platform`, `payment_method`) raggruppando le ultime 6–8 settimane per lo stesso giorno della settimana (`toDayOfWeek`) e la stessa finestra di 5 minuti, usando `median` e lo scarto mediano `MAD` invece di `avg` e `stddev`.
+2. Imponete una guardia di volume minimo (es. `mediana_storica >= 25` eventi nella finestra) prima di valutare qualsiasi anomalia di calo.
+3. Richiedete che la violazione ($Z_{	ext{robusto}} < -3,5$ e calo superiore al $30\%$ rispetto alla mediana) si verifichi per almeno **3 finestre consecutive** prima di emettere l'allerta critica.
+4. Allegati a ogni riga di allerta l'owner del componente, la gravità (`P1` blocco totale, `P2` degrado parziale) e i valori esatti osservati rispetto alla baseline.
 
-## Il caso di Netflix e Radon
+Ecco la query pronta per ClickHouse che rileva il blocco di una piattaforma confrontando gli ultimi tre intervalli chiusi con la mediana storica delle 8 settimane precedenti:
 
-Netflix presenta nel 2018 Radon, sistema di anomaly detection basato su Robust Principal Component Analysis per migliaia di metriche operative. Il metodo separa pattern normale a basso rango da anomalie sparse e resta eseguibile su stream. Il risultato documentato è il passaggio da migliaia di alert giornalieri a poche decine con detection dei problemi reali sopra il 95 per cento. Il guadagno è fiducia: ogni segnale torna a produrre una risposta utile invece di rumore.
+```sql
+WITH storico_8_settimane AS (
+    SELECT
+        platform,
+        toDayOfWeek(minuto) AS giorno_settimana,
+        toHour(minuto) * 60 + toMinute(minuto) AS minuto_del_giorno,
+        quantileExact(0.50)(ordini_1m) AS mediana_storica,
+        -- Calcolo approssimato della dispersione robusta tramite range interquartile (IQR):
+        quantileExact(0.75)(ordini_1m) - quantileExact(0.25)(ordini_1m) AS iqr_storico
+    FROM realtime.v_orders_per_minute_by_platform
+    WHERE minuto >= toStartOfMinute(now()) - INTERVAL 56 DAY
+      AND minuto < toStartOfMinute(now()) - INTERVAL 1 DAY
+    GROUP BY platform, giorno_settimana, minuto_del_giorno
+),
+ultimi_3_minuti_chiusi AS (
+    SELECT
+        r.platform,
+        r.minuto,
+        r.ordini_1m AS ordini_osservati,
+        s.mediana_storica,
+        -- Z-score robusto basato su IQR (1.349 * sigma ~ IQR):
+        (r.ordini_1m - s.mediana_storica) / greatest(s.iqr_storico / 1.349, 1.0) AS z_robusto,
+        (r.ordini_1m < s.mediana_storica * 0.65 AND z_robusto < -3.5 AND s.mediana_storica >= 20) AS is_anomalo
+    FROM realtime.v_orders_per_minute_by_platform AS r
+    INNER JOIN storico_8_settimane AS s
+        ON r.platform = s.platform
+       AND toDayOfWeek(r.minuto) = s.giorno_settimana
+       AND (toHour(r.minuto) * 60 + toMinute(r.minuto)) = s.minuto_del_giorno
+    WHERE r.minuto >= toStartOfMinute(now()) - INTERVAL 3 MINUTE
+      AND r.minuto < toStartOfMinute(now())
+)
+SELECT
+    platform,
+    countIf(is_anomalo) AS minuti_anomali_su_3,
+    round(avg(ordini_osservati), 1) AS media_osservata_3m,
+    round(avg(mediana_storica), 1) AS baseline_attesa_mediana,
+    round(min(z_robusto), 2) AS peggior_z_robusto,
+    'On-Call Mobile/Checkout — Verificare release e gateway per platform' AS runbook_action
+FROM ultimi_3_minuti_chiusi
+GROUP BY platform
+HAVING minuti_anomali_su_3 = 3;
+```
 
-## Domande per ripassare
+Con questa query le chiamate notturne alle due di mattina spariscono per sempre perché di notte `mediana_storica` scende sotto la guardia di volume o si adatta automaticamente ai 12 ordini attesi; al contrario, domenica pomeriggio alle 15:03, dopo tre minuti consecutivi in cui `platform = 'iOS'` registra 0 ordini contro una `mediana_storica` di 40 ordini al minuto ($Z_{	ext{robusto}} = -12,4$), ClickHouse restituisce la riga di allarme indicando esattamente la piattaforma colpevole e il runbook da seguire. Sostituire una soglia statica con una query su mediana stagionale e persistenza 3-su-3 richiede venti righe di SQL; lasciare che il team ignori gli allarmi per stanchezza rende cieca l'intera infrastruttura di monitoraggio.
 
-1. Quando una soglia statica genera falsi positivi sul tuo traffico?
-2. Quale baseline adattiva useresti per error rate e latenza?
-3. Chi è owner di ogni alert e quale azione deve seguire?
-4. Come misuri se un alert produce risposte utili o solo rumore?
+## Regole statistiche trasparenti in SQL o modelli Machine Learning multivariati
+
+Quando si progetta il sistema di rilevazione anomalie, il team deve scegliere tra due famiglie di algoritmi: le **regole statistiche parametriche/non-parametriche in SQL** (mediana stagionale, IQR/MAD, Z-score con guardia di volume) e i **modelli di Machine Learning non supervisionati o di forecasting** (Isolation Forest, Prophet, autoencoder su più metriche correlate).
+
+Il criterio di scelta è netto: **usate lo Z-score robusto con baseline stagionale in SQL dentro ClickHouse per il 95% degli allarmi operativi su metriche di business e infrastruttura (ordini, ricavi, latenza, tasso di errore per canale), riservate invece algoritmi multivariati come Isolation Forest in Python solo quando l'anomalia non è visibile su nessuna singola metrica presa da sola ma emerge dalla combinazione anomala di dieci feature contemporanee (es. rilevamento frodi su comportamenti di account o attacchi bot distribuiti).**
+
+La confusione comune consiste nell'addestrare una rete neurale o un modello Isolation Forest opaco per monitorare il numero di ordini al minuto in sala controllo. Sbagliare questa scelta distrugge l'operatività durante gli incidenti: quando alle tre di notte suona un allarme generato da una "scatola nera" che restituisce `anomaly_score = 0.87` senza dire quale metrica è scesa e di quanto rispetto a martedì scorso, l'ingegnere di turno perde mezz'ora solo per capire perché l'algoritmo si è attivato. Con mediana e IQR in SQL, il messaggio di allerta dice immediatamente: *"iOS: osservati 2 ordini/min contro 40 attesi (-95%) per 3 minuti consecutivi"*.
+
+Questo articolo non tratta la soppressione manuale delle finestre durante i calendari di festività mobili (Pasqua, Black Friday) né l'instradamento delle notifiche su PagerDuty o Opsgenie. Per i giorni di campagna straordinaria nota in anticipo, è buona norma inserire una tabella di calendario `dim_promo_events` che moltiplica la baseline attesa per un fattore di scala o sospende i controlli di eccesso di traffico mantenendo attivi solo quelli sul tasso di errore percentuale.
+
+## Cinque domande prima di attivare un nuovo alert in produzione
+
+1. La soglia confronta il valore corrente con la baseline storica della stessa ora e giorno della settimana anziché usare un numero statico valido sia di giorno sia di notte?
+2. Il calcolo della baseline usa stimatori robusti agli outlier passati (`median` e `IQR` / `MAD`) invece di media e deviazione standard semplici?
+3. L'allarme richiede una persistenza su più finestre consecutive (es. 3 minuti chiusi su 3) e una guardia di volume minimo prima di inviare una notifica?
+4. La query scompone il flusso per le dimensioni critiche di guasto (`platform`, `payment_gateway`, `country`) così che il crollo di un segmento non resti nascosto dietro la media globale?
+5. Ogni alert ha un proprietario chiaro, un livello di severità distinto (chiamata telefonica solo se richiede intervento umano immediato) e un link diretto al runbook di diagnosi?
+
+La metrica regina per misurare la qualità del vostro sistema di alerting è la **precisione operativa degli avvisi** (*Actionable Alert Ratio*), ovvero la percentuale di notifiche ricevute a cui corrisponde un incidente reale o un'azione correttiva eseguita: un sistema sano mantiene questo rapporto sopra l'80%, eliminando alla radice la stanchezza da falsi allarmi.
+
+Di tutta l'ingegneria dell'anomaly detection, un solo principio merita di essere scolpito nel team: un allarme a cui non corrisponde un'azione umana immediata non è un allarme, è solo rumore che coprirà il prossimo incidente vero.

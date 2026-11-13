@@ -19,297 +19,130 @@ learningObjectives:
   - Sessionizzare eventi con LAG, soglia di inattività e somma cumulata del flag di apertura
   - Calcolare funnel stretti e conversioni con finestra di attribuzione e denominatore dichiarato
 binario: "ml-tabellare"
+formato: "articolo"
 autore: "Hermes"
 controllatoDa: "Argo"
 autorizzatoDa: "Giano"
 draft: false
-dateModified: 2026-09-07
+dateModified: 2026-11-13
 ---
 
 # Funnel in SQL: passi in sequenza e finestre di conversione
 
-Un funnel racconta quanti utenti attraversano una sequenza di passi — vista prodotto, aggiunta al carrello, checkout, pagamento — e dove si perdono per strada. La sessionizzazione risponde a una domanda più a monte: cosa conta come una singola visita, quando tutto quello che hai è una lista di timestamp? Senza una definizione esplicita di sessione, ogni tasso di conversione è un numero appeso al nulla, perché il denominatore cambia senza che nessuno se ne accorga. In questa pagina costruiamo entrambi in SQL puro, con pattern che reggono su tabelle eventi reali: orari che arrivano in disordine, utenti che tornano dopo mesi, qualche evento che manca del tutto. Il dialetto di riferimento è PostgreSQL, ma quasi tutto gira anche altrove con ritocchi minimi. Siamo sul binario `ml-tabellare`: il lavoro è tutto su tabelle di eventi, finestre temporali e aggregazioni, senza modelli statistici.
+Un team di prodotto costruisce un funnel a tre passi (`signup_started -> workspace_created -> first_report_exported`) contando semplicemente quanti utenti distinti hanno generato ciascun evento nel mese corrente: risultano 1.000 utenti allo step 1, 620 allo step 2 e 710 allo step 3, con un assurdo tasso di passaggio del 114% tra il secondo e il terzo passo. La causa non è un errore di conteggio di ClickHouse: è calcolare un **funnel non sequenziale** che conta gli eventi in modo indipendente senza imporre l'ordine cronologico (`t1 < t2 < t3`) né dichiarare una finestra di conversione comune.
 
-Lavoreremo su una tabella `events` che vale la pena fissare subito, perché ogni query dell'articolo la usa:
+## Settecentodieci utenti allo step tre partendo da seicentoventi allo step due
 
-```sql
--- Tabella eventi: una riga per azione utente, mai aggregata a monte
--- event_time è timestamptz: i fusi orari mescolati sono la prima fonte di funnel sbagliati
-CREATE TABLE events (
-  user_id    bigint,       -- utente o visitatore loggato
-  event_name text,         -- 'view_item', 'add_to_cart', 'checkout', 'purchase', ...
-  event_time timestamptz,  -- quando è successo, con fuso
-  session_id text          -- spesso NULL a monte: lo ricostruiamo noi
-);
-```
+Questo è un caso ricostruito con numeri di esempio su quanto accade quando si costruisce un funnel con semplici `COUNT(DISTINCT user_id)` per evento invece di tracciare la sequenza temporale per ciascun utente.
 
-## L'idea in una frase
+Esistono tre modi principali di definire un funnel in SQL, ciascuno con regole e numeri diversi:
 
-In una frase: questa lezione insegna a trasformare timestamp grezzi in sessioni con soglia di inattività e a calcolare funnel stretti e conversioni con finestra di attribuzione dichiarata.
+| Tipo di funnel | Vincolo temporale | Denominatore | Quando usarlo |
+| :--- | :--- | :--- | :--- |
+| **Funnel lasco (non ordinato)** | Nessun ordine imposto tra gli step | Utenti nello step 1 | Da evitare per analisi di flusso reali |
+| **Funnel ordinato a finestra aperta** | `t_step1 <= t_step2 <= t_step3` | Utenti che hanno raggiunto lo step 1 | Onboarding SaaS multi-giorno |
+| **Funnel stretto a finestra chiusa** | Ordine stretto entro `N` giorni/ore dallo step 1 | Utenti con step 1 maturato da almeno `N` giorni | E-commerce, attivazione rapida, confronti settimanali stabili |
 
-## La ricetta in cinque passi
+Dichiarare esplicitamente se il funnel è **ordinato**, qual è la **finestra massima di conversione** e qual è il **denominatore** impedisce che i tassi di conversione oscillino o superino il 100%.
 
-1. Fissa la tabella eventi con `user_id`, `event_name` ed `event_time` in `timestamptz` e deduplica sulla tripla prima di ogni finestra.
-2. Calcola il gap dal precedente con `LAG` per utente in ordine di tempo e apri una nuova sessione quando il gap supera la soglia o è `NULL`.
-3. Numera le sessioni con somma cumulata del flag di apertura e aggrega una riga per sessione con inizio, fine e conteggio eventi.
-4. Mappa ogni evento a un numero di passo e calcola il passo più profondo raggiunto in ordine per il funnel stretto, oppure usa aggregazioni con `FILTER` per il funnel lasco.
-5. Attribuisci le conversioni tra visite con self-join temporale entro una finestra dichiarata e quadra ingressi, uscite e transizioni prima di pubblicare il tasso.
+## Ordine temporale stretto, finestra di conversione e windowFunnel in ClickHouse
 
-## Perché i funnel mentono più spesso delle query che li calcolano
+Il primo meccanismo è l'**imposizione dell'ordine temporale per utente (`t_step1 < t_step2 < t_step3`)**. In SQL standard, per un funnel a 3 o 4 passi, si calcola per ogni utente il timestamp del primo `step_1` (`minIf(occurred_at, event_name = 'step_1')`), poi il primo `step_2` **successivo** a `step_1`, e infine il primo `step_3` **successivo** a `step_2`. Solo chi rispetta la catena cronologica completa avanza al passo successivo.
 
-Il calcolo di un funnel sembra aritmetica elementare: conti chi fa il passo 1, conti chi fa anche il passo 2, poi dividi. Il problema è che ogni parola nasconde una decisione. "Chi fa il passo 2" significa entro quanto tempo dal passo 1? Nella stessa sessione, entro 24 ore, entro 30 giorni o senza alcun limite? Cambiando solo la finestra, lo stesso dataset passa da un tasso del 18% a uno del 41%. Entrambe le query sono sintatticamente corrette. La differenza è semantica e va scritta prima del `SELECT`, non scoperta dopo.
+Il secondo meccanismo è la **finestra di conversione esplicita e maturità della coorte**. Se un utente si iscrive oggi alle 14:00 e la finestra di conversione del funnel è di 7 giorni, quell'utente non ha ancora avuto 7 giorni di tempo per completare lo step 3. Nei confronti settimanali, bisogna includere nel denominatore solo gli utenti il cui `step_1` è avvenuto almeno 7 giorni fa (`step1_at <= now() - INTERVAL 7 DAY`), altrimenti l'ultima settimana sembrerà sempre avere una conversione crollata.
 
-La seconda ambiguità riguarda l'ordine. Un funnel stretto richiede la sequenza esatta A → B → C; uno lasco accetta chi ha fatto A, B e C in qualunque ordine. Per un checkout e-commerce la sequenza conta: nessuno paga prima di aver visto un prodotto, e se i dati dicono il contrario c'è un bug di tracciamento, non un utente creativo. Per un funnel editoriale — homepage, articolo, newsletter — l'ordine è molto meno informativo, e imporlo taglia fuori percorsi legittimi. La scelta tra stretto e lasco non è tecnica, è una tesi sul comportamento che stai misurando.
+Il terzo meccanismo è la funzione nativa **`windowFunnel(window_seconds)(timestamp, cond1, cond2, cond3)` di ClickHouse**. In una sola espressione aggregata per `user_id`, `windowFunnel` verifica automaticamente che le condizioni si verifichino nell'ordine esatto dichiarato e che l'intero percorso si completi entro `window_seconds` (es. `604800` secondi = 7 giorni), restituendo il livello massimo raggiunto (`0, 1, 2, 3`) per ciascun utente.
 
-Poi c'è il denominatore. Il tasso di conversione è una frazione, e le frazioni hanno due leve: $conv = N(convertiti) / N(entrati)$. Quasi tutti guardano il numeratore e danno per scontato il denominatore. Ma "entrati" chi sono: tutti i visitatori, solo chi ha visto almeno un prodotto, solo le sessioni con almeno due eventi? Un bot che rimbalza sulla homepage in mezzo secondo entra nel denominatore? Ogni risposta sposta il tasso di punti percentuali, e nessuna è neutra. La regola operativa è una sola: ogni funnel pubblicato deve dichiarare denominatore, finestra temporale e regola d'ordine in una riga, altrimenti non è confrontabile con niente — nemmeno con se stesso il mese dopo.
+**Un funnel in SQL è valido solo quando impone l'ordine cronologico dei passi per singolo utente, fissa una finestra massima di conversione e verifica che gli utenti al denominatore abbiano maturato l'intera finestra.**
 
-## Dalla lista di timestamp alle sessioni: la soglia di inattività
+## Tre errori comuni nei funnel in SQL
 
-La sessionizzazione time-based è la convenzione più diffusa: una sessione è una sequenza di eventi dello stesso utente dove ogni evento dista dal precedente meno di una soglia — tipicamente 30 minuti. Superata la soglia, si apre una sessione nuova. È una convenzione, non una legge fisica: 30 minuti funzionano per un e-commerce, sono assurdi per un tool B2B dove l'utente tiene la scheda aperta tutto il giorno. Il valore va scelto guardando la distribuzione dei gap tra eventi consecutivi, non copiato da un blog.
-
-Il mattone di base è `LAG()`: per ogni evento, l'orario dell'evento precedente dello stesso utente.
+Il blocco SQL qui sotto mostra l'errore classico del funnel calcolato con `countIf` indipendenti che permette agli utenti vecchi di completare lo step 3 senza aver fatto lo step 1 nel periodo:
 
 ```sql
--- Per ogni evento, quanto tempo è passato dal precedente dello stesso utente
+-- ERRORE 1: conta utenti distinti per evento senza verificare che step 2 avvenga DOPO step 1!
+-- ERRORE 2: un utente iscritto 3 mesi fa che esporta un report oggi entra allo step 3 ma non allo step 1!
 SELECT
-  user_id,
-  event_time,
-  -- LAG apre una finestra per utente, ordinata nel tempo
-  LAG(event_time) OVER (PARTITION BY user_id ORDER BY event_time) AS prev_time,
-  event_time - LAG(event_time) OVER (
-    PARTITION BY user_id ORDER BY event_time
-  ) AS gap  -- intervallo: NULL per il primo evento dell'utente
-FROM events;
+    uniqExactIf(user_id, event_name = 'signup_started') AS step_1_users,
+    uniqExactIf(user_id, event_name = 'workspace_created') AS step_2_users,
+    uniqExactIf(user_id, event_name = 'first_report_exported') AS step_3_users
+FROM analytics_prod.fct_product_events
+WHERE event_date >= today() - 30;
 ```
 
-Il `NULL` sulla prima riga di ogni utente non è un errore da rattoppare: è il segnale "nuova sessione". La query successiva lo usa esattamente così — ogni riga dove il gap supera la soglia (o è `NULL`) apre una sessione:
+### Contare ogni evento separatamente senza legare la sequenza per utente
+
+Quando usate `uniqExactIf` separati sulla stessa tabella, uno stesso utente può aver fatto `first_report_exported` oggi dopo essersi iscritto due mesi fa: entra nel conteggio dello step 3 ma non in quello dello step 1, rendendo possibile che `step_3_users > step_2_users`.
+
+### Includere nel denominatore gli utenti che non hanno ancora maturato la finestra
+
+Se misurate la conversione a 7 giorni su tutti gli iscritti degli ultimi 30 giorni includendo chi si è iscritto ieri, state mescolando utenti con 30 giorni di vita e utenti con 24 ore di vita. Il tasso di conversione dell'ultima settimana risulterà artificialmente più basso del 30–50% e genererà falsi allarmi.
+
+### Dimenticare di dichiarare se gli step devono essere consecutivi o possono avere eventi intermedi
+
+In un e-commerce, un utente può vedere il prodotto, aprire le FAQ, tornare sul carrello e poi pagare. Se usate una modalità troppo restrittiva che vieta qualsiasi evento intermedio, perderete l'80% delle conversioni reali; nella maggior parte dei funnel di prodotto serve l'ordine cronologico stretto dei passi chiave (`strict_order`), non l'adiacenza fisica immediata.
+
+## Funnel ordinato a finestra di 7 giorni con windowFunnel e CTE in ClickHouse
+
+Per costruire un funnel rigoroso e veloce in ClickHouse, applicate questi quattro passi:
+
+1. Isolate gli utenti il cui primo `step_1` è avvenuto all'interno del periodo di analisi ma **almeno 7 giorni fa** (finestra maturata).
+2. Calcolate per ogni utente il livello massimo raggiunto entro `604800` secondi (7 giorni) usando `windowFunnel(604800)(occurred_at, event_name = 'signup_started', event_name = 'workspace_created', event_name = 'first_report_exported')`.
+3. Aggregate i livelli raggiunti (`>= 1`, `>= 2`, `>= 3`) per ottenere i volumi reali di ogni step.
+4. Calcolate sia il tasso di conversione cumulativo rispetto allo step 1 sia il tasso di passaggio step-by-step.
+
+Ecco la query SQL completa in ClickHouse:
 
 ```sql
--- Flag di apertura sessione: 1 dove inizia una visita nuova
-WITH gaps AS (
-  SELECT
-    user_id, event_name, event_time,
-    event_time - LAG(event_time) OVER (
-      PARTITION BY user_id ORDER BY event_time
-    ) AS gap
-  FROM events
+-- Funnel ordinato a 3 step con finestra di conversione di 7 giorni e coorte maturata:
+WITH user_funnel_levels AS (
+    SELECT
+        user_id,
+        windowFunnel(604800)(
+            occurred_at,
+            event_name = 'signup_started',
+            event_name = 'workspace_created',
+            event_name = 'first_report_exported'
+        ) AS max_step_reached
+    FROM analytics_prod.fct_product_events
+    WHERE event_date >= today() - 37
+      AND occurred_at <= now() - INTERVAL 7 DAY
+      AND event_name IN ('signup_started', 'workspace_created', 'first_report_exported')
+    GROUP BY user_id
+    HAVING max_step_reached >= 1
 )
 SELECT
-  user_id, event_name, event_time,
-  -- gap IS NULL = primo evento mai visto per l'utente
-  CASE WHEN gap IS NULL OR gap > interval '30 minutes'
-       THEN 1 ELSE 0 END AS is_new_session
-FROM gaps;
+    count() AS step_1_signup_started,
+    countIf(max_step_reached >= 2) AS step_2_workspace_created,
+    countIf(max_step_reached >= 3) AS step_3_first_report_exported,
+    round(step_2_workspace_created * 100.0 / nullIf(step_1_signup_started, 0), 2) AS pct_step1_to_step2,
+    round(step_3_first_report_exported * 100.0 / nullIf(step_2_workspace_created, 0), 2) AS pct_step2_to_step3,
+    round(step_3_first_report_exported * 100.0 / nullIf(step_1_signup_started, 0), 2) AS pct_overall_conversion
+FROM user_funnel_levels;
 ```
 
-Due dettagli che in produzione mordono. Primo: gli eventi contemporanei. Se due eventi hanno lo stesso `event_time`, l'ordinamento è indeterminato e due esecuzioni possono sessionizzare diversamente. Aggiungi un tiebreaker stabile — un id monotonico se esiste — all'`ORDER BY` della finestra. Secondo: la soglia va parametrizzata in una CTE (`params AS (SELECT interval '30 minutes' AS timeout)`), non sparsa in cinque punti della query, o il giorno in cui il prodotto chiede "e con 15 minuti?" rifarai tutto a mano.
+Grazie a `windowFunnel(604800)` e al filtro `HAVING max_step_reached >= 1`, nessun utente può apparire allo step 3 senza aver prima completato lo step 1 e lo step 2 nell'ordine esatto e entro 7 giorni. La colonna `pct_overall_conversion` è garantita monotona decrescente (`step_1 >= step_2 >= step_3`).
 
-## Islands-and-gaps senza paura: numerare le sessioni
+Per rendere il funnel ancora più azionabile per il team di prodotto, potete estendere questa stessa query segmentando per canale di acquisizione (`entry_channel`), dispositivo o piano tariffario, oppure calcolando il **tempo mediano di attraversamento** tra `step_1` e `step_2` e tra `step_2` e `step_3`. Sapere non solo quanti utenti si fermano tra la creazione del workspace e l'esportazione del primo report, ma anche che chi converte ci mette in media 4 ore mentre chi supera le 48 ore quasi non converte più, orienta direttamente le campagne di email onboarding e i trigger in-app.
 
-Il flag `is_new_session` dice dove iniziano le sessioni, ma non dà loro un nome. Il passaggio da flag a identificativo è il classico pattern islands-and-gaps: una somma cumulata del flag, partizionata per utente, produce un numero di sessione crescente.
+Quando portate questo modello in dbt, ricordate di parametrizzare la finestra di conversione (ad esempio `7` giorni per il self-serve e `30` giorni per il B2B enterprise) e di esporre nella documentazione del modello la data minima e massima di `step_1` inclusa nel denominatore. In questo modo qualsiasi stakeholder che legge la dashboard sa immediatamente che i numeri dell'ultima settimana non sono inquinati da utenti che devono ancora completare la propria finestra di attivazione.
 
-```sql
--- Dal flag all'id di sessione con una somma cumulata
-WITH gaps AS (
-  SELECT
-    user_id, event_name, event_time,
-    event_time - LAG(event_time) OVER (
-      PARTITION BY user_id ORDER BY event_time, event_id
-    ) AS gap
-  FROM events
-),
-flagged AS (
-  SELECT
-    user_id, event_name, event_time,
-    CASE WHEN gap IS NULL OR gap > interval '30 minutes'
-         THEN 1 ELSE 0 END AS is_new_session
-  FROM gaps
-)
-SELECT
-  user_id, event_name, event_time,
-  -- la cumulata del flag numera le sessioni 1, 2, 3... per utente
-  SUM(is_new_session) OVER (
-    PARTITION BY user_id ORDER BY event_time, event_id
-  ) AS session_seq
-FROM flagged;
-```
+Infine, verificate sempre su un campione di 10 utenti convertiti che i timestamp reali degli eventi rispettino l'ordine atteso, soprattutto quando gli eventi provengono sia dal frontend sia da webhook server-side che possono avere qualche secondo di ritardo.
 
-Nota `event_id` nell'`ORDER BY`: è il tiebreaker del paragrafo precedente, e deve essere identico in tutte le finestre della query, altrimenti flag e numerazione possono divergere silenziosamente. Una volta numerate, le sessioni diventano una dimensione analizzabile: durata, numero di eventi, rimbalzo.
+## windowFunnel() nativo in ClickHouse vs catena di CTE con MIN()
 
-```sql
--- Una riga per sessione: durata, ampiezza, rimbalzo
-WITH sessioned AS ( /* la query precedente */ )
-SELECT
-  user_id,
-  session_seq,
-  MIN(event_time) AS session_start,
-  MAX(event_time) AS session_end,
-  MAX(event_time) - MIN(event_time) AS duration,
-  COUNT(*) AS n_events,
-  -- sessione di un solo evento = rimbalzo
-  (COUNT(*) = 1)::int AS is_bounce
-FROM sessioned
-GROUP BY user_id, session_seq;
-```
+Per calcolare funnel ordinati, potete usare **`windowFunnel()` di ClickHouse** oppure **una catena di CTE con `MIN(occurred_at)` e `LEFT JOIN` temporali**.
 
-Questa tabella — una riga per sessione — è il denominatore onesto di cui parlava il primo paragrafo: da qui in poi i tassi si calcolano sulle sessioni, non sugli eventi grezzi. Quando questo metodo non funziona? Quando il concetto stesso di "visita" non esiste: app mobile sempre aperte in background, dispositivi condivisi, utenti anonimi dietro NAT. Lì la sessione time-based produce frammenti senza senso, e serve una definizione basata su intento (una sequenza di task) o niente sessioni affatto.
+Il criterio di scelta è netto: **usate `windowFunnel()` in ClickHouse quando lavorate direttamente su miliardi di eventi perché esegue tutto in un'unica scansione in memoria con velocità superiore di ordini di grandezza, usate invece le CTE esplicite con `MIN()` in modelli dbt che devono restare portabili su PostgreSQL, BigQuery o Snowflake.**
 
-## Il primo funnel onesto: passi in sequenza
+La confusione comune consiste nel pensare che `windowFunnel` imponga l'adiacenza stretta: per default verifica l'ordine temporale tollerando eventi intermedi non elencati, esattamente ciò che serve nei funnel web e SaaS.
 
-Con le sessioni numerate, il funnel stretto diventa una domanda precisa: per ogni sessione, qual è il passo più avanzato raggiunto rispettando l'ordine? Il trucco è mappare ogni evento a un numero di passo e prendere il massimo prefisso continuo. Se la sessione ha visto passi 1, 2, 4 ma non 3, il funnel stretto si ferma a 2: il passo 4 fuori sequenza non conta, e segnalarlo a parte è spesso più interessante del tasso stesso.
+## Cinque domande prima di pubblicare un funnel in dashboard
 
-```sql
--- Funnel stretto view_item -> add_to_cart -> checkout -> purchase, per sessione
-WITH sessioned AS (
-  -- la sessionizzazione del paragrafo precedente
-  SELECT user_id, event_name, event_time, session_seq FROM flagged_numbered
-),
-stepped AS (
-  SELECT
-    user_id, session_seq, event_name, event_time,
-    -- mappa evento -> numero di passo; eventi fuori funnel = NULL
-    CASE event_name
-      WHEN 'view_item'   THEN 1
-      WHEN 'add_to_cart' THEN 2
-      WHEN 'checkout'    THEN 3
-      WHEN 'purchase'    THEN 4
-    END AS step
-  FROM sessioned
-),
-ordered AS (
-  SELECT
-    user_id, session_seq, step, event_time,
-    -- il passo massimo visto finora nella sessione, in ordine di tempo
-    MAX(step) OVER (
-      PARTITION BY user_id, session_seq ORDER BY event_time, event_id
-    ) AS max_step_so_far
-  FROM stepped
-  WHERE step IS NOT NULL  -- gli eventi fuori funnel non avanzano né rompono
-)
-SELECT
-  user_id, session_seq,
-  MAX(max_step_so_far) AS deepest_step  -- passo più profondo raggiunto in ordine
-FROM ordered
-GROUP BY user_id, session_seq;
-```
+1. Il funnel impone l'ordine cronologico (`t1 <= t2 <= t3`) a livello di singolo utente?
+2. È dichiarata esplicitamente la finestra massima di conversione (es. 7 giorni o 1 sessione)?
+3. Gli utenti al denominatore dello step 1 hanno tutti maturato interamente la finestra di conversione?
+4. I volumi risultano rigorosamente monotoni decrescenti (`step_1 >= step_2 >= step_3`)?
+5. Avete riportato sia la conversione complessiva (`step_N / step_1`) sia i tassi di passaggio tra step adiacenti?
 
-Da qui il report è una semplice aggregazione: quante sessioni hanno raggiunto almeno il passo $k$, per ogni $k$. Il tasso passo-passo è $r_k = S_k / S_{k-1}$, dove $S_k$ conta le sessioni arrivate almeno al passo $k$; il tasso end-to-end è $S_4 / S_1$. Su 10.000 sessioni con $S = (10000, 3200, 1400, 900)$, i tassi sono 32%, 44%, 64% — e il collo di bottiglia è il passaggio vista → carrello, non il checkout come spesso si presume guardando i totali.
-
-| Passo | Sessioni arrivate | Tasso sul passo precedente |
-|---|---|---|
-| 1 — vista prodotto | 10.000 | — (denominatore) |
-| 2 — carrello | 3.200 | 32% |
-| 3 — checkout | 1.400 | 44% |
-| 4 — acquisto | 900 | 64% |
-
-Il funnel lasco — "ha fatto tutti i passi in qualunque ordine" — si calcola invece con aggregazioni condizionate, senza finestre:
-
-```sql
--- Funnel lasco: basta aver fatto ogni passo almeno una volta nella sessione
-SELECT
-  user_id, session_seq,
-  COUNT(*) FILTER (WHERE event_name = 'view_item')   > 0 AS did_view,
-  COUNT(*) FILTER (WHERE event_name = 'add_to_cart') > 0 AS did_cart,
-  COUNT(*) FILTER (WHERE event_name = 'purchase')    > 0 AS did_buy
-FROM sessioned
-GROUP BY user_id, session_seq;
-```
-
-La differenza tra i due conteggi è diagnostica: se il lasco supera lo stretto del 20%, una fetta consistente di utenti percorre il funnel fuori ordine — magari rientra dal carrello salvato giorni dopo — e forzare la sequenza significa misurare male il prodotto.
-
-## Conversioni vincolate nel tempo e finestre di attribuzione
-
-Il funnel per sessione risponde a "cosa succede dentro una visita", ma molte conversioni maturano tra visite: vedi un prodotto lunedì, lo compri giovedì. Qui serve una finestra di attribuzione esplicita — entro $W$ dal passo iniziale — e il pattern è un self-join temporale: per ogni passo 1, cerco il primo passo 2 successivo entro $W$.
-
-```sql
--- Per ogni vista prodotto, il primo acquisto entro 7 giorni
-WITH views AS (
-  SELECT user_id, event_time AS view_time
-  FROM events WHERE event_name = 'view_item'
-),
-buys AS (
-  SELECT user_id, event_time AS buy_time
-  FROM events WHERE event_name = 'purchase'
-)
-SELECT
-  v.user_id,
-  v.view_time,
-  -- primo acquisto successivo alla vista, se cade nella finestra
-  MIN(b.buy_time) FILTER (
-    WHERE b.buy_time > v.view_time
-      AND b.buy_time <= v.view_time + interval '7 days'
-  ) AS attributed_buy
-FROM views v
-LEFT JOIN buys b ON b.user_id = v.user_id
-GROUP BY v.user_id, v.view_time;
-```
-
-Il `LEFT JOIN` con `FILTER` invece del `WHERE` è la riga che decide se la query è corretta. Filtrare nel `WHERE` trasformerebbe il join in inner e cancellerebbe le viste non convertite, cioè esattamente il denominatore. Il tasso a 7 giorni è poi $conv_7 = N(viste\;con\;attributed\_buy) / N(viste)$. Allargando $W$ da 1 a 7 a 30 giorni il tasso cresce per costruzione. Pubblicare il numero senza $W$ è come pubblicare una velocità senza unità di misura.
-
-Il self-join ha un costo quadratico potenziale: per utenti iperattivi con migliaia di eventi, il prodotto cartesiano per utente esplode. Due difese standard: restringere il `JOIN` con la condizione temporale direttamente nella `ON` (`AND b.buy_time <= v.buy_time + interval '7 days'`), così il planner lavora per intervalli, e pre-aggregare al primo evento utile per utente-giorno prima di joinare. Se il motore supporta `MATCH_RECOGNIZE` (Oracle, Snowflake, Trino recente), la stessa logica si esprime in modo più leggibile e spesso più veloce. In Postgres il self-join resta la via maestra.
-
-## Quando gli utenti saltano i passi: leggere i percorsi reali
-
-I funnel dicono dove gli utenti escono, non dove vanno. Per capirlo serve l'analisi dei percorsi: la distribuzione delle sequenze effettive, incluse quelle che il funnel disegna come "abbandoni". Il mattone è di nuovo `LEAD()`: per ogni evento, qual è il successivo nella stessa sessione?
-
-```sql
--- Transizioni osservate: da ogni evento al successivo nella sessione
-WITH sessioned AS (
-  SELECT user_id, event_name, event_time, session_seq FROM flagged_numbered
-),
-chained AS (
-  SELECT
-    event_name AS from_step,
-    -- evento successivo nella stessa sessione, NULL se è l'ultimo
-    LEAD(event_name) OVER (
-      PARTITION BY user_id, session_seq ORDER BY event_time, event_id
-    ) AS to_step
-  FROM sessioned
-)
-SELECT
-  from_step,
-  to_step,
-  COUNT(*) AS n_transitions,
-  -- quota sul totale delle uscite da from_step: dove va davvero la gente
-  ROUND(100.0 * COUNT(*) / SUM(COUNT(*)) OVER (PARTITION BY from_step), 1)
-    AS pct_of_exits
-FROM chained
-GROUP BY from_step, to_step
-ORDER BY from_step, n_transitions DESC;
-```
-
-Questa matrice di transizione risponde a domande che il funnel non può porre: dopo `add_to_cart`, quanti tornano a `view_item` (confronto tra prodotti, comportamento sano) e quanti escono del tutto? Se il 35% va carrello → vista → carrello → checkout, il percorso "pulito" del funnel è una minoranza e ottimizzare solo quello significa ottimizzare per pochi. Un'applicazione immediata: gli eventi `to_step IS NULL` sono le uscite reali, passo per passo — molto più informative del generico "abbandono".
-
-Il limite va dichiarato: con decine di tipi evento, le sequenze distinte esplodono in combinatoria e la coda lunga è rumore. In pratica si raggruppano gli eventi minori in un bucket `other` prima di concatenare, e si analizzano le prime 20-50 sequenze per copertura. Oltre quella soglia, il percorso va trattato statisticamente (catene di Markov del primo ordine sulla matrice sopra), non elencato.
-
-## Prestazioni e trappole su tabelle eventi grandi
-
-Le query di questo articolo sono tutte `PARTITION BY user_id`, e su tabelle da centinaia di milioni di righe questo è il punto dove si vince o si perde. La prima regola è non sessionizzare mai l'intera storia: filtra il periodo prima delle finestre, mai dopo, così l'ordinamento lavora su una frazione dei dati. La seconda è materializzare: la sessionizzazione è deterministica a parità di soglia, quindi calcolala una volta in una tabella incrementale (`session_events` con `user_id, session_seq, ...`) e costruisci funnel e percorsi sopra quella. Ricalcolarla in ogni report è il modo più costoso di ottenere sempre lo stesso risultato.
-
-Le trappole dati, in ordine di frequenza reale. Fusi orari: se `event_time` è `timestamp without time zone` alimentato da client in fusi diversi, le sessioni a cavallo della mezzanotte si spezzano e i gap diventano assurdi; normalizza in `timestamptz` a monte e non fidarti mai di timestamp ingenui. Eventi duplicati: retry di rete e double-fire del tracking gonfiano i conteggi — una deduplica su `(user_id, event_name, event_time)` prima di tutto il resto costa poco e salva molto. Bot e traffico interno: filtrali con una blocklist esplicita e documentata, perché ogni scelta di esclusione sposta il denominatore e deve essere riproducibile. Utenti anonimi con id che ruotano: la sessionizzazione per utente diventa frammentazione per utente, e l'unico onesto è sessionizzare per chiave anonima (cookie, `session_id` nativo se c'è) dichiarando il limite.
-
-| Trappola | Sintomo | Difesa |
-|---|---|---|
-| Fusi mescolati | Sessioni spezzate a mezzanotte | `timestamptz` ovunque, a monte |
-| Eventi duplicati | Tassi gonfiati, transizioni A → A | Deduplica su tripla prima delle finestre |
-| Bot nel denominatore | Conversioni basse e piatte | Blocklist esplicita e versionata |
-| Soglia copiata | Sessioni frammentate o fuse | Scegliela dalla distribuzione dei gap |
-
-## Come leggere un funnel senza farsi ingannare
-
-Un funnel ben calcolato si legge in tre mosse. Prima: guarda i tassi passo-passo, non l'end-to-end — il collo di bottiglia è il passo con $r_k$ minimo, ed è lì che ogni punto recuperato vale di più in assoluto. Seconda: segmenta prima di concludere. Lo stesso funnel per traffico organico e a pagamento, per mobile e desktop, per nuovi e ricorrenti racconta storie diverse; il tasso aggregato è una media ponderata dal mix, e se il mix cambia nel tempo il tasso si muove senza che nessun percorso sia cambiato — il classico paradosso di Simpson applicato al prodotto. Terza: diffida dei movimenti senza meccanismo. Un +3 punti sul checkout nella stessa settimana del redesign è un'ipotesi, non una prova; la prova richiede coorti comparabili o un esperimento, e il funnel da solo non la fornisce.
-
-Vale anche il controllo più umile e più trascurato: la quadratura. La somma delle sessioni per passo più quelle uscite deve tornare al totale delle sessioni entrate. Le transizioni in uscita da un passo devono sommare al 100%. Se non torna, c'è un filtro messo nel posto sbagliato — quasi sempre un `WHERE` che doveva essere un `FILTER`, o eventi `NULL` mangiati da un `JOIN`. Quando presenti il risultato, la riga di contesto non è facoltativa: denominatore, finestra, regola d'ordine, soglia di sessione ed esclusioni. Cinque informazioni in una riga. È la differenza tra un numero che orienta una decisione e uno che decora una slide.
-
-Verdetto: usa il funnel stretto con ordine imposto per checkout e pagamenti, il funnel lasco con `FILTER` per percorsi editoriali, sessioni a 30 minuti solo dopo aver guardato la distribuzione dei `gap` e finestra di attribuzione sempre dichiarata accanto al tasso.
-
-## Un riferimento concreto: la soglia di Google Analytics
-
-Per ancorare la soglia a un caso reale: Google Analytics 4, rilasciato nell'ottobre 2020, mantiene a 30 minuti il timeout predefinito che chiude una sessione dopo 30 minuti di inattività. La regola è la stessa sessionizzazione time based descritta nella lezione con `LAG` e somma cumulata del flag di apertura. Con 10000 sessioni e passi pari a 10000 viste, 3200 carrelli, 1400 checkout e 900 acquisti, i tassi passo passo risultano 32 percento, 44 percento e 64 percento. Senza soglia, denominatore e finestra dichiarati, lo stesso dataset passa dal 18 percento al 41 percento solo cambiando definizione.
-
-## Domande per chiudere la lezione
-
-1. Quando apri una nuova sessione con `LAG` e soglia di inattività e come tratti il primo evento con `gap` nullo?
-2. Quale denominatore rende confrontabile il tasso di conversione tra due passi del funnel stretto?
-3. Perché un filtro nel `WHERE` dopo `LEFT JOIN` cancella il denominatore nelle conversioni con finestra di attribuzione?
-4. Quando il funnel lasco supera lo stretto del 20 percento cosa indica sui percorsi reali degli utenti?
+La metrica di controllo di qualsiasi funnel ordinato è la **monotonicità dei volumi**: `step_1 >= step_2 >= ... >= step_N` deve essere sempre vera senza eccezioni. Verificare questa proprietà automaticamente a ogni esecuzione della pipeline garantisce che nessun utente possa saltare passaggi o comparire allo step finale senza aver maturato lo step iniziale.

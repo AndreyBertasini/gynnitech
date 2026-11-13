@@ -15,51 +15,186 @@ learningObjectives:
   - Dichiarare test minimi di unicità, completezza e valori ammessi sulle colonne critiche
   - Far passare ogni pull request da test automatici e revisione prima del deploy
 binario: "ml-tabellare"
+formato: "articolo"
 autore: "Hermes"
 controllatoDa: "Argo"
 autorizzatoDa: "Giano"
 draft: false
-dateModified: 2026-09-07
+dateModified: 2026-11-13
 ---
+
 # Cheat sheet: analytics engineering con dbt
 
-Questa scheda appartiene al binario **ml-tabellare** ed è pensata per essere consultata sul lavoro, non letta una volta sola: raccoglie le convenzioni minime di layer, naming, test e deploy che mantengono un progetto dbt affidabile mentre cresce.
+Un progetto dbt cresce in sei mesi da 15 a 220 modelli scritti da cinque persone diverse senza uno standard condiviso: metà dei file si chiama `clean_orders.sql` o `final_sales_v2.sql`, alcuni marts leggono direttamente le tabelle `raw` saltando lo staging, i modelli incrementali perdono gli eventi in ritardo e le pull request vanno in produzione senza Data Diff. Il repository diventa così fragile che ogni modifica a una colonna rompe tre dashboard nascoste e il run notturno supera le due ore. La causa non è la dimensione del progetto: è non applicare in modo inflessibile lo **standard operativo di naming, layer, test minimi, materializzazione e Slim CI**.
 
-## Di cosa parla questa scheda
+## Duecentoventi modelli senza convenzioni e tre dashboard rotte a ogni modifica
 
-La cheat sheet di analytics engineering fissa le convenzioni minime di layer, naming, test e deploy che mantengono un progetto dbt affidabile mentre cresce.
+Questo è un caso ricostruito con numeri di esempio che mostra perché ogni team di Analytics Engineering ha bisogno di una scheda di riferimento unica e vincolante durante lo sviluppo e la code review.
 
-## La sequenza operativa in cinque mosse
+Quando un repository dbt cresce senza regole ferree si manifestano sempre le stesse tre patologie:
+1. Dall'elenco dei file è impossibile capire il ruolo di un modello: `users_summary.sql` è uno staging, un intermedio o un mart? Chi lo interroga? Qual è la sua chiave primaria?
+2. I test vengono aggiunti "solo quando avanza tempo": un `LEFT JOIN` su una tabella priva di test `unique` raddoppia silenziosamente i ricavi per quattro giorni prima che qualcuno se ne accorga.
+3. I modelli incrementali vengono scritti copiando vecchi snippet privi di finestra di lookback e privi del filtro `target.name != 'prod'`, rallentando la CI a 45 minuti per ogni pull request.
 
-1. Colloca ogni modello nel layer giusto: `staging` per la pulizia, `intermediate` per la logica riusabile, `marts` per il consumo.
-2. Applica il prefisso del layer a ogni nuovo modello prima di scrivere la prima riga di SQL.
-3. Aggiungi test di unicità, completezza e valori ammessi sulle colonne critiche di ogni modello.
-4. Documenta ogni modello nel file `YAML` con descrizione, proprietario e definizioni delle metriche.
-5. Fai passare ogni pull request da test automatici e revisione prima del deploy in produzione.
+Questa scheda operativa condensa tutte le regole del Modulo 16 in quattro quadranti pronti da consultare prima di ogni commit.
 
-## Come usare questa scheda
+## I quattro quadranti dello standard dbt: Layer/Naming, Test/Contratti, Materializzazioni e CI/CD
 
-Questa scheda è un passaggio decisionale, non una definizione isolata. Collega domanda, dato, controllo e azione. Così il lavoro tecnico resta ancorato a una scelta verificabile anche quando decidi sotto incertezza.
+Ogni modello che entra nel branch `main` del progetto dbt deve rispettare simultaneamente i quattro quadranti seguenti.
 
-Nell'analytics engineering il nodo è trasformare dati grezzi in modelli affidabili, testati e pronti per il business. Spesso i progetti dbt crescono senza regole chiare e accumulano debito tecnico. Il debito rallenta decisioni e operazioni. La sfida è mantenere ordine e qualità mentre il sistema si espande, prima che nomi ambigui, test insufficienti o metriche duplicate intacchino la fiducia nei dati.
+Il primo quadrante governa **Architettura a Layer e Convenzioni di Naming**:
+1. **`staging/` (`stg_<sorgente>__<entita>.sql`)**: rapporto 1-a-1 con `{{ source('sorgente', 'entita') }}` (è l'**unico** layer autorizzato a chiamare `source()`). Esegue solo ridenominazione standard, cast dei tipi (`toDecimal64`, `toDateTime(..., 'UTC')`), pulizia base e deduplicazione tecnica (`LIMIT 1 BY id`). Materializzato come `view`.
+2. **`intermediate/` (`int_<dominio>__<verbo_plurale>.sql`)**: unisce più `{{ ref('stg_...') }}`, pre-aggrega o risolve grani complessi. Non è mai esposto alla BI. Materializzato come `view`/`ephemeral` (se letto da 1 solo modello) o `table` (se pesante e letto da $\ge 2$ modelli).
+3. **`marts/` (`fct_<evento>.sql`, `dim_<entita>.sql`, `act_<tool>__<entita>.sql`)**: tabelle finali orientate ai dipartimenti (`finance`, `marketing`, `product`, `activation`). Materializzate come `table` o `incremental` con `partition_by` e `order_by` espliciti.
 
-## Convenzioni operative
+Il secondo quadrante governa **Test Minimi Obbligatori e Contratti**. Ogni singolo modello (nessuno escluso) dichiara nel file YAML i test **`unique` e `not_null`** sulla propria chiave primaria (o `unique_combination_of_columns` se composta). Le colonne di stato o tipo hanno `accepted_values`, le chiavi esterne nei marts hanno `relationships` e i modelli `marts` pubblicati hanno **`contract: {enforced: true}`**, mentre l'esecuzione avviene sempre tramite **`dbt build`** (mai `dbt run` isolato).
 
-I nomi dichiarano a colpo d'occhio layer e origine dei dati: i modelli di `staging` seguono il pattern `stg_`, quelli `intermediate` il pattern `int_` e i `marts` finali il pattern `mrt_`. Ogni modello critico dichiara test di unicità e completezza sulle chiavi, test di valori ammessi sulle colonne categoriche e test di relazione dove una chiave referenzia un'altra tabella. Prima di unire una pull request, la revisione controlla naming, test, documentazione e impatto sul `lineage`. Così piccole modifiche non diventano debito tecnico permanente.
+Il terzo e quarto quadrante governano **Materializzazioni/Performance** e **Git/Deploy**. Per l'**Early Filtering & Projection** si vieta `SELECT *` nei modelli con join, filtrando date e selezionando le sole colonne necessarie nella prima CTE. I **Modelli Incremental** includono sempre una finestra di lookback (`- INTERVAL 3 DAY`) deduplicata su `unique_key` / partizione, più il filtro `{% if target.name != 'prod' %}` per limitare `dev` e `ci` agli ultimi 7 giorni. Infine, per **Slim CI & Blue/Green**, ogni PR gira con `dbt build --select state:modified+ --defer`, allega il **Data Diff** contro `analytics_prod` e promuove i rebuild con `EXCHANGE TABLES`.
 
-## L'errore tipico da evitare
+**Un progetto dbt rimane pulito e governabile anche a 500 modelli solo se ogni pull request rispetta la gerarchia `stg_ -> int_ -> fct_/dim_`, blinda le chiavi con `unique + not_null`, applica lookback e dev-filter sugli incrementali e supera la Slim CI.**
 
-Un errore comune è usare la cheat sheet come etichetta invece che come processo. Succede quando presenti un grafico senza decisione, una metrica senza `baseline` o una conclusione senza indicare quale assunzione potrebbe invalidarla. La domanda chiave è: se il risultato fosse instabile, quale scelta sbaglierei? Se non c'è una risposta concreta, manca il collegamento tra analisi e azione.
+## Tre violazioni dello standard dbt da bloccare immediatamente in Pull Request
 
-Verdetto: la disciplina di naming, test e review applicata a ogni pull request vale più di qualsiasi refactoring straordinario.
+Il blocco SQL qui sotto mostra i tre errori che un revisore deve respingere al primo sguardo durante una code review:
 
-## Un caso che dimostra il valore delle convenzioni
+```sql
+-- VIOLAZIONE 1: un modello nella cartella marts/ che chiama direttamente {{ source() }}
+-- saltando lo strato di staging e mescolando cast grezzi con logica di business!
+-- VIOLAZIONE 2: SELECT * prima di un JOIN senza Early Filtering né configurazione order_by!
+-- VIOLAZIONE 3: incremental senza lookback window e senza filtro per target.name != 'prod'!
+{{
+    config(
+        materialized = 'incremental'
+    )
+}}
+SELECT *
+FROM {{ source('raw_stripe', 'charges') }} AS c
+LEFT JOIN {{ ref('dim_customers') }} AS u
+    ON c.customer_id = u.customer_id
+{% if is_incremental() %}
+WHERE c.created_at > (SELECT max(created_at) FROM {{ this }})
+{% endif %}
+```
 
-dbt nasce nel 2016 dentro Fishtown Analytics, una piccola consultancy di Philadelphia che si stanca di riscrivere le stesse trasformazioni SQL per ogni cliente. Il team trasforma quella pratica in dbt Core, con modelli SQL versionati, testati e documentati secondo convenzioni condivise. Nel febbraio 2022 dbt Labs raccoglie 222 milioni di dollari a una valutazione di 4,2 miliardi, e i layer staging, intermediate e marts diventano il vocabolario comune dei team dati. La morale operativa sta nei numeri della crescita: quando centinaia di team adottano gli stessi layer e le stesse convenzioni di naming, il test che scrivi oggi protegge la dashboard di qualcun altro domani.
+### Chiamare {{ source() }} dentro un modello Intermediate o Mart
 
-## Domande per verificare che la scheda funzioni
+Scrivere `FROM {{ source('stripe', 'charges') }}` dentro `fct_revenue.sql` rompe l'incapsulamento a strati del progetto. Se due marts diversi leggono direttamente la stessa tabella `source()`, la logica di deduplicazione tecnica, conversione centesimi/euro e filtro degli account di test viene duplicata in due posti e finisce inevitabilmente per divergere. La regola è assoluta: `{{ source() }}` vive **solo** dentro `models/staging/`; tutto il resto del progetto legge esclusivamente da `{{ ref() }}`.
 
-1. In quale layer collochi un nuovo modello e quale prefisso di naming gli assegni?
-2. Quali test minimi dichiari sulle colonne critiche prima di aprire la pull request?
-3. Cosa controlli in review oltre al fatto che la query gira senza errori?
-4. Quale segnale ti dice che il progetto sta accumulando debito tecnico?
+### Omettere unique + not_null sulla chiave primaria nel file YAML del modello
+
+Consegnare in pull request un nuovo file `.sql` senza la corrispondente voce in `_models.yml` dotata di `unique` e `not_null` sulla chiave primaria equivale a consegnare codice al buio. Senza un test formale sul grano della tabella, né l'autore né i colleghi che faranno modifiche tra sei mesi sapranno se una riga rappresenta un ordine, una riga d'ordine o un pagamento, e il primo `LEFT JOIN` impreciso gonfierà i totali senza far fallire `dbt build`.
+
+### Scrivere modelli fisici su ClickHouse senza specificare order_by e partition_by
+
+Lasciare che un modello `table` o `incremental` da decine di milioni di righe venga creato con una chiave `ORDER BY tuple()` generica o solo sull'ID casuale rinuncia al 90% delle prestazioni di ClickHouse. Ogni modello fisico nei `marts` deve dichiarare esplicitamente `partition_by = 'toYYYYMM(data)'` e `order_by = '(dimensione_filtro_bassa_card, data, id_univoco)'`.
+
+## Template aureo di riferimento: Modello dbt + Audit automatico di conformità del progetto
+
+Usate questo template standardizzato come punto di partenza per ogni nuovo modello incrementale nei vostri `marts`, affiancato dalla query di controllo automatico della qualità architetturale:
+
+1. Configurate il blocco `{{ config(...) }}` con `materialized`, `engine`, `unique_key`, `incremental_strategy`, `partition_by`, `order_by` e `on_schema_change`.
+2. Strutturate il codice SQL in CTE chiare: prima CTE di importazione con **Early Filtering** (lookback 3gg in incrementale + filtro 7gg in `dev`/`ci`) ed **Early Projection** (niente `SELECT *`), seguita dalla CTE di logica/join e dalla `SELECT` finale tipizzata per il contratto.
+3. Collegate il test YAML (`unique`, `not_null`, `accepted_values`, `contract: {enforced: true}`).
+4. Eseguite il controllo di conformità sugli artefatti per verificare che zero modelli nel repository violino lo standard.
+
+Ecco il template completo del modello dbt aureo più la query SQL di verifica della governance del progetto:
+
+```sql
+-- 1. TEMPLATE AUREO MODELLO MART INCREMENTALE (models/marts/finance/fct_invoices.sql)
+{{
+    config(
+        materialized = 'incremental',
+        engine = 'MergeTree()',
+        unique_key = 'invoice_id',
+        incremental_strategy = 'delete+insert',
+        partition_by = 'toYYYYMM(invoice_date)',
+        order_by = '(country_code, invoice_date, invoice_id)',
+        on_schema_change = 'append_new_columns'
+    )
+}}
+
+WITH invoices_filtered AS (
+    -- Early Filtering + Early Projection (solo le colonne necessarie, niente SELECT *):
+    SELECT
+        invoice_id,
+        customer_id,
+        country_code,
+        invoice_status,
+        toDate(issued_at_utc) AS invoice_date,
+        issued_at_utc,
+        net_amount_eur,
+        vat_amount_eur
+    FROM {{ ref('stg_erp__invoices') }}
+    WHERE invoice_status IN ('issued', 'paid', 'refunded')
+    {% if is_incremental() %}
+      -- Lookback di 3 giorni per catturare ritardi e cambi di stato:
+      AND toDate(issued_at_utc) >= (
+          SELECT max(invoice_date) - INTERVAL 3 DAY
+          FROM {{ this }}
+      )
+    {% endif %}
+    {% if target.name != 'prod' %}
+      -- Limite automatico a 7 giorni per ambienti dev e CI:
+      AND toDate(issued_at_utc) >= today() - 7
+    {% endif %}
+),
+customers_dim AS (
+    SELECT
+        customer_id,
+        company_segment
+    FROM {{ ref('dim_customers') }}
+)
+SELECT
+    i.invoice_id,
+    i.customer_id,
+    c.company_segment,
+    i.country_code,
+    i.invoice_status,
+    i.invoice_date,
+    i.net_amount_eur,
+    i.vat_amount_eur,
+    (i.net_amount_eur + i.vat_amount_eur) AS gross_amount_eur
+FROM invoices_filtered AS i
+LEFT JOIN customers_dim AS c
+    ON i.customer_id = c.customer_id;
+
+-- 2. QUERY DI AUDIT GOVERNANCE DBT (verifica naming, copertura test, contratti e tempi di build):
+SELECT
+    layer,
+    count() AS total_models,
+    countIf(
+        (layer = 'staging' AND model_name LIKE 'stg_%__%')
+        OR (layer = 'intermediate' AND model_name LIKE 'int_%__%')
+        OR (layer = 'marts' AND (model_name LIKE 'fct_%' OR model_name LIKE 'dim_%' OR model_name LIKE 'act_%'))
+    ) AS naming_compliant_models,
+    countIf(has_primary_key_tests = 1) AS tested_pk_models,
+    countIf(layer = 'marts' AND has_enforced_contract = 1) AS contracted_marts,
+    round(max(last_execution_time_sec), 1) AS slowest_model_sec
+FROM analytics_meta.dbt_project_governance_audit
+GROUP BY layer
+ORDER BY layer ASC;
+```
+
+Con questo template come standard di team, ogni file del repository ha la stessa struttura prevedibile: chiunque apra `fct_invoices.sql` vede immediatamente nella riga `config` la chiave univoca (`invoice_id`), la partizione mensile e l'ordinamento fisico; la prima CTE applica il taglio delle date e delle colonne prima di toccare il `LEFT JOIN`; e la query di governance conferma che il 100% dei modelli rispetta i prefissi `stg_ / int_ / fct_ / dim_ / act_` e possiede i test sulla chiave primaria.
+
+## Guida rapida alla scelta della Materializzazione in base a Layer e Volume
+
+Per decidere in cinque secondi quale materializzazione impostare su un modello dbt in ClickHouse, usate questo albero decisionale:
+
+Il criterio di scelta è netto: **usate `view` per tutti i modelli `staging` (`stg_`) e per i modelli `intermediate` leggeri letti da un solo figlio, usate `table` per tutte le dimensioni (`dim_`), i modelli di attivazione (`act_`), gli intermedi condivisi da più figli e le tabelle dei fatti (`fct_`) che contano meno di 20–50 milioni di righe (tempo di rebuild $< 10\text{ secondi}$), e passate a `incremental` (con lookback di 3 giorni e `partition_by`) esclusivamente per le grandi tabelle dei fatti o di eventi che superano le decine di milioni di righe.**
+
+La confusione comune consiste nel mettere `incremental` ovunque per partito preso (dovendo poi gestire `--full-refresh` manuali a ogni modifica di logica su tabelle minuscole da 50.000 righe) oppure nel lasciare come `view` catene di cinque join pesanti interrogati direttamente da Metabase o Looker. Seguire la soglia dei 10 secondi di tempo di compilazione su ClickHouse mantiene il progetto semplice dove i dati sono piccoli e velocissimo dove i dati sono enormi.
+
+Questo cheat sheet riassume le convenzioni operative da verificare in ogni pull request prima di passare al progetto pratico finale del modulo.
+
+## Cinque controlli finali della Checklist di Pull Request dbt
+
+1. **Naming e Layer**: il file si trova nella cartella corretta, rispetta il prefisso (`stg_<src>__`, `int_<dom>__`, `fct_`, `dim_`, `act_`) e usa `{{ source() }}` solo se è uno `staging` (altrimenti solo `{{ ref() }}`)?
+2. **Test e Contratto**: nel file YAML sono presenti la descrizione del grano, i test `unique` + `not_null` sulla chiave primaria, `accepted_values` sugli stati e `contract: {enforced: true}` (se è un mart)?
+3. **Performance SQL**: la query evita `SELECT *`, filtra le date e le colonne nella prima CTE prima dei `JOIN`, e dichiara `partition_by` + `order_by` se è materializzata su disco?
+4. **Sicurezza Incremental**: se il modello è `incremental`, contiene una finestra di lookback idempotente (`- INTERVAL 3 DAY`) e il filtro `{% if target.name != 'prod' %}` per non scansionare tutto lo storico in `dev`/`ci`?
+5. **Validazione CI & Data Diff**: `dbt build --select state:modified+ --defer` è verde e il commento della PR include la tabella del **Data Diff** (`analytics_prod` vs `dbt_ci_pr_<id>`) con zero discrepanze inattese?
+
+La metrica sintetica di un repository dbt eccellente è una tripla di conformità al 100%: **`100% Naming Compliance`**, **`100% Primary Key Test Coverage`** e **`100% Slim CI + Data Diff su ogni PR`**.
+
+Di tutta questa scheda operativa, fate vostra una sola regola culturale: la velocità di un team di Analytics Engineering non si misura da quanto in fretta scrive una query sporca oggi, ma da quanto è sicuro modificare quella query tra sei mesi senza rompere un solo numero in produzione.

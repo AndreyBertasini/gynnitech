@@ -16,119 +16,100 @@ learningObjectives:
 prerequisites:
   - infrastructure-ops/monitoring
 binario: "ml-tabellare"
+formato: "articolo"
 autore: "Hermes"
 controllatoDa: "Argo"
 autorizzatoDa: "Giano"
 draft: false
-dateModified: 2026-09-07
+dateModified: 2026-11-13
 ---
 
-# Gestione dei costi dell'infrastruttura dati
+## Il caso della fattura cloud triplicata per una tabella ricostruita ogni ora
 
-Sul binario ml-tabellare, questa lezione affronta il tema che nessuno ama ma tutti pagano: dove vanno i soldi dell'infrastruttura e come farli fruttare.
+Nel cloud analitico i costi non esplodono quasi mai per la quantità di dati archiviati su disco, ma per il compute sprecato a rileggere e riscrivere inutilmente gli stessi terabyte ogni giorno. In questo caso ricostruito su un'azienda retail italiana (numeri di esempio), la fattura mensile del data warehouse passa da milleottocento a cinquemilaquattrocento euro in due mesi: l'analisi dei log rivela che un singolo modello dbt non incrementale ricostruisce da zero tre anni di storico transazioni ogni sessanta minuti per alimentare una dashboard guardata due volte a settimana.
 
-## Che cosa significa controllare i costi dati
+Gestire i costi dell'infrastruttura dati significa dare visibilità settimanale alla spesa per reparto e per singolo modello, convertire i carichi pesanti in elaborazioni incrementali e impostare guardrail automatiche di budget prima che arrivi la fattura di fine mese.
 
-Il controllo dei costi attribuisce ogni spesa a workload e owner con guardrail misurabili. In una frase: se una spesa non ha un proprietario, non è un costo, è una fuga.
+## Dove si nascondono i costi reali di warehouse e storage
 
-## Il metodo di lavoro
+Molti team cercano di risparmiare cancellando vecchi file su S3, dove un terabyte costa poche decine di euro al mese, mentre ignorano query mal scritte che scansionano l'intera tabella ad ogni apertura di dashboard. Le tre voci che dominano la spesa sono quasi sempre: modelli `table` completi eseguiti troppo spesso, query senza filtro sulla chiave di partizione e ambienti di sviluppo o test lasciati accesi senza spegnimento automatico.
 
-1. Identifica i cinque modelli o query più costosi con viste di sistema del warehouse.
-2. Separa costi fissi da costi variabili per workload e team.
-3. Converti i modelli append-only in incrementali e limita le finestre temporali.
-4. Assegna owner e budget guardrail con dashboard dei costi visibile a tutti.
+**Ottimizzare i cinque modelli più costosi e introdurre l'elaborazione incrementale riduce spesso la spesa di compute dal quaranta al settanta per cento senza perdere un solo dato.**
 
-## L'audit dei costi: partire dai cinque più grandi
+| Voce di costo | Causa tipica di spreco | Intervento ad alto impatto | Risparmio atteso |
+| :--- | :--- | :--- | :--- |
+| Modelli dbt `table` | Riscrittura totale dello storico ogni ora | Conversione a `incremental` su partizione | 50% – 80% compute |
+| Dashboard BI | Query `SELECT *` senza filtri temporali | Tabelle aggregate pre-calcolate + cache | 30% – 60% query |
+| Ambienti dev/CI | Cluster attivi 24/7 o full-refresh in PR | Auto-suspend 5 min + Slim CI | 40% – 70% dev |
+| Storage S3 | Retention infinita di log raw non compressi | Lifecycle policy verso Glacier/delete | 20% – 40% storage |
 
-Si parte dai cinque modelli più costosi, che spesso superano metà della spesa totale. In Snowflake emergono dalla cronologia delle query, in BigQuery dallo schema informativo dei job. Per ciascuno chiedi se il costo è necessario e se il modello può diventare incrementale. Poi separa i costi fissi come storage e infrastruttura dai costi variabili come query ad hoc e job schedulati.
+## Tre errori comuni nella gestione dei costi cloud
 
-Verdetto: prima i cinque modelli più costosi, poi tutto il resto.
+Quando le aziende cercano di tagliare la spesa dell'infrastruttura dati, commettono spesso tre errori che bloccano il lavoro senza risolvere la causa principale.
 
-## Le quattro leve che riducono davvero la spesa
+### Tagliare i costi alla cieca spegnendo dashboard usate dal business
 
-La conversione da tabella completa a modello incrementale taglia il costo dell'80-95 per cento sui grandi flussi append-only. I filtri sulle date evitano di leggere cinque anni quando servono 90 giorni; in sviluppo bastano 30 giorni di dati. Il dimensionamento del warehouse pesa molto, perché una taglia XL consuma sedici volte una XS: aumenta solo quando serve e riduci subito dopo. I timeout automatici, tipicamente dieci minuti sulle query di produzione, fermano le esecuzioni fuori controllo.
-
-Verdetto: incrementale, finestre corte e taglie piccole come default operativo.
-
-## La cultura dei costi si costruisce mostrando i numeri
-
-La dashboard con costo per modello, costo per team e trend mensile cambia i comportamenti più di qualsiasi policy. Quando un team vede il costo reale della propria dashboard trova subito il modo di ridurlo. La spesa diventa responsabilità condivisa solo se resta visibile nello stesso posto dove si decide.
-
-## Esempio SQL: costruire una vista di controllo
-
-Il pattern crea una base analitica con metrica, segmento e finestra temporale. Così confronti periodi e gruppi senza riscrivere la logica.
+Ridurre la spesa bloccando l'accesso agli analisti genera frustrazione e spinge i reparti a esportare CSV locali fuori controllo. Prima di spegnere qualsiasi risorsa, misurate il costo per singolo modello e confrontatelo con il numero reale di letture settimanali.
 
 ```sql
-WITH base_events AS (
-  SELECT
-    user_id,
-    account_id,
-    event_type,
-    event_time,
-    DATE_TRUNC('week', event_time) AS week,
-    source,
-    device_type
-  FROM events
-  WHERE event_time >= CURRENT_DATE - INTERVAL '180 days'
-    AND user_id IS NOT NULL
-),
-weekly_user_metrics AS (
-  SELECT
-    week,
-    user_id,
-    COALESCE(source, 'unknown') AS source,
-    COALESCE(device_type, 'unknown') AS device_type,
-    COUNT(*) AS total_events,
-    COUNT(DISTINCT DATE(event_time)) AS active_days,
-    COUNT(DISTINCT event_type) AS event_diversity,
-    MAX(CASE WHEN event_type IN ('purchase', 'subscribe', 'activation') THEN 1 ELSE 0 END) AS reached_key_outcome
-  FROM base_events
-  GROUP BY week, user_id, source, device_type
-)
+-- Query costosa senza filtro di partizione che scansiona tutto lo storico
+SELECT customer_id, sum(amount_eur)
+FROM fact_orders
+GROUP BY customer_id;
+```
+
+### Tenere nascosta la fattura cloud alla sola amministrazione
+
+Se gli ingegneri e gli analisti che scrivono le query non vedono mai quanto costa eseguire un modello ogni ora anziché una volta al giorno, non hanno alcun incentivo né informazione per scrivere codice efficiente.
+
+### Dimenticare le quote di sicurezza sugli ambienti esplorativi
+
+Un singolo utente che lancia per errore un join cartesiano su tabelle da miliardi di righe può consumare in un pomeriggio il budget compute di un'intera settimana se non esistono limiti di timeout o quote per query.
+
+## Come identificare e ottimizzare i modelli più costosi
+
+Il primo passo pratico consiste nell'estrarre dai log di sistema del warehouse i cinque modelli o le cinque query che consumano più tempo di elaborazione e byte letti negli ultimi trenta giorni.
+
+```sql
+-- Identificare i 5 modelli più costosi negli ultimi 30 giorni (esempio ClickHouse query_log)
 SELECT
-  week,
-  source,
-  device_type,
-  COUNT(DISTINCT user_id) AS users,
-  ROUND(AVG(active_days), 2) AS avg_active_days,
-  ROUND(AVG(event_diversity), 2) AS avg_event_diversity,
-  ROUND(AVG(reached_key_outcome) * 100, 2) AS key_outcome_rate
-FROM weekly_user_metrics
-GROUP BY week, source, device_type
-ORDER BY week, source, device_type;
+  normalized_query_hash,
+  any(substr(query, 1, 120)) AS sample_query,
+  count() AS executions,
+  round(sum(read_bytes) / 1e9, 2) AS total_gb_read,
+  round(sum(query_duration_ms) / 1000, 1) AS total_sec
+FROM system.query_log
+WHERE type = 'QueryFinish'
+  AND event_date >= today() - 30
+GROUP BY normalized_query_hash
+ORDER BY total_gb_read DESC
+LIMIT 5;
 ```
 
-## Esempio Python: controllare stabilità e anomalie
+Una volta individuati i primi cinque responsabili della spesa, applicate tre azioni mirate: convertite i modelli storici in incrementali elaborando solo gli ultimi tre giorni, allineate la frequenza di aggiornamento al reale bisogno decisionale (giornaliero invece che orario dove basta) e pubblicate una dashboard settimanale dei costi con l'owner di ciascun dominio.
 
-Lo stesso schema a finestra mobile individua i picchi di spesa fuori dalla variabilità settimanale.
+## Il caso difficile dei picchi imprevisti dovuti a carichi ad hoc
 
-```python
+Anche con pipeline notturne perfettamente ottimizzate, un'azienda in crescita può subire picchi improvvisi quando un nuovo strumento BI o un notebook esplorativo interroga direttamente le tabelle raw ad alta granularità.
 
-# df contiene: week, segment, users, key_outcome_rate
-# key_outcome_rate espresso in percentuale, es. 12.4
+Per proteggere il budget senza frenare l'esplorazione, impostate guardrail automatiche a due livelli: avviso automatico su Slack al raggiungimento del settantacinque per cento del budget mensile previsto e limite rigido di memoria o durata per singola query negli ambienti dedicati all'analisi ad hoc.
+Un ulteriore aspetto decisivo nella gestione quotidiana dell'infrastruttura riguarda la documentazione operativa e la condivisione delle responsabilità tra team tecnico e stakeholder di business. Quando una piattaforma dati cresce senza regole scritte, ogni nuova richiesta urgente finisce per generare scorciatoie temporanee che restano in produzione per anni. Stabilire fin dall'inizio criteri chiari per l'ingresso di nuove sorgenti, per la gestione delle modifiche allo schema e per la dismissione delle tabelle obsolete mantiene l'architettura leggera, leggibile e sostenibile anche quando il volume dei dati decuplica.
 
-df = df.sort_values(['segment', 'week']).copy()
-df['previous_rate'] = df.groupby('segment')['key_outcome_rate'].shift(1)
-df['wow_change_pp'] = df['key_outcome_rate'] - df['previous_rate']
-df['rolling_mean'] = df.groupby('segment')['key_outcome_rate'].transform(
-    lambda s: s.rolling(4, min_periods=2).mean()
-)
-df['rolling_std'] = df.groupby('segment')['key_outcome_rate'].transform(
-    lambda s: s.rolling(4, min_periods=2).std()
-)
-df['z_score'] = (df['key_outcome_rate'] - df['rolling_mean']) / df['rolling_std']
+Dal punto di vista pratico, conviene organizzare una breve revisione mensile congiunta tra chi gestisce le pipeline, chi costruisce i modelli analitici e i referenti dei reparti che usano i report. Durante questo incontro di trenta minuti si controllano tre indicatori oggettivi: il rispetto degli SLA di freschezza sulle tabelle principali, l'andamento dei costi di calcolo rispetto al budget previsto e il numero di incidenti o interventi manuali richiesti nelle ultime quattro settimane. Se uno di questi indicatori peggiora, la priorità della settimana successiva non è aggiungere nuove integrazioni, ma risolvere la causa strutturale del rallentamento.
 
-anomalies = df[df['z_score'].abs() >= 2].sort_values('z_score')
-print(anomalies[['week', 'segment', 'key_outcome_rate', 'wow_change_pp', 'z_score']])
-```
+Inoltre, ogni scelta tecnologica dovrebbe essere valutata sul costo totale di proprietà nell'arco di dodici mesi, includendo non solo le licenze cloud ma soprattutto le ore di lavoro umano necessarie per mantenere, aggiornare e monitorare il sistema. Uno strumento leggermente più costoso in fattura ma completamente gestito libera tempo prezioso degli ingegneri per attività ad alto valore, come il miglioramento della qualità dei dati, la costruzione di modelli affidabili e il supporto diretto alle decisioni strategiche aziendali.
 
-## L'IPO che ha spiegato dove stanno i soldi
+Infine, ricordate che la resilienza di un'infrastruttura dati non si dimostra nei giorni ordinari ma durante gli imprevisti: un picco di traffico improvviso, il cambio di formato di un'API esterna o un errore umano su una query di aggiornamento. Avere ambienti isolati, controlli automatici prima del rilascio, alert calibrati e procedure di ripristino già provate trasforma quelle situazioni potenzialmente critiche in normali interventi di routine risolti in pochi minuti senza impatto sul business.
 
-Il 16 settembre 2020 Snowflake si quota al NYSE con una raccolta di circa 3,36 miliardi di dollari nella maggiore IPO software dell'epoca. Il prospetto mostra la separazione che governa ogni budget dati: il compute cresce con le query e si ottimizza con incrementali e viste materializzate, mentre lo storage resta una voce quasi trascurabile. La lezione per il controllo dei costi è diretta: si governa il compute con owner e guardrail, non si taglia lo storage alla cieca.
+Nel contesto delle imprese italiane, dove i team dati sono spesso compatti e chiamati a coprire sia l'ingegneria sia l'analisi di business, questa sobrietà operativa fa tutta la differenza tra una piattaforma che abilita decisioni rapide e un sistema fragile che richiede manutenzione continua. Investire tempo nella standardizzazione di pochi pattern solidi ripaga ogni trimestre in termini di velocità di esecuzione, fiducia dei dirigenti nei numeri e serenità operativa per tutto il reparto tecnico.
+Quando l'organizzazione consolida queste abitudini operative, anche l'inserimento di nuovi colleghi o consulenti esterni diventa molto più veloce e sicuro. Un repository ordinato, con ambienti di test isolati e controlli automatici sulle modifiche, permette a chiunque di contribuire fin dalla prima settimana senza il timore di compromettere i dati di produzione o i report direzionali. Allo stesso tempo, la direzione ottiene visibilità trasparente sul ritorno dell'investimento tecnologico, perché ogni nuovo flusso porta con sé costi misurabili, responsabilità chiare e tempi di consegna prevedibili. Questa combinazione di rigore ingegneristico e semplicità gestionale rappresenta la base più solida su cui costruire la crescita analitica di medio e lungo periodo.
 
-## Domande per chiudere
+## Checklist di verifica su cost management
 
-1. Quali cinque modelli consumano oltre metà del tuo budget warehouse?
-2. Quale conversione a incrementale taglia di più il costo ricorrente?
-3. Quale guardrail assegna owner e budget a ogni workload?
-4. Quale dashboard rende visibile la spesa a tutti i team?
+Prima di approvare il budget trimestrale dell'infrastruttura dati, verificate queste cinque domande:
+
+1. Avete identificato i cinque modelli o query più costosi degli ultimi trenta giorni tramite i log di sistema?
+2. I modelli su tabelle storiche voluminose usano la materializzazione incrementale anziché la riscrittura completa?
+3. La frequenza di aggiornamento di ogni pipeline corrisponde all'uso reale delle dashboard collegate?
+4. Ogni dominio di spesa ha un proprietario nominato e una dashboard costi visibile ai team tecnici?
+5. Sono attive guardrail di budget e timeout di sicurezza sulle query esplorative degli utenti?

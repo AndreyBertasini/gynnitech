@@ -1,105 +1,178 @@
 ---
-title: "Layering in dbt: staging, intermediate e marts"
+title: "dbt e il ruolo dell'analytics engineer"
 description: >-
-  Layering: staging, intermediate, marts. Lezione sul design a strati dei modelli dbt.
+  Come dbt porta ingegneria del software nelle trasformazioni SQL: grafo DAG
+  con ref() e source(), layering staging-intermediate-marts, test sui contratti
+  dati e materializzazioni incrementali.
 module: "Modulo 16: Analytics engineering con dbt"
-order: 2
-category: Decisione
-headerImage: /course-headers/analytics-engineering-dbt-e-ruolo-dell-analytics-engineer-ginnytech-ad.webp
-headerImageAlt: >-
-  Layering dbt - immagine ufficiale della lezione su GinnyTech, creata da AD
-difficulty: advanced
-duration: 18 min
+order: 1
+category: Tecnico
+headerImage: /course-headers/analytics-engineering-dbt-e-ruolo-dell-analytics-engineer-ginnytech-ad-v2.webp
+headerImageAlt: "dbt e il ruolo dell'analytics engineer - immagine ufficiale della lezione su GinnyTech, creata da AD"
+difficulty: intermediate
+duration: 24 min
 prerequisites:
-  - analytics-engineering/indice-analytics-engineering
+  - data-warehousing/modellazione-dati
 learningObjectives:
-  - Assegnare ogni trasformazione al layer corretto tra staging, intermediate e marts
-  - Applicare le convenzioni di naming stg_, int_ e mrt_ ai modelli
-  - Bloccare in review la logica di business fuori dal layer intermediate
+  - Articolare le responsabilità dell'analytics engineer tra data engineering di piattaforma e analisi di business
+  - Strutturare un progetto dbt in tre layer (staging, intermediate, marts) usando source() e ref() per costruire il DAG
+  - Scegliere la materializzazione corretta tra view, table, ephemeral e incremental con test automatici di integrità
 binario: "ml-tabellare"
+formato: "articolo"
 autore: "Hermes"
 controllatoDa: "Argo"
 autorizzatoDa: "Giano"
 draft: false
-dateModified: 2026-09-07
+dateModified: 2026-11-13
 ---
-# Layering in dbt: staging, intermediate e marts
 
-Senza strati, ogni team ricostruisce la propria versione della stessa logica: il calcolo del revenue, la definizione di utente attivo, la regola che esclude i resi. Il layering è la risposta a questo caos, e organizzare le trasformazioni in strati leggibili è il cuore del design dei modelli dbt. Qui impari a farlo mentre il progetto cresce, senza che i numeri smettano di coincidere.
+# dbt e il ruolo dell'analytics engineer
 
-## L'idea in una frase
+Un'azienda e-commerce italiana con dodici milioni di euro di fatturato ha sedici viste SQL salvate dentro lo strumento di Business Intelligence e quattro procedure schedulate a mano alle tre di notte. Quando la finanza e il marketing presentano i conti del trimestre, il ricavo netto differisce del 14% perché una vista esclude i resi parziali e l'altra no, mentre una procedura notturna ha girato prima che arrivassero i pagamenti del corriere. La causa non è il database né il linguaggio SQL: è l'assenza di un grafo delle dipendenze, di uno strato unico di pulizia e di test automatici che blocchino il dato rotto prima della pubblicazione.
 
-Il layering separa la pulizia delle sorgenti, la logica di business riusabile e i dataset finali in tre strati con responsabilità distinte.
+## Sedici viste sparse e due fatturati diversi in consiglio
 
-## La procedura in cinque passi
+Questo è un caso ricostruito con numeri di esempio su quanto accade nelle aziende che crescono senza separare l'ingestione dei dati dalla loro modellazione analitica. I data engineer caricano in warehouse le tabelle grezze dell'ERP, del sito web e del gateway di pagamento; gli analisti, pressati dalle richieste quotidiane, scrivono query di trecento righe direttamente nei cruscotti copiando e incollando la logica di calcolo dello sconto e dell'IVA da un report all'altro.
 
-1. Mappa ogni tabella sorgente a un modello di `staging` con sole rinomine, cast di tipo e filtri di righe invalide.
-2. Sposta ogni join e ogni regola di business riusata da più team in un modello `intermediate`.
-3. Costruisci i `marts` come dataset finali denormalizzati senza logica di business complessa.
-4. Applica a ogni modello il prefisso del suo layer e i test di unicità e completezza.
-5. Blocca in review qualsiasi logica di business che ricompare dentro `staging` o `marts`.
+Dopo diciotto mesi di stratificazione, il calcolo del margine operativo vive in otto query diverse. Quando il gestionale cambia il codice degli ordini annullati da `CANC` a `VOID`, un analista aggiorna tre cruscotti ma dimentica gli altri cinque: per due settimane il direttore commerciale vede un fatturato gonfiato di 86.000 euro, finché un controllo incrociato con la contabilità fa emergere l'incongruenza. Inoltre, poiché le tabelle derivate vengono ricalcolate con script cron ad orari fissi (`03:00` e `03:15`) senza conoscere lo stato dei passi precedenti, basta un rallentamento di venti minuti sull'estrazione ERP perché la tabella dei ricavi giri sui dati del giorno prima.
 
-## Il problema che il layering risolve
+La causa di questa fragilità non è l'incapacità di scrivere SQL: è gestire trasformazioni di produzione fuori dal controllo di versione, senza separazione a strati e senza un compilatore che risolva l'ordine di esecuzione in base alle dipendenze reali tra tabelle.
 
-Senza strati, ogni team ricostruisce la propria versione della stessa logica. Il calcolo del `revenue`, la definizione di utente attivo e la regola che esclude i resi vengono riscritti ognuno a modo suo. Il risultato sono numeri che non coincidono tra dashboard diverse, lavoro duplicato e manutenzione insostenibile appena cambia una definizione. Il layering impone che la logica viva in un solo posto. Così trasforma dati grezzi in modelli testati, documentati e riusabili.
+## Come dbt trasforma query isolate in un grafo verificato
 
-## I tre livelli
+L'analytics engineering risolve questo divario applicando alle trasformazioni SQL i principi dell'ingegneria del software tramite [dbt (data build tool)](https://docs.getdbt.com/docs/introduction). Tre meccanismi fisici sostengono l'architettura.
 
-Il modello si appoggia su tre strati, ciascuno con responsabilità precise.
+Il primo meccanismo è la compilazione del grafo aciclico diretto (DAG) tramite le funzioni `source()` e `ref()`. In dbt un modello è un singolo file `.sql` che contiene un'istruzione `SELECT` pura, senza comandi `CREATE TABLE` o `INSERT` cablati a mano. Quando un modello richiama `{{ source('erp', 'raw_orders') }}` o `{{ ref('stg_orders') }}`, il compilatore risolve il nome fisico dello schema di destinazione e costruisce l'albero esatto di esecuzione: nessun modello a valle può partire finché i suoi genitori non hanno terminato e superato le verifiche.
 
-| Layer | Responsabilità | Esempio |
-|---|---|---|
-| Staging (stg_) | Pulizia minima e allineamento con i dati sorgente. Nessuna logica di business. | `stg_stripe__payments` riflette la tabella `payments` di Stripe con colonne rinominate e tipi corretti |
-| Intermediate (int_) | Logica di business complessa, join tra dati, aggregazioni intermedie e flag. Centralizza la logica riutilizzata da più team. | `int_orders_with_customers` unisce ordini e clienti, calcola metriche come `net_revenue` |
-| Marts (mrt_) | Dataset pronti per il consumo da BI e analyst, denormalizzati e semplici. Nessuna logica di business complessa. | `mrt_marketing__campaign_performance` con metriche aggregate e pronte per reportistica |
+Il secondo meccanismo è l'architettura a tre strati (`staging`, `intermediate`, `marts`). Lo strato `staging` ha un rapporto 1:1 con le tabelle grezze: rinomina le colonne, converte i tipi e scarta i record tecnici di prova, senza fare alcun join né aggregazione. Lo strato `intermediate` incapsula i passaggi algebrici complessi, come la deduplicazione o il raggruppamento dei pagamenti per ordine, portando le tabelle alla stessa granularità prima dell'incrocio. Lo strato `marts` espone i fatti e le dimensioni pronti per il business, dove ogni metrica è definita una sola volta.
 
-Lo `staging` legge i dati grezzi, rinomina le colonne, converte i tipi e filtra le righe tecnicamente invalide, senza join. L'`intermediate` ospita la logica pesante: join, aggregazioni intermedie e flag riusati da più team. I `marts` sono il prodotto finito, denormalizzato e leggibile, pensato per chi costruisce report senza dover ricostruire i calcoli.
+Il terzo meccanismo è il contratto di qualità dichiarato nei file YAML. Ogni modello dichiara vincoli di unicità (`unique`), non nullità (`not_null`), dominio ammesso (`accepted_values`) e integrità referenziale (`relationships`), che dbt traduce in query SQL di controllo: se una query restituisce anche una sola riga anomala, la pipeline si ferma prima di esporre il numero errato.
 
-## Perché tre layer e non due o quattro
+**In dbt ogni regola di pulizia vive in un solo modello del grafo e nessun dato raggiunge i cruscotti senza aver prima superato i test strutturali sul suo contratto.**
 
-Il pattern a tre livelli si è affermato per convergenza nella community dbt intorno al 2020, non per dogma ma perché funziona. Due livelli costringono a mescolare pulizia e logica di business nello stesso modello, e così ritorna il problema iniziale. Quattro o più livelli aggiungono passaggi che nessuno mantiene davvero e rendono il `lineage` difficile da leggere. Tre è il punto di equilibrio: ogni layer ha una responsabilità propria e non invade quella degli altri.
+## Tre errori che portano il caos dentro dbt
 
-## Convenzioni di naming
-
-La community dbt suggerisce uno schema di nomi prevedibile, che rende leggibile il `DAG` a colpo d'occhio.
-
-```text
-stg_[source]__[table_name]     → stg_stripe__payments
-int_[description]               → int_daily_customer_revenue
-mrt_[domain]__[description]     → mrt_marketing__campaign_performance
-```
-
-Conviene usare nomi chiari, evitare abbreviazioni criptiche e il plurale per le tabelle di entità. Un nome ben scelto dice già a quale layer appartiene il modello e da dove arrivano i suoi dati.
-
-## La definizione di Monthly Active User
-
-Senza layering ogni team scrive la propria query di `MAU` con definizioni leggermente diverse, e i numeri divergono. Con il layering la pulizia sta in `staging`, la logica di business in `intermediate` e la metrica finale nei `marts`. Così la definizione è una sola e tutti la riusano.
+Il blocco SQL qui sotto mostra cosa succede quando si copia una query monolitica dentro un file dbt senza rispettare gli strati e le funzioni del grafo:
 
 ```sql
--- Staging: stg_app__events
--- Intermediate: int_user_activity_flags
-SELECT user_id, event_date,
-  CASE WHEN event_date > CURRENT_DATE - 30 THEN 1 ELSE 0 END AS is_active_30d
--- Marts: mrt_metrics__mau
-SELECT DATE_TRUNC('month', event_date) AS month,
-  COUNT(DISTINCT CASE WHEN is_active_30d = 1 THEN user_id END) AS mau
+-- models/report_ricavi_errato.sql
+-- ERRORE: nome tabella cablato, join 1:N prima di aggregare i pagamenti e nessun filtro sugli annullati VOID.
+SELECT
+    o.customer_id,
+    count(o.order_id) AS numero_ordini,
+    sum(o.order_total_eur) AS ricavo_ordini_eur,
+    sum(p.payment_amount_eur) AS incassato_eur
+FROM raw_erp.orders AS o
+LEFT JOIN raw_payments.transactions AS p
+    ON o.order_id = p.order_id
+WHERE o.status != 'CANC'
+GROUP BY o.customer_id;
+
+-- Se un ordine da 100 EUR ha 2 tentativi di pagamento (uno fallito da 100 e uno riuscito da 100),
+-- il join moltiplica la riga dell'ordine: ricavo_ordini_eur diventa 200 EUR invece di 100 EUR.
 ```
 
-## Errori da evitare
+### Cablare i nomi fisici delle tabelle invece di usare source() e ref()
 
-L'errore più comune è usare il layering come etichetta senza applicarne il processo: un grafico senza decisione chiara, una metrica senza `baseline` o una conclusione senza dire quali assunzioni potrebbero invalidarla. Prima di fidarti dei dati controlla completezza, duplicati, timezone, definizioni cambiate e segmenti esclusi. Non fermarti alla media aggregata: segmenta per canale, coorte, piano, paese, device e maturità dell'utente, perché due segmenti con trend opposti rendono la media fuorviante.
+Scrivere `FROM raw_erp.orders` direttamente nel modello sembra più rapido perché evita di dichiarare il file YAML delle sorgenti e funziona subito nel terminale SQL. Diventa disastroso appena si esegue `dbt build`: non vedendo la macro `source()` o `ref()`, dbt ignora l'esistenza di quella dipendenza, esegue i modelli in ordine casuale e impedisce di far girare i test in un ambiente di sviluppo isolato, finendo per sovrascrivere le tabelle di produzione durante le prove.
 
-*Riferimenti:* dbt Labs (2024), Hughes (2022), Kimball & Ross (2013).
+### Fare join tra tabelle a granularità diversa direttamente nel modello finale
 
-Verdetto: tre layer con responsabilità rigide battono sia i due layer che impastano tutto sia i quattro o più layer che nessuno mantiene.
+Unire la tabella degli ordini con la tabella delle transazioni di pagamento nella stessa `SELECT` che calcola il totale cliente sembra comodo per risparmiare un file intermedio. Non funziona perché la relazione tra ordini e tentativi di pagamento è uno-a-molti (1:N): ogni ordine che ha avuto un primo addebito rifiutato e un secondo andato a buon fine compare due volte nel risultato del join, raddoppiando silenziosamente sia `count(o.order_id)` sia `sum(o.order_total_eur)`.
 
-## Un esempio che ha fatto scuola
+### Saltare i test YAML sulla chiave primaria del modello
 
-dbt nasce nel 2016 dentro Fishtown Analytics, una piccola consultancy di Philadelphia che si stanca di riscrivere le stesse trasformazioni SQL per ogni cliente. Dalla pratica quotidiana emerge la convenzione dei tre layer, con staging dedicato alla pulizia, intermediate alla logica riusabile e marts al consumo finale. Nel febbraio 2022 dbt Labs raccoglie 222 milioni di dollari a una valutazione di 4,2 miliardi, e quello schema diventa il riferimento condiviso dalla community. La lezione è che la separazione rigida dei layer elimina le definizioni duplicate: ogni metrica vive in un solo posto e ogni dashboard riusa lo stesso numero.
+Rilasciare un modello senza dichiarare i test `unique` e `not_null` sulla sua chiave primaria sembra innocuo quando si è appena controllato il risultato a occhio su cento righe di sviluppo. In produzione il fan-out da join 1:N o un caricamento duplicato della sorgente entra in tabella senza sollevare alcun allarme, e l'errore viene scoperto solo settimane dopo quando i conti non tornano con il bilancio.
 
-## Domande per mettere alla prova il design
+## Il grafo a tre strati con pre-aggregazione e contratto YAML
 
-1. Quale logica metti in staging e quale vieti esplicitamente in quel layer?
-2. Quando una regola di business merita un modello intermediate invece di vivere nei marts?
-3. Come verifichi che due dashboard usino davvero la stessa definizione di metrica?
-4. Quale segnale ti dice che la logica duplicata sta tornando nei marts?
+Per progettare un repository dbt solido e manutenibile, applicate questi quattro criteri in ordine di priorità:
+
+1. Create un modello `stg_` per ogni tabella sorgente usando esclusivamente `{{ source() }}`, limitandovi a rinominare i campi, convertire valute e date e normalizzare i codici di stato senza mai eseguire join.
+2. Isolate nei modelli `int_` ogni raggruppamento necessario a portare le tabelle figlie alla stessa granularità della tabella padre prima di unirle.
+3. Costruite i modelli `fct_` e `dim_` nello strato `marts` usando solo `{{ ref() }}` verso gli strati inferiori, scegliendo la materializzazione in base al volume e alla frequenza di lettura.
+4. Allegare a ogni modello un contratto nel file YAML con almeno `unique` e `not_null` sulla chiave di granularità dichiarata, eseguendo `dbt build` così che test e trasformazioni corrano nello stesso passo atomico.
+
+Ecco la riscrittura corretta divisa nei tre strati e il relativo contratto di verifica:
+
+```sql
+-- 1) models/staging/erp/stg_erp__orders.sql
+WITH source AS (
+    SELECT * FROM {{ source('raw_erp', 'orders') }}
+)
+SELECT
+    order_id,
+    customer_id,
+    CAST(order_ts AS TIMESTAMP) AS order_at,
+    CAST(order_total_eur AS NUMERIC(12, 2)) AS order_total_eur,
+    CASE
+        WHEN status IN ('CANC', 'VOID') THEN 'cancelled'
+        ELSE lower(status)
+    END AS order_status
+FROM source
+WHERE order_id IS NOT NULL;
+
+-- 2) models/intermediate/finance/int_payments_pivoted_to_orders.sql
+-- Porta i pagamenti alla granularità di 1 riga per order_id PRIMA del join con gli ordini.
+SELECT
+    order_id,
+    countIf(payment_status = 'captured') AS captured_payments_count,
+    sumIf(payment_amount_eur, payment_status = 'captured') AS captured_amount_eur
+FROM {{ ref('stg_payments__transactions') }}
+GROUP BY order_id;
+
+-- 3) models/marts/finance/fct_customer_orders.sql
+{{ config(materialized='table') }}
+
+SELECT
+    o.order_id,
+    o.customer_id,
+    o.order_at,
+    o.order_total_eur,
+    coalesce(p.captured_amount_eur, 0) AS captured_amount_eur
+FROM {{ ref('stg_erp__orders') }} AS o
+LEFT JOIN {{ ref('int_payments_pivoted_to_orders') }} AS p
+    ON o.order_id = p.order_id
+WHERE o.order_status != 'cancelled';
+```
+
+```yaml
+# models/marts/finance/_finance__models.yml
+version: 2
+
+models:
+  - name: fct_customer_orders
+    description: "Tabella dei fatti con granularità: una riga per ordine valido non annullato."
+    columns:
+      - name: order_id
+        tests:
+          - unique
+          - not_null
+      - name: customer_id
+        tests:
+          - not_null
+```
+
+Con questa struttura l'ordine da 100 euro con due tentativi di pagamento viene ridotto a una sola riga in `int_payments_pivoted_to_orders` prima del join, azzerando la moltiplicazione dei ricavi; inoltre la mappatura di `VOID` e `CANC` vive in un unico punto (`stg_erp__orders`), propagandosi automaticamente a tutti i cruscotti a valle. Se domani un join errato dovesse duplicare `order_id`, il test `unique` in `dbt build` bloccherebbe la pipeline in meno di cinque secondi. Impostare i tre strati fin dal primo modello non aggiunge costo di calcolo perché `staging` ed `ephemeral` vengono compilati come viste o sotto-query leggere; ristrutturare invece cinquanta query monolitiche già collegate ai report richiede settimane di migrazione campo per campo.
+
+## Materializzazione table o modello incremental
+
+Quando i modelli dello strato `marts` crescono in volume, occorre scegliere come dbt deve salvarli fisicamente nel database. I due strumenti principali per i marts sono la materializzazione `table` (che ricostruisce l'intera tabella da zero a ogni esecuzione con `CREATE TABLE AS SELECT`) e la materializzazione `incremental` (che elabora e accoda o aggiorna solo le righe nuove o modificate dall'ultima esecuzione tramite il blocco `{% if is_incremental() %}`).
+
+Il criterio di scelta è netto: **usate la materializzazione `table` finché il modello impiega meno di due o tre minuti a ricalcolarsi per intero e la sorgente conta pochi milioni di righe, passate a `incremental` solo quando la tabella sorgente è un flusso di eventi o log da decine di milioni di righe in cui il ricalcolo completo viola i tempi di consegna o gonfia i costi di calcolo.**
+
+La confusione comune consiste nel trasformare in `incremental` qualsiasi modello fin dal primo giorno per sentirsi più vicini alle grandi architetture, oppure nel lasciare come `table` un registro di clickstream che raddoppia ogni mese. Sbagliare questa scelta porta a due problemi opposti: un modello `incremental` prematuro su tabelle piccole introduce il rischio di deriva storica quando cambiano le regole di business o arrivano aggiornamenti tardivi oltre la finestra di guardia (costringendo a lanciare comunque `--full-refresh` manuali), mentre un modello `table` su cento milioni di eventi brucia budget di calcolo rielaborando a ogni ora tre anni di storia immutata.
+
+Questo articolo non affronta l'orchestrazione esterna dei job tramite schedulatori come Airflow o Dagster né la scrittura di macro Jinja personalizzate per la generazione dinamica di colonne. I tempi di soglia tra `table` e `incremental` variano in base al motore sottostante (ClickHouse, Snowflake, BigQuery o DuckDB).
+
+## Cinque domande prima di approvare una pull request in dbt
+
+1. Il modello usa esclusivamente `{{ source() }}` (se è in `staging`) o `{{ ref() }}` (se è in `intermediate` o `marts`), senza alcun nome di schema o tabella scritto in chiaro?
+2. I modelli `stg_` si limitano a rinominare, tipizzare e pulire una singola sorgente 1:1 senza introdurre join o aggregazioni di business?
+3. Prima di ogni `LEFT JOIN` tra due modelli, avete verificato che la tabella di destra abbia esattamente una riga per chiave di join per evitare il fan-out dei totali?
+4. Il file YAML associato dichiara esplicitamente la granularità del modello e include i test `unique` e `not_null` sulla chiave primaria?
+5. Se avete scelto `materialized='incremental'`, il filtro `is_incremental()` include una finestra di sovrapposizione (ad esempio gli ultimi tre giorni) per catturare gli eventi arrivati in ritardo?
+
+La metrica che separa un progetto dbt governato da un ammasso di query rinominate è la percentuale di modelli `marts` coperti da test sulla chiave primaria unita al numero di riferimenti diretti a tabelle grezze fuori dallo strato `staging`: la prima deve essere al 100%, il secondo esattamente a zero.
+
+Di tutto il flusso di lavoro dell'analytics engineer, una regola conta ordini di grandezza più delle altre: dichiarare la granularità di ogni modello ("una riga rappresenta un singolo X") e difenderla con il test `unique` sulla chiave prima di fare qualsiasi join. Finché la granularità è garantita, i numeri tornano sempre.

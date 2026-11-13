@@ -16,77 +16,147 @@ learningObjectives:
 prerequisites:
   - s3-data-lake/backup-dr
 binario: "ml-tabellare"
+formato: "articolo"
 autore: "Hermes"
 controllatoDa: "Argo"
 autorizzatoDa: "Giano"
 draft: false
-dateModified: 2026-09-07
+dateModified: 2026-11-13
 ---
+
 # Delta Lake: transazioni ACID sul data lake
 
-Nel binario `ml-tabellare` il nostro lavoro è trasformare file sparsi in tabelle di cui fidarsi. Un data lake di soli file `Parquet` fatica a gestire update, rollback, concorrenza e correzioni storiche. `Delta Lake` aggiunge un transaction log, il versioning e garanzie `ACID` che trasformano file distribuiti in tabelle affidabili: serve quando devi correggere dati, garantire letture coerenti e ricostruire versioni passate senza interventi manuali rischiosi.
+Un'azienda usa Apache Spark e Databricks sopra S3 per aggiornare ogni ora la tabella dei contratti clienti, ma in un job viene lasciata per abitudine l'opzione `.option("overwriteSchema", "true")` (o `mergeSchema` indiscriminato) mentre un secondo job esegue un `VACUUM` con ritenzione di `0 ore` proprio mentre sono in corso le query della BI. Il primo job accetta silenziosamente un dataframe sbagliato che rinomina e cambia tipo alle colonne rompendo i report a valle; il secondo job cancella da S3 i file Parquet che le query attive stavano ancora leggendo, facendole fallire a metà esecuzione. La causa non è un difetto di Delta Lake: è disabilitare i guardrail di **Schema Enforcement**, eseguire `MERGE` senza filtri di partizione e violare la finestra di sicurezza di 7 giorni del comando `VACUUM`.
 
-## Di cosa stiamo parlando
+## Uno schema corrotto accettato in silenzio e query uccise da un VACUUM a zero ore
 
-Delta Lake aggiunge ai file Parquet del lake un registro transazionale con garanzie ACID, viaggio nel tempo e controllo dello schema. In pratica trasforma una cartella di file in una tabella con le stesse promesse di un database.
+Questo è un caso ricostruito con numeri di esempio su quanto accade quando si usa **Delta Lake** su S3 disattivando le sue protezioni native per pigrizia operativa. La tabella `curated.subscriptions_delta` su S3 contiene 150 milioni di contratti e viene aggiornata ogni ora con i cambi di stato provenienti dal CRM.
 
-## Il percorso di lavoro, in sei passi
+Tre scelte di configurazione errate provocano incidenti a catena:
+1. Per non dover gestire le eccezioni quando un team aggiunge una colonna, gli sviluppatori impostano ovunque `spark.databricks.delta.schema.autoMerge.enabled = true`. Un giorno un bug nel job sorgente scrive il nome colonna con un refuso (`subscrption_amount` invece di `subscription_amount`): invece di bloccare la scrittura grazie allo *Schema Enforcement*, Delta Lake aggiunge automaticamente la colonna sbagliata riempiendo di `NULL` la colonna vera per tutte le nuove righe.
+2. Il comando orario `MERGE INTO subscriptions_delta USING updates ON target.sub_id = updates.sub_id` non include nella condizione di `ON` la colonna di partizione `start_month`: per aggiornare 5.000 contratti dell'ultimo mese, il motore scansiona e riscrive i file Parquet di tutti i 60 mesi storici.
+3. Per liberare subito spazio su S3, un operatore lancia `VACUUM subscriptions_delta RETAIN 0 HOURS`: i file Parquet dello snapshot di due minuti fa vengono eliminati mentre le query di fine mese li stavano ancora leggendo.
 
-1. Identifica le tabelle con correzioni tardive, cancellazioni o scritture concorrenti.
-2. Converti la tabella in formato `Delta` e verifica letture coerenti durante le scritture.
-3. Implementa gli upsert con `merge` su chiave e controlla duplicati e righe perse.
-4. Configura il controllo dello schema decidendo quando far fallire le scritture impreviste.
-5. Pianifica compaction periodica con `OPTIMIZE` e `Z-ordering` sulle chiavi di filtro reali.
-6. Prova `time travel` e rollback su una versione nota prima di dichiarare pronta la tabella.
+La causa di questi tre incidenti è non rispettare l'architettura del **Transaction Log (`_delta_log`)**, il partition pruning nelle clausole `MERGE` e il ciclo di vita di `OPTIMIZE ZORDER` + `VACUUM`.
 
-## Delta contro Iceberg: la domanda che sentirete sempre
+## Il Transaction Log (_delta_log), Schema Enforcement/Evolution e OPTIMIZE Z-Order
 
-La domanda pratica più frequente è quale dei due table format adottare. La differenza principale è l'ecosistema: `Delta` nasce dentro `Databricks` e `Spark`, `Iceberg` è pensato per più motori. La tabella di confronto riassume i punti che contano davvero:
+Delta Lake porta transazioni ACID serializzabili e alte prestazioni di lettura sopra i file Parquet di S3 attraverso tre meccanismi architetturali ([Armbrust et al., 2020](https://www.vldb.org/pvldb/vol13/p3411-armbrust.pdf)).
 
-| | Delta Lake | Iceberg |
-|---|---|---|
-| **Creatore** | Databricks | Netflix → Apache |
-| **Ecosistema primario** | Spark, Databricks | Multi-engine (Trino, Presto, Flink, Spark) |
-| **Compaction** | OPTIMIZE command | Manuale o via tool esterni |
-| **Z-ordering** | Sì (multi-dimensionale) | No nativo |
-| **Change Data Feed** | Sì | Sì (via snapshot diffs) |
+Il primo meccanismo è il **Transaction Log atomico nella sottocartella `_delta_log/`**. A differenza di Apache Iceberg (che usa un catalogo esterno per scambiare il puntatore a `metadata.json`), Delta Lake salva la storia ordinata delle transazioni direttamente su S3 dentro la cartella della tabella sotto forma di file JSON numerati in sequenza (`000000.json`, `000001.json`, ...). Ogni file JSON registra le azioni atomiche di quella transazione: quali nuovi file Parquet sono stati aggiunti (`add`), quali vecchi file sono stati logicamente rimossi (`remove`) e quale sia lo schema attivo (`metaData`). Ogni 10 commit (o secondo la soglia configurata), Delta Lake consolida tutti i JSON precedenti in un file **Checkpoint Parquet** veloce da leggere, permettendo a qualsiasi motore (Spark, Trino, Athena, ClickHouse `deltaLake()`) di ricostruire istantaneamente lo stato esatto della tabella a qualsiasi versione $V$.
 
-Se lavori in `Databricks`, `Delta Lake` è la scelta naturale. Se sei multi-cloud o multi-engine, `Iceberg` è più portabile. Verdetto: su `Databricks` usa `Delta Lake`, in ambienti multi-motore o multi-cloud usa `Iceberg`.
+Il secondo meccanismo è l'equilibrio tra **Schema Enforcement (attivo di default)** e **Schema Evolution controllata (`mergeSchema`)**. Di default Delta Lake applica una convalida rigorosa (*Schema Enforcement*): se un job tenta di inserire un dataframe con una colonna mancante, una colonna sconosciuta o un tipo incompatibile, la transazione viene respinta prima di scrivere nel `_delta_log`. Solo quando un'evoluzione additiva è voluta e testata si abilita puntualmente `mergeSchema` per quella specifica operazione.
 
-## Le tre operazioni che fanno il lavoro quotidiano
+Il terzo meccanismo è l'accoppiata tra **`MERGE INTO` con filtro di partizione**, **`OPTIMIZE ... ZORDER BY`** e **`VACUUM` a 7 giorni (168 ore)**. Poiché ogni `MERGE` riscrive i file Parquet toccati creando una nuova versione, aggiungere nella condizione `ON` il filtro sulla partizione (`AND target.partition_month IN (...)`) evita di scansionare lo storico; `OPTIMIZE ZORDER BY (col1, col2)` compatta i file piccoli in file da 256 MB–1 GB raggruppando spazialmente le chiavi di filtro; e `VACUUM` rimuove fisicamente da S3 i file marcati come `remove` da più di 7 giorni.
 
-Tre operazioni coprono la maggior parte del lavoro quotidiano: l'upsert via `merge`, il `time travel` per leggere uno stato passato e l'`OPTIMIZE` con `Z-ordering` per tenere i file compatti e veloci da scansionare. Ecco come si scrivono:
+**Una tabella Delta Lake su S3 mantiene integrità ACID e letture veloci solo se lascia attivo lo Schema Enforcement di default, include le chiavi di partizione nella condizione `ON` dei `MERGE` e schedula `OPTIMIZE ZORDER` seguito da `VACUUM` con almeno 168 ore di ritenzione.**
 
-```python
-# Scrittura con merge (upsert)
-from delta.tables import DeltaTable
-delta_table = DeltaTable.forPath(spark, "s3://lake/orders")
-delta_table.alias("t").merge(
-    new_orders.alias("s"), "t.order_id = s.order_id"
-).whenMatchedUpdateAll().whenNotMatchedInsertAll().execute()
+## Tre errori nell'uso di Delta Lake in produzione
 
-# Time travel: leggi tabella com'era 7 giorni fa
-df = spark.read.format("delta").option("versionAsOf", 7).load("s3://lake/orders")
+Il blocco SQL qui sotto mostra i tre antipattern critici su una tabella Delta: un `MERGE INTO` privo del predicato di partizione che scansiona l'intero data lake, lo `ZORDER BY` applicato su troppe colonne compresa la chiave di partizione stessa, e un `VACUUM RETAIN 0 HOURS` distruttivo:
 
-# Compaction e Z-ordering
-spark.sql("OPTIMIZE orders ZORDER BY (customer_id, order_date)")
+```sql
+-- ERRORE 1: MERGE INTO che unisce solo su sub_id senza specificare start_month nella clausola ON!
+-- Risultato: il motore non può fare partition pruning e legge tutti i 60 mesi di storico su S3!
+MERGE INTO delta_lake.subscriptions AS target
+USING staging.hourly_updates AS source
+    ON target.sub_id = source.sub_id
+WHEN MATCHED THEN UPDATE SET
+    target.status = source.status,
+    target.mrr_eur = source.mrr_eur
+WHEN NOT MATCHED THEN INSERT *;
+
+-- ERRORE 2: ZORDER BY che include la colonna di partizione (start_month) e troppe colonne (6 colonne),
+-- rendendo inefficace il clustering multidimensionale!
+OPTIMIZE delta_lake.subscriptions
+ZORDER BY (start_month, customer_id, country_code, plan_id, sales_rep_id, currency);
+
+-- ERRORE 3: VACUUM a 0 ore che cancella i file Parquet mentre i lettori concorrenti li stanno leggendo!
+VACUUM delta_lake.subscriptions RETAIN 0 HOURS;
 ```
 
-## Schema evolution: lasciare cambiare o bloccare?
+### Scrivere MERGE INTO sulla sola chiave primaria dimenticando il filtro di partizione
 
-`Delta Lake` gestisce sia l'evoluzione automatica dello schema, per esempio l'aggiunta di colonne, sia lo `schema enforcement`, che blocca le scritture con colonne non previste. Il comportamento si configura con `mergeSchema`: lascialo attivo quando una sorgente legittima cambia spesso, tienilo spento quando vuoi che uno schema imprevisto fallisca subito invece di corrompere silenziosamente la tabella.
+Scrivere `ON target.sub_id = source.sub_id` quando `target` è partizionata per `start_month` costringe spesso l'esecutore a una scansione completa di tutte le partizioni della tabella di destinazione per verificare dove potrebbero trovarsi quei `sub_id`. Se sapete che gli aggiornamenti dell'ultima ora riguardano solo contratti nati negli ultimi 12 mesi (o potete calcolare la lista esatta dei mesi presenti in `source`), aggiungere `AND target.start_month >= '2025-11-01'` nella condizione `ON` taglia del 90% i file Parquet letti e riscritti dal `MERGE`.
 
-## Gli errori che si ripetono
+### Inserire la colonna di partizione o più di 3 colonne dentro ZORDER BY
 
-Il primo errore è adottare `Delta` per moda quando il contesto è multi-engine: in quel caso `Iceberg` evita un lock-in che pagheresti caro più avanti. Il secondo è disattivare lo `schema enforcement` per comodità, lasciando che scritture impreviste corrompano la tabella senza che nessuno se ne accorga. Il terzo è dimenticare la compaction: senza `OPTIMIZE` periodico la tabella si frammenta in tanti piccoli file e le query rallentano.
+Scrivere `ZORDER BY (partition_col, col1, col2, col3, col4, col5)` commette due errori matematici contemporanei: primo, la colonna di partizione fisica (`partition_col`) ha già un unico valore costante dentro ciascuna cartella S3, quindi includerla nello Z-Order brucia bit di interleaving senza alcun effetto; secondo, la curva Z-Order perde rapidamente località spaziale oltre le **2 o 3 colonne**. Lo `ZORDER BY` va riservato a **1–3 colonne ad alta cardinalità non di partizione** frequentemente filtrate nel `WHERE` (es. `customer_id, product_id`).
 
-## Il caso che ha detto la parola "lakehouse": Databricks, 2019
+### Eseguire VACUUM con RETAIN inferiore a 168 ore (7 giorni) su tabelle attive
 
-Databricks nasce nel 2013 dai creatori di Apache Spark a Berkeley e porta Spark in produzione come piattaforma gestita. Nel 2019 rende Delta Lake open source e lo affida alla Linux Foundation: un registro transazionale sopra i file Parquet con atomicità, viaggio nel tempo e controllo dello schema. La mossa risponde a un dolore misurato sul campo, con pipeline che riscrivono intere partizioni per correggere poche righe e letture concorrenti che vedono tabelle a metà. Il fatto che nello stesso periodo anche Iceberg di Netflix del 2018 spinga nella stessa direzione conferma una sola cosa: il lakehouse nasce quando il formato dei file smette di essere un dettaglio.
+Disabilitare il controllo di sicurezza (`retentionDurationCheck.enabled = false`) per lanciare `VACUUM ... RETAIN 0 HOURS` espone la produzione a errori `FileNotFoundException` immediati. In Delta Lake i lettori usano un isolamento *Snapshot Isolation* senza bloccare gli scrittori: se una query lunga o un job di lettura è partito cinque minuti fa leggendo la versione `v41` mentre un `MERGE` ha appena creato la versione `v42` e il vostro `VACUUM 0 HOURS` cancella subito da S3 i file sostituiti della `v41`, la query in corso fallisce rovinosamente e perdete qualsiasi possibilità di Time Travel sugli ultimi giorni.
 
-## Domande per fissare i concetti
+## Upsert MERGE con Partition Pruning, OPTIMIZE Z-Order, VACUUM sicuro e lettura da ClickHouse
 
-1. Quale operazione di correzione diventa sicura con il `merge` su chiave invece della riscrittura manuale?
-2. Quando il `time travel` su una versione sostituisce la ricostruzione di uno stato passato?
-3. Quale impostazione del controllo dello schema fa fallire subito una scrittura imprevista?
-4. Quando la mancanza di compaction periodica segnala che la tabella si sta frammentando?
+Per gestire una tabella Delta Lake in produzione con aggiornamenti veloci, schema protetto e interrogazione diretta anche da ClickHouse, applicate questi quattro criteri in ordine di priorità:
+
+1. Mantenete sempre attivo lo **Schema Enforcement** predefinito; quando dovete aggiungere nuove colonne previste dal contratto, usate `ALTER TABLE ... ADD COLUMNS` esplicito nel repository di migrazione anziché lasciare `autoMerge` globale acceso.
+2. Nelle istruzioni `MERGE INTO`, inserite nella clausola `ON` il filtro esplicito sulle partizioni toccate per attivare il *dynamic/static partition pruning*.
+3. Schedulate giornalmente `OPTIMIZE ... WHERE <partizione_recente> ZORDER BY (col_alta_cardinalita_1, col_alta_cardinalita_2)` (massimo 2–3 colonne) seguito da `VACUUM ... RETAIN 168 HOURS`.
+4. Sfruttate la funzione `deltaLake('https://s3...')` in ClickHouse per interrogare direttamente il `_delta_log` da S3 con la massima velocità colonnare.
+
+Ecco il codice SQL completo con il `MERGE` ottimizzato per partizione, la manutenzione `OPTIMIZE ZORDER` + `VACUUM` e l'interrogazione diretta della tabella Delta Lake su S3 da ClickHouse:
+
+```sql
+-- 1. MERGE INTO ottimizzato con filtro di partizione (start_month) nella condizione ON
+-- per potare l'80% delle partizioni storiche durante l'upsert:
+MERGE INTO delta_lake.subscriptions AS target
+USING staging.hourly_updates AS source
+    ON target.sub_id = source.sub_id
+   AND target.start_month >= DATE '2026-01-01'
+WHEN MATCHED AND source.op = 'CANCEL' THEN
+    UPDATE SET target.status = 'cancelled', target.updated_at = source.updated_at
+WHEN MATCHED THEN
+    UPDATE SET target.mrr_eur = source.mrr_eur, target.updated_at = source.updated_at
+WHEN NOT MATCHED THEN
+    INSERT (sub_id, customer_id, country_code, start_month, status, mrr_eur, updated_at)
+    VALUES (source.sub_id, source.customer_id, source.country_code, source.start_month, source.status, source.mrr_eur, source.updated_at);
+
+-- 2. Compattazione bin-packing + Z-Ordering sulle sole 2 chiavi di filtro ad alta cardinalità
+-- (escludendo la chiave di partizione start_month) + VACUUM sicuro a 7 giorni (168 ore):
+OPTIMIZE delta_lake.subscriptions
+WHERE start_month >= DATE '2026-10-01'
+ZORDER BY (customer_id, country_code);
+
+VACUUM delta_lake.subscriptions RETAIN 168 HOURS;
+
+-- 3. Interrogazione diretta della tabella Delta Lake su S3 da ClickHouse tramite funzione deltaLake()
+-- che legge automaticamente il _delta_log per ignorare i file Parquet obsoleti:
+SELECT
+    country_code,
+    status,
+    count() AS abbonamenti_attivi,
+    sum(mrr_eur) AS mrr_totale_eur
+FROM deltaLake(
+    'https://s3.eu-central-1.amazonaws.com/acme-lake-prod/curated/subscriptions_delta/'
+)
+WHERE start_month >= '2026-01-01'
+  AND country_code = 'IT'
+GROUP BY country_code, status
+ORDER BY mrr_totale_eur DESC;
+```
+
+Il risultato coniuga sicurezza transazionale e velocità di lettura: aggiungendo `target.start_month >= DATE '2026-01-01'` nella condizione `ON`, il tempo di esecuzione del `MERGE` orario scende da 14 minuti a 45 secondi perché il motore ignora i cinque anni precedenti; lo `ZORDER BY (customer_id, country_code)` compatta i file della partizione corrente permettendo alle query puntuali di saltare oltre il 95% dei blocchi Parquet; e quando ClickHouse interroga la cartella tramite `deltaLake('https://...')`, legge il `_delta_log/` su S3 selezionando solo i file Parquet appartenenti all'ultimo snapshot committato, mentre `VACUUM ... RETAIN 168 HOURS` mantiene pulito il bucket senza mai disturbare le query in corso.
+
+## Scelta dell'Open Table Format: Apache Iceberg o Delta Lake (e UniForm)
+
+Oggi i due standard dominanti per trasformare S3 in un Lakehouse transazionale sono **Apache Iceberg** e **Delta Lake** (entrambi basati sotto il cofano su file Apache Parquet). Come scegliere quale adottare per un nuovo progetto?
+
+Il criterio di scelta è netto: **scegliete Apache Iceberg quando la vostra architettura è multi-motore ed eterogenea su AWS/Cloud (es. combinazione di Amazon Athena, Trino, ClickHouse, AWS Glue, Snowflake e Flink) e volete sfruttare *Hidden Partitioning* e *Partition Evolution* nativa tramite catalogo centrale, scegliete invece Delta Lake quando il cuore di tutte le vostre trasformazioni di ingegneria dati e Machine Learning risiede sull'ecosistema Apache Spark / Databricks.**
+
+La confusione comune consiste nel vivere questa scelta come un lock-in irreversibile che costringe a convertire e duplicare i terabyte di file Parquet su S3. Poiché sia Iceberg sia Delta Lake salvano i dati effettivi in normali file **Apache Parquet** e differiscono solo nei file di metadati JSON/Avro laterali, attivando **Delta UniForm (*Universal Format*)** (o Apache XTable) ogni commit scritto nel `_delta_log` genera automaticamente in parallelo anche i metadati `metadata.json` di Apache Iceberg sugli stessi identici file Parquet, rendendo la tabella leggibile nativamente da entrambi gli ecosistemi con zero duplicazione di storage.
+
+Questo articolo non tratta i *Deletion Vectors* introdotti nelle versioni più recenti di Delta Lake (equivalenti ai *Positional Delete Files* Merge-on-Read di Iceberg) né il *Change Data Feed* (`readChangeFeed = true`) per propagare a valle le sole righe modificate da un `MERGE`. Ricordate che se abilitate i *Deletion Vectors* su una tabella Delta, assicuratevi che tutti i motori di lettura esterni (come le versioni meno recenti di Athena o ClickHouse) supportino il protocollo `ReaderVersion = 3` oppure eseguite `REORG TABLE ... APPLY (PURGE)` prima della lettura esterna.
+
+## Cinque domande prima di mandare in produzione una tabella Delta Lake su S3
+
+1. Lo **Schema Enforcement** è attivo di default (con `autoMerge` globale disabilitato) così che eventuali colonne errate o tipi corrotti provenienti dalle sorgenti vengano bloccati prima di inquinare la tabella?
+2. Tutte le istruzioni `MERGE INTO` includono nella clausola `ON` non solo la chiave primaria del record ma anche i predicati sulla colonna di partizione per attivare il *partition pruning*?
+3. È pianificato un job regolare di **`OPTIMIZE`** sulle partizioni attive con `ZORDER BY` limitato a un massimo di 2 o 3 colonne ad alta cardinalità (escludendo le colonne di partizione)?
+4. È pianificato un job regolare di **`VACUUM`** con ritenzione di almeno **168 ore (7 giorni)**, senza mai forzare `RETAIN 0 HOURS` in produzione?
+5. Se la tabella viene letta da più motori fuori da Spark (Athena, ClickHouse, Trino), avete usato la funzione nativa `deltaLake()` / catalogo compatibile o abilitato **Delta UniForm** per esporre i metadati Iceberg?
+
+La metrica di efficienza operativa di una tabella Delta Lake è il **tempo di esecuzione del job `MERGE` periodico** insieme al **peso dei file Parquet non referenziati** prima e dopo il `VACUUM`: un `MERGE` ben filtrato per partizione mantiene una durata costante nel tempo anche quando la tabella supera i molti terabyte di storico.
+
+Di tutto il lavoro con Delta Lake, fissate una sola regola d'oro: il `_delta_log` è il vostro contratto ACID su S3. Non aggirate mai lo Schema Enforcement con `autoMerge` cieco, filtrate sempre le partizioni nel `MERGE` e lasciate a `VACUUM` i suoi sette giorni di respiro.

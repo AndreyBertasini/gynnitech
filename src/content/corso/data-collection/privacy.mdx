@@ -16,211 +16,164 @@ learningObjectives:
 prerequisites:
   - data-collection/framework
 binario: "ml-tabellare"
+formato: "articolo"
 autore: "Hermes"
 controllatoDa: "Argo"
 autorizzatoDa: "Giano"
 draft: false
-formato: "3s"
-sezioni: ["La privacy decide la qualità","GDPR per chi analizza","Implementazione pratica","Il trade-off con l'analisi","Errori e un caso"]
-dateModified: 2026-10-15
+dateModified: 2026-11-13
 ---
-import { QuizExercise } from '../../../components/QuizExercise';
-
-import { SqlExercise } from '../../../components/SqlExercise';
 
 # Privacy e GDPR nella raccolta dati
 
-<Percorso />
+Un portale B2C italiano invia nei parametri dell'URL di conferma (`?email=mario.rossi@esempio.it&cf=RSSMRA80A01H501U`) i dati personali in chiaro del cliente: lo script di tracking cattura automaticamente `page_url` e `referrer` spargendo email e codice fiscale in tutte le tabelle di clickstream, nei log di Kafka e nei server dei pixel pubblicitari anche quando l'utente aveva cliccato "Rifiuta tutti" sul banner dei cookie. Quando un utente invia una richiesta formale di cancellazione (Art. 17 GDPR), il team cancella la riga nel database PostgreSQL ma non sa come rimuovere quei dati sparsi in 2 miliardi di righe analitiche. La causa non è la rigidità del GDPR: è non applicare la **Privacy by Design alla fonte (propagazione del consenso per finalità, scrubbing degli URL, pseudonimizzazione con sale segreto e separazione della Identity Vault per il diritto all'oblio)**.
 
-<Obiettivi />
+## Email e codice fiscale finiti negli URL e impossibili da cancellare dal clickstream
 
-Un evento può essere tecnicamente utile e comunque sbagliato da raccogliere. Succede se espone dati personali non necessari, se il consenso non è chiaro o se non abbiamo deciso quando cancellarlo. Sul binario **ml-tabellare** i dati personali finiscono in tabelle, e la conformità si gioca su che cosa ci finisce dentro, per quanto tempo e con quale base giuridica. La privacy fa parte del design della misura: non è un vincolo che arriva dopo. L'obiettivo è raccogliere meno, raccogliere meglio e restare analizzabili a lungo.
+Questo è un caso ricostruito con numeri di esempio su quanto accade quando la conformità privacy viene vista come un "banner da mettere in homepage" anziché come un requisito architetturale della pipeline dati. L'azienda raccoglie 60 milioni di eventi web al mese in ClickHouse e S3.
 
-## La privacy decide la qualità
+Durante un audit del Data Protection Officer (DPO) emergono tre violazioni critiche del Regolamento Europeo (GDPR 2016/679):
+1. Il banner di consenso (*Consent Management Platform*, CMP) compare a schermo, ma i tag di tracciamento marketing partono già al caricamento della pagina **prima** che l'utente esprima una scelta, oppure ignorano lo stato `consent_marketing = false` nelle chiamate server-side.
+2. Il flusso di registrazione passa l'email in query string (`https://sito.it/benvenuto?email=nome@dominio.it`): il collettore salva l'URL completo in chiaro dentro la tabella immutabile degli eventi di navigazione (`raw_tracking.events`) che ha una retention di 5 anni, senza alcuna base giuridica per conservare dati identificativi diretti (PII) nel log comportamentale.
+3. Quando 40 utenti esercitano il diritto di cancellazione (Art. 17 GDPR) e di accesso (Art. 15 GDPR), l'azienda supera i 30 giorni di legge e scopre che gli identificativi diretti sono copiati in 18 tabelle diverse del data warehouse senza un catalogo dei campi PII.
 
-<Schema sezione="1" titolo="Il percorso verso la conformità">
-<Passo testo="Elenchiamo ogni campo personale con la decisione che supporta." />
-<Passo testo="Assegniamo base giuridica, owner e tempo di conservazione." />
-<Passo testo="Sostituiamo gli identificativi diretti con pseudonimi." />
-<Passo testo="Aggreghiamo i micro-eventi e cancelliamo i grezzi oltre la soglia." />
-<Passo testo="Testiamo cancellazione e accesso su tutti i sistemi, prima dell'audit." />
-<Passi>
-<Fase nome="Campi" testo="con la decisione" passo="1" />
-<Fase nome="Base giuridica" testo="owner e durata" passo="2" />
-<Fase nome="Pseudonimi" testo="prima dello storage" passo="3" />
-<Fase nome="Aggregati" testo="grezzi cancellati" passo="4" />
-<Fase nome="Test" testo="cancellazione e accesso" passo="5" />
-</Passi>
-</Schema>
+La causa del rischio sanzionatorio (fino al 4% del fatturato globale annuo) è non aver separato i **dati identificativi diretti (PII)** dai **dati comportamentali pseudonimizzati** fin dal collettore di ingresso.
 
-La raccolta conforme minimizza i dati personali, registra il consenso e conserva solo aggregati utili, così l'analisi resta possibile nel tempo. In una frase: meno dati personali, più anni di analisi.
+## Base Giuridica per Finalità, Pseudonimizzazione con Salt e Architettura Identity Vault
 
-<ErroreTipico sbagliato="Raccogliamo il campo e decidiamo dopo a che cosa serve" giusto="Ogni campo ha una decisione, una base giuridica e una scadenza" />
+Raccogliere dati analitici ricchi e azionabili rispettando al 100% il GDPR poggia su tre meccanismi ingegneristici che proteggono la privacy senza distruggere la capacità di analisi.
 
-<Messaggio>Meno dati personali, più anni di analisi.</Messaggio>
+Il primo meccanismo è la **Mappatura della Base Giuridica (Art. 6 GDPR), del Consenso Granulare e della Retention per ciascun campo**. Nel Tracking Plan ogni proprietà è classificata (`PII_DIRECT`, `PII_INDIRECT`, `NON_PII`) e associata a una base giuridica precisa:
+1. **Esecuzione del contratto / Obbligo legale** (Art. 6.1.b/c): registrare l'ordine pagato e la fattura nel gestionale e nel mart contabile (conservazione 10 anni per legge fiscale).
+2. **Legittimo interesse / Statistica aggregata strettamente necessaria** (Art. 6.1.f / Linee Guida Garante): misurazione tecnica delle prestazioni del servizio e conteggi aggregati anonimizzati senza identificativi persistenti cross-sito.
+3. **Consenso esplicito ed effettivo** (Art. 6.1.a): tracciamento individuale per profilazione comportamentale e invio a piattaforme pubblicitarie. Ogni evento trasporta nel payload il vettore del consenso (`consent_analytics: 1|0`, `consent_marketing: 1|0`) e il collettore blocca alla fonte i campi per cui manca il consenso.
 
-<Domanda risposta="La decisione che supporta: un campo senza decisione e senza base giuridica si elimina dal plan.">Che cosa elenchiamo accanto a ogni campo personale?</Domanda>
+Il secondo meccanismo è lo **Scrubbing automatico delle PII dagli URL e la Pseudonimizzazione con chiave segreta (`HMAC-SHA256`)**. Prima che un evento tocchi il disco di Kafka o ClickHouse, il collettore rimuove qualsiasi parametro sensibile dagli URL (`email`, `token`, `cf`, `phone`), converte l'indirizzo IP nel solo codice geografico (`country_code`, `region`) scartando l'IP grezzo, e sostituisce gli identificativi diretti con un hash crittografico salato (`hex(HMAC_SHA256(email_clean, secret_pepper))`). Un semplice `MD5(email)` o `SHA256(email)` **senza sale segreto non è sicuro**: chiunque può invertire l'hash in un secondo con una tabella arcobaleno (*rainbow table*) delle email note.
 
-## GDPR per chi analizza
+Il terzo meccanismo è il pattern **Identity Vault (PII Table isolata) per l'esecuzione istantanea del Diritto all'Oblio (Art. 17)**. Invece di scrivere nome, cognome, email e telefono dentro le 50 tabelle di eventi da miliardi di righe, le tabelle di eventi contengono **solo** un identificativo opaco interno (`user_surrogate_id`). Tutte le PII vivono in **un'unica tabella isolata e cifrata (`privacy_vault.user_pii_lookup`)**: quando un utente chiede la cancellazione GDPR, basta svuotare **quella singola riga** nella tabella `user_pii_lookup`. Istantaneamente i miliardi di eventi storici in `fct_events` diventano per sempre non riconducibili a nessuna persona fisica, mantenendo intatti al 100% i conteggi aggregati di fatturato e conversione storica dell'azienda.
 
-<Slide sezione="2" titolo="Quattro principi GDPR" messaggio="Base giuridica e minimizzazione prima del tag.">
-<Passi>
-<Fase nome="Base legale" testo="consenso, contratto, legge" />
-<Fase nome="Minimizzazione" testo="solo ciò che serve" evidenzia="si" />
-<Fase nome="Accesso e cancellazione" testo="diritti dell'utente" />
-<Fase nome="Residenza" testo="dati in UE" />
-</Passi>
-</Slide>
+**Una raccolta dati rispetta il GDPR senza perdere precisione analitica solo se applica il filtro di consenso alla fonte, rimuove IP e PII dagli URL e isola tutti i dati identificativi diretti in un unico Identity Vault separato dalle tabelle di eventi.**
 
-Quattro principi toccano direttamente chi disegna la raccolta. Primo: serve una base legale per trattare dati personali, come consenso, legittimo interesse, contratto o obbligo di legge. Secondo: vale la minimizzazione, quindi raccogliamo solo ciò che serve. Terzo: l'utente ha diritto di accesso e cancellazione, e i sistemi devono poterlo fare davvero. Quarto: i dati dei cittadini europei restano in UE o in paesi con garanzie adeguate. Questo limita dove appoggiamo lo storage.
+## Tre errori che espongono il data warehouse a violazioni GDPR e perdita di metriche
 
-<Pattern si="Base giuridica esplicita e minimizzazione" no="Raccolta totale giustificata dopo" />
+Il blocco SQL qui sotto mostra l'audit di privacy che rivela i tre errori più gravi: salvataggio di email in chiaro dentro `page_url` e di indirizzi IP completi nella tabella di clickstream, e invio di eventi marketing per utenti con `consent_marketing = 0`:
 
-<Domanda risposta="Una base legale: consenso, legittimo interesse, contratto o obbligo di legge.">Che cosa serve per trattare dati personali?</Domanda>
+```sql
+-- Audit di conformità GDPR sulla tabella grezza degli eventi:
+-- ERRORE 1: page_url contiene email e codici fiscali in chiaro passati in query string!
+-- ERRORE 2: client_ip_full conservato in chiaro per anni senza necessità di sicurezza!
+-- ERRORE 3: eventi con user_id e marketing properties registrati anche quando consent_marketing = 0!
+SELECT
+    countIf(match(page_url, '[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}')) AS url_con_email_in_chiaro_leak,
+    countIf(client_ip_full != '' AND event_date < today() - 30) AS ip_completi_conservati_oltre_limite,
+    countIf(consent_marketing = 0 AND ad_click_id != '') AS tracciamento_marketing_senza_consenso
+FROM raw_tracking.events_unfiltered
+WHERE event_date >= today() - 90;
+```
 
-## Implementazione pratica
+### Salvare URL completi non bonificati e indirizzi IP grezzi nelle tabelle analitiche
 
-<Schema sezione="3" titolo="Dal consenso alla cancellazione">
-<Passo testo="Una consent management platform raccoglie il consenso granulare." />
-<Passo testo="Solo dopo il consenso attiviamo il tracking." />
-<Passo testo="Nei log usiamo un hash dello user_id, non l'email in chiaro." />
-<Passo testo="Una retention policy cancella i grezzi e tiene gli aggregati anonimi." />
-<Passi>
-<Fase nome="Consenso" testo="analytics, marketing, funzionali" passo="1" />
-<Fase nome="Tracking" testo="acceso dopo il consenso" passo="2" />
-<Fase nome="Hash" testo="al posto dell'email" passo="3" />
-<Fase nome="Retention" testo="grezzi cancellati" passo="4" />
-</Passi>
-</Schema>
+Acquisire `window.location.href` e l'indirizzo IP del visitatore salvandoli in chiaro dentro le tabelle del data warehouse trasforma una tabella di pagine viste in un archivio di dati personali ad alto rischio. Gli sviluppatori web passano spesso token, email e nomi nei parametri GET (`?user=mario@rossi.it`). Se il collettore non applica una *allowlist* dei soli parametri consentiti (`utm_source`, `utm_medium`, `utm_campaign`, `page`) oscurando tutto il resto con `[REDACTED]` prima del salvataggio, vi ritroverete con dati personali impossibili da ripulire sparsi in tutti i backup S3.
 
-La traduzione operativa passa per quattro scelte. Una `consent management platform` raccoglie il consenso granulare per `analytics`, `marketing` e funzioni. Solo dopo attiviamo il tracking. La pseudonimizzazione usa un `hash` di `user_id` invece dell'email in chiaro nei log. Una `retention policy` cancella i grezzi dopo un numero definito di mesi e conserva le aggregazioni anonime più a lungo. Il diritto all'oblio richiede un processo che cancelli davvero da `warehouse`, `CRM` e log. I backup si svuotano al ciclo di conservazione. Se ripristiniamo un backup, ripuliamo di nuovo i dati già cancellati.
+### Usare un semplice SHA256(email) senza sale segreto credendo che sia anonimizzazione
 
-<ErroreTipico sbagliato="Un banner generico, senza cancellazione reale" giusto="Consenso granulare, hash e retention scritta" />
+Sostituire `'mario.rossi@gmail.com'` con `SHA256('mario.rossi@gmail.com')` e dichiarare che "il dato è anonimo e fuori dal perimetro GDPR" è un grave errore sia tecnico sia giuridico. Poiché l'algoritmo SHA-256 è deterministico e pubblico, basta fare il join con una qualsiasi lista di email per ricostruire in pochi millisecondi nome e cognome di ogni riga. Per il GDPR un dato hashato è un **dato pseudonimizzato** (ancora soggetto al GDPR), e per impedire la re-identificazione non autorizzata deve usare una chiave crittografica segreta custodita fuori dal database o essere sostituito da un UUID mappato nell'*Identity Vault*.
 
-<Messaggio>Il diritto all'oblio vale anche per backup e log, con tempi diversi.</Messaggio>
+### Cancellare le righe degli ordini storici per il GDPR sballando i bilanci passati
 
-<Domanda risposta="Contiamo le righe dell'utente in warehouse, CRM e log: devono essere zero. Nei backup controlliamo la scadenza e che il ripristino non rimetta quei dati.">Come verifichiamo che la cancellazione copra warehouse, CRM e backup?</Domanda>
+Quando non si separa l'*Identity Vault* dalle tabelle dei fatti e arriva una richiesta di cancellazione GDPR, eseguire `DELETE FROM fct_orders WHERE customer_id = 12345` commette due errori opposti: da un lato viola l'obbligo fiscale di conservazione delle scritture contabili (Art. 17.3.b GDPR), dall'altro altera retroattivamente il fatturato dei mesi già chiusi a bilancio. Non si cancellano mai i fatti contabili aggregati: si rimuovono i dati personali identificativi dell'utente nell'*Identity Vault*.
 
-## Il trade-off con l'analisi
+## Architettura Identity Vault, Scrubbing URL in SQL e verifica di Cancellazione GDPR in ClickHouse
 
-<Slide sezione="4" titolo="Raccogliere meno, analizzare uguale" messaggio="L'aggregato giornaliero tiene trend, retention e funnel.">
-<Confronto>
-<Lato nome="Ogni page view" sottotitolo="grezzi per sempre" />
-<Lato nome="Aggregato giornaliero" sottotitolo="grezzi a tempo definito" scelta="Il compromesso" />
-<Criterio nome="Trend e funnel" a="sì" b="sì" />
-</Confronto>
-</Slide>
+Per implementare una pipeline di raccolta e modellazione dati pienamente conforme al GDPR su ClickHouse, applicate questi quattro criteri in ordine di priorità:
 
-Raccogliere meno protegge la privacy ma limita l'analisi. Il bilanciamento sta negli aggregati. Invece di salvare ogni `page view` per sempre, aggreghiamo al giorno per utente e cancelliamo i grezzi quando lo scopo è finito. La durata non la fissa la legge: la ricaviamo dallo scopo. Per esempio 90 giorni, ma è solo un'ipotesi da verificare. Perdiamo la granularità del singolo evento, ma manteniamo trend, `retention` e funnel. È quasi sempre il compromesso giusto per restare conformi senza spegnere l'analisi. Lavoriamo sempre su tabelle pseudonimizzate e verifichiamo che nessun campo identifichi direttamente la persona.
+1. In ingresso, applicate lo **scrubbing automatico delle PII dagli URL** e scartate l'indirizzo IP dopo aver risolto nazione e regione; se `consent_analytics = 0`, raccogliete solo un ping aggregato *cookieless* privo di identificativi persistenti per mantenere il conteggio totale delle visite.
+2. Isolate tutti gli attributi identificativi diretti (`email`, `full_name`, `phone`) nell'unica tabella **`privacy_vault.user_pii_lookup`** protetta da permessi ristretti, lasciando nelle tabelle analitiche (`fct_events`, `fct_orders`) solo la chiave surrogata opaca `user_surrogate_id`.
+3. Configurate sulle tabelle di eventi granulari il **TTL automatico di ritenzione** in ClickHouse (es. `TTL event_date + INTERVAL 13 MONTH DELETE` per il clickstream) in linea con l'informativa privacy.
+4. Automatizzate e testate la procedura di **Right to Erasure (Art. 17)** azzerando i campi PII nell'*Identity Vault* e verificando con una query di audit che il soggetto non sia più re-identificabile.
 
-<Pattern si="Aggregato giornaliero, grezzi cancellati a scopo finito" no="Conservazione infinita senza uso" />
+Ecco l'implementazione SQL completa in ClickHouse con separazione tra tabella eventi dotata di TTL e *Identity Vault*, scrubbing URL ed esecuzione di una verifica di cancellazione GDPR:
 
-<Domanda risposta="Quando lo scopo è finito; 90 giorni è solo un'ipotesi. Conserviamo gli aggregati giornalieri per utente: trend, retention e funnel restano.">Dopo quanto tempo cancelliamo i grezzi, e che cosa conserviamo?</Domanda>
+```sql
+-- 1. Tabella Isolata IDENTITY VAULT (unico posto dove risiedono le PII dirette, accesso ristretto):
+CREATE TABLE privacy_vault.user_pii_lookup
+(
+    user_surrogate_id String,
+    email_clean String,
+    full_name String,
+    phone_number String,
+    consent_analytics UInt8,
+    consent_marketing UInt8,
+    gdpr_status LowCardinality(String), -- 'active', 'erased_art17'
+    updated_at DateTime64(3, 'UTC') DEFAULT now64(3)
+)
+ENGINE = ReplacingMergeTree(updated_at)
+ORDER BY user_surrogate_id;
 
-## Errori e un caso
+-- 2. Tabella Analitica Eventi (ZERO PII dirette, URL bonificati da email/CF e TTL automatico a 13 mesi):
+CREATE TABLE analytics_prod.fct_web_events_gdpr_safe
+(
+    event_date Date,
+    occurred_at DateTime64(3, 'UTC'),
+    event_id String,
+    user_surrogate_id String,
+    event_name LowCardinality(String),
+    page_path_scrubbed String,
+    utm_source LowCardinality(String),
+    country_code LowCardinality(String),
+    revenue_eur Decimal(12, 2)
+)
+ENGINE = MergeTree
+PARTITION BY toYYYYMM(event_date)
+ORDER BY (event_date, event_name, user_surrogate_id)
+TTL event_date + INTERVAL 13 MONTH DELETE;
 
-L'errore più frequente è trattare la privacy come un'etichetta invece che come un criterio di scelta. Si pubblica un numero senza decisione, senza `baseline` e senza rischio dichiarato. Poi si aggrega troppo presto e si nascondono segmenti opposti. Duplicati, tracking incompleto e `timezone` incoerenti producono conclusioni false. Infine, correlazione non è causalità.
+-- 3. Scrubbing alla fonte durante l'inserimento (rimuove qualsiasi email finita negli URL):
+INSERT INTO analytics_prod.fct_web_events_gdpr_safe
+SELECT
+    toDate(occurred_at) AS event_date,
+    occurred_at,
+    event_id,
+    if(consent_analytics = 1, user_surrogate_id, 'ANONYMOUS_NO_CONSENT') AS user_surrogate_id,
+    event_name,
+    replaceRegexpAll(page_url, '[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}', '[EMAIL_REDACTED]') AS page_path_scrubbed,
+    utm_source,
+    country_code,
+    revenue_eur
+FROM raw_tracking.incoming_stream;
 
-<Slide sezione="5" titolo="Il caso Meta e il GDPR" messaggio="Residenza e base giuridica si decidono prima del tag.">
-<NumeriGrandi>
-<Numero valore="2023" testo="l'autorità irlandese multa Meta" />
-<Numero valore="1,2 mld €" testo="la sanzione GDPR più alta" />
-</NumeriGrandi>
-</Slide>
+-- 4. Test e Audit di Cancellazione GDPR (Art. 17):
+-- Verifica che per tutti gli utenti con gdpr_status = 'erased_art17' i campi PII siano stati azzerati
+-- mentre il fatturato storico in fct_web_events_gdpr_safe sia rimasto intatto al 100%:
+SELECT
+    countIf(gdpr_status = 'erased_art17' AND (email_clean != '' OR full_name != '')) AS violazioni_cancellazione_incompleta,
+    (SELECT countIf(match(page_path_scrubbed, '[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}'))
+     FROM analytics_prod.fct_web_events_gdpr_safe
+     WHERE event_date >= today() - 30) AS email_residue_negli_url,
+    (SELECT sum(revenue_eur)
+     FROM analytics_prod.fct_web_events_gdpr_safe
+     WHERE event_date >= today() - 30) AS fatturato_storico_preservato_eur
+FROM privacy_vault.user_pii_lookup FINAL;
+```
 
-Nel maggio 2023 l'autorità irlandese per la protezione dei dati multa Meta per 1,2 miliardi di euro. Il motivo sono i trasferimenti di dati europei verso gli Stati Uniti, dopo la sentenza Schrems II, senza una base valida. È la sanzione GDPR più alta mai inflitta, e colpisce pipeline globali disegnate quando i dati potevano muoversi liberamente. La lezione è entrata nei tracking plan di mezza Europa: residenza dei dati, minimizzazione e base giuridica si decidono prima di accendere il tag, perché spegnerlo dopo costa molto di più.
+Il risultato risolve il conflitto tra privacy e business: quando l'utente `USR-991` esercita il diritto all'oblio (Art. 17), il sistema aggiorna la sua unica riga in `privacy_vault.user_pii_lookup` azzerando `email_clean = ''`, `full_name = ''`, `phone_number = ''` e impostando `gdpr_status = 'erased_art17'`. In meno di un secondo l'utente è dimenticato e la query di audit certifica `violazioni_cancellazione_incompleta = 0` e `email_residue_negli_url = 0`; allo stesso tempo, poiché le righe in `fct_web_events_gdpr_safe` contengono solo `user_surrogate_id` e l'importo `revenue_eur`, il fatturato storico dell'azienda non perde un solo centesimo.
 
-<Pattern si="Decidiamo residenza e base giuridica prima del tag" no="Spegniamo il tracking solo dopo la sanzione" />
+## Gestione degli utenti che rifiutano i cookie: Buio Totale o Misurazione Cookieless Aggregata
 
-<Domanda risposta="Perché spegnere il tag dopo costa molto di più: residenza, minimizzazione e base giuridica si decidono prima.">Perché decidiamo la base giuridica prima di accendere il tag?</Domanda>
+In Italia ed Europa una quota compresa tra il **25% e il 55% dei visitatori** clicca su "Rifiuta" sul banner dei cookie. Come gestire questo traffico senza violare la direttiva ePrivacy / GDPR ma senza diventare ciechi sulle performance delle campagne di acquisizione?
 
-## Pratica
+Il criterio di scelta è netto: **non installate alcun cookie o identificativo persistente nel browser né inviate dati personali a terze parti quando l'utente rifiuta il consenso, ma inviate dal vostro server first-party un ping tecnico *cookieless* strettamente anonimo e aggregato (contenente solo `timestamp_ora`, `page_path_pulito`, `utm_source`/`utm_campaign` della pagina corrente e `country_code`, con `user_surrogate_id = 'ANONYMOUS_NO_CONSENT'` e senza profilazione cross-pagina) abbinato a conversioni server-side sugli ordini realmente conclusi.**
 
-Proviamo una query: contiamo i tipi di evento distinti per utente.
+La confusione comune consiste nello spegnere il 100% della telemetria del sito quando l'utente rifiuta i cookie di profilazione pubblicitaria, perdendo anche il semplice conteggio anonimo delle pagine viste. Separando il **tracciamento individuale persistente** (che richiede consenso) dal **conteggio statistico aggregato first-party privo di identificatori**, mantenete la visibilità sui volumi reali di ogni canale nel pieno rispetto della scelta dell'utente. Ricordate di documentare ogni tabella nel **Registro dei Trattamenti (Art. 30 GDPR)** indicando finalità, categorie di interessati e TTL configurato.
 
-<SqlExercise client:visible
-  description="Scrivi una query che conti i tipi di evento distinti (page_view, purchase) generati da ogni utente. Mostra nome utente e numero di tipi di evento diversi."
-  hint="Usa JOIN tra utenti e eventi, COUNT(DISTINCT tipo), GROUP BY per utente."
-  solutionQuery={`SELECT u.nome, COUNT(DISTINCT e.tipo) AS tipi_evento
-FROM utenti u
-JOIN eventi e ON u.id = e.utente_id
-GROUP BY u.id, u.nome
-ORDER BY tipi_evento DESC;`}
-/>
+## Cinque domande prima di superare l'audit GDPR sulla raccolta dati
 
-## Riepilogo
+1. Ogni campo del vostro Tracking Plan che contiene dati personali ha una **base giuridica documentata**, un **owner** e una **scadenza di conservazione automatica (`TTL`)** configurata fisicamente sulle tabelle del database?
+2. Il collettore rimuove alla fonte gli indirizzi IP completi e applica uno **scrubbing con espressione regolare** su tutti gli URL e i referrer per impedire che email, nomi o codici fiscali finiscano nel clickstream?
+3. Lo stato del consenso (`consent_analytics`, `consent_marketing`) viene rispettato sia lato client sia nelle pipeline server-side e di Reverse ETL, bloccando l'invio di dati a terze parti per chi ha negato il consenso?
+4. Avete isolato tutti gli identificativi diretti (email, nome, telefono) in un unico **Identity Vault (`user_pii_lookup`)** separato dalle tabelle di eventi, usando nelle tabelle analitiche solo chiavi surrogate opache?
+5. Avete eseguito negli ultimi tre mesi un test reale di **Diritto di Accesso (Art. 15)** e di **Diritto alla Cancellazione (Art. 17)** verificando di poter estrarre o rimuovere i dati di un utente da tutti i sistemi entro i 30 giorni di legge?
 
-<Messaggio>Ogni campo personale ha decisione, base giuridica e scadenza.</Messaggio>
+La metrica di conformità tecnica alla privacy è **`0 PII dirette fuori dall'Identity Vault`** (`email_residue_negli_url = 0`) accompagnata da un **Tempo di Esecuzione della Cancellazione Art. 17 inferiore a 24 ore** senza alterazione dei totali finanziari aggregati.
 
-<Messaggio>Consenso granulare, hash e retention scritta.</Messaggio>
-
-<Messaggio>Aggregati giornalieri: privacy protetta e trend salvi.</Messaggio>
-
-<QuizExercise client:visible
-  quizId="data-collection-privacy"
-  title="Hai capito la privacy nella raccolta dati?"
-  questions={[
-    {
-      id: 'q1',
-      text: 'Che cosa serve per trattare dati personali?',
-      options: [
-        'Una base legale, come consenso, contratto o obbligo di legge',
-        'Solo un banner di cookie',
-        'Niente, se i dati sono utili',
-        'Solo un server in Europa'
-      ],
-      correctIndex: 0,
-      explanation: 'Il primo principio del GDPR è la base legale. Seguono minimizzazione, diritto di accesso e cancellazione, residenza dei dati.'
-    },
-    {
-      id: 'q2',
-      text: 'Che cosa fa la pseudonimizzazione?',
-      options: [
-        'Cancella tutti i dati',
-        'Sostituisce l’email in chiaro con un hash dello user_id nei log',
-        'Rende i dati pubblici',
-        'Elimina il consenso'
-      ],
-      correctIndex: 1,
-      explanation: 'La pseudonimizzazione toglie gli identificativi diretti prima dello storage analitico, senza perdere la possibilità di analisi.'
-    },
-    {
-      id: 'q3',
-      text: 'Qual è il compromesso giusto tra privacy e analisi?',
-      options: [
-        'Conservare ogni evento per sempre',
-        'Aggregare al giorno per utente e cancellare i grezzi quando lo scopo è finito',
-        'Non raccogliere nulla',
-        'Raccogliere solo il consenso'
-      ],
-      correctIndex: 1,
-      explanation: 'Si perde la granularità del singolo evento, ma si mantengono trend, retention e funnel.'
-    },
-    {
-      id: 'q4',
-      text: 'Che cosa richiede il diritto all’oblio?',
-      options: [
-        'Un processo che cancelli davvero da warehouse, CRM e log e che gestisca i backup',
-        'Un messaggio all’utente',
-        'La cancellazione solo del banner',
-        'Niente: basta l’hash'
-      ],
-      correctIndex: 0,
-      explanation: 'Un banner generico senza cancellazione reale non basta: la cancellazione va testata su tutti i sistemi.'
-    },
-    {
-      id: 'q5',
-      text: 'Che cosa ha mostrato la multa a Meta del 2023?',
-      options: [
-        'Che il GDPR non si applica ai trasferimenti',
-        'Che residenza, minimizzazione e base giuridica si decidono prima di accendere il tag',
-        'Che le multe sono sempre piccole',
-        'Che i dati possono viaggiare liberamente'
-      ],
-      correctIndex: 1,
-      explanation: 'Con 1,2 miliardi di euro è la sanzione GDPR più alta: spegnere il tag dopo costa molto di più.'
-    }
-  ]}
-/>
-
-Nella prossima lezione fissiamo il vocabolario: [Glossario del tracking: entità, eventi, proprietà](/course/data-collection/terminology/).
+Di tutta questa lezione su Privacy e GDPR, portate con voi una sola regola architetturale: il modo migliore per proteggere e cancellare i dati personali da cinquanta tabelle da miliardi di righe è non scriverli mai in quelle cinquanta tabelle. Mettete le PII in una sola cassaforte (`Identity Vault`), usate chiavi surrogate per tutto il resto e lasciate che il `TTL` faccia pulizia puntuale.

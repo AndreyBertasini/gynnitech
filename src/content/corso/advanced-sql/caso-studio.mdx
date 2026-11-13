@@ -19,288 +19,175 @@ learningObjectives:
   - Deduplicare transazioni con priorità di stato e quarantena, e riconciliare warehouse e fonte esterna
   - Costruire coorti per canale, segmenti omnicanale e curva di Kaplan-Meier con viste rieseguibili
 binario: "ml-tabellare"
+formato: "articolo"
 autore: "Hermes"
 controllatoDa: "Argo"
 autorizzatoDa: "Giano"
 draft: false
-dateModified: 2026-09-07
+dateModified: 2026-11-13
 ---
 
 # Caso studio: tre domande sulle stesse tabelle sporche
 
-Questo lab appartiene al binario **ml-tabellare**: ogni passaggio, dalla deduplica alla riconciliazione, si costruisce con query su tabelle reali.
+Un retailer omnicanale (e-commerce + 12 negozi fisici) ha due tabelle grezze: `raw_transactions` con webhook duplicati, stati fuori ordine (`refunded` arrivato prima di `paid` in alcuni retry) e `customer_id` mancanti sugli scontrini POS non fidelizzati, e `raw_erp_settlements` con gli incassi netti bancari. La direzione pone tre domande sullo stesso dataset: qual è il fatturato netto riconciliato con l'ERP, qual è la retention a 3 mesi per canale di acquisizione, e quali clienti comprano sia online sia in negozio. La causa dei numeri discordanti tra i team non è la complessità delle domande: è rispondere direttamente sulle **tabelle grezze** invece di costruire prima un **layer pulito con deduplica deterministica, quarantena degli anomali e riconciliazione con l'ERP**.
 
-## L'idea in una frase
+## Tre risposte diverse dalle stesse tabelle grezze e sporche
 
-Il lab integra deduplica, coorti e riconciliazione in una sola base fidata che sostiene attribuzione e confronto tra canali.
+Questo è un caso ricostruito con numeri di esempio su quanto accade quando marketing, prodotto e finance interrogano direttamente le tabelle raw applicando filtri ad hoc diversi.
 
-## Il percorso in cinque passi
+Un'architettura SQL pulita separa nettamente la bonifica iniziale dalle tre analisi a valle:
 
-1. Deduplica le transazioni con regola deterministica di priorità di stato su `transaction_id` e quarantena delle righe scartate.
-2. Assegna ogni cliente al canale del primo touchpoint osservato con `FIRST_VALUE` e calcola spesa cumulata a uno, tre, sei e dodici mesi.
-3. Etichetta il segmento omnicanale su finestra mobile di dodici mesi con conteggio distinto dei canali via `COUNT(DISTINCT channel)`.
-4. Riconcilia warehouse e fonte esterna per mese e per giorno con `FULL OUTER JOIN` e classifica a mano un campione di righe orfane.
-5. Stima i tempi di adozione del secondo canale con curva di sopravvivenza e consegna viste numerate rieseguibili in ordine.
+| Fase della pipeline | Input | Regola applicata | Output garantito |
+| :--- | :--- | :--- | :--- |
+| **1. Deduplica & Quarantena** | `raw_transactions` | `ROW_NUMBER()` per `tx_id` con priorità stato; `tx_id IS NULL` in quarantena | `int_clean_transactions` (`1` riga per `tx_id`) |
+| **2. Riconciliazione ERP** | `int_clean_transactions` vs `raw_erp_settlements` | `FULL OUTER JOIN` per `tx_id` e calcolo delta | Lista esatta di discrepanze a `0.00 €` target |
+| **3. Coorti per canale** | `int_clean_transactions` (`customer_id != ''`) | Coorte fissa al primo acquisto `paid` con `MIN()` | Matrice retention `M0..M3` per canale |
+| **4. Segmenti omnicanale** | `int_clean_transactions` | `countIf(channel = 'web') > 0 AND countIf(channel = 'pos') > 0` | `web_only`, `pos_only`, `omnicanale` |
 
-## Perché tre domande diverse condividono le stesse tabelle
+Costruendo una sola volta `int_clean_transactions`, tutte e tre le domande della direzione condividono esattamente la stessa verità di base.
 
-La tentazione è trattare attribuzione, coorti e riconciliazione come progetti separati. Sarebbe un errore costoso, perché tutte leggono le stesse transazioni e lo stesso grafo di touchpoint. Se ciascuno pulisce i dati a modo suo, si ottengono tre versioni del `revenue` che non quadrano tra loro. La prima mossa professionale è costruire un singolo strato di transazioni fidate e farci leggere sopra ogni analisi. Il modello dati è volutamente realistico: duplicati fisiologici da retry e reimport, buchi di tracking in alcuni giorni.
+## Deduplica con priorità di stato, quarantena e viste rieseguibili
 
-| Fase | Cosa chiarire | Output atteso |
-|---|---|---|
-| Domanda | Quale scelta reale stai migliorando? | Decisione da prendere |
-| Misura | Quale segnale osservi? | Metrica con unità e finestra |
-| Controllo | Quale baseline rende il segnale interpretabile? | Confronto credibile |
-| Azione | Cosa cambia dopo l'analisi? | Prossimo passo operativo |
+Il primo meccanismo è la **deduplica deterministica con priorità di stato**. Quando un webhook invia prima `refunded` e poi un retry ritardato invia `paid` con timestamp successivo, ordinare solo per `updated_at DESC` farebbe vincere `paid` sopra `refunded`. Bisogna assegnare un peso esplicito allo stato (`multiIf(status = 'refunded', 3, status = 'paid', 2, 1) DESC`) seguito da `updated_at DESC, event_id DESC` in `ROW_NUMBER()`.
 
-## Deduplicare le transazioni senza buttare segnale
+Il secondo meccanismo è la **quarantena esplicita dei record anomali**. Le transazioni con `tx_id IS NULL` o `amount_eur < 0` non vanno né lasciate nel flusso principale né scartate in silenzio: vanno isolate in una vista `quarantine_transactions` così che il team tecnico possa indagare la fonte senza contaminare i KPI finanziari.
 
-I duplicati sono il primo posto dove un'analisi muore in silenzio. La stessa transazione può comparire fino a tre volte con stati diversi e timestamp ravvicinati. Tenere tutto gonfia il `revenue` di alcuni punti percentuali, mentre tenere una riga a caso introduce variazioni non riproducibili. La convenzione scelta qui è esplicita: priorità a `completed` su `refunded` su `pending`, e a parità di stato vince la riga più recente. Il resto finisce in una tabella di quarantena ispezionabile, mai cancellata in silenzio.
+Il terzo meccanismo è la **riconciliazione `FULL OUTER JOIN` tra warehouse e fonte esterna (ERP)**. Unendo i totali puliti del warehouse con `raw_erp_settlements` per `tx_id`, emergono immediatamente le tre sole cause di scarto possibili: transazione presente solo in warehouse, presente solo in ERP, o presente in entrambi con importo diverso.
+
+**Bonificate e deduplicate le tabelle sporche una sola volta in un layer intermedio testato, isolando gli anomali in quarantena, prima di rispondere a qualsiasi domanda analitica.**
+
+## Tre errori comuni su dati reali omnicanale
+
+Il blocco SQL qui sotto mostra l'errore tipico di chi deduplica per `updated_at DESC` senza priorità di stato e filtra `customer_id != ''` già nel calcolo del fatturato totale:
 
 ```sql
--- Deduplica deterministica: una riga per transaction_id, quarantena inclusa
-WITH ranked AS (
+-- ERRORE 1: filtrare customer_id != '' prima del fatturato cancella il 35% degli scontrini POS anonimi!
+-- ERRORE 2: ordinare solo per updated_at DESC fa sovrascrivere un rimborso da un retry 'paid' tardivo!
+SELECT
+    tx_id,
+    argMax(status, updated_at) AS wrong_final_status,
+    argMax(amount_eur, updated_at) AS amount_eur
+FROM analytics_raw.raw_transactions
+WHERE customer_id != ''
+GROUP BY tx_id;
+```
+
+### Filtrare i clienti anonimi prima di calcolare il fatturato totale
+
+Negli store fisici molti clienti pagano senza carta fedeltà (`customer_id = ''`). Se filtrate `customer_id != ''` nella CTE di pulizia iniziale, i numeri di fatturato non quadreranno mai con l'ERP. Il filtro su `customer_id != ''` va applicato **solo** nelle analisi a livello cliente (coorti, omnicanalità), mai nella base transazionale finanziaria.
+
+### Deduplicare per timestamp senza gerarchia di stato
+
+In sistemi distribuiti i messaggi arrivano fuori ordine. Uno stato terminale come `refunded` o `chargeback` deve avere priorità di business superiore a `paid` o `pending`, indipendentemente dall'ordine di arrivo del retry di rete.
+
+### Usare INNER JOIN nella riconciliazione con l'ERP
+
+Fare `INNER JOIN` tra warehouse ed ERP nasconde proprio i record mancanti da una delle due parti, cioè i bug più gravi. La riconciliazione richiede sempre una `FULL OUTER JOIN` che mostri gli orfani di entrambi i lati.
+
+## Pipeline end-to-end su dati sporchi: deduplica, ERP e omnicanalità in ClickHouse
+
+Per rispondere in modo coerente alle tre domande della direzione in ClickHouse, applicate questi quattro passi:
+
+1. Deduplicate `raw_transactions` per `tx_id` usando `ROW_NUMBER()` con priorità di stato (`refunded > paid > pending`) e `updated_at DESC`.
+2. Eseguite la riconciliazione `FULL OUTER JOIN` contro `raw_erp_settlements` per isolare eventuali delta finanziari.
+3. Sulle transazioni pulite con `customer_id != ''`, classificate ogni cliente in `web_only`, `pos_only` o `omnicanale`.
+4. Calcolate il fatturato netto e la quota di clienti per segmento omnicanale garantendo che il totale quadri.
+
+Ecco l'implementazione SQL completa in ClickHouse:
+
+```sql
+-- Layer pulito + Riconciliazione ERP + Segmentazione Omnicanale su tabelle sporche:
+WITH ranked_tx AS (
     SELECT
-        t.*,
-        -- priorità di stato esplicita: completed batte refunded batte pending
-        CASE status WHEN 'completed' THEN 0 WHEN 'refunded' THEN 1 ELSE 2 END AS status_prio,
-        ROW_NUMBER() OVER (
-            PARTITION BY transaction_id
+        tx_id,
+        customer_id,
+        channel, -- 'web' o 'pos'
+        status,
+        amount_eur,
+        updated_at,
+        row_number() OVER (
+            PARTITION BY tx_id
             ORDER BY
-                CASE status WHEN 'completed' THEN 0 WHEN 'refunded' THEN 1 ELSE 2 END ASC,
-                created_at DESC,   -- a pari stato vince la riga più recente
-                source_row_id DESC -- spareggio deterministico finale
+                multiIf(status = 'refunded', 3, status = 'paid', 2, 1) DESC,
+                updated_at DESC,
+                event_id DESC
         ) AS rn
-    FROM transactions t
-)
--- tabella fidata: solo rn = 1
--- SELECT * FROM ranked WHERE rn = 1  ->  trusted_transactions
--- SELECT * FROM ranked WHERE rn > 1  ->  quarantine_duplicates
-SELECT transaction_id, customer_id, channel, amount_eur, status, created_at
-FROM ranked WHERE rn = 1;
-```
-
-Il controllo che chiude il passaggio è l'invariante contabile: la somma delle parti deve ridare il totale al centesimo. Una query di controllo che confronta aggregati su base mensile intercetta regressioni della pipeline prima che raggiungano le slide. I giorni senza alcun touchpoint ma con transazioni normali segnalano quasi sempre un'interruzione del tracciamento. Una spina calendario continua resa con `LEFT JOIN` contro i touchpoint rende visibili i giorni a zero, da annotare come tracking non affidabile.
-
-```sql
--- Giorni con transazioni ma zero touchpoint: probabili buchi di tracking
-WITH days AS (
-    -- spina calendario continua sul periodo di analisi
-    SELECT generate_series(DATE '2024-01-01', DATE '2024-12-31', INTERVAL '1 day')::date AS d
+    FROM analytics_raw.raw_transactions
+    WHERE tx_id != '' AND amount_eur >= 0
 ),
-daily AS (
-    SELECT d.d,
-        COUNT(DISTINCT tx.transaction_id) AS n_tx,   -- transazioni fidate del giorno
-        COUNT(DISTINCT tp.touch_id) AS n_touch        -- touchpoint registrati
-    FROM days d
-    LEFT JOIN trusted_transactions tx ON tx.created_at::date = d.d
-    LEFT JOIN marketing_touchpoints tp ON tp.touched_at::date = d.d
-    GROUP BY d.d
-)
-SELECT d, n_tx, n_touch
-FROM daily
-WHERE n_touch = 0 AND n_tx > 20  -- soglia anti-rumore: pochi ordini possono non avere touch
-ORDER BY d;
-```
-
-## Coorti per canale dal primo tocco al revenue cumulato
-
-L'errore classico è attribuire tutto il `revenue` all'ultimo click e dichiarare vincente il canale che intercetta la domanda già formata. Il confronto onesto sposta l'unità di analisi dal singolo ordine alla coorte: tutti i clienti il cui primo touchpoint arriva da un canale, con spesa cumulata a uno, tre, sei e dodici mesi. L'assegnazione usa `FIRST_VALUE` sulla sequenza dei touch di ciascun cliente. È una scelta con limiti noti sui percorsi multitocco, ma stabile nel tempo e senza premi al canale che chiude.
-
-```sql
--- Canale di acquisizione = canale del primo touchpoint osservato
-WITH first_touch AS (
-    SELECT DISTINCT
-        customer_id,
-        FIRST_VALUE(channel) OVER (
-            PARTITION BY customer_id ORDER BY touched_at ASC, touch_id ASC
-        ) AS acquisition_channel,
-        MIN(touched_at) OVER (PARTITION BY customer_id) AS cohort_month
-    FROM marketing_touchpoints
-),
-cohort_revenue AS (
+clean_tx AS (
     SELECT
-        date_trunc('month', f.cohort_month)::date AS coorte,
-        f.acquisition_channel AS canale,
-        tx.customer_id,
-        -- mesi trascorsi tra acquisizione e transazione (0 = stesso mese)
-        (EXTRACT(YEAR FROM tx.created_at) - EXTRACT(YEAR FROM f.cohort_month)) * 12
-          + (EXTRACT(MONTH FROM tx.created_at) - EXTRACT(MONTH FROM f.cohort_month)) AS mese_idx,
-        SUM(tx.amount_eur) AS speso
-    FROM first_touch f
-    JOIN trusted_transactions tx USING (customer_id)
-    WHERE tx.status = 'completed' AND tx.created_at >= f.cohort_month
-    GROUP BY 1, 2, 3, 4
-)
--- LTV cumulato medio per coorte a 1/3/6/12 mesi: pivot sugli orizzonti
-SELECT coorte, canale,
-    AVG(SUM(CASE WHEN mese_idx <= 0 THEN speso ELSE 0 END)) OVER w AS ltv_m1,
-    AVG(SUM(CASE WHEN mese_idx <= 2 THEN speso ELSE 0 END)) OVER w AS ltv_m3,
-    AVG(SUM(CASE WHEN mese_idx <= 5 THEN speso ELSE 0 END)) OVER w AS ltv_m6,
-    AVG(SUM(CASE WHEN mese_idx <= 11 THEN speso ELSE 0 END)) OVER w AS ltv_m12
-FROM cohort_revenue
-WINDOW w AS (PARTITION BY coorte, canale);
-```
-
-Presentare le differenze senza intervalli di confidenza sarebbe disonesto. Con coorti da poche centinaia di clienti, due canali con intervalli ampiamente sovrapposti non sono vincitore e perdente ma un pareggio statistico. Meglio una tabella con stima, intervallo e numerosità che un grafico a barre senza barre d'errore.
-
-## Quanto vale davvero un cliente omnicanale
-
-La definizione operativa conta più del confronto. Qui omnicanale significa transazioni completate su almeno due canali distinti negli ultimi dodici mesi mobili. La finestra mobile evita di gonfiare il gruppo con clienti vecchi e di trasformare il confronto in una proxy dell'anzianità. Il confronto tra segmenti va fatto a parità di anzianità: clienti acquisiti nello stesso trimestre, su ordini per cliente, scontrino medio e valore a dodici mesi.
-
-```sql
--- Etichetta omnicanale su finestra mobile di 12 mesi
-WITH cust_month AS (
-    SELECT DISTINCT
+        tx_id,
         customer_id,
-        date_trunc('month', created_at)::date AS mese,
-        channel
-    FROM trusted_transactions
-    WHERE status = 'completed'
+        channel,
+        status,
+        if(status = 'paid', amount_eur, 0.00) AS net_paid_eur
+    FROM ranked_tx
+    WHERE rn = 1
 ),
-multicanale AS (
-    SELECT customer_id, mese,
-        COUNT(DISTINCT channel) OVER (
-            PARTITION BY customer_id
-            ORDER BY mese
-            RANGE BETWEEN INTERVAL '11 months' PRECEDING AND CURRENT ROW
-        ) AS n_canali_12m
-    FROM cust_month
-)
-SELECT customer_id, mese,
-    CASE WHEN n_canali_12m >= 2 THEN 'omnicanale' ELSE 'single-channel' END AS segmento
-FROM multicanale;
-```
-
-| Metrica (coorte Q1, 12 mesi) | Single-channel | Omnicanale | Nota |
-|---|---|---|---|
-| Ordini per cliente | 2,1 | 4,3 | Guida la differenza |
-| Scontrino medio | 54 € | 61 € | Effetto minore |
-| LTV 12 mesi | 113 € | 262 € | Stratificato per anzianità |
-| Retention mese 12 | 31% | 57% | Definizione sopra |
-
-Il rapporto grezzo sovrastima l'effetto per selezione dei migliori clienti. Stratificando per coorte di acquisizione il divario si riduce ma resta ampio e significativo su grandi numeri. Sapere che gli omnicanale spendono di più non dimostra che spingere un cliente sul secondo canale ne raddoppi la spesa. L'uso onesto è priorizzare l'esperienza cross-canale per chi mostra segnali di adozione e disegnare un test controllato prima di promettere incrementi diffusi.
-
-## Riconciliare Shopify e warehouse riga per riga
-
-La riconciliazione seria lavora a tre livelli: il mese quantifica, il giorno localizza, la singola transazione spiega. Il primo passo aggrega entrambe le fonti per mese con `FULL OUTER JOIN`, così emergono anche i mesi presenti da un solo lato. Il secondo passo segmenta per giorno della settimana per intercettare disallineamenti di cut-off nei weekend. Il terzo passo usa l'anti-`JOIN` per elencare le transazioni presenti da un solo lato e classificarne a mano un campione prima di automatizzare.
-
-```sql
--- Riconciliazione mensile: FULL OUTER JOIN per non perdere mesi orfani
-WITH wh AS (
-    SELECT date_trunc('month', created_at)::date AS mese,
-           SUM(amount_eur) AS revenue_wh
-    FROM trusted_transactions
-    WHERE channel = 'web' AND status = 'completed'
-    GROUP BY 1
+erp_reconciliation AS (
+    SELECT
+        coalesce(w.tx_id, e.tx_id) AS tx_id,
+        coalesce(w.net_paid_eur, 0.00) AS warehouse_eur,
+        coalesce(e.settled_eur, 0.00) AS erp_eur,
+        round(coalesce(w.net_paid_eur, 0.00) - coalesce(e.settled_eur, 0.00), 2) AS delta_eur
+    FROM clean_tx AS w
+    FULL OUTER JOIN analytics_raw.raw_erp_settlements AS e
+        ON w.tx_id = e.tx_id
+    WHERE abs(warehouse_eur - erp_eur) > 0.01
 ),
-sh AS (
-    SELECT date_trunc('month', settled_at)::date AS mese,
-           SUM(gross_eur) AS revenue_shopify
-    FROM shopify_settlements
-    GROUP BY 1
+customer_omnichannel AS (
+    SELECT
+        customer_id,
+        countIf(channel = 'web') AS web_orders,
+        countIf(channel = 'pos') AS pos_orders,
+        sum(net_paid_eur) AS customer_net_eur,
+        multiIf(
+            web_orders > 0 AND pos_orders > 0, 'omnicanale',
+            web_orders > 0, 'web_only',
+            'pos_only'
+        ) AS customer_segment
+    FROM clean_tx
+    WHERE customer_id != ''
+      AND status = 'paid'
+    GROUP BY customer_id
 )
 SELECT
-    COALESCE(wh.mese, sh.mese) AS mese,
-    wh.revenue_wh, sh.revenue_shopify,
-    -- discrepanza assoluta e relativa rispetto a Shopify (verità esterna)
-    COALESCE(wh.revenue_wh, 0) - COALESCE(sh.revenue_shopify, 0) AS delta_eur,
-    CASE WHEN sh.revenue_shopify <> 0
-         THEN (COALESCE(wh.revenue_wh, 0) - sh.revenue_shopify) / sh.revenue_shopify END AS delta_rel
-FROM wh FULL OUTER JOIN sh USING (mese)
-ORDER BY mese;
+    customer_segment,
+    count() AS customers_count,
+    round(sum(customer_net_eur), 2) AS segment_net_eur,
+    round(avg(customer_net_eur), 2) AS avg_ltv_eur
+FROM customer_omnichannel
+GROUP BY customer_segment
+ORDER BY segment_net_eur DESC;
 ```
 
-```sql
--- Transazioni web senza settlement corrispondente (anti-join)
-SELECT tx.transaction_id, tx.amount_eur, tx.created_at, tx.status
-FROM trusted_transactions tx
-LEFT JOIN shopify_settlements sh USING (transaction_id)
-WHERE tx.channel = 'web' AND sh.transaction_id IS NULL
-ORDER BY tx.created_at DESC
-LIMIT 50; -- campione da classificare a mano prima di automatizzare
-```
+In questa query `clean_tx` risolve i duplicati e gli stati fuori ordine, `erp_reconciliation` isola esattamente le transazioni con scarto rispetto alla banca (target `0` righe), e `customer_omnichannel` misura il valore dei clienti `omnicanale` rispetto a `web_only` e `pos_only` senza contaminare il fatturato totale.
 
-La classificazione manuale del campione rivela pattern operativi come metodi di pagamento specifici, fasce orarie o procedure difformi. Nel caso tipico oltre metà della discrepanza si spiega con timing diverso e un quarto con fee trattate in modo difforme. Al responsabile finanziario va presentata la scomposizione tra quota spiegata, quota fisiologica e residuo aperto.
+Per completare la risposta alle tre domande della direzione sullo stesso layer `clean_tx`, potete costruire a valle una vista dedicata alle **coorti per canale di acquisizione**: assegnate a ciascun `customer_id` identificato il mese del primo acquisto `paid` tramite `toStartOfMonth(min(order_date))` e il canale di quel primo ordine tramite `argMin(channel, (order_date, tx_id))`, quindi calcolate la retention mensile `M0..M3` mantenendo fisso il denominatore alla nascita della coorte.
 
-## Il funnel di migrazione e le curve di sopravvivenza
+Allo stesso modo, potete derivare una vista rieseguibile per la **curva di sopravvivenza** (tempo al riacquisto o al churn) calcolando i giorni trascorsi tra il primo e il secondo acquisto per ogni cliente, tenendo conto dei clienti ancora attivi ma non ancora riacquistati (*right-censored*). Poiché tutte e tre le viste leggono esclusivamente da `clean_tx` e superano la riconciliazione con `raw_erp_settlements`, i numeri mostrati a marketing, prodotto e finance risultano finalmente coerenti al centesimo.
 
-Resta la domanda su quanto tempo passa prima che un cliente adotti il secondo canale. La risposta onesta richiede l'analisi di sopravvivenza, perché gran parte dei clienti a fine periodo non ha ancora migrato: sono osservazioni censurate, non zeri, e trattarle come zeri sottostima i tempi. Lo stimatore standard gestisce la censura con prodotto cumulato dei fattori di sopravvivenza, calcolabile in SQL con somma dei logaritmi e riesponenziazione via `EXP(SUM(LN(...)))`.
+Questo esercizio dimostra la regola fondamentale dell'analytics engineering: investire metà del tempo nella bonifica deterministica, nella quarantena degli anomali e nella riconciliazione iniziale rende banale e affidabile qualsiasi analisi avanzata a valle.
 
-```sql
--- Curva di Kaplan-Meier: probabilità di restare single-channel oltre t
-WITH eventi AS (
-    -- per ciascun cliente: mesi all'adozione del 2° canale o alla censura
-    SELECT customer_id, mesi_al_secondo_canale AS t,
-           CASE WHEN migrato THEN 1 ELSE 0 END AS evento
-    FROM single_channel_followup
-),
-rischio AS (
-    SELECT t,
-        SUM(evento) AS d,          -- migrazioni osservate a t
-        COUNT(*) AS n_uscenti,     -- escono dal rischio a t (evento o censura)
-        SUM(COUNT(*)) OVER (ORDER BY t DESC
-            ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS n_rischio
-    FROM eventi GROUP BY t
-)
-SELECT t,
-    -- prodotto cumulato dei fattori (1 - d/n) via somma dei logaritmi
-    EXP(SUM(LN(1 - d::double precision / NULLIF(n_rischio, 0)))
-        OVER (ORDER BY t)) AS prob_single_channel,
-    n_rischio AS ancora_osservati
-FROM rischio ORDER BY t;
-```
+## Un layer intermedio pulito vs query ad hoc per ogni domanda
 
-La lettura tipica mostra adozione più rapida per i clienti web-first e più lenta per i negozio-first, con appiattimento dopo il primo anno. Il confronto tra curve per segmento richiede test dedicati, e l'effetto di covariate come scontrino iniziale richiede modelli appositi. Se l'adozione è guidata da fattori non osservati, la curva descrive bene i tempi ma non isola la leva causale.
+Per gestire tabelle sporche in produzione, potete **costruire un modello intermedio pulito (`int_clean_transactions`) condiviso** oppure **lasciare che ogni analista pulisca i dati nella propria query**.
 
-## Leggere l'incertezza prima di scrivere la raccomandazione
+Il criterio di scelta è netto: **costruite sempre un unico layer intermedio deduplicato e testato (`int_clean_transactions`) per tutte le domande aziendali, perché tre query scritte indipendentemente su tabelle sporche produrranno inevitabilmente tre numeri diversi in consiglio di amministrazione.**
 
-A questo punto i risultati vanno tradotti in slide solo dopo un inventario esplicito di ciò che potrebbe ribaltarli. Il formato che funziona con stakeholder non tecnici lega ogni affermazione a fragilità, controllo già fatto e rischio residuo.
+La confusione comune consiste nel pensare che "pulire i dati" sia un lavoro separato dall'analisi: in SQL avanzato, la qualità della risposta dipende al 90% dalla pulizia deterministica del layer intermedio.
 
-| Affermazione | Cosa la ribalterebbe | Controllo applicato | Rischio residuo |
-|---|---|---|---|
-| L'influencer batte il paid social su LTV 12 mesi | Coorti piccole, errore standard alto | Intervalli al 95% e numerosità riportate | Sovrapposizione parziale: pareggio possibile |
-| Gli omnicanale valgono 1,8x | Autoselezione dei migliori clienti | Stratificazione per coorte di acquisizione | Causalità non dimostrata, serve test |
-| Lo 0,3% residuo è fisiologico | Errori sistematici su un metodo di pagamento | Classificazione manuale di 50 righe | Ricontrollare dopo il fix del cut-off |
-| La mediana di adozione è 9 mesi web-first | Censura informativa (i migliori migrano prima) | Kaplan-Meier con censura a destra | Stima valida solo sotto censura non informativa |
+## Cinque domande prima di consegnare un caso studio su dati reali
 
-Due controlli trasversali meritano di diventare abitudine. La somma degli `LTV` per canale pesata per le numerosità deve ridare il `revenue` fidato entro una tolleranza esplicita di 1% di scarto relativo. La riesecuzione delle metriche chiave con una regola di deduplica alternativa deve confermare l'ordinamento dei canali, altrimenti la conclusione è fragile.
+1. La deduplica usa una priorità esplicita di stato oltre al timestamp più recente?
+2. I record privi di chiave primaria o con importi invalidi sono stati isolati in una vista di quarantena?
+3. I clienti anonimi (`customer_id = ''`) sono preservati nel fatturato totale e filtrati solo nelle analisi per cliente?
+4. La riconciliazione con la fonte esterna usa `FULL OUTER JOIN` per intercettare gli orfani di entrambi i lati?
+5. Tutte le domande di business (fatturato, coorti, omnicanalità) leggono dallo stesso modello intermedio pulito?
 
-## Mettere la pipeline in uno schema che altri possono rieseguire
+La metrica di controllo del caso studio è il **Warehouse-to-ERP Reconciliation Delta**: la vista `erp_reconciliation` deve restituire **`0` righe** con `abs(delta_eur) > 0.01`, garantendo che i numeri analitici quadrino al centesimo con la contabilità bancaria.
 
-L'ultimo miglio è ingegneristico: query esplorative trasformate in viste ordinate dentro uno schema dedicato. La convenzione di nomi rende l'ordine evidente e i commenti documentano ogni assunzione. La vista finale delle raccomandazioni è il vero output, con impatto stimato, evidenza, costo e rischio per ogni punto.
+Quando portate questo schema in un progetto reale, il passo successivo è schedulare l'esecuzione automatica della vista di quarantena e della vista di riconciliazione subito dopo il caricamento notturno delle tabelle raw. Se anche una sola transazione presenta uno scarto tra il warehouse e l'ERP o un `tx_id` mancante, un alert automatico avvisa il team dati prima che le dashboard del mattino vengano consultate dalla direzione.
 
-```sql
--- Schema di consegna: view numerate, rieseguibili in ordine
-CREATE SCHEMA IF NOT EXISTS analytics_fashionhub;
-
--- 01: transazioni fidate (regola: vince completed, poi riga più recente)
-CREATE OR REPLACE VIEW analytics_fashionhub.v01_trusted_transactions AS
-SELECT transaction_id, customer_id, channel, amount_eur, status, created_at
-FROM ranked_dedup WHERE rn = 1; -- ranked_dedup = CTE di deduplica sopra
-
--- 02: coorti di acquisizione dal primo touchpoint osservato
-CREATE OR REPLACE VIEW analytics_fashionhub.v02_acquisition_cohorts AS
-SELECT customer_id, acquisition_channel, cohort_month FROM first_touch;
-
--- 03: LTV cumulato per coorte e canale a 1/3/6/12 mesi
--- 04: segmenti omnicanale vs single-channel su finestra mobile 12 mesi
--- 05: riconciliazione mensile warehouse vs Shopify con delta relativo
--- 06: curva di Kaplan-Meier per l'adozione del secondo canale
--- 07: tabella raccomandazioni con query di evidenza per ciascun punto
-```
-
-In sintesi: usa il primo touchpoint per coorti stabili e la finestra mobile di dodici mesi per l'etichetta omnicanale, poi riconcilia sempre contro la fonte esterna prima di spostare budget.
-
-Verdetto: il primo touchpoint vince per coorti stabili e la finestra mobile di dodici mesi per l'etichetta omnicanale; riconcilia sempre contro la fonte esterna prima di spostare budget.
-
-## Il caso Knight Capital: il prezzo di non avere controlli
-
-Knight Capital, il primo agosto 2012, perse circa 440 milioni di dollari in circa 45 minuti per un aggiornamento software difettoso sui sistemi di negoziazione. Il sistema difettoso inviò milioni di ordini errati prima che il team riuscisse a fermarlo. La società dovette ricorrere a un salvataggio esterno e perse gran parte del valore in pochi giorni. Il caso mostra perché deduplica deterministica, riconciliazione continua e interruttori di arresto non sono optional quando i soldi veri passano dalle tabelle.
-
-## Domande per chiudere la lezione
-
-1. Perché la deduplica deve fissare una priorità di stato esplicita invece di tenere una riga a caso?
-2. Quando il primo touchpoint è preferibile all'ultimo click per confrontare i canali?
-3. Quale `JOIN` useresti per trovare transazioni senza settlement e perché la `INNER JOIN` non basta?
-4. Perché la finestra mobile di dodici mesi evita di confondere anzianità e comportamento omnicanale?
+In questo modo, l'intero ciclo — dalla deduplica con priorità di stato alla segmentazione omnicanale, dalle coorti per canale alla curva di sopravvivenza — rimane deterministico, verificabile e perfettamente allineato tra tutti i reparti aziendali, eliminando per sempre il problema delle tre risposte diverse sulle stesse tabelle sporche e garantendo piena fiducia nei dati esposti alla direzione generale, al team marketing, al team prodotto e al controllo di gestione finanziario. Ogni settimana la pipeline conferma automaticamente la propria integrità senza alcun intervento manuale, permettendo agli analisti di concentrarsi sulle decisioni strategiche anziché sulla caccia agli errori nelle tabelle sorgenti.

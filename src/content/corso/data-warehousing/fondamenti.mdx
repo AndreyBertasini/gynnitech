@@ -1,164 +1,149 @@
 ---
-title: "Data warehouse moderno: OLTP, OLAP e star schema"
+title: "Data Warehouse: OLTP vs OLAP, storage colonnare e motore vettorializzato"
 description: >-
-  Fondamenti di data warehousing: da Kimball a Snowflake, modellazione dimensionale.
+  Perché i database transazionali crollano sotto query analitiche e come
+  funzionano internamente i data warehouse moderni: layout row-oriented vs
+  column-oriented, compressione, pruning ed esecuzione vettorializzata SIMD.
 module: "Modulo 9: Data warehouse e modellazione analitica"
-order: 1
+order: 2
 category: Tecnico
-headerImage: /course-headers/data-warehousing-fondamenti-ginnytech-ad-v3.webp
-headerImageAlt: "Data warehouse moderno: OLTP, OLAP e star schema - immagine ufficiale della lezione su GinnyTech, creata da AD"
-difficulty: advanced
-duration: 22 min
+headerImage: /course-headers/data-warehousing-fondamenti-ginnytech-ad.webp
+headerImageAlt: "Data Warehouse: OLTP vs OLAP, storage colonnare e motore vettorializzato - immagine ufficiale della lezione su GinnyTech, creata da AD"
+difficulty: intermediate
+duration: 24 min
+prerequisites:
+  - data-warehousing/introduzione
 learningObjectives:
-  - Distinguere OLTP e OLAP e separare lake, warehouse, mart e semantic layer con responsabilità scritte
-  - Modellare uno star schema secondo Kimball con fact table e dimensioni conformed
-  - Confrontare Snowflake, BigQuery e Redshift su architettura, scalabilità e costi
-prerequisites: []
+  - Distinguere carichi OLTP e OLAP per pattern di accesso, layout su disco e garanzie di isolamento
+  - Calcolare il risparmio di I/O dello storage colonnare rispetto al layout row-oriented su tabelle ampie
+  - Spiegare il legame tra ordinamento fisico, compressione e pruning dei blocchi con esecuzione vettorializzata SIMD
 binario: "ml-tabellare"
+formato: "articolo"
 autore: "Hermes"
 controllatoDa: "Argo"
 autorizzatoDa: "Giano"
 draft: false
-dateModified: 2026-09-07
+dateModified: 2026-11-13
 ---
-# Data warehouse moderno: OLTP, OLAP e star schema
 
-Il problema non è conoscere il warehouse in astratto: è decidere quando i dati arrivano da fonti diverse, quando due dashboard danno numeri diversi per la stessa metrica o quando una query di ieri oggi costa troppo. Per questo serve un'architettura che separi sistemi transazionali, storage analitico e mart, con ogni livello che ha un compito preciso: conservare, trasformare, servire o governare. Qui impari a leggerla e a scegliere la piattaforma giusta.
+# Data Warehouse: OLTP vs OLAP, storage colonnare e motore vettorializzato
 
-## L'idea in una frase
+Un e-commerce B2B con cinquanta milioni di righe d'ordine lancia ogni lunedì alle nove una query di margine per categoria direttamente sul database PostgreSQL di produzione. Per quattro minuti il disco satura la banda di lettura, la CPU sale al 98% e i clienti che provano a pagare ricevono un errore di timeout al checkout. La causa non è un server sottodimensionato né un indice mancante: è chiedere una scansione aggregata su milioni di record a un motore progettato per leggere e scrivere intere righe una alla volta.
 
-Il data warehouse moderno separa sistemi transazionali, storage analitico e `mart` per servire una sola verità condivisa. Ogni livello ha un compito preciso: conservare, trasformare, servire o governare.
+## Quattro minuti di checkout bloccato per un report del lunedì
 
-## La sequenza di progettazione
+Questo è un caso ricostruito con numeri di esempio su quanto avviene nelle aziende che usano il database applicativo come data warehouse. La tabella `orders` su PostgreSQL conta 50 milioni di righe e 60 colonne: identificativi, indirizzi di spedizione, note testuali del corriere, codici promozionali, stato di fatturazione e importi. Ogni riga occupa in media 800 byte, portando la tabella fisica a circa 40 gigabyte su disco.
 
-1. Separa sistemi transazionali, `lake`, `warehouse`, `mart` e `semantic layer` con responsabilità scritte.
-2. Fissa `grain`, ownership e contratti prima di modellare fatti e dimensioni interrogabili dal business.
-3. Scegli la piattaforma in base a workload, volumi e costi con `baseline` di confronto esplicita.
-4. Consolida sorgenti operative in un core modellato e servi i team tramite `mart` dedicati e documentati.
-5. Collega ogni tabella a una decisione con refresh, qualità e accessi dichiarati e verificabili.
+Il lunedì mattina la direzione commerciale apre il cruscotto settimanale che calcola il fatturato netto per regione negli ultimi dodici mesi. La query ha bisogno di sole tre colonne su sessanta (`created_at`, `region_code`, `net_amount_eur`), pari a 20 byte per riga. Eppure, poiché un database relazionale orientato alle righe (OLTP) memorizza tutti i sessanta attributi di un ordine in modo contiguo dentro pagine da 8 kilobyte, il disco è costretto a caricare in memoria tutti i 40 gigabyte della tabella per estrarre meno di un gigabyte di numeri utili.
 
-## Quando il problema diventa concreto
+Quella lettura massiva espelle dalla RAM (`shared_buffers`) le pagine calde degli utenti attivi sul sito e satura i canali di I/O: mentre l'analista aspetta il grafico, centinaia di transazioni di acquisto restano in coda. La causa del blocco non è una query scritta male: è la fisica del layout per riga applicata a un carico di lavoro analitico (OLAP).
 
-Il problema non è conoscere il warehouse in astratto. È decidere quando i dati arrivano da fonti diverse, quando due dashboard danno numeri diversi per la stessa metrica o quando una query di ieri oggi costa troppo. Leggi l'architettura distinguendo transazionale, `lake`, `warehouse`, `mart` e `semantic layer`. Ogni livello deve avere un motivo: conservare, trasformare, servire o governare. Un warehouse affidabile semplifica le domande difficili perché rende espliciti `grain`, ownership e contratti.
+## Come lavorano lo storage colonnare e il motore SIMD
 
-| Passaggio | Domanda da fare | Output atteso |
-|---|---|---|
-| Decisione | Che cosa cambia se l'architettura del warehouse è più chiara? | Scelta esplicita |
-| Segnale | Quale dato osservabile riduce l'incertezza? | Metrica o evento |
-| Baseline | Rispetto a cosa interpretiamo il risultato? | Confronto credibile |
-| Vincolo | Che cosa può falsare la lettura? | Assunzione da dichiarare |
-| Azione | Quale passo operativo segue? | Raccomandazione controllabile |
+I data warehouse analitici separano il carico dalle applicazioni transazionali e ribaltano l'architettura interna grazie a tre meccanismi fisici descritti nella letteratura sui motori colonnari ([Abadi et al., 2008](https://doi.org/10.1145/1376616.1376712)).
 
-## OLTP e OLAP
+Il primo meccanismo è la memorizzazione per colonna (*column-oriented storage*). Invece di salvare in sequenza tutti i campi della riga 1 seguiti da tutti i campi della riga 2, il motore salva ogni colonna in un file separato: tutti i valori di `created_at` insieme, tutti i `region_code` insieme e tutti i `net_amount_eur` insieme. Quando una query chiede tre colonne su sessanta, il disco legge solo i tre file corrispondenti e ignora fisicamente il restante 95% della tabella.
 
-La prima distinzione è tra database transazionali e analitici, perché servono mondi diversi.
+Il secondo meccanismo è l'accoppiamento tra ordinamento fisico, compressione omogenea e salto dei blocchi (*zone maps* o indice sparso). Mettere nello stesso file milioni di valori dello stesso tipo e ordinarli per chiave primaria permette ad algoritmi come Run-Length Encoding (RLE), Delta e ZSTD di comprimere i dati da cinque a dieci volte più di una pagina OLTP mista. Inoltre il motore registra per ogni blocco di 8.192 righe il valore minimo e massimo: se la query filtra un mese specifico, il lettore controlla gli estremi e salta interi blocchi senza nemmeno decomprimerli.
 
-| | **OLTP** (Database transazionale) | **OLAP** (Data Warehouse) |
-|---|---|---|
-| **Missione** | Gestire operazioni in tempo reale | Supportare analisi e decisioni |
-| **Query** | Poche righe, semplici (SELECT by ID) | Molte righe, complesse (GROUP BY, JOIN) |
-| **Schema** | Normale (3NF), senza duplicati | Denormalizzato (star schema), ottimizzato per lettura |
-| **Esempi** | PostgreSQL, MySQL per app | Snowflake, BigQuery, Redshift |
-| **Utenti** | Applicazioni | Analyst, BI tools |
+Il terzo meccanismo è l'esecuzione vettorializzata tramite istruzioni SIMD (*Single Instruction, Multiple Data*) della CPU. Un database tradizionale valuta le espressioni riga per riga invocando una catena di chiamate a funzione per ogni singolo record; un motore analitico moderno carica in cache L1 vettori contigui di migliaia di valori della stessa colonna e applica somme, filtri e confronti su più elementi contemporaneamente in un singolo ciclo di clock.
 
-## Star schema secondo Kimball
+**Un data warehouse ottiene ordini di grandezza di velocità sugli aggregati perché legge da disco solo le colonne richieste, salta i blocchi fuori intervallo grazie all'ordinamento fisico e processe vettori compressi direttamente nei registri SIMD della CPU.**
 
-Il modello dimensionale di Kimball poggia su due tabelle. La fact table `sales fact` contiene misure numeriche e foreign key con una riga per evento: `amount`, `quantity`, `date key` e `customer key`. La dimension table `dim customer` contiene attributi descrittivi con una riga per entità: `name`, `country` e `segment`. Il vantaggio è la semplicità di lettura e la velocità: dimensioni piccole e fatti grandi e indicizzati, compatibile con ogni tool BI.
+## Tre errori quando si progetta una tabella analitica
 
-## Snowflake, BigQuery, Redshift
-
-Le tre piattaforme hanno architetture diverse e la scelta dipende da dove sei già e da quanto sono prevedibili i workload.
-
-| | **Snowflake** | **BigQuery** | **Redshift** |
-|---|---|---|---|
-| **Architettura** | Disaccoppiato storage/compute | Serverless, shared nothing | Cluster MPP |
-| **Scalabilità** | Warehouse size configurabile | Automatica, slot-based | Aggiungi nodi al cluster |
-| **Semi-structured** | Eccellente (VARIANT) | Buono (JSON) | Buono (SUPER) |
-| **Costo** | Crediti compute + storage | 5 dollari per TB scansionato in on-demand | Nodo/ora |
-
-Per un team dati moderno Snowflake e BigQuery sono le scelte dominanti. Redshift resta valido per chi è già in AWS e ha workload prevedibili.
-
-In sintesi: scegli Snowflake per workload variabili con governance, BigQuery per stack Google serverless e Redshift per workload AWS prevedibili già consolidati.
-
-Verdetto: Snowflake vince per workload variabili con governance, BigQuery per stack Google serverless e Redshift solo per workload AWS prevedibili già consolidati.
-
-## Il modello di maturità del warehouse
-
-Un warehouse cresce per stadi. Al primo stadio c'è il raw data dump con copie grezze delle tabelle operative: ingestion facile e query impossibili. Al secondo arriva lo `star schema` con fatti e dimensioni: query veloci con ETL dedicato. Al terzo si passa a `data vault` o `data mesh` per decine di team indipendenti, dove ogni team possiede i propri dati e li espone tramite contratti.
-
-## Esempio SQL: una vista di controllo
-
-Il pattern seguente è eseguibile nella maggior parte dei warehouse moderni e crea una base con metrica, segmento e finestra temporale per confrontare periodi e gruppi senza riscrivere la logica.
+Il blocco SQL qui sotto mostra tre abitudini importate dal mondo OLTP che annullano i vantaggi di un motore colonnare:
 
 ```sql
-WITH base_events AS (
-  SELECT
-    user_id,
-    account_id,
-    event_type,
-    event_time,
-    DATE_TRUNC('week', event_time) AS week,
-    source,
-    device_type
-  FROM events
-  WHERE event_time >= CURRENT_DATE - INTERVAL '180 days'
-    AND user_id IS NOT NULL
-),
-weekly_user_metrics AS (
-  SELECT
-    week,
-    user_id,
-    COALESCE(source, 'unknown') AS source,
-    COALESCE(device_type, 'unknown') AS device_type,
-    COUNT(*) AS total_events,
-    COUNT(DISTINCT DATE(event_time)) AS active_days,
-    COUNT(DISTINCT event_type) AS event_diversity,
-    MAX(CASE WHEN event_type IN ('purchase', 'subscribe', 'activation') THEN 1 ELSE 0 END) AS reached_key_outcome
-  FROM base_events
-  GROUP BY week, user_id, source, device_type
+-- Schema modellato come un database transazionale e interrogato senza pruning.
+CREATE TABLE ordini_analytics_errato
+(
+    order_uuid String,
+    created_at DateTime,
+    region_code String,
+    customer_notes String,
+    raw_payload_json String,
+    net_amount_eur Float64
 )
+ENGINE = MergeTree
+ORDER BY order_uuid;
+
+-- Query lanciata dai report: SELECT * e chiave di ordinamento su UUID casuale.
+SELECT *
+FROM ordini_analytics_errato
+WHERE created_at >= '2026-01-01 00:00:00'
+  AND region_code = 'IT-LOM';
+```
+
+### Usare SELECT * nelle query e nelle viste di reporting
+
+Scrivere `SELECT *` in una vista o in un estratto per lo strumento di Business Intelligence sembra innocuo perché nei database a righe il costo di leggere tre colonne o sessanta colonne dalla stessa pagina già in memoria è quasi identico. In un data warehouse colonnare è l'errore più costoso in assoluto: obbliga il motore ad aprire, leggere da disco e decomprimere i file di tutte le sessanta colonne (incluse le note testuali e i payload JSON da kilobyte), bruciando in un istante tutto il risparmio di I/O dell'architettura per colonna.
+
+### Ordinare la tabella per un UUID casuale invece che per le colonne di filtro
+
+Mettere `order_uuid` come chiave di `ORDER BY` sembra naturale a chi proviene da PostgreSQL o MySQL, dove la chiave primaria serve a cercare il singolo ordine per identificativo. Su uno storage colonnare un UUID casuale distrugge sia la compressione sia il pruning dei blocchi: poiché le date `created_at` e le regioni `region_code` finiscono sparse in modo uniforme in tutti i blocchi della tabella, il valore minimo e massimo di ogni blocco copre l'intero arco di cinque anni e il motore deve leggere il 100% della tabella a ogni query temporale.
+
+### Eseguire aggiornamenti riga per riga con UPDATE invece di inserire a blocchi
+
+Mandare migliaia di comandi `UPDATE ordini SET status = 'shipped' WHERE order_uuid = '...'` al minuto contro il data warehouse sembra il modo più diretto per tenere sincronizzato lo stato degli ordini. Non funziona perché i file colonnari compressi sono immutabili: modificare una singola riga costringe il motore a riscrivere interi blocchi o a pianificare costose mutazioni asincrone su disco, saturando la coda di compattazione fino a bloccare le nuove scritture.
+
+## Tabella colonnare con chiave d'ordine per cardinalità e proiezione stretta
+
+Per sfruttare la fisica di un data warehouse moderno e abbattere tempi e costi di lettura, applicate questi quattro criteri in ordine di priorità:
+
+1. Separate sempre il database transazionale (OLTP) dal motore analitico (OLAP), alimentando il secondo a micro-batch o in streaming append-only senza mai far girare report pesanti sul database che serve i clienti.
+2. Definite la chiave di ordinamento fisico (`ORDER BY`) partendo dalle colonne usate più spesso nei filtri `WHERE`, disponendole da cardinalità più bassa (es. regione o stato) a cardinalità più alta (es. data o timestamp).
+3. Assegnate tipi di dato compatti (`LowCardinality` per le stringhe ripetute, `Decimal` o interi per gli importi) ed escludete dalle tabelle calde i blob testuali che non servono ai raggruppamenti.
+4. Scrivete query che elencano esplicitamente le sole colonne necessarie al calcolo, lasciando fuori ogni attributo non utilizzato.
+
+Ecco lo schema e la query corretti in ClickHouse:
+
+```sql
+CREATE TABLE ordini_analytics_corretto
+(
+    region_code LowCardinality(String),
+    order_status LowCardinality(String),
+    created_at DateTime,
+    order_id UInt64,
+    customer_id UInt64,
+    net_amount_eur Decimal(12, 2)
+)
+ENGINE = MergeTree
+PARTITION BY toYYYYMM(created_at)
+ORDER BY (region_code, created_at, order_id);
+
+-- La query legge solo 2 colonne su 6 e salta tutti i blocchi fuori da 'IT-LOM' e dal 2026.
 SELECT
-  week,
-  source,
-  device_type,
-  COUNT(DISTINCT user_id) AS users,
-  ROUND(AVG(active_days), 2) AS avg_active_days,
-  ROUND(AVG(event_diversity), 2) AS avg_event_diversity,
-  ROUND(AVG(reached_key_outcome) * 100, 2) AS key_outcome_rate
-FROM weekly_user_metrics
-GROUP BY week, source, device_type
-ORDER BY week, source, device_type;
+    toStartOfWeek(created_at) AS settimana,
+    count() AS numero_ordini,
+    sum(net_amount_eur) AS ricavo_netto_eur
+FROM ordini_analytics_corretto
+WHERE region_code = 'IT-LOM'
+  AND created_at >= '2026-01-01 00:00:00'
+GROUP BY settimana
+ORDER BY settimana ASC;
 ```
 
-## Esempio Python: controllare stabilità e anomalie
+Il salto prestazionale è netto: su 50 milioni di righe, invece di leggere 40 gigabyte da disco in quattro minuti bloccando i pagamenti, il motore salta le partizioni degli anni passati, salta tutti i blocchi delle altre regioni grazie all'ordinamento su `(region_code, created_at)` e legge meno di 45 megabyte compressi, restituendo il risultato in 35 millisecondi. Scegliere le colonne in una `SELECT` è una correzione immediata a costo zero; sbagliare invece la chiave di `ORDER BY` e il partizionamento su una tabella che ha già accumulato cinque terabyte di storia richiede una riscrittura fisica completa della tabella.
 
-```python
+## Data warehouse cloud pay-per-scan o motore colonnare dedicato per analitica in tempo reale
 
-# df contiene: week, segment, users, key_outcome_rate
-# key_outcome_rate espresso in percentuale, es. 12.4
+Una volta deciso di adottare uno storage colonnare, occorre scegliere quale famiglia di motori OLAP risponde meglio al carico aziendale. Le opzioni principali sono due: i data warehouse cloud con tariffazione a consumo per terabyte scansionato o per crediti elastici (come BigQuery e Snowflake) e i motori colonnari ad alte prestazioni con risorse dedicate per query a bassa latenza (come ClickHouse).
 
-df = df.sort_values(['segment', 'week']).copy()
-df['previous_rate'] = df.groupby('segment')['key_outcome_rate'].shift(1)
-df['wow_change_pp'] = df['key_outcome_rate'] - df['previous_rate']
-df['rolling_mean'] = df.groupby('segment')['key_outcome_rate'].transform(
-    lambda s: s.rolling(4, min_periods=2).mean()
-)
-df['rolling_std'] = df.groupby('segment')['key_outcome_rate'].transform(
-    lambda s: s.rolling(4, min_periods=2).std()
-)
-df['z_score'] = (df['key_outcome_rate'] - df['rolling_mean']) / df['rolling_std']
+Il criterio di scelta è netto: **usate un data warehouse cloud serverless o a crediti elastici se il carico consiste in trasformazioni batch orarie o notturne e report interni consultati da poche decine di analisti durante la giornata, usate invece un motore colonnare ad alta concorrenza come ClickHouse se dovete servire cruscotti esposti ai clienti finali, centinaia di query al secondo sotto i 100 millisecondi o flussi continui di eventi e telemetria ad alto volume.**
 
-anomalies = df[df['z_score'].abs() >= 2].sort_values('z_score')
-print(anomalies[['week', 'segment', 'key_outcome_rate', 'wow_change_pp', 'z_score']])
-```
+La confusione comune consiste nell'usare un warehouse pay-per-scan per alimentare un grafico dentro l'applicazione vista da diecimila utenti contemporanei, oppure nell'installare e gestire un cluster distribuito a bassa latenza per far girare tre report finanziari la mattina. Sbagliare questa scelta brucia il budget: diecimila clienti che aggiornano una pagina collegata a un motore tariffato a terabyte scansionato generano fatture da decine di migliaia di euro al mese e code di concorrenza, mentre mantenere nodi dedicati sempre accesi per dieci query al giorno spreca capacità computazionale rimasta inattiva per il 95% del tempo.
 
-## Il momento in cui il warehouse è diventato cloud
+Questo articolo non tratta i formati di tabella aperti su object storage (Apache Iceberg e Delta Lake) né la modellazione dimensionale a stella, approfonditi nelle lezioni successive del modulo. I rapporti di compressione effettivi dipendono dall'entropia dei dati e dal codec scelto per ciascuna colonna.
 
-Nel novembre 2012 Amazon Web Services annuncia Redshift al re:Invent di Las Vegas come primo data warehouse cloud con architettura colonnare MPP. La novità è operativa prima che tecnica: capacità su scala petabyte con pricing orario per nodi invece di licenze e appliance da milioni di dollari. Da lì il mercato si spacca tra cluster gestiti e modelli serverless come BigQuery e Snowflake, con storage e compute separati. Il punto è questo: l'architettura vince quando rende espliciti layer, grain e costi prima della modellazione.
+## Cinque domande prima di creare una tabella nel data warehouse
 
-## Domande per ripassare
+1. Il carico analitico è completamente isolato dal database OLTP di produzione così che nessuna query pesante possa rallentare le transazioni dei clienti?
+2. La clausola `ORDER BY` della tabella elenca per prime le colonne effettivamente usate nei filtri `WHERE`, ordinate da cardinalità minore a cardinalità maggiore?
+3. Tutte le query dei report e dei modelli elencano solo le colonne strettamente necessarie, bandendo qualsiasi `SELECT *` sulle tabelle dei fatti?
+4. Gli aggiornamenti e i caricamenti avvengono a blocchi (batch di migliaia di righe) o in append con deduplicazione asincrona, evitando `UPDATE` e `DELETE` puntuali riga per riga?
+5. Avete usato tipi di dato specifici (`LowCardinality`, interi dimensionati, `Decimal`) anziché stringhe generiche per massimizzare la compressione e l'esecuzione SIMD?
 
-1. Quale livello tra `lake`, `warehouse`, `mart` e `semantic layer` risponde alla tua domanda?
-2. Quale `grain` rende confrontabili due dashboard sullo stesso `KPI`?
-3. Quale piattaforma tra Snowflake, BigQuery e Redshift si adatta al tuo workload?
-4. Quale contratto di ownership impedisce metriche divergenti tra team?
+La metrica che separa un data warehouse ben progettato da uno che spreca risorse è il rapporto tra le righe lette da disco (`read_rows` / `read_bytes`) e le righe effettivamente restituite o aggregate dalla query: quando l'indice sparso e la selezione delle colonne lavorano insieme, una query su un mese legge solo pochi punti percentuali della tabella complessiva.
+
+Di tutta l'architettura colonnare, una decisione conta ordini di grandezza più del resto: ordinare fisicamente la tabella sulle colonne con cui filtrate i dati ogni giorno. È quell'ordinamento che trasforma una scansione cieca di terabyte in una lettura mirata di pochi megabyte.

@@ -19,248 +19,133 @@ learningObjectives:
   - Scegliere tra JOIN, semi-join con EXISTS e anti-join con NOT EXISTS in base alla domanda di esistenza
   - Verificare cardinalità, NULL e quadratura dei complementari prima di pubblicare il risultato
 binario: "ml-tabellare"
+formato: "articolo"
 autore: "Hermes"
 controllatoDa: "Argo"
 autorizzatoDa: "Giano"
 draft: false
-dateModified: 2026-09-07
+dateModified: 2026-11-13
 ---
-
-import { SqlExercise } from '../../../components/SqlExercise';
 
 # Join avanzate, semi-join, anti-join e logica insiemistica
 
-Un report clienti che raddoppia il fatturato dopo una join, un controllo anti-frode che perde utenti senza match, un catalogo che risulta completo finché qualcuno non conta a mano: quasi mai è colpa del database. È confusione tra tre operazioni diverse — rappresentare una relazione, filtrare righe in base a un'altra tabella, sottrarre un insieme da un altro — scritte con una sintassi che sembra quasi identica. Questa pagina mette in ordine le join avanzate, i semi-join, gli anti-join e gli operatori insiemistici, con il criterio per scegliere l'operazione giusta prima di scriverla e i controlli per accorgersi quando il risultato mente in silenzio. Siamo sul binario `ml-tabellare`: il lavoro è tutto su tabelle, chiavi e insiemi di righe, senza modelli.
+Un analista vuole contare quanti clienti attivi hanno effettuato almeno un acquisto nel mese corrente e scrive `SELECT count(c.customer_id) FROM customers c INNER JOIN orders o ON c.customer_id = o.customer_id`. Poiché un cliente fedele ha fatto cinque ordini nel mese, la `INNER JOIN` moltiplica la sua riga cinque volte: il report mostra 4.200 "clienti acquirenti" quando in realtà i clienti distinti erano 1.150, gonfiando il tasso di conversione del 265%. La causa non è la tabella degli ordini: è usare una **JOIN moltiplicativa** per rispondere a una **domanda di esistenza** che richiedeva una **semi-join (`EXISTS`)** o una **anti-join (`NOT EXISTS`)**, senza verificare cardinalità e `NULL`.
 
-## L'idea in una frase
+## Quattromiladuecento clienti contati al posto di millecentocinquanta per una JOIN 1:N
 
-In una frase: questa lezione insegna a scegliere tra `JOIN` che moltiplicano, semi-join che filtrano e operazioni di insieme, per tenere il grano del risultato sotto controllo.
+Questo è un caso ricostruito con numeri di esempio su quanto accade quando si confonde l'unione di colonne (`JOIN`) con il controllo di appartenenza a un insieme (`EXISTS` / `NOT EXISTS`).
 
-## Il metodo in cinque passi
+Ogni operazione tra due tabelle `A` e `B` risponde a una domanda diversa e ha conseguenze diverse sul numero di righe risultanti:
 
-1. Scrivi in una frase la domanda con verbi di esistenza o assenza prima di scegliere l'operatore di combinazione.
-2. Dichiara il grano atteso e conta le righe prima e dopo la `JOIN` per intercettare duplicazioni silenziose.
-3. Filtra l'esistenza con `EXISTS` e l'assenza con `NOT EXISTS` senza cambiare grano né aggiungere colonne.
-4. Risolvi stati vigenti al momento dell'evento con `JOIN` laterale ordinata e limite unitario.
-5. Quadra complementari e totali e verifica unicità delle chiavi e `NULL` di correlazione prima di pubblicare.
+| Pattern SQL | Domanda che risolve | Rischio moltiplicazione righe | Comportamento con `NULL` |
+| :--- | :--- | :--- | :--- |
+| `INNER JOIN` / `LEFT JOIN` | Arricchire ogni riga di `A` con colonne di `B` | **Alto** (se `B` è 1:N rispetto a `A`) | Esclude `NULL` in `INNER`, mantiene `A` in `LEFT` |
+| `WHERE EXISTS (...)` (Semi-join) | Tenere le righe di `A` che hanno almeno 1 match in `B` | **Zero** (mantiene sempre la granularità di `A`) | Sicuro: valuta solo esistenza del match |
+| `WHERE NOT EXISTS (...)` (Anti-join) | Trovare le righe di `A` senza alcun match in `B` | **Zero** | **Sicuro anche se `B` contiene `NULL`** |
+| `WHERE col NOT IN (...)` | Da evitare per anti-join su colonne nullable | Zero | **Pericoloso**: un solo `NULL` in `B` azzera tutto |
 
-## Perché la domanda giusta vale più della sintassi giusta
+Prima di scrivere qualsiasi `JOIN`, dovete dichiarare la granularità di partenza (`1 riga = 1 cliente`) e verificare che il risultato finale mantenga esattamente quella granularità. Se la tabella di destra può avere zero, una o molte righe per ogni chiave della tabella di sinistra, una `LEFT JOIN` o `INNER JOIN` non pre-aggregata moltiplicherà le righe di sinistra e falsificherà ogni somma o conteggio successivo. L'uso disciplinato di `EXISTS` e `NOT EXISTS` elimina questo rischio alla radice, mentre la quadratura dei complementari offre una prova aritmetica immediata che nessun record è stato perso o duplicato durante l'operazione.
 
-Il SQL di base insegna le join come un meccanismo: due tabelle, una condizione di uguaglianza, un risultato. Il SQL analitico ribalta il problema: il meccanismo lo conosci, quello che manca è capire quale domanda stai ponendo. "Quali ordini hanno un cliente associato" e "quali clienti hanno fatto almeno un ordine" sembrano la stessa domanda, ma producono insiemi diversi, con cardinalità diversa, e solo una delle due risposte è quella che serve al report.
+## Semi-join (EXISTS), Anti-join (NOT EXISTS) e ASOF JOIN temporale
 
-Conviene fissare tre concetti prima di toccare la tastiera. Il grain è l'unità di ogni riga del risultato: una riga per ordine, una per cliente, una per cliente-giorno. La cardinalità della relazione dice quante righe di B possono corrispondere a una riga di A: uno-a-uno, uno-a-molti, molti-a-molti. La direzionalità dice da che parte si guarda: tenere tutte le righe di A e agganciare B dove esiste, oppure tenere solo l'intersezione.
+Il primo meccanismo è la **Semi-join con `EXISTS`**. Quando dovete filtrare una tabella principale (`customers`) verificando se esiste almeno un evento o ordine corrispondente (`orders`), `EXISTS` si ferma al primo match trovato per ciascun cliente e non duplica mai la riga di sinistra. È più leggibile, più veloce su molti motori e immune ai `count(*)` gonfiati.
 
-Da qui discende una regola pratica: ogni operazione di combinazione risponde a una domanda precisa. La tabella sotto è la mappa da tenere a mente per tutto il resto della pagina.
+Il secondo meccanismo è l'**Anti-join con `NOT EXISTS`**. Quando cercate i clienti che *non* hanno mai acquistato o gli ordini privi di fattura, `NOT EXISTS` è la scelta obbligatoria. Al contrario, `NOT IN (SELECT customer_id FROM orders)` usa la logica a tre valori (`TRUE`, `FALSE`, `UNKNOWN`): se anche una sola riga di `orders` ha `customer_id IS NULL`, l'intera espressione `NOT IN` diventa `UNKNOWN` e restituisce **zero righe** senza alcun errore.
 
-| Operazione | Domanda a cui risponde | Cosa restituisce |
-|---|---|---|
-| `INNER JOIN` | Quali righe compaiono in entrambi gli insiemi? | Solo l'intersezione, con colonne di entrambe |
-| `LEFT JOIN` | Quali righe di A hanno o non hanno corrispondenza in B? | Tutte le righe di A, `NULL` dove B manca |
-| Semi-join (`EXISTS`) | Quali righe di A hanno almeno un match in B? | Solo righe di A, mai duplicate |
-| Anti-join (`NOT EXISTS`) | Quali righe di A non hanno alcun match in B? | Solo righe di A senza corrispondenza |
-| `LATERAL` | Per ogni riga di A, cosa calcola una subquery che dipende da quella riga? | Una riga di A espansa con il calcolo |
-| As-of join | Qual era lo stato di B al momento dell'evento in A? | Il match temporale più vicino non posteriore |
-| `UNION ALL` / `UNION` | Quali righe stanno in A più quelle in B? | Le righe accodate, con o senza deduplica |
-| `EXCEPT` | Quali righe di A non sono in B? | La differenza insiemistica |
-| `INTERSECT` | Quali righe sono identiche in A e B? | L'intersezione insiemistica |
+Il terzo meccanismo è la **quadratura dei complementari** abbinata alle join temporali (**`ASOF JOIN`**). La somma tra le righe di `A` che hanno match (`EXISTS`) e quelle che non hanno match (`NOT EXISTS`) deve sempre eguagliare esattamente il totale delle righe di `A`. Inoltre, quando dovete associare a un evento il prezzo o il listino attivo esattamente in quell'istante (`event_time >= price_valid_from`), ClickHouse offre `ASOF JOIN` per trovare il match temporale più vicino senza esplosioni cartesiane.
 
-La colonna decisiva è la seconda. Se non sai dire in una frase quale domanda stai ponendo, qualsiasi sintassi scegli è una scommessa.
+**Usate `JOIN` solo quando vi servono colonne di `B` e conoscete la cardinalità; usate `EXISTS` e `NOT EXISTS` per domande di esistenza, verificando sempre la quadratura dei complementari.**
 
-## Inner, left e la trappola della duplicazione silenziosa
+## Tre errori con JOIN, NOT IN e filtri su LEFT JOIN
 
-Il difetto più costoso delle join è che non falliscono mai rumorosamente. Una condizione di join su chiave non univoca non solleva errori: moltiplica le righe e gonfia ogni aggregazione a valle. Prendi il caso classico, revenue media per ristorante attivo: con una `INNER JOIN` tra ristoranti e ordini, ogni ristorante compare tante volte quanti sono i suoi ordini, e la media calcolata sulle righe duplicate non è più la media per ristorante.
+Il blocco SQL qui sotto mostra l'errore classico di `NOT IN` con valori `NULL` e la moltiplicazione di righe da `INNER JOIN` 1:N:
 
 ```sql
--- Sbagliato: ogni ristorante pesa per il numero di ordini
--- La media è calcolata sulle righe duplicate, non sui ristoranti
-SELECT AVG(r.fatturato) AS media_fatturato
-FROM ristoranti AS r
-JOIN ordini AS o ON o.ristorante_id = r.id
-WHERE o.data_ordine >= CURRENT_DATE - INTERVAL '90 days';
+-- ERRORE 1: INNER JOIN 1:N moltiplica i clienti per il numero di ordini prima del COUNT.
+-- ERRORE 2: NOT IN restituisce 0 righe se raw_orders.customer_id contiene anche un solo NULL!
+SELECT count(c.customer_id) AS clienti_attivi_gonfiati
+FROM analytics_prod.dim_customers AS c
+INNER JOIN analytics_prod.fct_orders AS o
+    ON c.customer_id = o.customer_id
+WHERE o.order_date >= '2026-10-01';
+
+SELECT count(*) AS clienti_senza_ordini_rotto_da_null
+FROM analytics_prod.dim_customers
+WHERE customer_id NOT IN (SELECT customer_id FROM analytics_prod.fct_orders);
 ```
 
-Il controllo che smaschera il problema è banale e quasi nessuno lo fa: confrontare il conteggio prima e dopo la join. Se la tabella di sinistra ha 1.200 ristoranti e il risultato della join ne ha 48.000 righe, la join ha cambiato il grain e ogni `AVG`, `COUNT` o `SUM` va ricalcolato sul grain giusto, tipicamente pre-aggregando prima di unire.
+### Contare entità dopo una JOIN 1:N senza pre-aggregare o usare EXISTS
+
+Unire `dim_customers` con `fct_orders` e poi contare `count(c.customer_id)` o sommare un attributo del cliente (`sum(c.credit_limit)`) moltiplica i valori del cliente per il numero dei suoi ordini. Se vi servono anche importi aggregati da `fct_orders`, pre-aggregate `fct_orders` per `customer_id` in una CTE prima della `JOIN`; se vi serve solo sapere chi ha comprato, usate `EXISTS`.
+
+### Mettere un filtro sulla tabella di destra nel WHERE di una LEFT JOIN
+
+Scrivere `FROM customers c LEFT JOIN orders o ON c.id = o.customer_id WHERE o.status = 'paid'` trasforma silenziosamente la `LEFT JOIN` in una `INNER JOIN`. Per i clienti senza ordini, `o.status` è `NULL`, quindi `o.status = 'paid'` è falso e il cliente viene scartato. I filtri sulla tabella di destra di una `LEFT JOIN` vanno sempre dentro la clausola `ON` (`ON c.id = o.customer_id AND o.status = 'paid'`).
+
+### Usare NOT IN su colonne che possono contenere NULL
+
+In SQL, `x NOT IN (1, 2, NULL)` equivale a `x != 1 AND x != 2 AND x != NULL`, che restituisce `UNKNOWN` per qualunque `x`. È un bug silenzioso che svuota interi report di anomalie o di clienti inattivi appena compare un record sporco con chiave nulla.
+
+## Semi-join, Anti-join e Quadratura dei Complementari in ClickHouse
+
+Per garantire che ogni operazione insiemistica tra tabelle sia esatta e verificabile, applicate questi quattro passi:
+
+1. Dichiarate la granularità attesa del risultato finale prima di scrivere la query.
+2. Usate `EXISTS` per verificare la presenza in un'altra tabella e `NOT EXISTS` per verificare l'assenza.
+3. Se dovete arricchire con colonne di una tabella `1:N`, pre-aggregate la tabella di destra alla chiave di join in una CTE dedicata.
+4. Eseguite una query di **quadratura dei complementari** verificando che `matched + unmatched = total_left`.
+
+Ecco l'implementazione SQL completa in ClickHouse con semi-join, anti-join e controllo di quadratura:
 
 ```sql
--- Corretto: prima aggrego gli ordini per ristorante, poi unisco
--- Il grain resta una riga per ristorante
-WITH ordini_per_ristorante AS (
-  SELECT
-    ristorante_id,
-    COUNT(*) AS n_ordini
-  FROM ordini
-  WHERE data_ordine >= CURRENT_DATE - INTERVAL '90 days'
-  GROUP BY ristorante_id
+-- Verifica di integrità e segmentazione clienti con Semi-Join, Anti-Join e Quadratura:
+WITH buyers_oct AS (
+    SELECT c.customer_id
+    FROM analytics_prod.dim_customers AS c
+    WHERE EXISTS (
+        SELECT 1
+        FROM analytics_prod.fct_orders AS o
+        WHERE o.customer_id = c.customer_id
+          AND o.order_date >= '2026-10-01'
+          AND o.status = 'paid'
+    )
+),
+non_buyers_oct AS (
+    SELECT c.customer_id
+    FROM analytics_prod.dim_customers AS c
+    WHERE NOT EXISTS (
+        SELECT 1
+        FROM analytics_prod.fct_orders AS o
+        WHERE o.customer_id = c.customer_id
+          AND o.order_date >= '2026-10-01'
+          AND o.status = 'paid'
+    )
 )
-SELECT AVG(r.fatturato) AS media_fatturato
-FROM ristoranti AS r
-JOIN ordini_per_ristorante AS o ON o.ristorante_id = r.id;
-```
-
-La `LEFT JOIN` aggiunge un secondo rischio: i `NULL` nelle colonne di destra. Filtrare con `WHERE b.colonna = qualcosa` dopo una `LEFT JOIN` trasforma silenziosamente la outer join in una inner join, perché il confronto con `NULL` è falso e le righe senza match spariscono. La condizione sulla tabella di destra va nella clausola `ON`, non nel `WHERE`. In alternativa, il filtro va scritto tenendo conto dei `NULL` con `OR b.colonna IS NULL`. La distinzione vale la pena interiorizzarla: la `ON` decide come le tabelle si agganciano, il `WHERE` decide quali righe del risultato sopravvivono.
-
-## Semi-join con EXISTS: filtrare senza moltiplicare
-
-Il semi-join risponde a una domanda di esistenza: quali righe di A hanno almeno un corrispondente in B. Non aggiunge colonne di B, non duplica righe di A, non cambia il grain. In SQL si scrive con `EXISTS` e una subquery correlata, ed è l'operatore giusto ogni volta che il predicato dice "almeno uno": clienti con almeno un ordine sportivo, ristoranti attivi negli ultimi 90 giorni, utenti che hanno aperto almeno una email della campagna.
-
-```sql
--- Utenti con almeno un ordine nella categoria 'Sport'
--- Ogni utente compare una sola volta, anche con 50 ordini sportivi
-SELECT u.nome, u.email
-FROM utenti AS u
-WHERE EXISTS (
-  SELECT 1
-  FROM ordini AS o
-  WHERE o.utente_id = u.id
-    AND o.categoria = 'Sport'
-)
-ORDER BY u.nome;
-```
-
-La variante ingenua — `JOIN` seguita da `GROUP BY` o `DISTINCT` per ricompattare — restituisce lo stesso insieme ma paga due costi inutili. Materializza le righe duplicate per poi buttarle via e rende la query fragile: chi la modifica tra sei mesi deve capire che il `DISTINCT` non è decorativo ma strutturale. Con `EXISTS` l'intento è leggibile nella sintassi e l'ottimizzatore può fermarsi al primo match per ogni riga (semi-join con short-circuit), senza scandire tutta la tabella interna.
-
-C'è un'alternativa che si vede spesso, `WHERE id IN (SELECT ...)`, e vale la pena sapere quando evitarla. Se la subquery restituisce `NULL`, `IN` ha semantica a tre valori e il risultato può svuotarsi in modi sorprendenti, mentre `EXISTS` ragiona solo in termini booleani: la riga esiste o non esiste. Per i semi-join, `EXISTS` con subquery correlata è quasi sempre la forma più sicura.
-
-Sul piano delle performance, il semi-join scala con il numero di righe di A che superano il test, non con la cardinalità del match. Cento ordini per utente costano quanto uno: al primo trovato, la ricerca si ferma. È il motivo per cui i filtri di esistenza su tabelle di eventi voluminose dovrebbero essere semi-join quasi per default.
-
-## Anti-join con NOT EXISTS: trovare chi manca
-
-L'anti-join è il gemello del semi-join: quali righe di A non hanno alcun corrispondente in B. Titoli mai visti in dodici mesi, utenti che non hanno mai comprato elettronica, fatture senza pagamento associato. Si scrive con `NOT EXISTS`, stessa struttura, polarità opposta.
-
-```sql
--- Utenti che non hanno mai ordinato nella categoria 'Elettronica'
-SELECT u.nome, u.email
-FROM utenti AS u
-WHERE NOT EXISTS (
-  SELECT 1
-  FROM ordini AS o
-  WHERE o.utente_id = u.id
-    AND o.categoria = 'Elettronica'
-)
-ORDER BY u.nome;
-```
-
-Anche qui esiste la variante con `LEFT JOIN ... WHERE o.id IS NULL`, e anche qui la forma con `NOT EXISTS` è preferibile per due motivi. Il primo è semantico: la `LEFT JOIN` materializza l'intero prodotto esterno per poi scartare quasi tutto, mentre l'anti-join logico scarta appena trova un match. Il secondo è la leggibilità dell'intento: `NOT EXISTS` dice "tenere gli assenti", la `LEFT JOIN` con filtro su `NULL` dice la stessa cosa in modo obliquo, e obliquo significa che il prossimo manutentore potrebbe "semplificarla" rompendola.
-
-L'avvertenza sui `NULL` qui è decisiva e riguarda la terza forma, `NOT IN`. Se la colonna confrontata contiene anche un solo `NULL`, `NOT IN` restituisce zero righe: il confronto `x NOT IN (1, 2, NULL)` non è mai vero, perché il `NULL` rende il predicato sconosciuto per ogni riga. È uno dei bug SQL più classici e più difficili da notare, perché la query gira senza errori e restituisce un insieme vuoto che sembra un dato ("nessun utente inattivo, ottimo") invece di un guasto logico. Regola pratica: per gli anti-join usare `NOT EXISTS`, mai `NOT IN` su colonne nullable.
-
-Un controllo economico prima di mettere un anti-join in produzione: contare separatamente i due insiemi. Se gli utenti totali sono 200.000, quelli con almeno un ordine elettronico sono 190.000 e l'anti-join ne restituisce 3.000 invece di 10.000, qualcosa non torna — tipicamente un filtro temporale applicato da una sola parte o un `NULL` nella chiave di correlazione.
-
-## Lateral join e as-of join: quando la relazione dipende dalla riga
-
-Fin qui la condizione di join era statica: uguaglianza tra chiavi. La `LATERAL join` serve quando la parte destra deve essere calcolata per ogni riga della sinistra, con parametri presi dalla riga stessa. Il caso tipico è una funzione che stima qualcosa — ETA di una corsa, punteggio di rischio di una transazione, i tre ordini più recenti di un cliente — e che non può essere espressa come join su chiavi perché il suo input è la riga corrente.
-
-```sql
--- Per ogni richiesta di corsa, calcola ETA con i dati di quella riga
--- La subquery laterale vede r.pickup_lat, r.hour, r.traffic_level
 SELECT
-  r.request_id,
-  eta.minuti_previsti,
-  eta.intervallo_confidenza
-FROM richieste_corse AS r
-CROSS JOIN LATERAL (
-  SELECT minuti_previsti, intervallo_confidenza
-  FROM stima_eta(r.pickup_lat, r.pickup_lon, r.ora, r.livello_traffico)
-) AS eta
-WHERE r.data_richiesta = CURRENT_DATE;
+    (SELECT count() FROM analytics_prod.dim_customers) AS total_customers,
+    (SELECT count() FROM buyers_oct) AS customers_with_orders,
+    (SELECT count() FROM non_buyers_oct) AS customers_without_orders,
+    total_customers - (customers_with_orders + customers_without_orders) AS reconciliation_diff;
 ```
 
-Senza `LATERAL`, la stessa logica richiederebbe di precalcolare la funzione su tutte le combinazioni possibili e poi unire — spesso impraticabile. Due dettagli contano: con `CROSS JOIN LATERAL` le righe di sinistra senza risultato dalla subquery spariscono, con `LEFT JOIN LATERAL ... ON true` sopravvivono con `NULL`, e la scelta segue la stessa logica delle join ordinarie. E la subquery laterale gira una volta per riga: su milioni di righe il costo va stimato, eventualmente limitando prima le righe di sinistra con un filtro selettivo.
+La query garantisce che `reconciliation_diff = 0`: ogni cliente appartiene esattamente a uno dei due insiemi complementari senza duplicazioni e senza perdite dovute a valori `NULL`. Questo controllo di quadratura è particolarmente prezioso nei modelli giornalieri di segmentazione CRM o di calcolo del churn: prima di inviare una lista di clienti "inattivi" al sistema di email marketing tramite Reverse ETL, verificare che la somma tra clienti attivi (`EXISTS`) e clienti inattivi (`NOT EXISTS`) corrisponda al 100% dell'anagrafica `dim_customers` evita di escludere per errore migliaia di utenti a causa di un `NULL` o di inviare comunicazioni promozionali a chi ha appena acquistato. In ambienti con tabelle da centinaia di milioni di righe, inoltre, `EXISTS` permette al query planner di interrompere la scansione al primo match utile, riducendo drasticamente memoria e tempi di esecuzione rispetto a una `JOIN` completa seguita da `DISTINCT`.
 
-L'as-of join risolve un problema diverso e frequentissimo in analisi temporali: agganciare a ogni evento lo stato di una dimensione al momento dell'evento. Il prezzo del listino vigente quando l'ordine è stato fatto, il piano di abbonamento attivo quando l'utente ha guardato il video, il tasso di cambio del giorno della transazione. Una join su uguaglianza fallisce perché i timestamp non coincidono quasi mai; serve il record di B più vicino senza superare il timestamp di A.
+Quando invece dovete arricchire ogni ordine con il listino prezzi o il tasso di cambio valido in quel preciso istante, evitate le `JOIN` a disuguaglianza (`o.created_at BETWEEN p.valid_from AND p.valid_to`) se gli intervalli possono sovrapporsi o lasciare buchi: in ClickHouse usate `ASOF LEFT JOIN` su `(currency, order_time >= rate_time)`, che garantisce al massimo una riga di match per ciascun evento.
 
-```sql
--- Per ogni ordine, il prezzo di listino vigente a quella data
--- Il match è: stesso prodotto, data listino <= data ordine, la più recente
-SELECT o.ordine_id, o.data_ordine, l.prezzo AS prezzo_vigente
-FROM ordini AS o
-JOIN LATERAL (
-  SELECT prezzo
-  FROM listini AS l
-  WHERE l.prodotto_id = o.prodotto_id
-    AND l.data_validita <= o.data_ordine
-  ORDER BY l.data_validita DESC
-  LIMIT 1
-) AS l ON true;
-```
+## Semi-join (EXISTS) vs Pre-aggregazione + LEFT JOIN
 
-I database con supporto nativo (`ASOF JOIN` in ClickHouse, kdb+, DuckDB con `ASOF`) esprimono lo stesso concetto con sintassi dedicata e implementazioni ottimizzate su dati ordinati. Il punto concettuale non cambia: quando la relazione è "lo stato vigente al momento", né l'uguaglianza né l'intervallo fisso bastano, serve un match temporale ordinato. E il controllo di qualità specifico è verificare gli eventi anteriori al primo record di B: ordini più vecchi del listino più vecchio restano senza match, e decidere se è corretto (dato mancante vero) o un buco da colmare con un valore di default è una scelta analitica, non tecnica.
+Quando dovete lavorare con due tabelle in relazione 1:N, dovete scegliere tra **`EXISTS`** e **CTE pre-aggregata + `LEFT JOIN`**.
 
-## UNION, EXCEPT, INTERSECT: ragionare per insiemi
+Il criterio di scelta è netto: **usate `EXISTS` / `NOT EXISTS` quando la domanda è puramente booleana (chi ha fatto almeno un'azione, chi non ha mai convertito) perché non richiede aggregazioni intermedie e preserva la granularità, usate invece una CTE pre-aggregata con `GROUP BY` seguita da `LEFT JOIN` quando vi servono anche metriche numeriche dalla tabella di destra (numero di ordini, somma spesa, data ultimo acquisto).**
 
-Gli operatori insiemistici combinano i risultati di due query invece delle tabelle, riga per riga, e richiedono stessa struttura: stesso numero di colonne, tipi compatibili nella stessa posizione. Sembrano primitivi, ma risolvono con eleganza problemi per cui le join sono lo strumento sbagliato: consolidare cataloghi da più sistemi, trovare record presenti qui e assenti là, verificare che due pipeline producano lo stesso insieme.
+La confusione comune consiste nell'usare `SELECT DISTINCT c.customer_id` dopo una `INNER JOIN` per riparare la moltiplicazione: è un cerotto costoso che nasconde il problema invece di risolverlo alla fonte.
 
-`UNION ALL` accoda le righe mantenendo i duplicati, `UNION` accoda e deduplica. La distinzione ha conseguenze su correttezza e costo: se i duplicati tra le sorgenti sono impossibili per costruzione (partizioni disgiunte per data o regione), `UNION ALL` è corretto e più economico perché evita l'ordinamento per deduplica. Se i duplicati sono possibili — tre sistemi che descrivono gli stessi listing, come nel caso sotto — la scelta tra `UNION` e `UNION ALL` decide se il catalogo finale conta ogni listing una volta o tre.
+## Cinque domande prima di pubblicare una query con JOIN
 
-```sql
--- Listing presenti in tutti e tre i sistemi (intersezione)
-SELECT listing_id FROM db_host
-INTERSECT
-SELECT listing_id FROM sistema_qualita
-INTERSECT
-SELECT listing_id FROM motore_prezzi;
+1. La granularità del risultato finale (`1 riga = 1 ...`) coincide esattamente con quella della tabella di partenza?
+2. Avete usato `EXISTS` / `NOT EXISTS` al posto di `INNER JOIN` + `DISTINCT` o `NOT IN` per le domande di esistenza?
+3. Tutti i filtri sulla tabella di destra di una `LEFT JOIN` sono posizionati nella clausola `ON` e non nel `WHERE`?
+4. Se unite una tabella `1:N` per estrarre importi o conteggi, l'avete prima pre-aggregata alla chiave di join?
+5. La somma tra insieme `EXISTS` e insieme `NOT EXISTS` quadra esattamente (`diff = 0`) con il totale della tabella di sinistra?
 
--- Listing dell'host mai passati dal controllo qualità (differenza)
-SELECT listing_id FROM db_host
-EXCEPT
-SELECT listing_id FROM sistema_qualita;
-
--- Catalogo unificato con provenienza: qui i duplicati informano,
--- quindi UNION ALL con colonna sorgente invece di UNION
-SELECT listing_id, 'host' AS sorgente FROM db_host
-UNION ALL
-SELECT listing_id, 'qualita' AS sorgente FROM sistema_qualita
-UNION ALL
-SELECT listing_id, 'prezzi' AS sorgente FROM motore_prezzi;
-```
-
-Tre avvertenze pratiche. Primo, `EXCEPT` e `INTERSECT` confrontano l'intera riga, non una chiave: due righe con stesso `listing_id` ma attributi diversi sono righe diverse e l'intersezione le esclude entrambe. Quando serve confrontare solo le chiavi, proiettare solo la chiave prima dell'operatore, come negli esempi sopra. Secondo, `NULL` nei confronti insiemistici: in `EXCEPT` e `INTERSECT` due `NULL` nella stessa posizione sono considerati uguali (diversamente dal `WHERE`, dove `NULL = NULL` è sconosciuto), un dettaglio che cambia i conteggi quando le chiavi sono nullable. Terzo, l'ordinamento: `ORDER BY` va una sola volta in fondo e si riferisce alle colonne del risultato combinato, non alle singole query — e nelle query componenti va evitato perché nella maggior parte dei dialetti è sintatticamente vietato o semanticamente inutile.
-
-Un uso sottovalutato di `EXCEPT` è come test di regressione tra pipeline: `SELECT ... FROM nuova_pipeline EXCEPT SELECT ... FROM vecchia_pipeline` restituisce esattamente le righe che la nuova versione aggiunge o perde. Eseguito a ogni deploy su un campione congelato, è il modo più economico per accorgersi che un refactoring ha cambiato i dati oltre al codice.
-
-## NULL, cardinalità e controlli prima di fidarsi del risultato
-
-Quasi tutti i bug silenziosi delle combinazioni tra tabelle hanno due radici: chiavi duplicate dove se ne presumeva l'unicità, e `NULL` dove si presumeva un valore. Entrambi si controllano con query da poche righe che conviene eseguire prima dell'analisi vera, non dopo aver presentato il numero sbagliato.
-
-Il controllo di cardinalità verifica che la chiave di `JOIN` sia davvero univoca dal lato in cui la si presume tale. Prima di unire gli eventi alla tabella clienti su `cliente_id`, una `GROUP BY cliente_id HAVING COUNT(*) > 1` sulla tabella clienti dice se esistono duplicati. Se ne esistono, la `JOIN` moltiplicherà le righe degli eventi per quei clienti e ogni metrica a valle sarà gonfiata esattamente in proporzione. Lo stesso vale per le chiavi composte: l'unicità va verificata sulla combinazione completa usata nella `ON`, non sulle singole colonne.
-
-Il controllo sui `NULL` riguarda le chiavi di correlazione: una riga con chiave `NULL` non matcha mai in una `JOIN` su uguaglianza, né in `EXISTS`, e sparisce dal risultato senza lasciare traccia. Contare i `NULL` nelle colonne di `JOIN` di entrambe le tabelle — e decidere esplicitamente se vanno esclusi, imputati o segnalati — chiude una delle falle più comuni. A questi due controlli si aggiunge la quadratura: la somma delle parti deve tornare con il totale. Se gli utenti attivi più gli inattivi (semi-join più anti-join complementari) non danno il totale utenti, c'è un terzo insieme nascosto, quasi sempre righe con chiave `NULL` o filtri temporali applicati in modo asimmetrico.
-
-Anche i fusi orari meritano una riga: confrontare `timestamp` con timezone diverse in un as-of join o in un filtro sugli ultimi 90 giorni sposta i confini delle finestre di qualche ora, abbastanza per far sparire o apparire eventi al bordo. Normalizzare a `UTC` prima di confrontare costa una riga e previene una classe intera di discrepanze irreproducibili.
-
-## Come scegliere l'operazione in produzione
-
-A questo punto il criterio di scelta si può enunciare come procedura. Primo passo: scrivere in una frase la domanda, usando i verbi che corrispondono alle operazioni — "tenere gli ordini con cliente" (inner), "tenere tutti i clienti con i loro ordini dove esistono" (left), "tenere i clienti con almeno un ordine" (semi-join), "tenere i clienti senza ordini" (anti-join), "per ogni ordine, il prezzo vigente allora" (as-of), "accodare due insiemi" (union). Se la frase non viene naturale, il requisito è ambiguo e va chiarito con chi ha chiesto l'analisi prima di scrivere SQL.
-
-Secondo passo: dichiarare il grano atteso del risultato e verificarlo contando le righe prima e dopo. Terzo: scegliere la forma sintattica più esplicita tra quelle equivalenti — `EXISTS` invece di `JOIN` più deduplica, `NOT EXISTS` invece di `NOT IN` su colonne nullable, filtro sulla tabella esterna nella `ON` invece che nel `WHERE`. Quarto: eseguire i controlli di cardinalità, `NULL` e quadratura, e fissare baseline e soglie (periodo precedente, segmento comparabile) così che una rottura futura dei dati si veda dal numero prima che dal reclamo.
-
-Resta il trade-off onesto: semi-join e anti-join con subquery correlate sono ottimizzati bene dai motori moderni, ma su volumi molto grandi e chiavi ad alta cardinalità la forma con pre-aggregazione o con `JOIN` esplicita su insieme deduplicato può vincere. L'unico arbitro affidabile è il piano di esecuzione misurato sui propri dati, non la regola generale. La regola generale serve a scrivere la query corretta, il piano di esecuzione serve a renderla veloce. In quest'ordine.
-
-<SqlExercise client:visible
-  description={`Usa un semi-join (EXISTS) per trovare gli utenti che hanno fatto almeno un ordine nella categoria 'Sport'. Mostra nome e email.`}
-  hint="Usa WHERE EXISTS (SELECT 1 FROM ordini WHERE utente_id = utenti.id AND categoria = 'Sport')."
-  initialQuery={`SELECT u.nome, u.email\nFROM utenti u\nJOIN ordini o ON u.id = o.utente_id\nWHERE o.categoria = 'Sport'\nGROUP BY u.nome, u.email`}
-  solutionQuery={`SELECT u.nome, u.email\nFROM utenti u\nWHERE EXISTS (\n  SELECT 1 FROM ordini o\n  WHERE o.utente_id = u.id AND o.categoria = 'Sport'\n)\nORDER BY u.nome`}
-/>
-
-<SqlExercise client:visible
-  description={`Usa un anti-join (NOT EXISTS) per trovare gli utenti che NON hanno mai fatto un ordine nella categoria 'Elettronica'. Ordina per nome.`}
-  hint="Usa WHERE NOT EXISTS (SELECT 1 FROM ordini WHERE utente_id = utenti.id AND categoria = 'Elettronica'). Confronta il risultato con una versione LEFT JOIN ... WHERE IS NULL."
-  initialQuery={`SELECT u.nome, u.email\nFROM utenti u\nLEFT JOIN ordini o ON u.id = o.utente_id AND o.categoria = 'Elettronica'\nWHERE o.id IS NULL`}
-  solutionQuery={`SELECT u.nome, u.email\nFROM utenti u\nWHERE NOT EXISTS (\n  SELECT 1 FROM ordini o\n  WHERE o.utente_id = u.id AND o.categoria = 'Elettronica'\n)\nORDER BY u.nome`}
-/>
-
-*Riferimenti:* Stonebraker, M. e Rowe, L. (1986). «The Design of POSTGRES». *Proceedings of ACM SIGMOD*, pp. 340–355. Chamberlin, D. D. (1998). *A Complete Guide to DB2 Universal Database*. Morgan Kaufmann, capitolo 8 su subquery e tabelle derivate. Celko, J. (2014). *Joe Celko's SQL for Smarties: Advanced SQL Programming*, quinta edizione. Morgan Kaufmann, capitolo 21 sulle operazioni insiemistiche.
-
-Verdetto: usa `EXISTS` per esistenza e `NOT EXISTS` per assenza su chiavi nullable, `LEFT JOIN` con condizione in `ON` per tenere i senza match, laterale con `LIMIT 1` per stati vigenti e `UNION ALL` con sorgente quando i duplicati informano.
-
-## Un esempio che fa testo: il disegno di POSTGRES
-
-Per chiudere con un riferimento fondativo: Michael Stonebraker e Lawrence Rowe hanno descritto il disegno di POSTGRES negli atti SIGMOD del 1986 alle pagine da 340 a 355. Il lavoro fissa la semantica di join, subquery correlate e viste che ancora guidano `EXISTS` e `NOT EXISTS` nei motori moderni. Con 200000 utenti totali e 190000 acquirenti di elettronica, un anti join corretto restituisce 10000 assenti mentre un `NOT IN` su colonna nullable restituisce zero righe. Senza controllo di cardinalità e quadratura dei complementari, la stessa combinazione gonfia medie e svuota insiemi senza errori di sintassi.
-
-## Domande per chiudere la lezione
-
-1. Quando una `JOIN` su chiave non univoca gonfia medie e conteggi senza sollevare errori?
-2. Perché `NOT IN` su colonna nullable restituisce insieme vuoto mentre `NOT EXISTS` trova gli assenti?
-3. Quando sposti un filtro sulla tabella esterna da `WHERE` a `ON` per non trasformare una `LEFT JOIN` in interna?
-4. Quale quadratura fai tra attivi, inattivi e totale utenti prima di fidarti di semi-join e anti-join?
+La metrica di qualità di qualsiasi join analitica è il **Row Multiplication Ratio** (`righe_dopo_join / righe_tabella_sinistra`), che per arricchimenti 1:1 o semi-join deve essere esattamente **`1.00`**. Prima di pubblicare un modello, aggiungete un test automatico di unicità sulla chiave primaria risultante per bloccare qualsiasi moltiplicazione silenziosa al nascere.

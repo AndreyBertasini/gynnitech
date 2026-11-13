@@ -16,160 +16,133 @@ learningObjectives:
 prerequisites:
   - data-warehousing/clickhouse
 binario: "ml-tabellare"
+formato: "articolo"
 autore: "Hermes"
 controllatoDa: "Argo"
 autorizzatoDa: "Giano"
 draft: false
-dateModified: 2026-09-07
+dateModified: 2026-11-13
 ---
+
 # Schema evolution e gestione dei cambiamenti
 
-Lo schema di un warehouse non è mai un oggetto isolato: sopra vivono dashboard, query salvate, modelli statistici e job ETL che si aspettano colonne con nome, tipo e significato stabili. Una colonna che sembra inutile può alimentare il report mensile di un altro team. Uno schema cambia in sicurezza solo quando sai chi lo usa e quale contratto non deve essere violato, e in questa lezione impari a governare quel cambiamento.
+Un team di piattaforma rinomina la colonna `discount_amount` in `promo_discount_eur` e cambia il tipo di `order_status` da intero a stringa il giovedì pomeriggio. Alle sette del venerdì mattina ventidue modelli dbt falliscono a catena, la vista del bilancio mensile restituisce errore e i tre cruscotti della direzione commerciale mostrano schermate bianche. La causa non è la frequenza dei rilasci: è applicare modifiche distruttive (*breaking changes*) direttamente sulle tabelle esposte anziché seguire il protocollo *expand-and-contract* con viste di compatibilità e contratti verificati.
 
-## L'idea in una frase
+## Ventidue modelli rotti al venerdì mattina per un solo rename
 
-La schema evolution governa ogni cambio di tabella senza rompere dashboard, job e analisi storiche. Uno schema cambia in sicurezza solo quando sai chi lo usa e quale contratto non deve essere violato.
+Questo è un caso ricostruito con numeri di esempio su quanto accade ogni volta che uno schema di data warehouse viene modificato sul posto (*in-place*) senza analisi di impatto. La tabella `fct_orders` di un'azienda retail alimenta quattordici modelli analitici a valle, otto report su strumento di Business Intelligence e due estrazioni verso il sistema di pianificazione finanziaria.
 
-## La sequenza di gestione del cambiamento
+Durante uno sprint di pulizia tecnica, un ingegnere decide di rendere più chiari i nomi delle colonne: esegue un `ALTER TABLE RENAME COLUMN discount_amount TO promo_discount_eur` e converte la colonna `is_b2b` da `UInt8` (`0`/`1`) a `String` (`'B2C'`/`'B2B'`). Il job del modello stesso compila, ma nella corsa notturna delle 02:00 tutte le query che puntavano a `discount_amount` si schiantano con `Unknown identifier`, mentre un report che filtrava `WHERE is_b2b = 1` fallisce per incompatibilità di tipo. Per ripristinare l'operatività prima dell'apertura dei negozi, il team deve annullare il rilascio a mano e rilanciare tre ore di calcolo arretrato.
 
-1. Mappa i consumer downstream e i job che toccano la tabella prima di proporre la modifica.
-2. Scegli la strategia compatibile tra colonna additiva, vista intermedia o versione esplicita con transizione.
-3. Applica il contratto di schema in build per bloccare violazioni prima del deploy in produzione.
-4. Esegui la migrazione con doppia esposizione e finestra di transizione comunicata ai consumer.
-5. Monitora dashboard e job dopo il rilascio e tieni pronto il `rollback` con soglia di rientro scritta.
+La causa del fermo è trattare le colonne di una tabella analitica pubblica come variabili private di una funzione anziché come un'interfaccia pubblica soggetta a vincoli di retrocompatibilità.
 
-## Il problema concreto
+## Modifiche additive, rotture di contratto e ciclo expand-and-contract
 
-Lo schema di un warehouse non è mai un oggetto isolato. Sopra vivono dashboard, query salvate, modelli statistici e job ETL che si aspettano colonne con nome, tipo e significato stabili. Modificare lo schema tocca un contratto implicito con tutti questi consumer. Una colonna che sembra inutile può alimentare il report mensile di un altro team. Uno schema cambia in sicurezza solo quando sai chi lo usa e quale contratto non deve essere violato.
+L'evoluzione sicura di uno schema analitico poggia su tre meccanismi fisici e organizzativi.
 
-Prima di toccare una tabella, rispondi in sequenza. Quale decisione operativa abilita il cambiamento? Quali consumer sono impattati? Esiste una variante retrocompatibile? Se non esiste, quale piano di migrazione chiude la transizione?
+Il primo meccanismo è la distinzione tassativa tra modifiche retrocompatibili (additive) e modifiche distruttive (*breaking*). Aggiungere una nuova colonna opzionale o con valore predefinito in fondo alla tabella è un'operazione additiva: i consumatori esistenti che elencano esplicitamente le colonne nella loro `SELECT` continuano a funzionare senza accorgersi del cambiamento. Al contrario, eliminare una colonna, rinominarla, restringerne il tipo di dato (es. da `Int64` a `Int32` o da `String` a `Date`) o cambiarne il significato semantico (es. passare una colonna di ricavo da lordo a netto mantenendo lo stesso nome) rompe immediatamente il codice o i calcoli di chi legge a valle.
 
-| Passaggio | Domanda da fare | Output atteso |
-|---|---|---|
-| Decisione | Che cosa cambia se modifico lo schema in questo modo? | Scelta esplicita |
-| Segnale | Quali consumer e quali job toccano questo campo? | Mappa di lineage |
-| Baseline | Lo stato attuale funziona per tutti i consumer? | Confronto credibile |
-| Vincolo | Che cosa si rompe se il cambiamento non è retrocompatibile? | Assunzione da dichiarare |
-| Azione | Quale passo di migrazione segue, e con quale rollback? | Piano controllabile |
+Il secondo meccanismo è la migrazione a tre fasi *expand-migrate-contract* (espandi, migra, contrai). Nella fase *expand*, si aggiunge la nuova colonna `promo_discount_eur` accanto alla vecchia `discount_amount` popolandole entrambe (o esponendo entrambe tramite una vista di compatibilità). Nella fase *migrate*, si aggiornano gradualmente i modelli dbt e i cruscotti a valle perché leggano la nuova colonna, monitorando i log delle query del warehouse per vedere chi interroga ancora il vecchio nome. Nella fase *contract*, solo dopo che i log confermano zero letture sulla vecchia colonna per almeno due settimane, si rimuove definitivamente `discount_amount`.
 
-| Elemento | Specifica richiesta |
-|---|---|
-| Unità di analisi | tabella, fact, dimensione, grain o modello dati |
-| Segnale principale | grain corretto, integrità, performance, costo query, tracciabilità |
-| Baseline | versione attuale dello schema e consumer che ne dipendono |
-| Decisione | schema, mart, query pattern o scelta architetturale |
-| Rischio | rompere un consumer che non sapevi esistesse |
+Il terzo meccanismo è il contratto di schema verificato in compilazione (`contract: { enforced: true }` in dbt) unito alle dichiarazioni di `exposures` e al versionamento dei modelli (`v1`, `v2`). Quando il contratto è attivo, il motore verifica prima del rilascio che ogni colonna promessa esista esattamente con il nome e il tipo di dato dichiarati nel file YAML, rifiutando la build se una modifica non autorizzata altera la firma della tabella.
 
-## Strategie di evoluzione
+**Uno schema evolve senza interruzioni solo se ogni modifica distruttiva viene trasformata in una sequenza di aggiunta parallela, migrazione monitorata dei consumatori e rimozione differita.**
 
-Tre approcci coprono la maggior parte dei casi reali. Il primo è `additive-only`, il più sicuro: aggiungi colonne e non ne rimuovi mai, con le vecchie marcate come deprecate. I nuovi consumer vedono la nuova colonna, i vecchi la ignorano senza accorgersi di nulla. Funziona in Snowflake, BigQuery e Postgres.
+## Tre errori durante la modifica di tabelle in produzione
 
-Il secondo è la vista intermedia: esponi una `vista` invece della tabella fisica e aggiorna la vista quando migri lo schema sottostante. La vista diventa il contratto stabile e la tabella fisica cambia sotto di essa.
-
-Il terzo è il versionamento esplicito con tabelle come `orders_v1` e `orders_v2` in coesistenza temporanea. I consumer migrano quando sono pronti. È il più complesso e serve quando hai molti consumer indipendenti non coordinabili in un solo deploy.
-
-In sintesi: usa `additive-only` come default, la vista intermedia come contratto stabile e il versionamento esplicito solo per migrazioni non coordinabili.
-
-Verdetto: `additive-only` vince come default, la vista intermedia come contratto stabile e il versionamento esplicito solo per migrazioni non coordinabili.
-
-## Contratti e test automatici
-
-Con i model contract di `dbt`, coperti nel modulo di analytics engineering, blocchi in build ogni modifica che viola lo schema atteso. Sposti la rottura dal runtime al build time: invece di una dashboard muta vedi una CI rossa che impedisce il deploy.
+Il blocco SQL qui sotto mostra le tre operazioni eseguite a caldo che rompono le dipendenze a valle o alterano silenziosamente le serie storiche:
 
 ```sql
--- esempio di model contract dbt (semplificato)
--- la build fallisce se la colonna manca o cambia tipo
-models:
-  - name: orders
-    config:
-      contract:
-        enforced: true
-    columns:
-      - name: order_id
-        data_type: integer
-      - name: status
-        data_type: varchar
-```
+-- 1) ERRORE: Rinomina e cambio di tipo distruttivo eseguiti sul posto senza fase expand.
+ALTER TABLE analytics.fct_orders
+    RENAME COLUMN discount_amount TO promo_discount_eur;
 
-Prima del cambio passa la checklist: consumer impattati verificati sul lineage graph, retrocompatibilità confermata per tutti, piano di migrazione con finestra scritta se non compatibile, test automatici sul nuovo schema, `rollback` pronto in produzione.
+ALTER TABLE analytics.fct_orders
+    MODIFY COLUMN channel_code UInt16;
 
-## Esempio SQL: costruire una vista di controllo
-
-Il pattern seguente è eseguibile nella maggior parte dei warehouse moderni e crea una base con metrica, segmento e finestra temporale per confrontare periodi e gruppi senza riscrivere la logica.
-
-```sql
-WITH base_events AS (
-  SELECT
-    user_id,
-    account_id,
-    event_type,
-    event_time,
-    DATE_TRUNC('week', event_time) AS week,
-    source,
-    device_type
-  FROM events
-  WHERE event_time >= CURRENT_DATE - INTERVAL '180 days'
-    AND user_id IS NOT NULL
-),
-weekly_user_metrics AS (
-  SELECT
-    week,
-    user_id,
-    COALESCE(source, 'unknown') AS source,
-    COALESCE(device_type, 'unknown') AS device_type,
-    COUNT(*) AS total_events,
-    COUNT(DISTINCT DATE(event_time)) AS active_days,
-    COUNT(DISTINCT event_type) AS event_diversity,
-    MAX(CASE WHEN event_type IN ('purchase', 'subscribe', 'activation') THEN 1 ELSE 0 END) AS reached_key_outcome
-  FROM base_events
-  GROUP BY week, user_id, source, device_type
-)
+-- 2) ERRORE: Cambio semantico silenzioso nello stesso nome di colonna (da lordo a netto IVA).
+CREATE OR REPLACE VIEW analytics.v_daily_revenue AS
 SELECT
-  week,
-  source,
-  device_type,
-  COUNT(DISTINCT user_id) AS users,
-  ROUND(AVG(active_days), 2) AS avg_active_days,
-  ROUND(AVG(event_diversity), 2) AS avg_event_diversity,
-  ROUND(AVG(reached_key_outcome) * 100, 2) AS key_outcome_rate
-FROM weekly_user_metrics
-GROUP BY week, source, device_type
-ORDER BY week, source, device_type;
+    order_date,
+    -- Fino a ieri restituiva gross_eur, oggi restituisce net_eur con lo stesso alias!
+    sum(net_eur) AS total_revenue_eur
+FROM analytics.fct_orders
+GROUP BY order_date;
 ```
 
-Quando lo schema cambia, è questa superficie di trend e segmenti a dirti subito se qualcosa si è incrinato.
+### Rinominare o cancellare una colonna direttamente sulla tabella esposta
 
-## Esempio Python: controllare stabilità e anomalie
+Eseguire `RENAME COLUMN` o `DROP COLUMN` in un'unica pull request sembra il modo più ordinato per non lasciare colonne duplicate nel database. Non funziona in un ecosistema analitico perché i repository non sono tutti nello stesso posto: anche se correggete i modelli SQL dentro dbt, i fogli elettronici della finanza, le query salvate in Metabase o Superset e gli script dei data scientist risiedono fuori dal vostro albero SQL e smettono istantaneamente di funzionare.
 
-```python
+### Cambiare il significato semantico di una colonna mantenendo lo stesso nome
 
-# df contiene: week, segment, users, key_outcome_rate
-# key_outcome_rate espresso in percentuale, es. 12.4
+Modificare la formula di `total_revenue_eur` da ricavo lordo a ricavo al netto dell'IVA e dei resi senza cambiare il nome della colonna sembra un favore fatto agli utenti per "non rompere i loro report". In realtà è molto più pericoloso di un errore di sintassi: i cruscotti continuano a girare senza alcun avviso, ma confrontano i mesi nuovi al netto con i mesi vecchi o i budget fissati al lordo, portando la direzione a credere che le vendite siano crollate del 22% da un giorno all'altro.
 
-df = df.sort_values(['segment', 'week']).copy()
-df['previous_rate'] = df.groupby('segment')['key_outcome_rate'].shift(1)
-df['wow_change_pp'] = df['key_outcome_rate'] - df['previous_rate']
-df['rolling_mean'] = df.groupby('segment')['key_outcome_rate'].transform(
-    lambda s: s.rolling(4, min_periods=2).mean()
-)
-df['rolling_std'] = df.groupby('segment')['key_outcome_rate'].transform(
-    lambda s: s.rolling(4, min_periods=2).std()
-)
-df['z_score'] = (df['key_outcome_rate'] - df['rolling_mean']) / df['rolling_std']
+### Forzare una conversione di tipo su colonne storiche con valori sporchi
 
-anomalies = df[df['z_score'].abs() >= 2].sort_values('z_score')
-print(anomalies[['week', 'segment', 'key_outcome_rate', 'wow_change_pp', 'z_score']])
+Lanciare `ALTER TABLE MODIFY COLUMN channel_code UInt16` su una colonna `String` che per anni ha ospitato codici testuali sembra una buona ottimizzazione di spazio. Su miliardi di righe storiche basta che nel 2023 sia stato registrato un singolo codice alfanumerico come `'WEB_01'` perché la mutazione fallisca a metà riscrittura su disco o azzeri silenziosamente i valori non numerici trasformandoli in `0`, corrompendo i dati storici.
+
+## Migrazione expand-and-contract assistita da query log e model versions
+
+Per far evolvere le tabelle del data warehouse con zero minuti di disservizio sui report, applicate questi quattro criteri in ordine di priorità:
+
+1. Prima di toccare qualsiasi colonna di uno strato `marts`, interrogate il registro delle query del warehouse (es. `system.query_log` in ClickHouse) e il grafo di lineage dbt per elencare tutti i modelli, gli utenti e i cruscotti che hanno letto quella colonna negli ultimi trenta giorni.
+2. Applicate sempre il ciclo *expand-and-contract*: aggiungete la colonna nuova con `ADD COLUMN`, esponete il vecchio nome come alias di compatibilità nella vista o nel modello versionato `v1` e pubblicate il nuovo schema su `v2` con `deprecation_date` dichiarata.
+3. Attivate `contract: { enforced: true }` nei file YAML dei modelli pubblici così che il compilatore blocchi qualsiasi rimozione o cambio di tipo accidentale in CI/CD.
+4. Eseguite il `DROP COLUMN` della vecchia colonna solo quando la query di controllo su `system.query_log` restituisce zero accessi residui al vecchio identificativo.
+
+Ecco la sequenza SQL corretta in ClickHouse per aggiungere la nuova colonna, esporre la vista compatibile e verificare nei log che nessuno usi più il vecchio campo prima di rimuoverlo:
+
+```sql
+-- FASE 1 (EXPAND): aggiungiamo la nuova colonna tipizzata senza toccare discount_amount.
+ALTER TABLE analytics.fct_orders
+    ADD COLUMN IF NOT EXISTS promo_discount_eur Decimal(12, 2) DEFAULT 0;
+
+-- Vista di transizione che mantiene entrambi i nomi per non rompere i report esistenti.
+CREATE OR REPLACE VIEW analytics.v_fct_orders_compat AS
+SELECT
+    order_id,
+    order_date,
+    promo_discount_eur,
+    promo_discount_eur AS discount_amount
+FROM analytics.fct_orders;
+
+-- FASE 2 (MONITOR): verifichiamo in system.query_log chi legge ancora la vecchia colonna.
+SELECT
+    user,
+    count() AS esecuzioni_ultimi_14_giorni,
+    max(event_time) AS ultima_lettura
+FROM system.query_log
+WHERE type = 'QueryFinish'
+  AND event_date >= today() - 14
+  AND has(columns, 'analytics.fct_orders.discount_amount')
+GROUP BY user;
+
+-- FASE 3 (CONTRACT): solo quando la query sopra restituisce 0 righe, rimuoviamo il vecchio campo.
+ALTER TABLE analytics.fct_orders
+    DROP COLUMN IF EXISTS discount_amount;
 ```
 
-Il controllo con `z_score` vale doppio dopo una migrazione: evita reazioni al `rumore` e segnala le variazioni che meritano indagine.
+Con questo protocollo i ventidue modelli dbt e i cruscotti della direzione continuano a funzionare senza alcuna interruzione durante l'intera transizione: i team aggiornano le proprie query secondo il proprio calendario, e la verifica su `system.query_log` sostituisce le ipotesi con la prova oggettiva che la vecchia colonna è ormai inutilizzata. Tenere due colonne o una vista di compatibilità per quindici giorni costa pochi megabyte su disco ed è completamente reversibile; rompere invece il cruscotto del consiglio di amministrazione il venerdì mattina blocca l'azienda e brucia giornate di lavoro in emergenza.
 
-## La lezione di chi ha governato il cambiamento per decenni
+## Aggiunta in-place con retrofill o nuova versione del modello in dbt
 
-Nel luglio 2008 Google pubblica open source Protocol Buffers 2, il sistema di serializzazione usato internamente per far evolvere migliaia di servizi senza fermare il mondo a ogni cambio di campo. Il meccanismo centrale è la compatibilità backward e forward tramite numeri di campo stabili: un campo rinominato resta leggibile e un campo aggiunto non rompe i lettori vecchi. Da allora il principio diventa il riferimento per ogni discussione di schema evolution tabellare. Rinominare una colonna senza alias, cambiare un tipo senza cast o aggiungere un valore a un enum senza avviso equivale a rompere un contratto. Gli schemi evolvono comunque, la differenza è tra chi governa il cambiamento e chi lo subisce.
+Quando una modifica tocca un modello importante dello strato `marts`, bisogna decidere se evolvere la tabella esistente sul posto (*in-place*) o pubblicare una nuova versione esplicita del modello (`fct_orders_v2`) mantenendo temporaneamente in vita `fct_orders_v1`.
 
-## Domande per ripassare
+Il criterio di scelta è netto: **evolvete la tabella sul posto con un semplice `ADD COLUMN` se state solo aggiungendo nuovi attributi opzionali o metriche supplementari che non alterano il grain né il significato delle colonne già presenti, pubblicate invece una nuova versione esplicita del modello (`v2`) con finestra di deprecazione ogni volta che cambiate il grain della tabella, rimuovete o rinominate colonne esistenti o modificate la formula di calcolo di una metrica consolidata.**
 
-1. Quali consumer downstream toccano la tabella prima della modifica?
-2. Quale strategia tra additiva, vista e versione garantisce compatibilità?
-3. Quale contratto in build blocca una colonna mancante o un tipo cambiato?
-4. Quale soglia di monitoraggio fa scattare il `rollback` dopo il deploy?
+La confusione comune consiste nel creare una `v2`, `v3` e `v4` per ogni banale colonna aggiunta — moltiplicando inutilmente i costi di storage e di calcolo — oppure nell'alterare la formula del margine netto direttamente dentro `v1` senza cambiare versione. Sbagliare questa scelta porta o alla proliferazione incontrollata di tabelle duplicate che nessuno osa più spegnere, o alla rottura improvvisa della fiducia nei dati quando i numeri storici cambiano da un giorno all'altro sotto lo stesso nome.
+
+Questo articolo non tratta l'evoluzione degli schemi binari in streaming su Kafka (gestita tramite Schema Registry Avro o Protobuf) né le migrazioni dei database transazionali OLTP con strumenti come Flyway o Liquibase. Sui motori colonnari, il costo fisico di una mutazione `MODIFY COLUMN` dipende dal fatto che la colonna faccia parte o meno della chiave `ORDER BY` (che non può mai essere modificata senza ricreare la tabella).
+
+## Cinque domande prima di modificare lo schema di una tabella pubblica
+
+1. La modifica che state introducendo è puramente additiva (nuova colonna in coda) o è una modifica distruttiva su nome, tipo di dato, grain o formula semantica?
+2. Avete interrogato i log delle query del warehouse (`system.query_log` o equivalente) e le `exposures` di dbt per sapere esattamente quali report e quali utenti leggono le colonne coinvolte?
+3. Se state rinominando o cambiando il significato di una colonna, avete previsto la fase *expand* mantenendo in parallelo sia il vecchio sia il nuovo campo per un periodo di transizione?
+4. Il modello pubblico ha il contratto attivo (`contract: { enforced: true }`) nel file YAML e un controllo automatico in CI che impedisce rimozioni involontarie di colonne?
+5. Avete fissato una data di spegnimento (`deprecation_date`) e la query di verifica a zero letture prima di eseguire la fase finale di *contract* (`DROP COLUMN`)?
+
+La metrica operativa che misura la maturità del team nella gestione degli schemi è il numero di incidenti su cruscotti e job a valle causati da rilasci del data warehouse: in un'architettura che applica *expand-and-contract* e contratti verificati in CI, quel numero deve restare costantemente uguale a zero.
+
+Di tutta la procedura, un solo principio evita il 99% dei disastri del venerdì mattina: non rinominare né cancellare mai una colonna nello stesso rilascio in cui introducete la sua sostituta. Aggiungete oggi, migrate domani, cancellate solo quando i log dicono che non la legge più nessuno.

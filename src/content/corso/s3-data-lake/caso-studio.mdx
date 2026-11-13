@@ -16,99 +16,175 @@ learningObjectives:
 prerequisites:
   - s3-data-lake/iceberg
 binario: "ml-tabellare"
+formato: "articolo"
 autore: "Hermes"
 controllatoDa: "Argo"
 autorizzatoDa: "Giano"
 draft: false
-dateModified: 2026-09-07
+dateModified: 2026-11-13
 ---
+
 # Progetto: data lake completo su S3
 
-Questo è il lavoro finale del binario `ml-tabellare`, e va svolto come una vera consegna architetturale. Il progetto porta un lake `S3` da cartelle sparse a sistema leggibile e governato: zone `raw`, `curated` e `analytics`, formati colonnari, catalogo, policy di accesso, lifecycle e query engine. Ogni scelta deve spiegare quale rischio riduce tra costi, sicurezza, query lente, dati non tracciabili, schema instabile o recovery mai verificato.
+Un'azienda retail omnicanale accumula 100 GB di scontrini ed eventi e-commerce in file CSV/JSON grezzi dentro un unico bucket S3 non strutturato: ogni query mensile su Athena impiega 68 secondi scansionando tutti i 100 GB ($0,50 a query), i resi merce arrivati nei giorni successivi richiedono la riscrittura manuale delle cartelle passate e non esiste alcun controllo di qualità prima di aggiornare i report dei negozi. L'obiettivo di questo progetto finale è trasformare quella palude di file in un **Lakehouse enterprise su S3 strutturato in tre zone (`raw`, `curated`, `analytics`) con Apache Iceberg nel Glue Catalog**, dimostrando il funzionamento del Time Travel, del gate di qualità e un tempo di query **sotto i 5 secondi** (con meno dell'1% dei byte scansionati) sul dataset da 100 GB.
 
-## L'obiettivo del progetto
+## Sessantotto secondi di scansione su 100 GB di CSV e resi merce impossibili da aggiornare
 
-Questo progetto consegna un data lake su `S3` con zone, formato colonnare, catalogo, accessi governati e query veloci dimostrate da una prova misurabile. Il peso non sta nelle singole configurazioni, ma nel fatto che tutte insieme funzionino davvero.
+Questo è un caso ricostruito con numeri di esempio che riunisce tutte le competenze del Modulo 10 in un progetto architetturale completo da portare in produzione. Il dataset aziendale comprende 350 milioni di righe di transazioni omnicanale (100 GB in formato grezzo) distribuite su 12 mesi e 120 punti vendita italiani ed europei.
 
-## Come procedere, passo dopo passo
+Nel sistema di partenza privo di architettura Lakehouse si scontrano tre limiti bloccanti:
+1. I dati grezzi sono depositati in `s3://retail-dump/csv/` senza partizioni né compressione colonnare: qualsiasi query analitica che calcola il margine netto di un mese per la categoria `'Elettronica'` in Italia deve leggere l'intero archivio da 100 GB, superando il minuto di attesa.
+2. Quando un cliente restituisce un prodotto in negozio 10 giorni dopo l'acquisto, la riga originale dello scontrino deve passare a `status = 'returned'`: senza un table format transazionale, gli script di aggiornamento lasciano duplicati o bloccano le letture.
+3. Non sono configurati né il ciclo di vita S3 (Lifecycle) né il gate di controllo qualità sulle nuove partizioni giornaliere.
 
-1. Disegna il layout dei `bucket` con zone `raw`, `curated` e `analytics` e partizioni per data.
-2. Carica i dati in formato `Parquet` con compressione `Snappy` e partizioni tra 200 e 500 MB.
-3. Crea almeno una tabella `Iceberg` registrata nel `Glue Catalog` con `time travel` funzionante.
-4. Configura in `Lake Formation` le policy che mostrano a ogni ruolo solo dati e colonne consentiti.
-5. Esegui la query `Athena` di controllo e misura scansione e latenza su un volume noto.
-6. Verifica la consegna con la checklist e ripeti la query dopo ogni modifica al layout.
+La soluzione consiste nel costruire l'architettura completa in quattro passi verificabili: layout S3 a tre zone governate, tabella **Apache Iceberg** registrata nel catalogo con *Hidden Partitioning* e *Time Travel*, gate di qualità **Write-Audit-Publish (WAP)** e benchmark finale su 100 GB.
 
-## Fase 1: architettura S3 e partizionamento
+## Architettura del Progetto: Zone S3, Tabella Iceberg Curated, Mart Analytics e Governance
 
-La struttura del `bucket` separa i dati transazionali da quelli dimensionali e partiziona i primi per data, così le query temporali leggono solo le partizioni rilevanti. Ecco come deve apparire il layout, con la zona `transactional` scandita da anno, mese e giorno:
+Il progetto implementa una pipeline Lakehouse a quattro livelli su Amazon S3, AWS Glue Data Catalog, Athena e ClickHouse.
 
-```text
-s3://globalretail-datalake/
-  transactional/
-    sales/year=YYYY/month=MM/day=DD/
-    inventory/year=YYYY/month=MM/
-  dimensional/
-    products/
-    stores/
-    customers/
-```
+Il primo livello è il **layout fisico e di sicurezza dei bucket S3**. I dati sono separati in tre prefissi governati (`s3://acme-retail-lake-prod/raw/`, `curated/`, `analytics/`) protetti da `BlockPublicAccess`, crittografia `SSE-KMS` con *Bucket Key* attiva, `S3 Versioning` e replica Cross-Region (`S3 RTC` a 15 minuti verso `eu-west-1` per la zona `raw/`). La Lifecycle Policy sposta i file `raw/` $> 128\text{ KB}$ in `Glacier Deep Archive` dopo 90 giorni ed elimina gli upload multipart incompleti dopo 7 giorni, mantenendo invece `curated/` e `analytics/` sempre interrogabili in millisecondi (`Standard` + `Glacier Instant Retrieval` oltre i 90 giorni).
 
-Il formato è `Parquet` con compressione `Snappy`. Le partizioni ottimali stanno tra 200 e 500 MB ciascuna: troppo piccole moltiplicano i file e rallentano le scansioni, troppo grandi riducono il parallelismo.
+Il secondo livello è la **tabella transazionale `curated.omnicanale_sales` in formato Apache Iceberg** registrata nel Glue Data Catalog. La tabella è compressa in **Parquet Zstandard (`zstd`)**, partizionata con *Hidden Partitioning* su `month(occurred_at)` e ordinata internamente in scrittura per `(country_code, product_category, store_id)` con file compattati da 256 MB. Gli arrivi giornalieri e i resi merce degli ultimi 30 giorni vengono applicati atomicamente con un comando `MERGE INTO` che aggiorna lo stato e crea un nuovo snapshot interrogabile in *Time Travel*.
 
-## Fase 2: Apache Iceberg
+Il terzo e quarto livello sono il **gate di qualità pre-pubblicazione** (che verifica zero chiavi duplicate e volume entro $\pm 30\%$ della media a 7 giorni) e la **verifica di performance sul dataset da 100 GB** (dimostrando che una query mensile filtrata per paese e categoria scansiona meno di **450 MB** e risponde in **1,4 secondi**, ben sotto il traguardo dei 5 secondi).
 
-`Iceberg` trasforma i file in tabelle versionate con `time travel`, così puoi interrogare lo stato di una tabella a una data passata senza ricostruirla a mano. La creazione della tabella sulle vendite usa la `format-version` 2 e un layout per anno e mese:
+**Un progetto Lakehouse su S3 è completo e pronto per il collaudo aziendale solo se combina zone S3 messe in sicurezza, tabelle Apache Iceberg con `MERGE` e Time Travel, gate di qualità automatico e prova misurata di scansione sub-5 secondi.**
+
+## Tre errori che farebbero fallire il collaudo del progetto su 100 GB
+
+Il blocco SQL qui sotto mostra i tre errori che impedirebbero di raggiungere l'obiettivo dei 5 secondi sul dataset da 100 GB: interrogare la zona `raw` in CSV invece della tabella Iceberg `curated`, usare `SELECT *` annullando la proiezione colonnare Parquet, e non ordinare i file durante la compattazione:
 
 ```sql
-CREATE TABLE sales_iceberg (
-    order_id STRING, store_id INT, product_id INT,
-    quantity INT, amount DECIMAL(10,2), margin DECIMAL(10,2)
-) PARTITIONED BY (year INT, month INT)
-LOCATION 's3://globalretail-datalake/transactional/sales'
-TBLPROPERTIES ('format-version'='2');
-
--- Time travel: stato tabella a gennaio
-SELECT * FROM sales_iceberg FOR TIMESTAMP AS OF TIMESTAMP '2024-01-15 00:00:00';
+-- ERRORE 1: interrogare direttamente i 100 GB nella zona raw/ (CSV non partizionato)
+-- invece della tabella Apache Iceberg nella zona curated/!
+-- ERRORE 2: usare SELECT * su 45 colonne quando servono solo store_id, product_category e net_amount_eur!
+-- Risultato: 100 GB scansionati, 68 secondi di attesa e $0,50 spesi per una singola query.
+SELECT *
+FROM glue_catalog.raw_omnicanale_csv
+WHERE occurred_at >= TIMESTAMP '2026-11-01 00:00:00'
+  AND occurred_at < TIMESTAMP '2026-12-01 00:00:00'
+  AND country_code = 'IT'
+  AND product_category = 'Elettronica';
 ```
 
-## Fase 3: Glue Catalog e governance
+### Costruire le query analitiche sulla zona Raw invece che sulla tabella Iceberg Curated
 
-Tutte le tabelle `Iceberg` vanno registrate nel `Glue Catalog`, che diventa il punto unico da cui i motori scoprono schema e posizione dei dati. Su questo si appoggia `Lake Formation` per il controllo granulare: il marketing vede solo metriche aggregate, la finanza vede i dati transazionali ma senza `PII`. Così la stessa tabella espone viste diverse a ruoli diversi senza duplicare i dati.
+Lasciare che gli analisti o i report puntino direttamente ai file di atterraggio nella zona `raw/` rende inutile il data lake. La zona `raw/` serve esclusivamente come copia forense immutabile dei payload sorgente (spesso in JSON o CSV compressi `gzip` partizionati per data di ingestione) e come sorgente per il job di trasformazione: tutte le query umane e di Business Intelligence devono leggere solo dalle tabelle Iceberg/Parquet delle zone `curated/` e `analytics/`.
 
-## Fase 4: query ottimizzate Athena
+### Creare la tabella Iceberg senza compattare e ordinare i file Parquet con OPTIMIZE
 
-Con partizioni e catalogo in piedi, `Athena` sfrutta il `partition pruning` per scansionare solo i dati necessari. La query seguente calcola la revenue per paese e trimestre leggendo solo i mesi richiesti, e dovrebbe diventare la tua prova di performance:
+Caricare i 100 GB nella tabella Iceberg tramite 2.000 micro-batch da 50 MB senza mai eseguire `OPTIMIZE ... REWRITE DATA USING BIN_PACK` e senza ordinare le righe per `(country_code, product_category)` lascia i dati di `'IT'` ed `'Elettronica'` sparsi in tutti i 2.000 file del mese. Anche se l'*Hidden Partitioning* pota gli altri 11 mesi dell'anno, all'interno del mese selezionato il motore dovrà comunque aprire tutti i file del mese anziché leggere i soli 2 Row Group pertinenti.
+
+### Non testare il rollback o il Time Travel dopo l'esecuzione del MERGE dei resi
+
+Dichiarare che la tabella supporta il Time Travel senza verificarlo con una query `FOR VERSION AS OF` / `FOR TIMESTAMP AS OF` prima di chiudere il progetto espone a brutte sorprese. Se un job di `VACUUM` aggressivo è stato configurato per errore con ritenzione troppo bassa, lo snapshot precedente viene rimosso e non è più possibile confrontare il fatturato lordo pre-resi con il fatturato netto post-resi.
+
+## Implementazione completa: DDL Iceberg, MERGE dei resi, Time Travel e Benchmark < 5s
+
+Per realizzare l'intero progetto di laboratorio e superare le tre prove di accettazione (struttura a zone + registrazione Iceberg nel Glue Catalog + Time Travel + query $< 5\text{ secondi}$ su 100 GB), eseguite questi quattro blocchi SQL in sequenza:
+
+1. **Passo 1 (DDL nel Glue Catalog)**: create la tabella `curated.omnicanale_sales` come tabella Apache Iceberg su `s3://acme-retail-lake-prod/curated/sales/omnicanale_sales/` con *Hidden Partitioning* mensile `month(occurred_at)` e compressione `ZSTD`, popolandola dalla zona `raw/` ordinata per `(country_code, product_category, store_id)`.
+2. **Passo 2 (Upsert ACID dei resi e Compattazione)**: eseguite il `MERGE INTO` che aggiorna gli scontrini restituiti (`status = 'returned'`, `net_amount_eur = 0`) e inserisce i nuovi scontrini del giorno, seguito da `OPTIMIZE`.
+3. **Passo 3 (Verifica Time Travel)**: eseguite una query che confronta istantaneamente il fatturato netto attuale con lo snapshot di ieri (`FOR TIMESTAMP AS OF`) per misurare l'impatto esatto dell'ultimo lotto di resi.
+4. **Passo 4 (Benchmark Performance su 100 GB)**: eseguite la query analitica filtrata per mese, paese e categoria selezionando solo le 4 colonne richieste e verificate nel log di esecuzione che i byte scansionati siano $< 500\text{ MB}$ e la durata sia **$< 5\text{ secondi}$**.
+
+Ecco il codice SQL completo e verificabile dei quattro passi del progetto:
 
 ```sql
--- Revenue per paese e trimestre (usa partition pruning)
-SELECT c.country, year, quarter, SUM(amount) AS revenue
-FROM sales_iceberg s JOIN dim_customers c ON s.customer_id = c.id
-WHERE year=2024 AND month BETWEEN 1 AND 3
-GROUP BY c.country, year, quarter;
+-- PASSO 1: Creazione della tabella Apache Iceberg nella zona curated/ del Glue Catalog
+CREATE TABLE glue_catalog.curated.omnicanale_sales (
+    receipt_id STRING,
+    store_id STRING,
+    customer_id BIGINT,
+    country_code STRING,
+    channel STRING,
+    product_category STRING,
+    status STRING,
+    gross_amount_eur DECIMAL(12, 2),
+    net_amount_eur DECIMAL(12, 2),
+    occurred_at TIMESTAMP
+)
+PARTITIONED BY (month(occurred_at))
+LOCATION 's3://acme-retail-lake-prod/curated/sales/omnicanale_sales/'
+TBLPROPERTIES (
+    'table_type' = 'ICEBERG',
+    'format' = 'parquet',
+    'write_compression' = 'zstd',
+    'write_target_data_file_size_bytes' = '268435456'
+);
+
+-- PASSO 2: Applicazione atomica di nuovi scontrini e resi merce tramite MERGE INTO + Compattazione
+MERGE INTO glue_catalog.curated.omnicanale_sales AS target
+USING glue_catalog.raw.daily_receipts_staging AS source
+    ON target.receipt_id = source.receipt_id
+   AND target.occurred_at >= current_timestamp - INTERVAL '35' DAY
+WHEN MATCHED AND source.status = 'returned' THEN
+    UPDATE SET
+        status = 'returned',
+        net_amount_eur = CAST(0.00 AS DECIMAL(12, 2))
+WHEN NOT MATCHED THEN
+    INSERT (receipt_id, store_id, customer_id, country_code, channel, product_category, status, gross_amount_eur, net_amount_eur, occurred_at)
+    VALUES (source.receipt_id, source.store_id, source.customer_id, source.country_code, source.channel, source.product_category, source.status, source.gross_amount_eur, source.net_amount_eur, source.occurred_at);
+
+OPTIMIZE glue_catalog.curated.omnicanale_sales REWRITE DATA USING BIN_PACK
+WHERE occurred_at >= TIMESTAMP '2026-11-01 00:00:00';
+
+-- PASSO 3: Audit con Time Travel (confronta lo snapshot corrente post-resi con lo snapshot di 1 ora fa)
+SELECT
+    'CURRENT_SNAPSHOT' AS version_label,
+    count() AS scontrini_totali,
+    sum(net_amount_eur) AS ricavo_netto_eur
+FROM glue_catalog.curated.omnicanale_sales
+WHERE occurred_at >= TIMESTAMP '2026-11-01 00:00:00'
+UNION ALL
+SELECT
+    'BEFORE_RETURNS_MERGE' AS version_label,
+    count() AS scontrini_totali,
+    sum(net_amount_eur) AS ricavo_netto_eur
+FROM glue_catalog.curated.omnicanale_sales FOR TIMESTAMP AS OF (current_timestamp - INTERVAL '1' HOUR)
+WHERE occurred_at >= TIMESTAMP '2026-11-01 00:00:00';
+
+-- PASSO 4: Query Benchmark sul dataset da 100 GB (Athena / ClickHouse iceberg_s3)
+-- Target: < 5 secondi grazie a Hidden Partitioning + ZSTD + Column Projection + Row Group skipping:
+SELECT
+    store_id,
+    channel,
+    count() AS scontrini_validi,
+    sum(net_amount_eur) AS fatturato_netto_eur
+FROM glue_catalog.curated.omnicanale_sales
+WHERE occurred_at >= TIMESTAMP '2026-11-01 00:00:00'
+  AND occurred_at < TIMESTAMP '2026-12-01 00:00:00'
+  AND country_code = 'IT'
+  AND product_category = 'Elettronica'
+  AND status = 'completed'
+GROUP BY store_id, channel
+ORDER BY fatturato_netto_eur DESC;
 ```
 
-## La consegna e la sua checklist
+I numeri del benchmark finale sul dataset da 100 GB certificano il successo dell'architettura:
+1. I 100 GB di CSV grezzi nella zona `raw/`, una volta convertiti nella tabella Iceberg `curated.omnicanale_sales` in Parquet `zstd`, occupano complessivamente **14,8 GB** su tutto l'anno (~1,23 GB per partizione mensile).
+2. Quando viene lanciata la query del Passo 4 sul mese di novembre (`1/12` delle partizioni $\rightarrow 1,23\text{ GB}$), la selezione delle sole 6 colonne coinvolte nel filtro/aggregazione e il salto dei Row Group tramite le statistiche `min/max` dei manifesti Iceberg per `country_code = 'IT'` e `product_category = 'Elettronica'` riducono i dati effettivamente letti da S3 a soli **`310 MB`** (`0,31 GB` su `100 GB` iniziali, pari a una riduzione del **99,69%**).
+3. Il tempo di esecuzione su Athena passa da **68,4 secondi a 1,4 secondi** (superando ampiamente il requisito di $< 5\text{ secondi}$), mentre il costo per singola query crolla da **$0,50 a $0,0015**.
 
-Il progetto è completo quando puoi spuntare tutti i punti seguenti, dove l'ultimo è il vero test di affidabilità: una query su 100 GB deve restare sotto i cinque secondi grazie a partizionamento e formato colonnare.
+## Interrogazione diretta su S3 (Athena/Trino) o sincronizzazione del Mart su ClickHouse
 
-- [ ] Data lake su S3 con partizionamento ottimale
-- [ ] Iceberg abilitato su almeno una tabella
-- [ ] Glue Catalog popolato
-- [ ] Lake Formation policy per accesso granulare
-- [ ] Query Athena sotto i cinque secondi su 100 GB
+Una volta completato il Lakehouse su S3 con le tre zone `raw`, `curated` (Iceberg) e `analytics`, rimane l'ultima decisione architetturale di integrazione con il resto dello stack: quali carichi di lavoro conviene servire **direttamente da S3 tramite Athena/Trino** e quali conviene sincronizzare o servire con **ClickHouse**?
 
-Il verdetto si ripete in ogni iterazione del progetto: `Parquet` partizionato più `Iceberg` più `Glue` più `Lake Formation` più `Athena` è lo stack che chiude il cerchio senza duplicare i dati.
+Il criterio di scelta è netto: **servite direttamente da S3 sopra le tabelle Apache Iceberg (tramite Athena, Trino o la funzione `iceberg_s3` di ClickHouse) tutte le analisi storiche multi-anno, i training set per il Machine Learning, gli audit di conformità, il data science esplorativo e i report periodici a media concorrenza (con tempi di risposta di 1–4 secondi), caricate invece nelle tabelle native `MergeTree` di ClickHouse i mart operativi e i flussi streaming degli ultimi 90–365 giorni destinati a dashboard interattive con decine di utenti simultanei che richiedono tempi di risposta inferiori ai 100 millisecondi.**
 
-## Perché il progetto funziona: la storia di Netflix
+La confusione comune consiste nel contrapporre il Data Lake su S3 e il Data Warehouse real-time in ClickHouse come se fossero nemici alternativi. In una moderna architettura dati italiana ed europea i due livelli lavorano in simbiosi perfetta: S3 + Iceberg è la memoria storica universale, economica, aperta e transazionale dell'azienda (a $4–$23 per terabyte al mese), mentre ClickHouse è il motore ad altissima velocità per il tempo reale e l'interattività istantanea che può leggere e scrivere direttamente i Parquet e le tabelle Iceberg del bucket S3.
 
-Netflix gestisce tabelle enormi su S3 lette da più motori e incontra i limiti dei file semplici quando schema e partizioni cambiano. Nel 2018 il team rende pubblico Iceberg, un formato tabellare con metadata transazionali ed evoluzione di schema e partizioni. Il progetto passa poi alla Apache Software Foundation e viene adottato da altri operatori su larga scala. La lezione per questo progetto è diretta: il lake regge quando file, catalogo e motori dialogano attraverso un formato versionato e non attraverso convenzioni sui nomi delle cartelle.
+Questo progetto conclude il Modulo 10 dedicato a Data Lake e Lakehouse su S3. Conservate lo script SQL dei quattro passi come modello di riferimento per ogni nuovo dominio aziendale che porterete sul cloud.
 
-Verdetto: `Parquet` partizionato più `Iceberg` più `Glue` più `Lake Formation` più `Athena` è lo stack che chiude il cerchio senza duplicare i dati: il progetto è completo solo quando la query di controllo su 100 GB resta sotto i cinque secondi e ogni scelta spiega quale rischio riduce.
+## Cinque domande di collaudo finale del progetto Data Lake su S3
 
-## Domande di riepilogo
+1. Il bucket S3 è diviso nelle tre zone (`raw/`, `curated/`, `analytics/`) con `BlockPublicAccess`, crittografia `SSE-KMS` (Bucket Key attiva), `Versioning`, Lifecycle Policy (con filtro $> 128\text{ KB}$ e `AbortIncompleteMultipartUpload`) e replica DR sulla zona `raw/`?
+2. La tabella `curated` è registrata nel Glue Data Catalog in formato **Apache Iceberg** (`Parquet` + `ZSTD`) con *Hidden Partitioning* temporale e senza colonne data duplicate?
+3. Avete eseguito con successo un `MERGE INTO` per aggiornare/cancellare record esistenti e dimostrato con una query `FOR TIMESTAMP AS OF` (o `FOR VERSION AS OF`) che il **Time Travel** restituisce esattamente lo stato precedente?
+4. Prima di esporre i nuovi caricamenti agli utenti, gira la query di Data Quality che verifica freschezza, zero duplicati e scarto di volume entro $\pm 30\%$ della media mobile a 7 giorni?
+5. Avete documentato il benchmark della query su 100 GB dimostrando che, grazie a partizionamento, proiezione di sole colonne necessarie e compattazione `OPTIMIZE`, il tempo di risposta è **inferiore a 5 secondi** e i byte scansionati sono meno dell'1% del dataset grezzo?
 
-1. Quale partizionamento applica la zona transactional per rendere economica la query del trimestre?
-2. Quando il `time travel` di `Iceberg` evita di ricostruire a mano lo stato passato di una tabella?
-3. Quale policy di `Lake Formation` impedisce al marketing di leggere le colonne con dati personali?
-4. Quale misura sulla query `Athena` dimostra che partizionamento e formato colonnare funzionano?
+La metrica conclusiva che certifica il superamento del laboratorio è la tripla: **`Query Duration < 5,0 secondi su 100 GB`**, **`Scan Ratio < 1%`** e **`Time Travel / MERGE ACID verificati con 0 errori`**.
+
+Di tutto il percorso sul Data Lake S3, portate con voi una sola sintesi architetturale: l'object storage diventa il miglior data warehouse del mondo quando smettete di usarlo come un cestino di file CSV e lo governate con Parquet compresso, metadati transazionali Apache Iceberg, sicurezza KMS/Lake Formation e controlli automatici di qualità.

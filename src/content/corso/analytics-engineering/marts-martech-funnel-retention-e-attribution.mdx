@@ -1,96 +1,160 @@
 ---
-title: "Snapshot e slowly changing dimensions"
-description: "Snapshot e slowly changing dimensions. Lezione su SCD type-2 e snapshots in dbt."
+title: "Marts Martech: funnel, retention e attribution in dbt"
+description: >-
+  Come progettare in dbt i tre marts fondamentali per prodotto e marketing:
+  funnel con progressione monotona per sessione, retention di coorte con spine
+  calendario e attribution multi-touch deterministica con test di riconciliazione.
 module: "Modulo 16: Analytics engineering con dbt"
-order: 5
-category: Decisione
+order: 3
+category: Tecnico
 headerImage: /course-headers/analytics-engineering-marts-martech-funnel-retention-e-attribution-ginnytech-ad.webp
-headerImageAlt: >-
-  Snapshot e SCD - immagine ufficiale della lezione su GinnyTech, creata da AD
+headerImageAlt: "Marts Martech: funnel, retention e attribution in dbt - immagine ufficiale della lezione su GinnyTech, creata da AD"
 difficulty: advanced
-duration: 18 min
+duration: 26 min
 prerequisites:
-  - analytics-engineering/staging-e-standardizzazione-dei-dati-martech
+  - analytics-engineering/dbt-e-ruolo-dell-analytics-engineer
 learningObjectives:
-  - Configurare uno snapshot dbt con strategia timestamp o check
-  - Ricostruire lo stato storico di una dimensione con filtri sul periodo di validità
-  - Testare unicità della chiave e assenza di buchi temporali negli snapshot
+  - Modellare un mart di funnel per sessione imponendo la progressione temporale monotona tra gli step
+  - Costruire una matrice di retention per coorte usando uno spine di calendario per preservare i periodi a zero attività
+  - Implementare un mart di attribution multi-touch in SQL che conservi esattamente il 100% del ricavo contabile
 binario: "ml-tabellare"
+formato: "articolo"
 autore: "Hermes"
 controllatoDa: "Argo"
 autorizzatoDa: "Giano"
 draft: false
-dateModified: 2026-09-07
+dateModified: 2026-11-13
 ---
-# Snapshot e slowly changing dimensions
 
-Prima o poi ogni team dati incontra la stessa domanda: come faccio a sapere com'era un cliente, un piano o un attributo in un momento preciso del passato? Lo stato attuale del database non basta, perché la storia che spiegava una decisione presa sei mesi fa è sparita. Gli snapshot di dbt conservano quella storia, e in questa lezione impari a configurarli e a interrogarli senza buchi temporali.
+# Marts Martech: funnel, retention e attribution in dbt
 
-## L'idea in una frase
+Un'azienda e-commerce investe 90.000 euro al mese in campagne pubblicitarie e legge sui cruscotti tre numeri impossibili: il tasso di passaggio dal carrello al checkout supera il 115%, la retention alla quarta settimana ignora chi ha smesso di comprare per un mese intero e la somma dei ricavi attribuiti ai canali supera del 28% l'incasso reale in banca. La causa non è il tracciamento né lo strumento grafico: sono tre errori algebrici nei modelli SQL dello strato `marts` in dbt.
 
-Gli snapshot di dbt conservano la storia completa di una dimensione registrando ogni cambiamento di attributo con il suo periodo di validità.
+## Centoquindici percento di conversione e ventottomila euro fantasma
 
-## La procedura in cinque passi
+Questo è un caso ricostruito con numeri di esempio su quanto accade quando i modelli di marketing e prodotto vengono scritti aggregando eventi grezzi senza vincoli di sequenza, senza griglia temporale e senza normalizzazione dei pesi.
 
-1. Scegli la tabella da storicizzare e la chiave immutabile che identifica ogni entità.
-2. Dichiara la strategia di rilevamento: `timestamp` se la colonna di modifica è affidabile, `check` altrimenti.
-3. Schedula lo snapshot con una frequenza superiore al ritmo di cambiamento dei dati.
-4. Interroga sempre con il filtro sul periodo di validità per ricostruire lo stato storico corretto.
-5. Testa unicità della chiave, completezza delle righe e assenza di buchi temporali a ogni run.
+Nel primo cruscotto del lunedì, la tabella del funnel conta 4.000 sessioni con evento `add_to_cart` e 4.600 sessioni con evento `checkout_started`: molti utenti aprono direttamente il link del carrello salvato il giorno prima senza passare dalla scheda prodotto nella stessa sessione, portando il rapporto tra secondo e primo passo al 115%. Nel secondo cruscotto, la curva di retention delle coorti mostra un balzo improvviso alla settimana 3 perché la query raggruppa solo le settimane in cui esistono ordini e fa sparire dal denominatore i periodi vuoti. Nel terzo cruscotto, un join tra ordini e sessioni pubblicitarie degli ultimi trenta giorni assegna l'intero valore di un ordine da 200 euro a ciascuno dei tre annunci cliccati dal cliente, trasformando 100.000 euro di vendite contabili in 128.000 euro di ricavo attribuito.
 
-## Il problema che cambia le decisioni
+La causa di tutte e tre le distorsioni è modellare funnel, coorti e attribuzione con semplici `COUNT` e `LEFT JOIN` piatti, invece di imporre i tre invarianti strutturali dei marts Martech in dbt.
 
-Un cliente cambia segmento, piano, stato `CRM` e owner commerciale nel tempo. Se guardi solo lo stato attuale del database, perdi la storia che spiegava una decisione presa sei mesi fa. Gli snapshot servono a questo: tenere traccia di come un attributo è cambiato, così da ricostruire il contesto corretto di una metrica in qualsiasi momento del passato.
+## I tre invarianti fisici di funnel, retention e attribution
 
-## Cosa sono le slowly changing dimensions
+Costruire marts di marketing e prodotto affidabili in dbt richiede di rispettare tre meccanismi matematici distinti.
 
-Una Slowly Changing Dimension (`SCD`) è una dimensione i cui attributi cambiano nel tempo, e di cui ti serve il valore storico e non solo l'ultimo. Lo stato attuale non basta: devi poter rispondere quale fosse, ad esempio, il piano di abbonamento di un cliente a una data passata precisa.
+Il primo meccanismo è la progressione temporale monotona del funnel. Un utente o una sessione supera il passo $k$ del funnel solo se ha già completato il passo $k-1$ in un istante precedente o uguale ($t_1 \le t_2 \le t_3$). Se si contano gli eventi in modo indipendente senza verificare la catena temporale, qualsiasi ingresso diretto a metà percorso gonfia il numeratore e rompe la monotonicità decrescente del funnel.
 
-I tipi più usati si distinguono per come trattano il valore vecchio.
+Il secondo meccanismo è l'incrocio con una griglia densa (*date spine*) per la retention di coorte. La retention nella settimana $n$ è il rapporto tra gli utenti attivi nella settimana $n$ e la dimensione fissa iniziale della coorte al tempo $0$. Poiché le tabelle degli eventi contengono righe solo quando un utente compie un'azione, raggruppare direttamente sugli eventi omette le coppie `(coorte, settimana)` con zero attivi; solo un `CROSS JOIN` tra le coorti e la serie completa delle settimane garantisce una matrice rettangolare priva di buchi.
 
-| Tipo    | Strategia                         | Uso                              | Esempio                         |
-|---------|----------------------------------|---------------------------------|--------------------------------|
-| Type 1  | Sovrascrivi                      | Quando il vecchio valore non serve più | Correzione di un typo nel nome |
-| Type 2  | Nuova riga con data di validità  | Quando serve storico completo    | Cambio di subscription plan    |
-| Type 3  | Colonna "valore precedente" + "valore attuale" | Quando serve solo il cambiamento immediatamente precedente | Sede legale precedente vs attuale |
+Il terzo meccanismo è la conservazione della somma nell'attribuzione multi-touch. Quando un ordine di valore $V$ viene preceduto da $N$ tocchi di marketing nella finestra di conversione, i pesi $w_i$ assegnati ai singoli tocchi per quell'ordine devono sommare esattamente a $1$ ($\sum_{i=1}^N w_i = 1$), e gli ordini privi di tocchi tracciati devono confluire su una riga sintetica `direct / untouch` con peso $1$: in questo modo la somma dei ricavi attribuiti nel mart coincide al centesimo con il totale della tabella contabile `fct_orders`.
 
-Il Type 2 è il più usato, perché conserva la storia completa con colonne di validità temporale.
+**Un mart Martech è corretto solo se il funnel impone $t_1 \le t_2 \le t_3$, la retention poggia su una griglia completa di date e l'attribution conserva al centesimo il totale degli ordini contabili.**
 
-Verdetto: il Type 2 vince quando serve lo storico completo: conserva ogni cambiamento con periodo di validità, mentre Type 1 e Type 3 restano per correzioni e cambiamenti immediatamente precedenti.
+## Tre errori nei modelli SQL di marketing e prodotto
 
-| customer_id | plan       | valid_from | valid_to   | is_current |
-|-------------|------------|------------|------------|------------|
-| C001        | free       | 2023-01-10 | 2023-06-15 | false      |
-| C001        | pro        | 2023-06-15 | 2023-12-01 | false      |
-| C001        | enterprise | 2023-12-01 | NULL       | true       |
+Il blocco SQL qui sotto mostra i tre antipattern che generano funnel sopra il 100% e ricavi moltiplicati quando si aggregano eventi e touchpoint senza regole di dominio:
 
-Con questa struttura filtri per il periodo che ti interessa, con la data di analisi compresa tra inizio e fine validità.
+```sql
+-- 1) FUNNEL ERRATO: conta gli step in modo indipendente senza verificare t1 <= t2 <= t3.
+SELECT
+    countDistinctIf(session_id, event_name = 'product_viewed') AS step_1_view,
+    countDistinctIf(session_id, event_name = 'add_to_cart') AS step_2_cart,
+    countDistinctIf(session_id, event_name = 'checkout_started') AS step_3_checkout
+FROM stg_events;
 
-## Gli snapshot di dbt come Type 2 automatico
+-- 2) ATTRIBUTION ERRATA: il join 1:N con i touchpoint moltiplica net_revenue_eur per N tocchi.
+SELECT
+    t.utm_channel,
+    sum(o.net_revenue_eur) AS ricavo_gonfiato_eur
+FROM fct_orders AS o
+LEFT JOIN stg_marketing_touches AS t
+    ON o.customer_id = t.customer_id
+   AND t.touch_at BETWEEN o.order_at - INTERVAL 30 DAY AND o.order_at
+GROUP BY t.utm_channel;
+```
 
-dbt offre un modulo per gli snapshot che automatizza il versionamento. Tu dichiari la strategia e dbt la applica a ogni esecuzione. Nel caso più comune definisci `customer_id` come chiave unica e usi una strategia basata sulla colonna `updated_at`.
+### Contare gli step del funnel senza imporre l'ordine temporale degli eventi
 
-A ogni esecuzione dello snapshot accade questo:
+Usare `countDistinctIf` separati per ogni nome di evento nella stessa query sembra il modo più veloce per riempire un grafico a imbuto. Non funziona perché tratta ogni passo come un insieme indipendente anziché come una sequenza ordinata: se un cliente riapre il sito con il carrello già pieno dal giorno prima e va dritto al pagamento, la sessione conta in `step_3_checkout` ma non in `step_1_view` né in `step_2_cart`, producendo tassi di passaggio superiori al 100% che rendono impossibile calcolare l'abbandono reale.
 
-1. Legge la tabella sorgente
-2. Confronta ogni riga con la versione salvata
-3. Se `customer_id` è nuovo, inserisce una riga con inizio validità uguale al momento corrente e fine validità vuota
-4. Se `updated_at` è cambiato, chiude la riga precedente e ne crea una nuova
-5. Se nulla è cambiato, ignora
+### Calcolare la retention senza incrociare le coorti con uno spine di calendario
 
-Le due strategie principali coprono casi diversi. Con la strategia `timestamp` ti affidi a una colonna di ultima modifica. Con la strategia `check` confronti un insieme di colonne e lo snapshot scatta se almeno una è cambiata, utile quando non ti fidi del campo di timestamp.
+Raggruppare gli eventi per `(cohort_week, activity_week)` senza una tabella di calendario intermedia sembra sufficiente finché la coorte ha migliaia di utenti attivi ogni settimana. Appena si analizza un segmento B2B o una coorte più piccola in cui nella settimana 4 nessun cliente effettua ordini, quella riga sparisce del tutto dal risultato SQL: i cruscotti a valle saltano dalla settimana 3 alla settimana 5 o calcolano medie sulle sole settimane presenti, sovrastimando la tenuta del prodotto.
 
-## Gli errori che rovinano uno snapshot
+### Fare join tra ordini e touchpoint senza dividere il ricavo per i pesi
 
-Quasi tutti i problemi nascono da poche scelte sbagliate all'inizio. Una chiave unica non immutabile è la prima trappola: usa ID generati dal sistema, mai email o altri campi che il cliente può modificare. Quando `updated_at` non è affidabile, passa alla strategia `check` sulle colonne che contano. Una query storica senza filtro temporale restituisce risultati sbagliati, quindi usa sempre il range di validità. Infine la frequenza: se i dati cambiano più volte al giorno, uno snapshot giornaliero perde le variazioni intermedie.
+Unire `fct_orders` con tutti i clic pubblicitari degli ultimi trenta giorni e sommare `o.net_revenue_eur` direttamente sul risultato del join è l'errore più diffuso nei report di marketing. Poiché un cliente che clicca su tre annunci prima di comprare genera tre righe nel join, l'importo dell'ordine viene sommato tre volte: più il cliente interagisce con le campagne, più il modello inventa fatturato inesistente.
 
-## Un esempio che ha fatto scuola
+## I modelli dbt corretti con sequenza monotona, spine e pesi normalizzati
 
-Monzo, banca digitale con 8 milioni di clienti, usa gli snapshot di dbt per tracciare ogni cambiamento di stato conto, piano tariffario e dati anagrafici con la data esatta. Senza snapshot la stessa logica avrebbe richiesto migliaia di righe di codice e mesi di lavoro; con dbt sono bastate poche righe e qualche settimana. Dai dati storici emerge un dettaglio operativo: i clienti che passano da `standard` a `plus` entro 30 giorni hanno un LTV del 43 per cento più alto di chi aspetta 90 giorni. È un'informazione che esiste solo se conservi la storia, e ha portato a rivedere l'onboarding.
+Per costruire in dbt tre marts Martech certificati e privi di distorsioni, applicate questi quattro criteri in ordine di priorità:
 
-## Domande per verificare la comprensione
+1. Nel mart di funnel (`fct_session_funnel`), calcolate il primo timestamp di ogni passo per sessione e validate il passo successivo solo se il suo timestamp è maggiore o uguale a quello del passo precedente.
+2. Nel mart di retention (`fct_cohort_retention`), fissate la dimensione della coorte al tempo zero e incrociate ogni coorte con la griglia delle settimane (`int_week_spine`) prima di fare il `LEFT JOIN` con le attività.
+3. Nel mart di attribution (`fct_order_attribution`), calcolate il numero totale di tocchi validi per ciascun ordine con una window function `count() OVER (partition by order_id)` e moltiplicate il ricavo dell'ordine per il peso normalizzato $w_i$, assegnando `direct` con peso $1$ quando non ci sono tocchi.
+4. Aggiungete un test singolare dbt che fallisce se la somma del ricavo attribuito in `fct_order_attribution` differisce per più di un centesimo dalla somma di `fct_orders`.
 
-1. Quando basta sovrascrivere un attributo e quando serve invece uno storico completo?
-2. Quale chiave immutabile scegli per lo snapshot e perché non usi la email?
-3. Come ricostruisci il valore di un attributo a una data passata precisa?
-4. Quale controllo ti segnala che lo snapshot sta perdendo cambiamenti intermedi?
+Ecco i modelli SQL corretti pronti per lo strato `marts` di dbt:
+
+```sql
+-- A) models/marts/product/fct_session_funnel.sql (progressione monotona t1 <= t2 <= t3)
+WITH tempi_per_sessione AS (
+    SELECT
+        session_id,
+        minIf(occurred_at, event_name = 'product_viewed') AS t1_view,
+        minIf(occurred_at, event_name = 'add_to_cart') AS t2_cart,
+        minIf(occurred_at, event_name = 'checkout_started') AS t3_checkout
+    FROM {{ ref('stg_events') }}
+    GROUP BY session_id
+)
+SELECT
+    session_id,
+    t1_view IS NOT NULL AS has_step_1_view,
+    (t1_view IS NOT NULL AND t2_cart IS NOT NULL AND t2_cart >= t1_view) AS has_step_2_cart,
+    (t1_view IS NOT NULL AND t2_cart IS NOT NULL AND t3_checkout IS NOT NULL
+        AND t2_cart >= t1_view AND t3_checkout >= t2_cart) AS has_step_3_checkout
+FROM tempi_per_sessione;
+
+-- B) models/marts/marketing/fct_order_attribution.sql (conservazione del 100% del ricavo)
+WITH ordini_con_tocchi AS (
+    SELECT
+        o.order_id,
+        o.net_revenue_eur,
+        coalesce(t.utm_channel, 'direct') AS utm_channel,
+        count() OVER (PARTITION BY o.order_id) AS touches_count
+    FROM {{ ref('fct_orders') }} AS o
+    LEFT JOIN {{ ref('stg_marketing_touches') }} AS t
+        ON o.customer_id = t.customer_id
+       AND t.touch_at BETWEEN o.order_at - INTERVAL 30 DAY AND o.order_at
+)
+SELECT
+    order_id,
+    utm_channel,
+    1.0 / touches_count AS attribution_weight,
+    round(net_revenue_eur * (1.0 / touches_count), 2) AS attributed_revenue_eur
+FROM ordini_con_tocchi;
+```
+
+Con questi due modelli il tasso di conversione tra ogni passo del funnel resta matematicamente compreso tra lo 0% e il 100% senza mai superare il passo precedente, e un ordine da 200 euro preceduto da quattro clic pubblicitari distribuisce esattamente 50 euro a ciascun tocco: lo scostamento tra i report di marketing e il bilancio finanziario scende dal 28% a zero. Scrivere la logica di pesatura in un modello dbt richiede trenta righe di SQL facilmente reversibili se domani si vuole passare dal peso lineare a un decadimento temporale; presentare invece al CFO un report di campagna con ricavi gonfiati distrugge la credibilità dell'intero team dati.
+
+## Attribuzione multi-touch deterministica in dbt o Marketing Mix Modeling econometrico
+
+Una volta messo in sicurezza il mart di attribution sui touchpoint tracciati, resta da capire fino a dove può arrivare questo modello e quando serve invece un approccio statistico diverso. I due strumenti sono l'attribuzione multi-touch deterministica basata sugli eventi individuali (MTA in dbt) e il Marketing Mix Modeling econometrico su serie storiche aggregate (MMM).
+
+Il criterio di scelta è netto: **usate il mart di attribution deterministica in dbt per allocare il budget quotidiano tra campagne digitali tracciabili sullo stesso dispositivo o utente autenticato (ricerca a pagamento, email, affiliate, social con parametri UTM), usate invece il Marketing Mix Modeling o test di incrementalità geografica quando una quota rilevante della spesa va su canali non tracciabili a livello di singolo clic (TV, cartellonistica, podcast, campagne video upper-funnel o traffico con forte rifiuto dei cookie).**
+
+La confusione comune consiste nel pretendere che la tabella `fct_order_attribution` misuri il ritorno di uno spot televisivo o di una campagna di notorietà su utenti che non cliccano sul banner ma cercano il marchio su Google tre giorni dopo, oppure nell'usare un complesso modello bayesiano trimestrale per decidere quale annuncio di ricerca spegnere il martedì mattina. Sbagliare questa distinzione porta a sovra-finanziare i canali di fondo imbuto (come le campagne sul proprio marchio, che intercettano l'ultimo clic di chi aveva già deciso di comprare) tagliando i canali superiori che alimentano la domanda nuova.
+
+Questo articolo non tratta la stima dei modelli bayesiani di Marketing Mix Modeling né la risoluzione probabilistica delle identità tra dispositivi privi di login. La durata della finestra di lookback (7, 14 o 30 giorni) va calibrata sulla lunghezza media del ciclo d'acquisto del vostro prodotto.
+
+## Cinque domande prima di pubblicare i marts di marketing e prodotto
+
+1. Nel modello di funnel, il superamento dello step $k$ verifica esplicitamente che l'utente abbia completato lo step $k-1$ con un timestamp precedente o uguale nella stessa finestra di conversione?
+2. La matrice di retention fa un `CROSS JOIN` tra l'elenco delle coorti e uno spine completo di settimane o mesi, così che i periodi con zero utenti attivi compaiano con valore `0` anziché sparire?
+3. La dimensione iniziale di ogni coorte (`cohort_size`) è calcolata una sola volta al periodo zero e mantenuta invariata come denominatore per tutti i periodi successivi?
+4. Nel modello di attribution, gli ordini che non hanno alcun touchpoint nella finestra di lookback vengono conservati sulla categoria `direct` con peso uguale a `1`?
+5. Avete aggiunto in dbt un test automatico che blocca la build se `SUM(attributed_revenue_eur)` differisce da `SUM(net_revenue_eur)` della tabella contabile degli ordini?
+
+La metrica di controllo che garantisce la tenuta dell'intero strato Martech è la differenza assoluta tra il totale di `fct_order_attribution` e il totale di `fct_orders`, affiancata dalla verifica che nessun passo $k$ del funnel abbia un conteggio superiore al passo $k-1$: entrambi gli scarti devono essere pari a zero a ogni esecuzione di `dbt build`.
+
+Di tutti i principi visti, uno solo evita le discussioni più accese in azienda: la somma dei pesi di attribuzione per ogni singolo `order_id` deve sempre fare esattamente uno. Quando il marketing e la finanza leggono lo stesso totale in fondo alla tabella, la conversazione smette di riguardare chi ha i numeri giusti e passa finalmente a come allocare il budget.

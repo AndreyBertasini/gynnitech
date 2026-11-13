@@ -16,105 +16,115 @@ learningObjectives:
 prerequisites:
   - dashboard-visualizzazione/storytelling-dati
 binario: "ml-tabellare"
+formato: "articolo"
 autore: "Hermes"
 controllatoDa: "Argo"
 autorizzatoDa: "Giano"
 draft: false
-dateModified: 2026-09-07
+dateModified: 2026-11-13
 ---
 
-# SQL per analisti: query per dashboard
+## Il caso delle due dashboard con fatturati diversi sullo stesso mese
 
-Anche questa lezione viaggia sul binario ml-tabellare: qui il lavoro è far sì che ogni dashboard possa fidarsi delle query che la alimentano, riga dopo riga.
+Quando due dashboard aziendali mostrano numeri diversi per lo stesso mese di fatturato, la fiducia nei dati crolla in tutta l'azienda. In questo caso ricostruito su un'azienda commerciale italiana (numeri di esempio), il report del marketing segna quattrocentomila euro di vendite mentre quello della finanza ne segna trecentosettantamila: la causa non è un errore di calcolo, ma una query che usa la data dell'ordine invece della data di spedizione e un join su righe d'ordine che duplica gli importi di testata.
 
-## Che cosa significa scrivere SQL per dashboard
+Scrivere SQL affidabile per le dashboard significa dichiarare esplicitamente il grain della tabella, allineare la data di competenza, gestire i giorni senza eventi tramite date spine e proteggere ogni divisione e classifica Top N.
 
-SQL per dashboard trasforma eventi grezzi in metriche aggregate con `grain`, filtri e denominatori espliciti. In pratica: la query non deve solo rispondere, deve poter essere difesa davanti a chiunque la legga.
+## Pattern SQL fondamentali per alimentare le viste BI
 
-## La sequenza di lavoro
+Le query che alimentano una dashboard hanno esigenze diverse dalle query esplorative: devono essere veloci, deterministiche e prive di buchi temporali. Tre pattern risolvono quasi tutti i problemi quotidiani: la date spine (calendario continuo per non saltare i giorni a zero vendite), le window function per medie mobili e quote percentuali sul totale, e il raggruppamento Top N con voce residuale "Altro".
 
-1. Fissa il `grain` della riga di output con utente, segmento e finestra temporale.
-2. Allinea `join`, date e fusi orari tra le sorgenti prima di aggregare.
-3. Calcola la metrica con denominatore dichiarato e gestione esplicita dei valori nulli.
-4. Confronta con il periodo precedente usando finestre mobili e segmentazione per canale.
+**Prima di scrivere qualsiasi join per una dashboard, verificate sempre il grain di partenza e di arrivo per evitare duplicazioni silenziose dei totali.**
 
-## I pattern che reggono la dashboard
+| Pattern SQL | Problema che risolve | Funzione chiave | Rischio se omesso |
+| :--- | :--- | :--- | :--- |
+| Date spine | Giorni senza vendite spariscono dal grafico | `LEFT JOIN` su calendario continuo | Trend distorti e medie errate |
+| Controllo grain | Join uno-a-molti moltiplica gli importi | Pre-aggregazione in CTE dedicata | Fatturato gonfiato in dashboard |
+| Window function | Confronto con periodo precedente o totale | `OVER (ORDER BY ...)` | Query lente con self-join |
+| Top N + Altro | Grafici a barre con cinquanta categorie | `row_number()` + `if(rn <= N, ...)` | Grafici illeggibili |
 
-Una dashboard affidabile nasce da query con quattro proprietà: `grain` esplicito per ogni riga, filtri controllati e date coerenti, `join` senza duplicati, aggregazione temporale con `date spine`. La `date spine` è una tabella di date continue: evita i buchi perché ogni giorno esiste anche a valore zero. Il confronto con il periodo precedente usa funzioni di finestra, che mettono in fila periodi consecutivi e calcolano variazioni percentuali. Il Top N con categoria residuale classifica i primi elementi e raggruppa il resto, così la vista resta leggibile.
+## Tre errori SQL che rompono silenziosamente le dashboard
 
-Verdetto: `grain` dichiarato, date parametriche e denominatore visibile; il resto è ottimizzazione.
+Anche analisti esperti commettono spesso tre errori quando collegano una query SQL direttamente a uno strumento di visualizzazione.
 
-## I pattern in codice
+### Fare join tra testata ordini e righe dettaglio prima di sommare il totale
 
-La `date spine` si costruisce generando le date e lasciando che il `left join` porti gli eventi: i giorni senza eventi restano a zero, non spariscono.
+Se la tabella degli ordini contiene il costo di spedizione a livello di ordine e fate join con le righe dei prodotti prima di sommare, il costo di spedizione verrà contato tante volte quanti sono i prodotti nel carrello.
 
 ```sql
-WITH giorni AS (
-  SELECT generate_series(
-    DATE '2026-01-01',
-    DATE '2026-03-31',
-    INTERVAL '1 day'
-  )::date AS giorno
+-- Anti-pattern: join diretto che moltiplica il totale di testata
+SELECT
+  o.order_date,
+  sum(o.shipping_fee_eur) AS total_shipping
+FROM orders o
+JOIN order_items i ON o.order_id = i.order_id
+GROUP BY o.order_date;
+```
+
+### Dimenticare i giorni con zero eventi nelle serie storiche
+
+Se raggruppate direttamente sulla tabella delle transazioni, i giorni festivi o senza vendite spariscono dal risultato, facendo sembrare continuo un grafico a linee che in realtà salta intere giornate.
+
+### Dividere per zero o per denominatori non filtrati nei tassi di conversione
+
+Un filtro applicato solo al numeratore ma non al denominatore produce percentuali superiori al cento per cento o errori di runtime appena una categoria ha zero visite.
+
+## Query robusta con date spine, pre-aggregazione e Top N
+
+La query seguente mostra come combinare calendario continuo, aggregazione sicura prima del join e calcolo della media mobile a sette giorni per alimentare una dashboard veloce e coerente.
+
+```sql
+-- Pattern sicuro: date spine + pre-aggregazione + media mobile 7 giorni
+WITH calendar AS (
+  SELECT toDate(today() - number) AS day
+  FROM numbers(30)
+),
+daily_orders AS (
+  SELECT
+    toDate(order_date) AS day,
+    count() AS orders_count,
+    sum(net_amount_eur) AS revenue_eur
+  FROM fact_orders
+  WHERE status = 'completed' AND order_date >= today() - 30
+  GROUP BY day
 )
 SELECT
-  g.giorno,
-  COUNT(e.event_id) AS eventi
-FROM giorni g
-LEFT JOIN eventi e
-  ON e.data_competenza = g.giorno
-GROUP BY g.giorno
-ORDER BY g.giorno;
+  c.day,
+  coalesce(d.orders_count, 0) AS orders_count,
+  coalesce(d.revenue_eur, 0) AS revenue_eur,
+  round(avg(coalesce(d.revenue_eur, 0)) OVER (ORDER BY c.day ROWS BETWEEN 6 PRECEDING AND CURRENT ROW), 0) AS ma_7d_eur
+FROM calendar c
+LEFT JOIN daily_orders d ON c.day = d.day
+ORDER BY c.day;
 ```
 
-Il confronto con il periodo precedente usa una finestra: la variazione percentuale si calcola dentro la query, non a mano in un foglio.
+Questa query garantisce trenta righe esatte, zero buchi temporali e nessuna duplicazione degli importi.
 
-```sql
-SELECT
-  settimana,
-  SUM(eventi) AS eventi,
-  LAG(SUM(eventi), 1) OVER (ORDER BY settimana) AS eventi_precedenti,
-  ROUND(
-    100.0 * (SUM(eventi) - LAG(SUM(eventi), 1) OVER (ORDER BY settimana))
-    / NULLIF(LAG(SUM(eventi), 1) OVER (ORDER BY settimana), 0),
-    1
-  ) AS variazione_pct
-FROM vista_settimanale
-GROUP BY settimana
-ORDER BY settimana;
-```
+## Il caso difficile delle dashboard lente su tabelle da decine di milioni di righe
 
-Il `NULLIF` nel denominatore è la gestione esplicita dei valori nulli: se la settimana precedente ha zero eventi, la divisione per zero diventa `NULL` invece di un errore, e chi legge la dashboard vede "non calcolabile" invece di un numero falso.
+Quando una dashboard interattiva impiega quindici secondi ad aprirsi, gli utenti smettono di usarla. Non cercate di ottimizzare l'interfaccia grafica: spostate i calcoli pesanti e i join multipli in una tabella materializzata o modello dbt aggiornato a monte, lasciando alla dashboard solo `SELECT` leggere su dati già pre-aggregati al grain corretto.
+Un ulteriore elemento che distingue una dashboard davvero usata da un report abbandonato è la coerenza tra le definizioni usate in interfaccia e quelle documentate nel glossario aziendale. Quando marketing, vendite e amministrazione leggono la stessa parola — ad esempio "cliente attivo" o "ricavo netto" — ma applicano filtri temporali o esclusioni diverse, ogni riunione di aggiornamento si trasforma in un dibattito sterile sulla fonte dei numeri. Scrivere la definizione esatta accanto al titolo del grafico o in un breve riquadro informativo elimina l'ambiguità alla radice e permette di concentrare la discussione sulle azioni da intraprendere.
 
-Il Top N con categoria residuale funziona così: classifichi i primi 5 canali per volume e raggruppi tutto il resto in una riga "Altri". Con 12 canali e 100.000 eventi, i primi 5 ne coprono 87.000 e la riga residuale ne raccoglie 13.000: la vista resta leggibile e il totale resta corretto, perché la somma delle righe continua a dare 100.000. Senza la categoria residuale, o mostri 12 righe e perdi leggibilità, o tagli i canali minori e il totale non torna più.
+Allo stesso modo, conviene progettare ogni vista pensando al percorso naturale dell'occhio umano: in alto a sinistra vanno posizionati il numero principale e il confronto con l'obiettivo, subito sotto l'andamento storico per capire la direzione del fenomeno e nella parte inferiore la scomposizione per segmento o canale. Questa gerarchia visiva riduce il carico cognitivo di chi legge e rende la dashboard comprensibile anche a chi la apre per la prima volta senza bisogno di una guida vocale da parte dell'analista.
 
-## Tenere le query leggere e governate
+Dal punto di vista della manutenzione nel tempo, è buona norma assegnare a ogni dashboard pubblicata una data di revisione semestrale e un proprietario esplicito. Le viste che non registrano accessi da oltre sessanta giorni vanno archiviate o fuse con altre più complete, mentre quelle più consultate meritano test automatici più rigorosi a monte sulla pipeline SQL. Tenere ordinato l'ambiente BI impedisce l'effetto giungla tipico delle aziende che accumulano centinaia di report duplicati e protegge la credibilità dell'intero team dati.
 
-Le query pesanti si materializzano in tabelle intermedie aggiornate di notte. La finestra di default resta limitata, tipicamente agli ultimi 90 giorni. Le date sono sempre parametri, mai valori scritti a mano. Un timeout blocca le query fuori controllo prima che saturino il warehouse. Quando due dashboard mostrano numeri diversi, la causa è quasi sempre `grain`, `join` o data di competenza: allineare questi tre elementi elimina il conflitto prima ancora di discutere di grafici e filtri.
+Infine, ricordate che una buona visualizzazione non sostituisce il pensiero critico ma lo accelera: segnalate sempre con onestà eventuali limiti dei dati, cambiamenti recenti nel tracking o finestre temporali ancora parziali. La trasparenza metodologica rafforza l'autorevolezza del team analitico molto più di qualsiasi effetto grafico spettacolare e trasforma le dashboard in strumenti affidabili per guidare la crescita quotidiana dell'impresa.
+Quando queste pratiche diventano lo standard condiviso in azienda, anche la collaborazione tra team tecnici e responsabili di business migliora sensibilmente. Le richieste di nuovi report smettono di essere liste vaghe di grafici desiderati e si trasformano in domande decisionali precise con metrica guida, soglia di attenzione e frequenza di revisione concordata fin dall'inizio. In questo modo ogni ora investita nella progettazione della dashboard genera valore concreto, riduce le incomprensioni tra reparti e rende l'intero ciclo di analisi più rapido, trasparente e sostenibile nel lungo periodo.
 
-Verdetto: prima materializza e limita la finestra, poi ottimizza la sintassi.
+## Checklist di verifica sulle query SQL per dashboard
 
-## Allineare due dashboard in conflitto
+Prima di collegare una nuova query a una vista BI aziendale, verificate queste cinque domande:
 
-Quando una vista conta righe ordine e l'altra righe pagamento, i totali divergono senza che nessuno abbia sbagliato i conti. La correzione parte dal `grain`: stessa unità, stesso filtro di stato, stessa data di competenza. Poi si fissa il denominatore unico e lo si documenta nella descrizione della metrica. Solo dopo si toccano visualizzazioni e filtri.
+1. Il grain della tabella finale è dichiarato chiaramente e verificato prima e dopo ogni join?
+2. La data di competenza (ordine, spedizione o fattura) è allineata con le altre dashboard aziendali?
+3. Le serie storiche usano una date spine continua per includere i giorni con zero eventi?
+4. I denominatori dei tassi usano `nullIf(..., 0)` e filtri coerenti con il numeratore?
+5. I calcoli pesanti sono pre-aggregati a monte anziché eseguiti a ogni clic dell'utente in dashboard?
 
-Un caso con numeri. La dashboard ordini conta 1.200 ordini a marzo, quella pagamenti 1.050 pagamenti nello stesso mese. Nessuno ha sbagliato: 150 ordini sono stati creati ma non ancora pagati, e le due viste usano date diverse, data di creazione contro data di pagamento. Allineando la data di competenza a quella di pagamento e il filtro di stato a "pagato", entrambe le viste mostrano 1.050. Il conflitto si risolve sulla definizione, non sul grafico.
 
-## Gli errori che producono dashboard in conflitto
+Nel contesto delle imprese italiane, dove spesso i manager devono prendere decisioni rapide tra una riunione operativa e l'altra, la qualità della visualizzazione non è un dettaglio estetico ma un moltiplicatore diretto di lucidità. Una dashboard progettata con codifiche visive corrette, definizioni condivise e contesto storico riduce drasticamente il tempo speso a discutere se un numero sia giusto e sposta tutta l'energia del team verso l'azione correttiva.
 
-Quattro errori hanno sintomi riconoscibili. Il `grain` non dichiarato produce totali che cambiano quando qualcuno aggiunge un filtro. I `join` su chiavi non univoche duplicano le righe e gonfiano le somme: il sintomo è un totale che cresce quando aggiungi una tabella. Le date scritte a mano nel codice producono numeri fermi che nessuno aggiorna. E il denominatore implicito, per esempio "utenti" senza dire se attivi o registrati, rende ogni confronto tra dashboard una discussione senza fine. Se due viste non tornano, la prima domanda non è "quale grafico è giusto" ma "quale definizione è diversa".
+Dal punto di vista pratico, conviene istituire una breve revisione trimestrale di tutte le viste pubblicate: si controlla quali grafici vengono effettivamente consultati ogni settimana, quali metriche hanno cambiato definizione nel frattempo e quali tabelle di supporto possono essere archiviate. Mantenere il catalogo BI snello e leggibile evita che gli utenti si perdano tra decine di schede duplicate e garantisce che ogni numero mostrato in sala riunioni resti coerente con il database centrale.
 
-## La prova della longevità
-
-SQL nasce nel 1974 nei laboratori IBM di San Jose con il paper di Donald Chamberlin e Raymond Boyce sul linguaggio SEQUEL per il prototipo System R. Nel 1986 diventa standard ANSI e da allora sopravvive a ogni ondata tecnologica perché la stessa query dichiarativa gira su Postgres, BigQuery e Snowflake con modifiche minime. La lezione per chi alimenta dashboard è diretta e misurabile: il costo di una query non è la sua esecuzione ma la sua manutenzione, quindi vince la query portabile e leggibile.
-
-## La checklist prima di pubblicare una query
-
-Prima di consegnare una query a una dashboard, verifica sei punti. Il `grain` è dichiarato in un commento o nel nome della vista? I filtri di stato e di data sono espliciti e coerenti con le altre viste? I `join` sono su chiavi univoche, con un controllo sui duplicati? Le date sono parametri, non valori scritti a mano? Il denominatore è visibile e documentato nella descrizione della metrica? La finestra temporale è limitata a ciò che serve? Se manca anche una sola risposta, la query funziona ma non è difendibile: e una dashboard si difende prima in riunione, non dopo.
-
-## Domande per allenarti
-
-1. Quale `grain` rende confrontabile la metrica che stai calcolando?
-2. Quale denominatore usi e come gestisci i valori nulli?
-3. Quale controllo allinea la tua query con le altre dashboard esistenti?
-4. Quale finestra temporale evita di leggere dati inutili?
-5. Quale data di competenza rende coerenti due viste che oggi divergono?
+Infine, ricordate che la fiducia nei dati si costruisce un dettaglio alla volta: riportare sempre la data di ultimo aggiornamento, il perimetro geografico o di canale incluso nel filtro e l'unità di misura esatta elimina sul nascere il novanta per cento delle contestazioni. Quando chi legge capisce al primo sguardo cosa sta guardando e perché conta, il dato smette di essere un ornamento e diventa uno strumento quotidiano di guida aziendale.

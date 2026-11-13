@@ -16,142 +16,94 @@ learningObjectives:
 prerequisites:
   - infrastructure-ops/introduzione
 binario: "ml-tabellare"
+formato: "articolo"
 autore: "Hermes"
 controllatoDa: "Argo"
 autorizzatoDa: "Giano"
 draft: false
-dateModified: 2026-09-07
+dateModified: 2026-11-13
 ---
 
-# CI/CD per pipeline dati
+## Il caso della modifica SQL fatta direttamente in produzione
 
-Questa lezione, sul binario ml-tabellare, ti abitua a una verità scomoda: nelle pipeline dati i difetti non si vedono quando li commetti, ma quando qualcun altro legge la dashboard. La CI/CD serve esattamente a questo.
+Modificare una query o un modello di trasformazione direttamente sull'ambiente di produzione senza test automatici è il modo più rapido per rompere i report aziendali. In questo caso ricostruito su un team analytics italiano (numeri di esempio), un analista aggiorna un filtro su una tabella dei ricavi per escludere gli ordini annullati, ma introduce per errore un join moltiplicativo che raddoppia il fatturato mostrato al consiglio di amministrazione il giorno seguente.
 
-## Che cosa significa CI/CD applicata ai dati
+Implementare CI/CD per le pipeline dati significa portare la stessa disciplina del software engineering nel mondo SQL ed ETL: ogni modifica passa da una pull request, gira in uno schema isolato su un sottoinsieme controllato di dati, supera test automatici di qualità e solo dopo raggiunge la produzione.
 
-La CI/CD per dati blocca modelli difettosi in isolamento con test automatici prima del rilascio in produzione. In una frase: il codice sbagliato non deve mai avere la possibilità di arrivare dove decide qualcuno.
+## Anatomia di una pipeline CI/CD per dbt e orchestratori
 
-## Il flusso del rilascio
+Una pipeline CI/CD efficace per i dati si articola in tre fasi sequenziali. Nella fase di Continuous Integration (alla creazione della pull request), il sistema esegue il linting SQL, compila il progetto e lancia la build dei soli modelli modificati e dei loro discendenti (`state:modified+`) dentro uno schema temporaneo isolato per la PR.
 
-1. Isola ogni modifica in branch e schema di sviluppo separato dalla produzione.
-2. Esegui build e test automatici sui soli modelli modificati a ogni pull request.
-3. Valida in staging per 24 ore prima di promuovere in produzione.
-4. Prepara rollback atomico con revert e rebuild prima di ogni deploy.
+Nella fase di staging o pre-produzione, la modifica viene eseguita su dati recenti realistici con controlli di volume e unicità delle chiavi. Infine, nella fase di deploy in produzione, il rilascio avviene in modo atomico o tramite esecuzione canarino su una frazione controllata, mantenendo sempre pronto il rollback alla versione precedente.
 
-## Cinque regole che separano un rilascio sicuro da uno manuale
+**Nessuna modifica a un modello SQL o a un DAG di produzione dovrebbe mai saltare lo schema isolato di pull request e i test automatici su chiavi primarie e volumi.**
 
-Ogni analista lavora sul proprio schema di sviluppo e mai direttamente su produzione. A ogni pull request scatta una build automatica: se la build fallisce, la modifica non si fonde. Il deploy è progressivo con staging obbligatorio e validazione prima della produzione. Il rollback usa revert Git e rebuild oppure scambio immediato tra ambienti. Infine, la qualità vive dentro la pipeline con test su valori nulli, unicità e valori ammessi che bloccano la fusione se falliscono.
+| Fase CI/CD | Quando si attiva | Cosa verifica | Azione se fallisce |
+| :--- | :--- | :--- | :--- |
+| Lint e compile | Ogni commit su branch | Sintassi SQL, riferimenti e YAML | Blocca merge della PR |
+| Slim CI (`state:modified+`) | Apertura/aggiornamento PR | Build e test dbt in schema PR isolato | Segnala errore su GitHub |
+| Staging / Canarino | Merge su branch principale | Confronto righe e null su dati reali | Ferma deploy in produzione |
+| Deploy produzione | Approvazione post-staging | Aggiornamento atomico e pulizia schemi | Rollback al tag precedente |
 
-Verdetto: branch isolato, build sui modificati e staging obbligatorio; senza questi tre il rilascio resta manuale.
+## Tre errori comuni nel configurare CI/CD per i dati
 
-## Configurazione GitHub Actions per dbt
+Anche i team che adottano Git per le proprie query cadono spesso in tre trappole che rendono la pipeline lenta o inefficace.
 
-```yaml
-name: dbt CI
-on:
-  pull_request:
-    branches: [main]
-jobs:
-  build:
-    runs-on: ubuntu-latest
-    environment: ci
-    steps:
-      - uses: actions/checkout@v3
-      - name: Install dbt
-        run: pip install dbt-snowflake
-      - name: Build modified models
-        env:
-          SNOWFLAKE_USER: ${{ secrets.SNOWFLAKE_USER }}
-          SNOWFLAKE_PASSWORD: ${{ secrets.SNOWFLAKE_PASSWORD }}
-        run: |
-          dbt deps
-          dbt build --select state:modified+ --target ci \
-            --defer --state ./target/
-```
+### Ricostruire l'intero data warehouse a ogni pull request
 
-Il flag con stato differito esegue solo i modelli modificati e prende il resto dalla produzione. La pipeline passa da ore a minuti senza perdere copertura.
-
-## Orchestrazione, test e canarino
-
-I DAG restano codice versionato con ambienti separati tra sviluppo, staging e produzione. Prima del rilascio i flussi girano in modalità test su dati sintetici. Le modifiche delicate partono su una frazione dei dati con verifica dell'output e poi scalano al totale. Il `lineage` è il grafo delle dipendenze tra tabelle: lo dichiari per far sì che un cambiamento non rompa tabelle a valle in silenzio.
-
-Verdetto: test su sintetici e canarino su frazione dei dati prima del totale.
-
-## Esempio SQL: costruire una vista di controllo
-
-Il pattern crea una base analitica con metrica, segmento e finestra temporale. Così confronti periodi e gruppi senza riscrivere la logica.
+Lanciare un `dbt run` completo su centinaia di modelli per una modifica di due righe in un singolo file blocca gli sviluppatori per quaranta minuti e fa esplodere i costi di compute. Usate sempre la selezione incrementale sullo stato modificato (`state:modified+`) e limitate le finestre temporali in ambiente CI.
 
 ```sql
-WITH base_events AS (
-  SELECT
-    user_id,
-    account_id,
-    event_type,
-    event_time,
-    DATE_TRUNC('week', event_time) AS week,
-    source,
-    device_type
-  FROM events
-  WHERE event_time >= CURRENT_DATE - INTERVAL '180 days'
-    AND user_id IS NOT NULL
-),
-weekly_user_metrics AS (
-  SELECT
-    week,
-    user_id,
-    COALESCE(source, 'unknown') AS source,
-    COALESCE(device_type, 'unknown') AS device_type,
-    COUNT(*) AS total_events,
-    COUNT(DISTINCT DATE(event_time)) AS active_days,
-    COUNT(DISTINCT event_type) AS event_diversity,
-    MAX(CASE WHEN event_type IN ('purchase', 'subscribe', 'activation') THEN 1 ELSE 0 END) AS reached_key_outcome
-  FROM base_events
-  GROUP BY week, user_id, source, device_type
-)
+-- Anti-pattern: test lanciati direttamente sullo schema di produzione
+INSERT INTO prod.fact_orders
+SELECT * FROM staging.raw_orders;
+```
+
+### Eseguire i test di pull request direttamente sullo schema di produzione
+
+Se il job CI scrive nelle stesse tabelle lette dalle dashboard aziendali, una pull request ancora in bozza o con un bug può corrompere i numeri mostrati agli utenti finali prima ancora che il codice venga revisionato.
+
+### Non avere una procedura di rollback atomico documentata
+
+Quando un deploy introduce un errore logico sottile che supera i test sintattici, il team deve poter tornare alla versione precedente con un singolo comando o revert Git, senza dover ricostruire manualmente le tabelle a mano.
+
+## Configurazione pratica di Slim CI e controlli post-deploy
+
+Nel flusso operativo consigliato, il workflow GitHub Actions scarica il `manifest.json` dell'ultimo deploy di produzione riuscito, crea uno schema dedicato alla pull request (ad esempio `pr_412`) e lancia il comando `dbt build --select state:modified+ --defer --state ./prod-manifest`.
+
+```sql
+-- Verifica automatica in schema isolato di PR prima del merge
 SELECT
-  week,
-  source,
-  device_type,
-  COUNT(DISTINCT user_id) AS users,
-  ROUND(AVG(active_days), 2) AS avg_active_days,
-  ROUND(AVG(event_diversity), 2) AS avg_event_diversity,
-  ROUND(AVG(reached_key_outcome) * 100, 2) AS key_outcome_rate
-FROM weekly_user_metrics
-GROUP BY week, source, device_type
-ORDER BY week, source, device_type;
+  count() AS total_rows,
+  countIf(order_id IS NULL) AS null_keys,
+  count() - uniqExact(order_id) AS duplicate_keys
+FROM pr_412.fact_orders;
 ```
 
-## Esempio Python: controllare stabilità e anomalie
+Al termine della build automatica, un passo finale elimina lo schema temporaneo quando la pull request viene chiusa o unita, mantenendo pulito il warehouse ed evitando accumuli di tabelle orfane.
 
-Il controllo su finestra mobile segnala le variazioni che meritano indagine dopo ogni deploy.
+## Il caso difficile dei DAG Python e degli script ETL legacy
 
-```python
+Quando l'infrastruttura non usa solo SQL dichiarativo ma include DAG Airflow o script Python di estrazione, i test di integrazione completi diventano più complessi. Non potete avviare un intero cluster di produzione per ogni piccolo commit.
 
-# df contiene: week, segment, users, key_outcome_rate
-# key_outcome_rate espresso in percentuale, es. 12.4
+In questi casi separate la logica di trasformazione pura in funzioni Python testabili con `pytest` su piccoli fixture locali, validate il parsing dei DAG Airflow in CI (`dag_bag.import_errors`) per intercettare errori di importazione prima del deploy e usate un ambiente di staging leggero per verificare le connessioni esterne.
+Un ulteriore aspetto decisivo nella gestione quotidiana dell'infrastruttura riguarda la documentazione operativa e la condivisione delle responsabilità tra team tecnico e stakeholder di business. Quando una piattaforma dati cresce senza regole scritte, ogni nuova richiesta urgente finisce per generare scorciatoie temporanee che restano in produzione per anni. Stabilire fin dall'inizio criteri chiari per l'ingresso di nuove sorgenti, per la gestione delle modifiche allo schema e per la dismissione delle tabelle obsolete mantiene l'architettura leggera, leggibile e sostenibile anche quando il volume dei dati decuplica.
 
-df = df.sort_values(['segment', 'week']).copy()
-df['previous_rate'] = df.groupby('segment')['key_outcome_rate'].shift(1)
-df['wow_change_pp'] = df['key_outcome_rate'] - df['previous_rate']
-df['rolling_mean'] = df.groupby('segment')['key_outcome_rate'].transform(
-    lambda s: s.rolling(4, min_periods=2).mean()
-)
-df['rolling_std'] = df.groupby('segment')['key_outcome_rate'].transform(
-    lambda s: s.rolling(4, min_periods=2).std()
-)
-df['z_score'] = (df['key_outcome_rate'] - df['rolling_mean']) / df['rolling_std']
+Dal punto di vista pratico, conviene organizzare una breve revisione mensile congiunta tra chi gestisce le pipeline, chi costruisce i modelli analitici e i referenti dei reparti che usano i report. Durante questo incontro di trenta minuti si controllano tre indicatori oggettivi: il rispetto degli SLA di freschezza sulle tabelle principali, l'andamento dei costi di calcolo rispetto al budget previsto e il numero di incidenti o interventi manuali richiesti nelle ultime quattro settimane. Se uno di questi indicatori peggiora, la priorità della settimana successiva non è aggiungere nuove integrazioni, ma risolvere la causa strutturale del rallentamento.
 
-anomalies = df[df['z_score'].abs() >= 2].sort_values('z_score')
-print(anomalies[['week', 'segment', 'key_outcome_rate', 'wow_change_pp', 'z_score']])
-```
+Inoltre, ogni scelta tecnologica dovrebbe essere valutata sul costo totale di proprietà nell'arco di dodici mesi, includendo non solo le licenze cloud ma soprattutto le ore di lavoro umano necessarie per mantenere, aggiornare e monitorare il sistema. Uno strumento leggermente più costoso in fattura ma completamente gestito libera tempo prezioso degli ingegneri per attività ad alto valore, come il miglioramento della qualità dei dati, la costruzione di modelli affidabili e il supporto diretto alle decisioni strategiche aziendali.
 
-## Quando un aggiornamento fermò mezzo mondo
+Infine, ricordate che la resilienza di un'infrastruttura dati non si dimostra nei giorni ordinari ma durante gli imprevisti: un picco di traffico improvviso, il cambio di formato di un'API esterna o un errore umano su una query di aggiornamento. Avere ambienti isolati, controlli automatici prima del rilascio, alert calibrati e procedure di ripristino già provate trasforma quelle situazioni potenzialmente critiche in normali interventi di routine risolti in pochi minuti senza impatto sul business.
 
-Il 19 luglio 2024 un aggiornamento difettoso del sensore CrowdStrike Falcon manda in boot loop circa 8,5 milioni di PC Windows nel mondo. Il file viene distribuito senza rilascio graduale e senza blocco automatico, così compagnie aeree, banche e ospedali restano fermi per ore. Il ripristino richiede intervento manuale su ogni macchina colpita. La lezione per la CI/CD dati è identica: nessun artefatto tocca la produzione senza canarino, test e rollback pronto.
+Nel contesto delle imprese italiane, dove i team dati sono spesso compatti e chiamati a coprire sia l'ingegneria sia l'analisi di business, questa sobrietà operativa fa tutta la differenza tra una piattaforma che abilita decisioni rapide e un sistema fragile che richiede manutenzione continua. Investire tempo nella standardizzazione di pochi pattern solidi ripaga ogni trimestre in termini di velocità di esecuzione, fiducia dei dirigenti nei numeri e serenità operativa per tutto il reparto tecnico.
+Quando l'organizzazione consolida queste abitudini operative, anche l'inserimento di nuovi colleghi o consulenti esterni diventa molto più veloce e sicuro. Un repository ordinato, con ambienti di test isolati e controlli automatici sulle modifiche, permette a chiunque di contribuire fin dalla prima settimana senza il timore di compromettere i dati di produzione o i report direzionali. Allo stesso tempo, la direzione ottiene visibilità trasparente sul ritorno dell'investimento tecnologico, perché ogni nuovo flusso porta con sé costi misurabili, responsabilità chiare e tempi di consegna prevedibili. Questa combinazione di rigore ingegneristico e semplicità gestionale rappresenta la base più solida su cui costruire la crescita analitica di medio e lungo periodo.
 
-## Domande per controllare il tuo processo
+## Checklist di verifica su CI/CD per pipeline dati
 
-1. Quale test blocca la tua pull request se un modello è difettoso?
-2. Quale ambiente isolato separa sviluppo, staging e produzione?
-3. Quale strategia di rollback applichi se il deploy fallisce?
-4. Quale controllo verifica l'output prima di scalare al totale?
+Prima di considerare sicuro il processo di rilascio delle vostre pipeline, verificate queste cinque domande:
+
+1. Ogni modifica a SQL, modelli dbt o DAG passa obbligatoriamente attraverso una pull request revisionata?
+2. I job di Continuous Integration girano in uno schema temporaneo isolato anziché toccare le tabelle di produzione?
+3. State usando la selezione sui soli modelli modificati (`state:modified+`) per contenere tempi e costi di CI?
+4. I test automatici verificano almeno unicità delle chiavi primarie, assenza di null critici e integrità referenziale?
+5. Esiste una procedura di rollback atomico testata per tornare rapidamente alla versione precedente in caso di anomalia?

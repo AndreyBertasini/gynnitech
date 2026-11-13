@@ -1,252 +1,169 @@
 ---
-title: "Event tracking: implementazione pratica"
+title: "Architettura degli eventi: dallo schema alla pipeline"
 description: >-
-  Implementare event tracking robusto con SDK, gestione errori e batching.
+  Progettare uno schema eventi robusto per analytics: naming, proprietà,
+  contesto, identificazione utente, strategie di batching e retry per dati
+  affidabili dal frontend alla warehouse.
 module: "Modulo 2: Raccolta dati e sistemi di tracking"
 order: 2
 category: Tecnico
 headerImage: /course-headers/data-collection-event-tracking-ginnytech-ad.webp
-headerImageAlt: "Event tracking: implementazione pratica - immagine ufficiale della lezione su GinnyTech, creata da AD"
+headerImageAlt: "Architettura degli eventi: dallo schema alla pipeline - immagine ufficiale della lezione su GinnyTech, creata da AD"
 difficulty: advanced
 duration: 22 min
 learningObjectives:
-  - Definire nome, trigger, proprietà e casi esclusi per ogni evento
-  - Implementare invio non bloccante con retry, buffer locale e batching
-  - Verificare con test automatici che duplicati ed errori restino sotto soglia
+  - Definire nome, trigger, proprietà semantiche e di contesto e chiave di idempotenza per ogni evento
+  - Collegare il percorso anonimo e autenticato senza perdere né duplicare le sessioni pre-login
+  - Verificare duplicati, ritardi di rete e conformità dello schema prima dell'ingresso in tabella analitica
 prerequisites:
   - data-collection/framework
 binario: "ml-tabellare"
+formato: "articolo"
 autore: "Hermes"
 controllatoDa: "Argo"
 autorizzatoDa: "Giano"
 draft: false
-formato: "3s"
-sezioni: ["Il compito dell'implementazione","Anatomia di un evento","Errori e batching","Metriche ed errori tipici","Un caso sul client-side"]
-dateModified: 2026-10-15
+dateModified: 2026-11-13
 ---
-import { QuizExercise } from '../../../components/QuizExercise';
 
-import { SqlExercise } from '../../../components/SqlExercise';
+# Architettura degli eventi: dallo schema alla pipeline
 
-# Event tracking: implementazione pratica
+Un'azienda SaaS europea con 40.000 utenti attivi decide di centralizzare il tracciamento delle azioni di prodotto e stima due settimane di lavoro. Dopo tre mesi il catalogo conta 47 eventi per lo stesso acquisto con nomi incompatibili, campi che cambiano tipo da stringa a numero a metà mese e una fattura del warehouse triplicata per via dei ritrasmessi non deduplicati. La causa non è lo strumento di raccolta né il browser: è aver trattato gli eventi come log applicativi improvvisati anziché come contratti immutabili tra chi emette il dato e chi lo interroga.
 
-<Percorso />
+## Tre mesi di lavoro e quarantasette nomi per lo stesso acquisto
 
-<Obiettivi />
+Questo è un caso ricostruito con numeri di esempio basato su migrazioni reali di piattaforme B2B e negozi online. Tre squadre di prodotto rilasciano funzionalità ogni settimana su web, applicazione iOS e applicazione Android: il team web chiama l'evento di pagamento `checkout_success` e passa il prezzo in euro con due decimali, il team iOS lo chiama `PurchaseCompleted` e invia il valore in centesimi interi, mentre il backend emette `order_paid` a ogni tentativo di addebito della carta.
 
-L'evento `signup_completed` sembra semplice. Poi qualcuno chiede se include email verificate, account invitati o utenti creati da un admin. Sul binario **ml-tabellare** ogni evento che implementiamo diventa una riga in una tabella, e la sua qualità si gioca a monte. L'implementazione trasforma intenzioni vaghe in eventi testabili, versionati e coerenti tra frontend, backend e `warehouse`. È su questo confine che si gioca l'affidabilità.
+Quando la connessione mobile cade in galleria, l'SDK del telefono riprova l'invio quattro volte senza un identificativo univoco dell'evento. In una settimana di campagna promozionale su 18.400 ordini reali registrati dal database contabile, la tabella degli eventi nel warehouse ne conta 24.120: un gonfiamento del 31% sul fatturato attribuito ai canali di marketing, accompagnato da 1.900 sessioni rimaste orfane perché l'identificativo anonimo pre-login non è mai stato ricongiunto all'identificativo dell'utente autenticato.
 
-## Il compito dell'implementazione
+La causa del disastro non è la rete mobile instabile né la velocità di rilascio dei team: è l'assenza di uno schema formale che separi l'involucro immutabile dell'evento dal suo carico informativo e che imponga l'idempotenza fin dal momento della generazione.
 
-<Schema sezione="1" titolo="Il percorso di implementazione">
-<Passo testo="Definiamo nome, trigger tecnico e casi esclusi." />
-<Passo testo="Fissiamo proprietà obbligatorie, tipi e regole di validazione." />
-<Passo testo="Implementiamo l'invio non bloccante, con retry e buffer locale." />
-<Passo testo="Applichiamo il batching, con soglie di numerosità e di tempo." />
-<Passo testo="Verifichiamo con test automatici che duplicati ed errori restino sotto soglia." />
-<Passi>
-<Fase nome="Contratto" testo="nome, trigger, esclusioni" passo="1" />
-<Fase nome="Proprietà" testo="tipi e validazioni" passo="2" />
-<Fase nome="Invio" testo="retry e buffer" passo="3" />
-<Fase nome="Batching" testo="soglie esplicite" passo="4" />
-<Fase nome="Test" testo="duplicati sotto soglia" passo="5" />
-</Passi>
-</Schema>
+## Cosa rende un evento un contratto stabile
 
-L'implementazione di event tracking definisce nomi, trigger, proprietà e test di qualità, così ogni evento resta stabile tra frontend, backend e warehouse. In una frase: trasformiamo un'intenzione in un contratto testabile. Il tracking è professionale quando un cambio di prodotto non altera in silenzio il significato della metrica.
+Tre meccanismi fisici tengono in piedi una pipeline di eventi senza far esplodere i conteggi a valle.
 
-<ErroreTipico sbagliato="Un nome evento senza definizione né trigger" giusto="Un contratto con trigger ed esclusioni" />
+Il primo meccanismo è la separazione rigida tra busta di trasporto (`envelope`), contesto tecnico (`context`) e proprietà di dominio (`properties`). La busta contiene i metadati invarianti che esistono su ogni singolo evento del sistema: `event_id` generato come UUID v4 o v7 al momento esatto del fatto, `event_name` in formato `oggetto_azione` al passato, `occurred_at` registrato quando l'azione avviene sul dispositivo e `received_at` assegnato dal server di raccolta. Il contesto raccoglie l'ambiente di esecuzione come URL, versione dell'app e user agent, mentre le proprietà contengono solo gli attributi del fatto di business, come l'importo dell'ordine o il codice del piano sottoscritto.
 
-<Messaggio>Un evento è un contratto testabile, non un nome.</Messaggio>
+Il secondo meccanismo è il ponte d'identità tra `anonymous_id` e `user_id`. Ogni evento trasporta sempre il cookie o l'identificativo del dispositivo in `anonymous_id`, mentre `user_id` resta nullo finché l'utente non supera l'autenticazione; al momento del login viene emesso un evento esplicito di legame che permette al warehouse di retro-attribuire i passaggi esplorativi alla persona reale tramite una tabella di corrispondenza.
 
-<Domanda risposta="Nome, trigger tecnico, proprietà obbligatorie con tipi e regole, casi esclusi.">Che cosa deve fissare il contratto di un evento prima dell'implementazione?</Domanda>
+Il terzo meccanismo è il trasporto non bloccante con coda locale e chiave di idempotenza. Il client accumula gli eventi in un buffer locale e li spedisce a blocchi di dieci o venti con ritentativi a intervallo crescente in caso di errore di rete: poiché la rete garantisce una consegna *at-least-once*, è il `event_id` generato all'origine che permette al warehouse di scartare i duplicati prodotti dai retry.
 
-## Anatomia di un evento
+**Un evento è affidabile solo se nasce con un identificativo univoco d'origine, separa busta, contesto e proprietà di business, e conserva sempre la coppia tra identità anonima e identità autenticata.**
 
-Un evento si definisce con sette elementi: nome, `trigger`, proprietà, tipi, esempi, casi esclusi e test. Il `trigger` è la condizione tecnica che fa scattare l'invio.
+## Tre errori nello schema degli eventi
 
-```json
-{
-  "event": "purchase_completed",
-  "user_id": "usr_abc123",
-  "anonymous_id": "anon_xyz789",
-  "timestamp": "2024-03-15T14:30:00Z",
-  "properties": {
-    "order_id": "ord_456",
-    "amount": 99.99,
-    "currency": "EUR",
-    "products": [{"sku": "ABC", "qty": 2}]
-  },
-  "context": {
-    "page_url": "/checkout/confirmation",
-    "user_agent": "Mozilla/5.0...",
-    "ip": "1.2.3.4"
-  }
-}
+Il blocco SQL qui sotto mostra la tabella tipica generata quando i team scaricano eventi grezzi direttamente dal frontend senza contratto né chiave di deduplicazione:
+
+```sql
+CREATE TABLE eventi_grezzi_v1
+(
+    ts DateTime,
+    utente String,
+    nome_evento String,
+    valore String,
+    pagina String
+)
+ENGINE = MergeTree
+ORDER BY ts;
+
+-- Tre righe per un solo ordine: due nomi diversi e un retry di rete senza chiave univoca.
+INSERT INTO eventi_grezzi_v1 VALUES
+    ('2026-10-12 10:14:02', 'anon_991', 'Click Bottone Acquista', '120.50 EUR', '/carrello'),
+    ('2026-10-12 10:14:05', 'usr_442', 'purchase_ok', '12050', '/conferma'),
+    ('2026-10-12 10:14:09', 'usr_442', 'purchase_ok', '12050', '/conferma');
+
+-- Il conteggio degli acquisti legge 3 ordini invece di 1 e non collega anon_991 a usr_442.
+SELECT count() AS ordini_stimati, countDistinct(utente) AS utenti_distinti
+FROM eventi_grezzi_v1;
 ```
 
-<Slide sezione="2" titolo="Le parti dell'evento" messaggio="Il contesto resta separato dalle proprietà di business.">
-<Relazioni centro="purchase_completed">
-<Nodo nome="user_id e anonymous_id" />
-<Nodo nome="timestamp" />
-<Nodo nome="properties" />
-<Nodo nome="context" />
-</Relazioni>
-</Slide>
+### Il nome legato all'interfaccia invece che al fatto di business
 
-Usiamo `user_id` con un utente autenticato e `anonymous_id` altrimenti: così uniamo il percorso prima e dopo il login. Il `timestamp` indica quando l'evento è successo, non quando è stato processato. Il `context` tiene i metadati automatici separati dalle proprietà di business.
+Chiamare un evento `Click Bottone Acquista` o `submit_form_blu` sembra naturale a chi sviluppa il componente grafico, perché descrive esattamente il gestore del clic nel codice del browser. Diventa un errore grave al primo ridisegno della pagina o quando si aggiunge l'acquisto rapido da applicazione mobile: il bottone cambia nome o sparisce, le serie storiche si spezzano in due e l'evento si attiva anche quando il clic fallisce per carta scaduta, gonfiando le conversioni con tentativi respinti dal gateway di pagamento.
 
-<Pattern si="Un contratto con trigger ed esclusioni" no="Un nome evento senza definizione" />
+### Un solo campo utente che sovrascrive l'identità anonima
 
-<Domanda risposta="Quando l'evento è successo, non quando è stato processato.">Che cosa indica il timestamp di un evento?</Domanda>
+Mettere `anon_991` e `usr_442` nella stessa colonna `utente` sembra un modo pulito per risparmiare spazio e avere sempre una chiave non nulla su cui raggruppare. In realtà spezza l'utente in due individui distinti nel preciso istante in cui effettua il login: tutte le pagine viste prima dell'autenticazione restano assegnate a `anon_991`, l'acquisto viene assegnato a `usr_442` e qualsiasi query di funnel calcola un tasso di conversione da visita ad acquisto pari a zero per il primo e al cento percento senza sorgente di traffico per il secondo.
 
-## Errori e batching
+### L'assenza di event_id e di separazione tra occurred_at e received_at
 
-<Schema sezione="3" titolo="Come inviamo senza bloccare">
-<Passo testo="Inviamo in background, senza attendere la risposta." />
-<Passo testo="Se l'invio fallisce, riproviamo con intervalli crescenti." />
-<Passo testo="Salviamo gli eventi in un buffer locale, per invii successivi." />
-<Passo testo="Raggruppiamo 10-20 eventi, oppure spediamo ogni 5-10 secondi." />
-<Passi>
-<Fase nome="Fire-and-forget" testo="in background" passo="1" />
-<Fase nome="Retry" testo="backoff crescente" passo="2" />
-<Fase nome="Buffer" testo="localStorage" passo="3" />
-<Fase nome="Batch" testo="10-20 eventi" passo="4" />
-</Passi>
-</Schema>
+Usare un unico timestamp generato al momento dell'inserimento e non allegare un `event_id` creato sul client sembra sufficiente finché la rete di test risponde in dieci millisecondi. In produzione un utente su treno compra alle 10:14, il telefono perde segnale e invia il pacchetto due volte quando torna online alle 10:48: senza `event_id` i due invii diventano due vendite distinte, e senza la distinzione tra `occurred_at` e `received_at` l'ordine finisce nella finestra oraria sbagliata, dopo gli eventi che nella realtà sono avvenuti più tardi.
 
-Il tracking non deve mai bloccare l'esperienza utente. Il pattern base è `fire-and-forget`: invio in background, senza attesa. Sul fallimento scatta il `retry` con `backoff` a intervalli crescenti. Un `buffer` in `localStorage` salva gli eventi per gli invii successivi. Il codice di tracking non lancia mai eccezioni verso l'app. Inviare un evento alla volta è inefficiente: raggruppare 10-20 eventi per batch, o spedire ogni 5-10 secondi, riduce le richieste `HTTP` del 90 per cento senza perdita percepita di freschezza.
+## Lo schema con contratto, idempotenza e identity stitching
 
-<Pattern si="Invio in background con buffer e batch" no="Chiamate singole che bloccano l'utente" />
+Per costruire una pipeline che regga i rilasci settimanali e le reti mobili instabili, applicate questi quattro criteri in ordine di priorità:
 
-<Messaggio>Il tracking non blocca mai l'utente.</Messaggio>
+1. Definite ogni evento sul fatto di business già confermato (`order_completed`, `subscription_started`) usando sempre il formato `oggetto_azione` in minuscolo, mai sull'elemento grafico cliccato.
+2. Assegnate alla nascita un `event_id` univoco, registrate sia `occurred_at` (orologio dell'evento) sia `received_at` (orologio dell'ingestione) e tenete sempre separate le colonne `anonymous_id` e `user_id`.
+3. Separate i campi fissi della busta dalle proprietà specifiche del dominio e validate i tipi all'ingresso, dirottando i payload non conformi in una coda di scarto ispezionabile anziché nella tabella principale.
+4. Deduplicate su `event_id` e ricongiungete il percorso pre-login tramite la mappa delle identità prima di calcolare qualsiasi metrica di funnel o fatturato.
 
-<Domanda risposta="Con invio in background, retry con backoff, buffer locale e nessuna eccezione verso l'app.">Come evitiamo che il tracking blocchi l'esperienza utente in caso di errore?</Domanda>
+Ecco lo schema corretto in ClickHouse che risolve i duplicati di rete e unisce la sessione anonima all'acquisto:
 
-## Metriche ed errori tipici
+```sql
+CREATE TABLE eventi_contratto
+(
+    event_id UUID,
+    event_name LowCardinality(String),
+    occurred_at DateTime64(3, 'UTC'),
+    received_at DateTime64(3, 'UTC'),
+    anonymous_id String,
+    user_id Nullable(String),
+    schema_version UInt16,
+    importo_centesimi UInt64,
+    valuta FixedString(3),
+    page_path String
+)
+ENGINE = ReplacingMergeTree(received_at)
+PARTITION BY toYYYYMM(occurred_at)
+ORDER BY (event_name, occurred_at, event_id);
 
-Costruiamo le decisioni su segnali osservabili. Contiamo completamento, abbandono precoce, ritorno settimanale ed efficacia delle raccomandazioni. Non misuriamo solo il click immediato: osserviamo anche segnali di qualità, come visione effettiva e ritorno. Così evitiamo metriche decorative, positive nel breve, che erodono valore nel lungo. Il tracking resta collegato a un outcome concreto, altrimenti l'analisi non ci aiuta a scegliere tra azioni alternative.
+-- Visita pre-login, login che lega anon_991 a usr_442, e acquisto inviato due volte per retry.
+INSERT INTO eventi_contratto VALUES
+    ('018f1a00-0000-7000-8000-000000000001', 'checkout_viewed', '2026-10-12 10:14:02.100', '2026-10-12 10:14:02.350', 'anon_991', NULL, 1, 12050, 'EUR', '/carrello'),
+    ('018f1a00-0000-7000-8000-000000000002', 'user_authenticated', '2026-10-12 10:14:04.000', '2026-10-12 10:14:04.200', 'anon_991', 'usr_442', 1, 0, 'EUR', '/login'),
+    ('018f1a00-0000-7000-8000-000000000003', 'order_completed', '2026-10-12 10:14:05.500', '2026-10-12 10:14:05.900', 'anon_991', 'usr_442', 1, 12050, 'EUR', '/conferma'),
+    ('018f1a00-0000-7000-8000-000000000003', 'order_completed', '2026-10-12 10:14:05.500', '2026-10-12 10:48:11.000', 'anon_991', 'usr_442', 1, 12050, 'EUR', '/conferma');
 
-<Slide sezione="4" titolo="Tre controlli prima di ogni lettura" messaggio="Ogni analisi ha definizione, segmento e confronto.">
-<Passi>
-<Fase nome="Aggregazione" testo="la media nasconde segmenti" />
-<Fase nome="Dati" testo="duplicati, timezone, definizioni" />
-<Fase nome="Causalità" testo="correlazione non basta" />
-</Passi>
-</Slide>
+OPTIMIZE TABLE eventi_contratto FINAL;
 
-Tre controlli precedono ogni lettura. Primo: non aggregare troppo presto, perché la media nasconde segmenti opposti. Secondo: verifichiamo duplicati, tracking incompleto, `timezone` incoerenti e cambi di definizione. Terzo: non confondiamo correlazione con causalità. Ogni analisi porta una definizione esplicita, un confronto per segmento e una verifica contro il periodo precedente o un gruppo di controllo.
+-- Mappa identità e conteggio reale: 1 solo ordine di 120,50 euro collegato allo stesso soggetto.
+WITH mappa_identita AS (
+    SELECT anonymous_id, anyLast(user_id) AS utente_risolto
+    FROM eventi_contratto
+    WHERE user_id IS NOT NULL
+    GROUP BY anonymous_id
+)
+SELECT
+    coalesce(e.user_id, m.utente_risolto, e.anonymous_id) AS identita_finale,
+    countIf(e.event_name = 'checkout_viewed') AS aperture_carrello,
+    countIf(e.event_name = 'order_completed') AS ordini_confermati,
+    sumIf(e.importo_centesimi, e.event_name = 'order_completed') / 100.0 AS ricavo_euro
+FROM eventi_contratto AS e
+LEFT JOIN mappa_identita AS m USING (anonymous_id)
+GROUP BY identita_finale;
+```
 
-<Pattern si="Test di tracking, deduplicazione e una definizione unica" no="Un funnel che cambia definizione ogni settimana" />
+Il risultato passa da tre ordini fittizi su due utenti spezzati a un singolo percorso coerente con un'apertura carrello, un ordine confermato e 120,50 euro di ricavo reale: lo scarto di duplicazione scende dal 31% a sotto lo 0,1%. Introdurre `event_id` e la coppia `anonymous_id` / `user_id` prima del lancio costa poche ore di allineamento sull'SDK; aggiungerli dopo sei mesi di raccolta non è retroattivo, perché gli eventi storici privi di chiave univoca e di legame pre-login non possono più essere distinti né ricongiunti con certezza.
 
-<Domanda risposta="Con la deduplicazione sulla chiave di idempotenza e un test che conta i duplicati sotto soglia.">Come distinguiamo duplicati da eventi reali dopo un retry?</Domanda>
+## Raccolta client-side nel browser o emissione server-side dal backend
 
-## Un caso sul client-side
+Anche con uno schema impeccabile, resta da decidere da quale punto dell'architettura debba partire ciascun evento. Gli strumenti sono due: il tracciamento client-side (nel browser o nell'applicazione mobile) e il tracciamento server-side emesso direttamente dai servizi di backend quando una transazione cambia stato.
 
-<Slide sezione="5" titolo="Il caso British Airways" messaggio="Ogni script nel browser è una superficie di attacco.">
-<NumeriGrandi>
-<Numero valore="2018" testo="codice Magecart nelle pagine di pagamento" />
-<Numero valore="183 mln £" testo="multa annunciata dall'ICO nel 2019" />
-<Numero valore="20 mln £" testo="sanzione definitiva, ottobre 2020" />
-</NumeriGrandi>
-</Slide>
+Il criterio di scelta è netto: **emettete dal client-side gli eventi di interazione con l'interfaccia che non modificano lo stato del database aziendale (scorrimento pagina, apertura di un filtro, visualizzazione di un banner), ed emettete esclusivamente dal server-side tutti gli eventi che certificano una transazione economica, un cambio di contratto o un'autenticazione.**
 
-Nel settembre 2018 British Airways scopre che un codice maligno di tipo Magecart, iniettato nelle pagine di pagamento, ha intercettato dati dei passeggeri durante il checkout. Nel luglio 2019 l'autorità britannica ICO annuncia l'intenzione di multare la compagnia per 183 milioni di sterline. Nell'ottobre 2020 la sanzione definitiva è fissata a 20 milioni di sterline. Il caso mostra il lato oscuro dell'implementazione client-side. Ogni script di tracking o di pagamento nel browser è superficie di attacco, e va inventariato, versionato e monitorato come il resto della pipeline.
+La confusione comune consiste nel tracciare gli acquisti o le sottoscrizioni sulla pagina di ringraziamento del browser per comodità del team marketing, oppure nel tentare di spostare sul server anche i clic puramente visivi che il backend non vede. Sbagliare questa ripartizione costa su due fronti: un acquisto emesso solo dal browser perde dal 10% al 25% del volume reale per colpa degli ad-blocker, delle chiusure anticipate della scheda dopo il redirect bancario e dei blocchi sui script di terze parti — oltre a esporre le pagine di pagamento al rischio di manomissione lato client, come mostrato dal caso [British Airways sanzionato dall'ICO britannico nel 2020](https://ico.org.uk/about-the-ico/media-centre/news-and-blogs/2020/10/ico-fines-british-airways-20m-for-data-breach-affecting-more-than-400-000-customers/) — mentre forzare sul backend ogni micro-interazione di interfaccia costringe a costruire chiamate di rete inutili per eventi che non hanno valore contabile. La pratica corretta unisce i due mondi passando il `anonymous_id` del client nella richiesta HTTP di acquisto, così che sia il backend a emettere `order_completed` con la stessa identità di sessione vista nel browser.
 
-<Pattern si="Inventariamo e monitoriamo ogni script nel browser" no="Aggiungiamo script di terze parti senza controllarli" />
+Questo articolo non copre la configurazione del consenso privacy e l'oscuramento dei dati personali prima dell'archiviazione, trattati nella lezione dedicata del modulo. I tempi di ritenzione del buffer locale dipendono dai limiti di memoria del browser o del sistema operativo mobile.
 
-<Domanda risposta="Perché ogni script nel browser è superficie di attacco: va inventariato, versionato e monitorato.">Che lezione lascia il caso British Airways sul client-side?</Domanda>
+## Cinque domande prima di mettere in produzione un nuovo evento
 
-## Pratica
+1. Il nome dell'evento segue la forma `oggetto_azione` al passato e descrive un fatto di business anziché un elemento grafico della pagina?
+2. Il payload genera un `event_id` univoco all'origine e separa chiaramente `occurred_at` dal timestamp di ricezione del server `received_at`?
+3. L'evento trasporta sempre `anonymous_id` accanto a `user_id` così da permettere la ricongiunzione delle sessioni iniziate prima del login?
+4. Se l'evento misura un incasso, un ordine o un cambio di stato contrattuale, viene emesso dal backend dopo la conferma sul database e non dalla pagina di cortesia del browser?
+5. Esiste una coda separata per gli eventi che falliscono la validazione dello schema, in modo che un rilascio errato non inquini la tabella analitica né perda il dato?
 
-Proviamo una query: troviamo chi ha visto la pagina elettronica ma non ha mai comprato.
+La metrica che separa chi governa la pipeline da chi subisce i numeri sporchi è doppia: lo scostamento percentuale tra gli eventi `order_completed` nel warehouse e le righe della tabella contabile degli ordini, affiancato dal tasso di eventi respinti dal validatore di schema. Quando il primo resta sotto lo 0,5% e il secondo vicino a zero, il tracciamento è un'infrastruttura di cui ci si può fidare.
 
-<SqlExercise client:visible
-  description="Quali utenti hanno fatto 'page_view' sulla pagina '/prodotti/elettronica' ma NON hanno mai fatto 'purchase'? Usa una subquery o LEFT JOIN per trovarli."
-  hint="Fai una subquery con gli utente_id che hanno purchase, poi escludili da quelli che hanno visitato /prodotti/elettronica."
-  solutionQuery={`SELECT DISTINCT u.nome, u.email
-FROM eventi e
-JOIN utenti u ON e.utente_id = u.id
-WHERE e.pagina = '/prodotti/elettronica'
-  AND e.tipo = 'page_view'
-  AND e.utente_id NOT IN (
-    SELECT utente_id FROM eventi WHERE tipo = 'purchase'
-  );`}
-/>
-
-## Riepilogo
-
-<Messaggio>Ogni evento ha un contratto: nome, trigger, proprietà, esclusioni.</Messaggio>
-
-<Messaggio>L'invio è non bloccante, con retry, buffer e batch.</Messaggio>
-
-<Messaggio>Un test conta i duplicati e li tiene sotto soglia.</Messaggio>
-
-<QuizExercise client:visible
-  quizId="data-collection-event-tracking"
-  title="Hai capito l'implementazione dell'event tracking?"
-  questions={[
-    {
-      id: 'q1',
-      text: 'Che cos’è il trigger di un evento?',
-      options: [
-        'Il nome del progetto',
-        'La condizione tecnica che fa scattare l’invio',
-        'Il numero di proprietà',
-        'La data di scadenza'
-      ],
-      correctIndex: 1,
-      explanation: 'Il trigger è la condizione tecnica dell’invio. Insieme a nome, proprietà ed esclusioni compone il contratto dell’evento.'
-    },
-    {
-      id: 'q2',
-      text: 'Che cosa fa il pattern fire-and-forget?',
-      options: [
-        'Attende la risposta del server prima di proseguire',
-        'Invia in background senza attesa, così il tracking non blocca l’utente',
-        'Cancella gli eventi falliti',
-        'Invia un evento solo al mese'
-      ],
-      correctIndex: 1,
-      explanation: 'L’invio in background evita di bloccare l’esperienza utente. Sul fallimento scattano retry con backoff e buffer locale.'
-    },
-    {
-      id: 'q3',
-      text: 'Perché usare il batching?',
-      options: [
-        'Perché riduce le richieste HTTP del 90 per cento senza perdita percepita di freschezza',
-        'Perché elimina i duplicati',
-        'Perché evita il consenso',
-        'Perché rende gli eventi anonimi'
-      ],
-      correctIndex: 0,
-      explanation: 'Raggruppare 10-20 eventi, o spedire ogni 5-10 secondi, riduce le richieste HTTP senza perdere freschezza.'
-    },
-    {
-      id: 'q4',
-      text: 'Quando usi user_id e quando anonymous_id?',
-      options: [
-        'user_id con un utente autenticato, anonymous_id altrimenti',
-        'Sempre anonymous_id',
-        'Sempre user_id, anche prima del login',
-        'Dipende dal browser'
-      ],
-      correctIndex: 0,
-      explanation: 'Con i due identificativi si unisce il percorso prima e dopo il login.'
-    },
-    {
-      id: 'q5',
-      text: 'Che cosa mostra il caso British Airways?',
-      options: [
-        'Che il server-side è sempre vulnerabile',
-        'Che ogni script nel browser è superficie di attacco e va inventariato e monitorato',
-        'Che il batching è pericoloso',
-        'Che le multe non arrivano mai'
-      ],
-      correctIndex: 1,
-      explanation: 'Un codice Magecart nelle pagine di pagamento ha intercettato dati dei passeggeri: gli script nel browser vanno gestiti come il resto della pipeline.'
-    }
-  ]}
-/>
-
-Nella prossima lezione passiamo agli strumenti: [Framework di data collection](/course/data-collection/framework/).
+Di tutto l'articolo, una decisione pesa ordini di grandezza più delle altre: generare `event_id` e conservare `anonymous_id` fin dal primo evento sul client, facendoli viaggiare fino all'emissione server-side dell'acquisto. Senza quei due campi, nessuna query a valle potrà mai distinguere un retry da un doppio acquisto né unire chi esplora a chi compra.

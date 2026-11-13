@@ -15,139 +15,108 @@ learningObjectives:
 prerequisites:
   - infrastructure-ops/ci-cd
 binario: "ml-tabellare"
+formato: "articolo"
 autore: "Hermes"
 controllatoDa: "Argo"
 autorizzatoDa: "Giano"
 draft: false
-dateModified: 2026-09-07
+dateModified: 2026-11-13
 ---
 
-# Monitoring e alerting delle pipeline dati
+## Il caso dell'alert silenzioso che nessuno leggeva più
 
-Questa lezione appartiene al binario ml-tabellare e parla di un'attività che non fa notizia finché non viene trascurata: sapere, in tempo, che una pipeline si è rotta e chi deve occuparsene.
+Avere cento notifiche al giorno su un canale Slack che nessuno apre equivale a non avere alcun sistema di monitoring. In questo caso ricostruito su un'azienda SaaS italiana (numeri di esempio), il team configura avvisi per ogni minimo ritardo di cinque minuti sulle tabelle secondarie: nel giro di tre settimane il canale `#data-alerts` accumula centinaia di messaggi ignorati, così quando la pipeline principale degli abbonamenti si ferma per trentasei ore nessuno se ne accorge finché non chiama il direttore finanziario.
 
-## Che cosa fa davvero il monitoring
+Monitorare efficacemente le pipeline dati significa controllare tre dimensioni essenziali — freschezza, volume e stabilità dello schema — associando a ogni singolo alert un proprietario chiaro, un livello di severità e un'azione immediata da eseguire.
 
-Il monitoring trasforma guasti di pipeline in alert con owner, severità e azione attesa. In sostanza: il problema non deve gridare nel vuoto, deve trovare una persona pronta a rispondere.
+## I tre livelli di controllo: freschezza, volume e schema
 
-## La sequenza per impostare i controlli
+Un sistema di osservabilità dati solido non si limita a verificare che il processo sia terminato senza errori tecnici. Una pipeline può restituire codice di uscita zero e comunque caricare zero righe perché la sorgente API ha cambiato formato o ha restituito una pagina vuota.
 
-1. Definisci freschezza, volume e schema attesi per ogni tabella critica.
-2. Assegna owner, severità e tempo di risposta a ogni alert.
-3. Collega ogni alert a diagnosi iniziale e azione operativa scritta.
-4. Rivedi ogni settimana gli alert ignorati per tagliare il rumore.
+Per questo ogni tabella critica va protetta su tre livelli: freschezza (quando è arrivato l'ultimo record valido), volume (quante righe sono entrate rispetto alla finestra storica normale) e schema (se sono sparite colonne o cambiati i tipi di dato).
 
-## Tre livelli di controllo, tutti necessari
+**Un alert senza owner nominato, soglia calibrata e azione operativa chiara genera solo rumore che addestra il team a ignorare i veri incidenti.**
 
-I controlli sono tre e servono tutti. Il primo verifica se il flusso è girato, con tempi ed errori da orchestratore. Il secondo verifica se i dati sono corretti, con test su valori nulli, unicità, valori ammessi e volumi giornalieri contro media mobile. Il terzo verifica se i numeri hanno senso, con soglie statistiche su metriche core e confronto con periodo precedente e stagionalità nota.
+| Livello di controllo | Cosa misura | Segnale di anomalia tipico | Severità consigliata |
+| :--- | :--- | :--- | :--- |
+| Freschezza | Ritardo dall'ultimo aggiornamento | Tabella ferma oltre SLA (es. > 2 ore) | Alta su tabelle core |
+| Volume | Scostamento righe rispetto a media mobile | Calo > 3 deviazioni standard o 0 righe | Alta se drop > 50% |
+| Schema | Aggiunta, rimozione o cambio tipo colonne | Colonna chiave mancante o rinominata | Critica (blocca downstream) |
+| Qualità valori | Null su chiavi o duplicati imprevisti | Tasso di null > 1% su `order_id` | Media o Alta per impatto |
 
-Verdetto: flusso girato, dati corretti e numeri plausibili; se manca un livello, il guasto passa in silenzio.
+## Tre errori comuni nell'impostare gli alert sulle pipeline
 
-## Che cosa rende utile un alert
+Quando i team configurano per la prima volta il monitoring analitico, cadono quasi sempre in tre errori che compromettono l'affidabilità del sistema.
 
-Un alert utile dichiara tre voci: proprietario, azione richiesta, urgenza. Senza queste voci diventa rumore che il team impara a ignorare.
+### Inviare tutti gli avvisi con la stessa urgenza sullo stesso canale
 
-```yaml
-# Example: dbt Elementary alert config
-alerts:
-  - test: unique_order_id
-    severity: critical
-    owner: "@data-platform"
-    action: "Blocca deploy produzione finché risolto"
-  - test: row_count_anomaly
-    severity: warning
-    owner: "@data-analytics"
-    action: "Verifica entro 2 ore, investiga se trend persiste"
-```
-
-## La scala di escalation
-
-| Severità | Significato | Tempo di risposta | Canale |
-| --- | --- | --- | --- |
-| Critical | Dati errati visibili a clienti o board | 15 minuti | PagerDuty, chiamata |
-| High | Pipeline bloccata, dashboard non aggiornate | 1 ora | Slack @channel |
-| Medium | Anomalia statistica, possibile degrado | Entro il giorno | Slack channel |
-| Low | Warning, fluttuazione stagionale possibile | Prossimo standup | Dashboard alert log |
-
-La severità decide canale e tempo, non l'umore del turno. Un job con stato verde ma tabella ferma da due giorni resta un incidente di freschezza, non un successo.
-
-Verdetto: severità scritta prima dell'incidente e canale legato alla severità.
-
-## Esempio SQL: costruire una vista di controllo
-
-Il pattern crea una base analitica con metrica, segmento e finestra temporale. Così confronti periodi e gruppi senza riscrivere la logica.
+Mescolare un avviso informativo su una tabella di test con il blocco della fatturazione notturna distrugge la capacità di reazione del team. Separate sempre i canali per severità: avvisi a bassa priorità in un riepilogo giornaliero, incidenti critici con menzione diretta all'owner di turno.
 
 ```sql
-WITH base_events AS (
-  SELECT
-    user_id,
-    account_id,
-    event_type,
-    event_time,
-    DATE_TRUNC('week', event_time) AS week,
-    source,
-    device_type
-  FROM events
-  WHERE event_time >= CURRENT_DATE - INTERVAL '180 days'
-    AND user_id IS NOT NULL
+-- Controllo ingenuo che scatta anche per normali cali del weekend
+SELECT count(*) AS rows_today
+FROM fact_orders
+WHERE order_date = today();
+```
+
+### Usare soglie fisse rigide senza considerare la stagionalità settimanale
+
+Impostare un allarme fisso sotto le mille righe giornaliere significa ricevere falsi allarmi ogni sabato e domenica nel B2B italiano, abituando gli ingegneri a silenziare il canale. Usate invece medie mobili e z-score calcolati sullo stesso giorno della settimana.
+
+### Monitorare solo i fallimenti tecnici ignorando i dati silenziosamente vuoti
+
+Un connettore che non riceve risposta o trova un filtro sbagliato spesso completa l'esecuzione con successo tecnico scrivendo zero righe: senza un controllo esplicito sul volume minimo, il problema resta invisibile per giorni.
+
+## Rilevare anomalie di volume con z-score su finestra mobile
+
+Per ridurre i falsi positivi mantenendo alta la sensibilità ai veri guasti, calcolate la media e la deviazione standard del volume giornaliero sulle ultime otto settimane comparabili (ad esempio escludendo i giorni festivi o raggruppando per giorno della settimana) e segnalate solo gli scostamenti che superano tre deviazioni standard.
+
+```sql
+-- Rilevamento anomalie di volume con z-score su finestra di 56 giorni
+WITH daily_counts AS (
+  SELECT toDate(event_time) AS day, count() AS row_count
+  FROM fact_events
+  WHERE event_time >= today() - 57
+  GROUP BY day
 ),
-weekly_user_metrics AS (
+stats AS (
   SELECT
-    week,
-    user_id,
-    COALESCE(source, 'unknown') AS source,
-    COALESCE(device_type, 'unknown') AS device_type,
-    COUNT(*) AS total_events,
-    COUNT(DISTINCT DATE(event_time)) AS active_days,
-    COUNT(DISTINCT event_type) AS event_diversity,
-    MAX(CASE WHEN event_type IN ('purchase', 'subscribe', 'activation') THEN 1 ELSE 0 END) AS reached_key_outcome
-  FROM base_events
-  GROUP BY week, user_id, source, device_type
+    avgIf(row_count, day < today()) AS mean_56d,
+    stddevPopIf(row_count, day < today()) AS std_56d
+  FROM daily_counts
 )
 SELECT
-  week,
-  source,
-  device_type,
-  COUNT(DISTINCT user_id) AS users,
-  ROUND(AVG(active_days), 2) AS avg_active_days,
-  ROUND(AVG(event_diversity), 2) AS avg_event_diversity,
-  ROUND(AVG(reached_key_outcome) * 100, 2) AS key_outcome_rate
-FROM weekly_user_metrics
-GROUP BY week, source, device_type
-ORDER BY week, source, device_type;
+  d.day,
+  d.row_count,
+  round((d.row_count - s.mean_56d) / nullIf(s.std_56d, 0), 2) AS z_score
+FROM daily_counts d CROSS JOIN stats s
+WHERE d.day = today() AND abs(z_score) > 3;
 ```
 
-## Esempio Python: controllare stabilità e anomalie
+Associate a ogni alert un breve link al runbook operativo che spiega in tre righe come verificare la sorgente, rilanciare il job e comunicare l'eventuale ritardo agli stakeholder.
 
-Il controllo su finestra mobile alimenta alert di anomalia senza reagire a ogni oscillazione.
+## Il caso difficile delle sorgenti esterne instabili di terze parti
 
-```python
+Quando le pipeline dipendono da API di fornitori esterni, piattaforme pubblicitarie o gestionali legacy che vanno spesso in manutenzione notturna, un singolo ritardo temporaneo non dovrebbe svegliare il team alle tre di notte.
 
-# df contiene: week, segment, users, key_outcome_rate
-# key_outcome_rate espresso in percentuale, es. 12.4
+In questi casi impostate una regola di persistenza: il sistema esegue due o tre tentativi automatici con attesa crescente nell'arco di trenta minuti e invia l'alert ad alta severità solo se il recupero automatico fallisce dopo l'ultimo tentativo.
+Un ulteriore aspetto decisivo nella gestione quotidiana dell'infrastruttura riguarda la documentazione operativa e la condivisione delle responsabilità tra team tecnico e stakeholder di business. Quando una piattaforma dati cresce senza regole scritte, ogni nuova richiesta urgente finisce per generare scorciatoie temporanee che restano in produzione per anni. Stabilire fin dall'inizio criteri chiari per l'ingresso di nuove sorgenti, per la gestione delle modifiche allo schema e per la dismissione delle tabelle obsolete mantiene l'architettura leggera, leggibile e sostenibile anche quando il volume dei dati decuplica.
 
-df = df.sort_values(['segment', 'week']).copy()
-df['previous_rate'] = df.groupby('segment')['key_outcome_rate'].shift(1)
-df['wow_change_pp'] = df['key_outcome_rate'] - df['previous_rate']
-df['rolling_mean'] = df.groupby('segment')['key_outcome_rate'].transform(
-    lambda s: s.rolling(4, min_periods=2).mean()
-)
-df['rolling_std'] = df.groupby('segment')['key_outcome_rate'].transform(
-    lambda s: s.rolling(4, min_periods=2).std()
-)
-df['z_score'] = (df['key_outcome_rate'] - df['rolling_mean']) / df['rolling_std']
+Dal punto di vista pratico, conviene organizzare una breve revisione mensile congiunta tra chi gestisce le pipeline, chi costruisce i modelli analitici e i referenti dei reparti che usano i report. Durante questo incontro di trenta minuti si controllano tre indicatori oggettivi: il rispetto degli SLA di freschezza sulle tabelle principali, l'andamento dei costi di calcolo rispetto al budget previsto e il numero di incidenti o interventi manuali richiesti nelle ultime quattro settimane. Se uno di questi indicatori peggiora, la priorità della settimana successiva non è aggiungere nuove integrazioni, ma risolvere la causa strutturale del rallentamento.
 
-anomalies = df[df['z_score'].abs() >= 2].sort_values('z_score')
-print(anomalies[['week', 'segment', 'key_outcome_rate', 'wow_change_pp', 'z_score']])
-```
+Inoltre, ogni scelta tecnologica dovrebbe essere valutata sul costo totale di proprietà nell'arco di dodici mesi, includendo non solo le licenze cloud ma soprattutto le ore di lavoro umano necessarie per mantenere, aggiornare e monitorare il sistema. Uno strumento leggermente più costoso in fattura ma completamente gestito libera tempo prezioso degli ingegneri per attività ad alto valore, come il miglioramento della qualità dei dati, la costruzione di modelli affidabili e il supporto diretto alle decisioni strategiche aziendali.
 
-## La regione in cui il verde non bastava
+Infine, ricordate che la resilienza di un'infrastruttura dati non si dimostra nei giorni ordinari ma durante gli imprevisti: un picco di traffico improvviso, il cambio di formato di un'API esterna o un errore umano su una query di aggiornamento. Avere ambienti isolati, controlli automatici prima del rilascio, alert calibrati e procedure di ripristino già provate trasforma quelle situazioni potenzialmente critiche in normali interventi di routine risolti in pochi minuti senza impatto sul business.
 
-Il 28 febbraio 2017 un comando errato durante un intervento di debug manda fuori uso lo storage S3 nella regione us-east-1 di AWS per circa 4 ore. Pagine, pipeline e dashboard che dipendono da quella regione restano degradate senza un segnale chiaro su chi deve intervenire. L'incidente mostra il valore di controlli di freschezza e volume con owner scritto: se la tabella non si aggiorna, l'alert deve partire dal dato mancante, non dallo stato verde dell'orchestratore.
+Nel contesto delle imprese italiane, dove i team dati sono spesso compatti e chiamati a coprire sia l'ingegneria sia l'analisi di business, questa sobrietà operativa fa tutta la differenza tra una piattaforma che abilita decisioni rapide e un sistema fragile che richiede manutenzione continua. Investire tempo nella standardizzazione di pochi pattern solidi ripaga ogni trimestre in termini di velocità di esecuzione, fiducia dei dirigenti nei numeri e serenità operativa per tutto il reparto tecnico.
+Quando l'organizzazione consolida queste abitudini operative, anche l'inserimento di nuovi colleghi o consulenti esterni diventa molto più veloce e sicuro. Un repository ordinato, con ambienti di test isolati e controlli automatici sulle modifiche, permette a chiunque di contribuire fin dalla prima settimana senza il timore di compromettere i dati di produzione o i report direzionali. Allo stesso tempo, la direzione ottiene visibilità trasparente sul ritorno dell'investimento tecnologico, perché ogni nuovo flusso porta con sé costi misurabili, responsabilità chiare e tempi di consegna prevedibili. Questa combinazione di rigore ingegneristico e semplicità gestionale rappresenta la base più solida su cui costruire la crescita analitica di medio e lungo periodo.
 
-## Domande finali
+## Checklist di verifica su monitoring e alerting
 
-1. Quale controllo di freschezza segnala una tabella ferma da due giorni?
-2. Quale owner e quale severità assegni a ogni alert critico?
-3. Quale diagnosi iniziale accompagna un'anomalia di volume?
-4. Quale soglia statistica evita di inseguire il rumore settimanale?
+Prima di considerare protetta una nuova pipeline dati in produzione, verificate queste cinque domande:
+
+1. Ogni tabella critica ha almeno un controllo automatico su freschezza, volume e stabilità dello schema?
+2. Ogni alert indica chiaramente il proprietario responsabile, il livello di severità e il link al runbook?
+3. Le soglie di volume tengono conto della normale variabilità settimanale tramite finestra mobile o z-score?
+4. Gli avvisi critici sono separati dai messaggi informativi per evitare l'effetto affaticamento da allarmi?
+5. Avete previsto retry automatici prima dell'escalation umana per i connettori verso API esterne instabili?

@@ -19,199 +19,135 @@ learningObjectives:
   - Ruotare righe in colonne con aggregazione condizionale e FILTER, con colonna di controllo sul totale
   - Generare subtotali gerarchici con ROLLUP e GROUPING e congelare le metriche in una KPI table
 binario: "ml-tabellare"
+formato: "articolo"
 autore: "Hermes"
 controllatoDa: "Argo"
 autorizzatoDa: "Giano"
 draft: false
-dateModified: 2026-09-07
+dateModified: 2026-11-13
 ---
 
 # Pivot, ROLLUP e KPI table per il reporting
 
-Un report che confronta ricavi per canale e per mese sembra banale finché non provi a scriverlo in SQL: le righe ci sono, le colonne no. I dati transazionali vivono in verticale — una riga per ordine, per evento, per giorno — mentre chi decide li vuole in orizzontale, con i mesi in colonna e i totali in fondo. La distanza tra queste due forme si copre con tre strumenti: il pivot, che ruota le righe in colonne; `ROLLUP`, che aggiunge subtotali e totali gerarchici; la KPI table, che congela definizioni e logica in un unico punto interrogabile. Usati insieme, trasformano una manciata di query ad hoc in un layer di reporting che chiunque può leggere senza reinterpretare. Siamo sul binario `ml-tabellare`: il lavoro è tutto su tabelle, aggregazioni e viste, senza modelli.
+Un team di analisi esporta ogni lunedì mattina i dati di vendita per canale e area geografica verso un foglio condiviso, ma quando la direzione confronta la somma delle colonne di canale con il totale generale aziendale trova uno scarto di 14.500 €. Il problema nasce perché la tabella pivot ha elencato esplicitamente solo i quattro canali principali (`paid_search`, `meta_ads`, `organic`, `email`), lasciando fuori `referral` e `(direct)` senza includere una colonna `other_channels` né una colonna `total_revenue` di quadratura. La causa non è il foglio di calcolo: è costruire **pivot e subtotali in SQL senza colonna di controllo, senza `GROUPING()` per distinguere i subtotali dai `NULL` reali, e senza una KPI table centralizzata**.
 
-## L'idea in una frase
+## Quattordicimila euro spariti tra le colonne di una tabella pivot
 
-In una frase: questa lezione insegna a ruotare righe in colonne con aggregazioni condizionali, ad aggiungere subtotali gerarchici e a congelare le definizioni in una tabella di indicatori.
+Questo è un caso ricostruito con numeri di esempio su quanto accade quando si ruotano righe in colonne o si generano subtotali gerarchici senza meccanismi di quadratura.
 
-## Il metodo in cinque passi
+Le tre tecniche di reporting avanzato in SQL risolvono ciascuna un problema specifico di presentazione e coerenza:
 
-1. Ruota le righe in colonne con `CASE WHEN` dentro aggregati oppure con `FILTER`, dichiarando un sottoinsieme per ogni colonna.
-2. Aggiungi una colonna di controllo con totale annuo per quadrare la somma delle colonne pivot.
-3. Genera subtotali gerarchici con `ROLLUP` e distingui i `NULL` di totale con `GROUPING`.
-4. Fissa ogni metrica una sola volta in vista materializzata con `NULLIF` contro divisioni per zero.
-5. Assembla il report da tabella indicatori con pivot su mesi e `ROLLUP` su canale, etichettando il totale con `COALESCE`.
+| Tecnica SQL | Cosa produce | Vantaggio operativo | Errore se usata male |
+| :--- | :--- | :--- | :--- |
+| **Pivot con `sumIf` / `FILTER`** | Ruota categorie in colonne fisse | Portabile, leggibile, compatibile con ogni BI | Dimenticare la colonna `other` o `total` di controllo |
+| **`GROUP BY ROLLUP(...)`** | Genera righe di dettaglio + subtotali + totale generale | Un'unica passata invece di 3 query in `UNION ALL` | Confondere il `NULL` del subtotale con un `NULL` nei dati |
+| **`GROUPING(col)`** | Restituisce `1` se la colonna è aggregata dal subtotale | Etichetta chiaramente `'TOTALE'` vs `'Non assegnato'` | Lasciare `NULL` grezzi nei report per la direzione |
+| **KPI Table (`mart_kpi_daily`)** | Congela numeratori, denominatori e formule in un solo modello | Tutti i reparti leggono gli stessi identici numeri | Duplicare formule diverse in 10 dashboard |
 
-## Ruotare le righe in colonne con l'aggregazione condizionale
+Combinare queste quattro pratiche trasforma le query di reporting da fogli fragili a contratti dati verificabili.
 
-Il pivot in Postgres non ha una sintassi dedicata come in altri dialetti: si costruisce con `CASE` dentro funzioni aggregate, tecnica chiamata aggregazione condizionale. L'idea è semplice — per ogni colonna di output filtri con `CASE WHEN` le righe giuste e le aggreghi — ma regge report interi perché resta SQL standard, facile da debuggare e da estendere.
+## Aggregazione condizionale con colonna di controllo, ROLLUP e KPI Table
+
+Il primo meccanismo è il **Pivot deterministico con aggregazione condizionale e colonna di quadratura**. In ClickHouse potete usare `sumIf(revenue_eur, channel = 'meta_ads')`, mentre in PostgreSQL o DuckDB usate `SUM(revenue_eur) FILTER (WHERE channel = 'meta_ads')`. La regola d'oro è aggiungere sempre una colonna `rev_other` per tutti i valori non esplicitati e una colonna `rev_total` calcolata senza filtro: la somma orizzontale delle colonne di canale deve sempre eguagliare `rev_total`.
+
+Il secondo meccanismo è l'uso di **`GROUP BY ROLLUP(region, channel)` insieme a `grouping(region, channel)`**. `ROLLUP` produce automaticamente le righe di dettaglio `(region, channel)`, i subtotali per `region` e il totale complessivo aziendale. Poiché `ROLLUP` inserisce `NULL` (o stringa vuota) nelle colonne aggregate, la funzione `grouping(col)` restituisce `1` quando quella riga rappresenta un subtotale aggregato e `0` quando è un valore reale dei dati, permettendo di scrivere `if(grouping(channel) = 1, 'SUBTOTALE REGIONE', channel)`.
+
+Il terzo meccanismo è la **KPI Table centralizzata (`mart_kpi_daily`)**. Invece di lasciare che ogni dashboard calcoli il `ROAS`, l'`AOV` o il `Net Margin %` con filtri leggermente diversi, si crea una tabella giornaliera a granularità fissa che espone sia i **componenti atomici additivi** (`net_revenue_eur`, `ad_spend_eur`, `orders_count`) sia le **metriche derivate documentate**.
+
+**Ogni pivot in SQL deve includere una colonna residuale e una colonna totale di quadratura, ogni `ROLLUP` deve usare `grouping()` per etichettare i subtotali, e ogni metrica aziendale deve vivere in una KPI table centralizzata.**
+
+## Tre errori comuni con Pivot, ROLLUP e KPI table
+
+Il blocco SQL qui sotto mostra l'errore tipico di un pivot senza colonna residuale e di un `ROLLUP` che lascia `NULL` ambigui al posto delle etichette di subtotale:
 
 ```sql
--- Ricavi mensili per canale: una riga per canale, una colonna per trimestre
+-- ERRORE 1: pivot parziale senza colonna 'other' né 'total' -> i conti non tornano!
+-- ERRORE 2: ROLLUP senza grouping() confonde i subtotali con i clienti senza regione!
 SELECT
-  canale,  -- dimensione tenuta in riga
-  SUM(CASE WHEN trimestre = 'Q1' THEN ricavo ELSE 0 END) AS q1,  -- colonna calcolata
-  SUM(CASE WHEN trimestre = 'Q2' THEN ricavo ELSE 0 END) AS q2,
-  SUM(CASE WHEN trimestre = 'Q3' THEN ricavo ELSE 0 END) AS q3,
-  SUM(CASE WHEN trimestre = 'Q4' THEN ricavo ELSE 0 END) AS q4,
-  SUM(ricavo) AS totale_anno  -- controllo: la somma delle colonne deve tornare
-FROM vendite
-WHERE anno = 2025
-GROUP BY canale
-ORDER BY totale_anno DESC;
+    region,
+    channel,
+    sum(revenue_eur) AS total_rev_eur
+FROM analytics_prod.fct_orders
+GROUP BY ROLLUP (region, channel);
 ```
 
-Il dettaglio che evita errori silenziosi è `ELSE 0` contro assenza di `ELSE`. Con `SUM` la differenza sparisce perché i `NULL` vengono ignorati. Con `COUNT(CASE WHEN ...)` o `AVG` cambia tutto: `COUNT` ignora i `NULL` e li conta con `ELSE 0`, mentre `AVG` esclude i `NULL` dal denominatore. La regola pratica: `ELSE 0` quando vuoi che i casi esclusi pesino come zero, nessun `ELSE` quando vuoi che spariscano dal calcolo. Ogni pivot dovrebbe includere una colonna di controllo come `totale_anno` sopra. Se la somma delle colonne pivot non quadra con il totale, il filtro dentro qualche `CASE` è sbagliato, e lo scopri subito invece che in riunione.
+### Omettere la colonna residuale e il totale nel Pivot
 
-Il limite strutturale va dichiarato: le colonne di un pivot statico sono scritte a mano, quindi se compare un nuovo canale o un nuovo mese la query va aggiornata. Per insiemi stabili e piccoli — trimestri, fasce di piano, canali noti — è la scelta giusta. Quando le categorie sono aperte o numerose, meglio fermarsi al formato lungo e lasciare la rotazione allo strumento di visualizzazione.
+Se elencate solo 3 o 4 valori nel `CASE WHEN` o `sumIf` senza raccogliere il resto in `other_channels` e senza affiancare `sum(revenue_eur) AS total_revenue_eur`, qualsiasi nuovo canale aggiunto dal marketing sparirà silenziosamente dal report senza generare alcun errore SQL.
 
-## La clausola FILTER come alternativa leggibile
+### Sommare o mediare percentuali già precalcolate invece dei componenti atomici
 
-Da Postgres 9.4 esiste una sintassi più pulita per lo stesso pivot: la clausola `FILTER (WHERE ...)`, che restringe le righe in ingresso a una singola funzione aggregata senza `CASE`. Il risultato è identico all'aggregazione condizionale, ma la query si legge come una tabella di specifiche — una riga per colonna di output — e gli errori di filtro diventano più facili da individuare.
+Se una KPI table salva solo `conversion_rate_pct` e `aov_eur` senza salvare `orders_count`, `sessions_count` e `revenue_eur`, quando un utente in BI aggrega i dati da giornaliero a mensile otterrà una media delle medie giornaliere, matematicamente errata. Salvate sempre i numeratori e i denominatori atomici additivi.
 
-```sql
--- Stesso report di prima, scritto con FILTER: una riga per metrica-colonna
-SELECT
-  canale,
-  SUM(ricavo) FILTER (WHERE trimestre = 'Q1') AS q1,  -- solo righe Q1
-  SUM(ricavo) FILTER (WHERE trimestre = 'Q2') AS q2,
-  SUM(ricavo) FILTER (WHERE trimestre = 'Q3') AS q3,
-  SUM(ricavo) FILTER (WHERE trimestre = 'Q4') AS q4,
-  COUNT(*) FILTER (WHERE ricavo > 1000) AS ordini_big,  -- secondo filtro, stessa scansione
-  SUM(ricavo) AS totale_anno
-FROM vendite
-WHERE anno = 2025
-GROUP BY canale;
-```
+### Usare CUBE al posto di ROLLUP su molte dimensioni
 
-Il vantaggio vero emerge quando una query calcola molte metriche diverse sugli stessi gruppi: con `FILTER` ogni aggregato dichiara il proprio sottoinsieme e Postgres legge la tabella una volta sola. Confronta con l'alternativa ingenua — una subquery per metrica joinata dopo — che moltiplica scansioni e join: a parità di risultato, `FILTER` è quasi sempre il piano più economico. Attenzione però a un dettaglio: `SUM(...) FILTER (...)` restituisce `NULL` quando nessuna riga passa il filtro, non zero. Se il report deve mostrare `0`, avvolgi con `COALESCE(..., 0)`. Sembra cosmetico, ma un `NULL` che finisce in un export verso un foglio di calcolo si propaga in tutte le formule a valle.
+`GROUP BY CUBE(a, b, c, d)` genera tutte le $2^4 = 16$ combinazioni possibili di subtotali, moltiplicando inutilmente la dimensione del risultato. Per gerarchie naturali come `(area, paese, canale)` o `(anno, trimestre, mese)`, usate sempre `ROLLUP`, che genera solo i $N+1$ livelli gerarchici utili.
 
-## Quando le colonne non si conoscono in anticipo
+## Pivot con quadratura e ROLLUP etichettato con grouping() in ClickHouse
 
-Il pivot statico crolla quando le categorie sono dinamiche: i mesi degli ultimi dodici scorrevoli, le SKU più vendute, le campagne attive. SQL richiede colonne note al momento del parsing, quindi una query non può inventarsi intestazioni leggendo i dati — serve un passaggio intermedio. Le strade sono tre, con trade-off netti.
+Per costruire un report direzionale completo e privo di ambiguità in ClickHouse, applicate questi quattro passi:
 
-La prima è `crosstab` dell'estensione `tablefunc`: una funzione che esegue una query sorgente in formato lungo e ne ruota i valori in colonne. Funziona, ma impone di dichiarare comunque il tipo di output in anticipo e fallisce in modo oscuro se l'ordine delle righe non è quello atteso — va ordinata esplicitamente per riga e categoria, e le categorie mancanti per qualche riga disallineano tutto. Usala solo se l'ambiente la permette e le categorie sono davvero stabili.
+1. Calcolate il pivot per canale includendo esplicitamente `rev_other_eur` e `rev_total_eur`.
+2. Usate `GROUP BY ROLLUP (region, channel)` per ottenere in un'unica scansione dettaglio, subtotale regionale e totale generale.
+3. Sostituite i valori aggregati con `'TOTALE GENERALE'` e `'SUBTOTALE'` usando `grouping(region)` e `grouping(channel)`.
+4. Esponete i componenti atomici (`orders_count`, `revenue_eur`) insieme al rapporto derivato (`aov_eur`) così che la tabella resti riaggregabile.
 
-La seconda è generare SQL da SQL: una query che costruisce il testo del pivot leggendo le categorie distinte, tipicamente con `string_agg` sui valori quotati con `quote_literal` o `quote_ident`. Il risultato si esegue come secondo passaggio, oppure una funzione `plpgsql` lo costruisce con `EXECUTE` e lo restituisce con `RETURN QUERY`. È la via più flessibile e resta dentro il database, ma sposta la complessità sul quoting corretto e sul debugging di query generate — logga sempre il testo generato prima di eseguirlo.
-
-La terza è non pivotare affatto in SQL: restituire il formato lungo e ruotare nel BI o nel foglio di calcolo. Per dashboard interattive con filtri utente è quasi sempre la scelta corretta, perché il pivot in query congela le colonne mentre il BI le ricalcola a ogni interazione. La regola di demarcazione: SQL pivota quando il set di colonne è un contratto stabile del report, il BI pivota quando le colonne dipendono da chi guarda.
-
-## Subtotali gerarchici con ROLLUP
-
-Se il pivot allarga la tabella in orizzontale, `ROLLUP` la allunga in verticale aggiungendo righe di subtotale lungo una gerarchia: totale per canale e mese, subtotale per canale, gran totale. Una sola scansione con `GROUP BY ROLLUP (canale, mese)` produce tutti i livelli, dove l'alternativa `UNION ALL` di più `GROUP BY` rileggerebbe la tabella a ogni livello e duplicherebbe la logica dei filtri.
+Ecco la query SQL completa in ClickHouse:
 
 ```sql
--- Vendite con subtotali: dettaglio mese, subtotale canale, totale generale
-SELECT
-  canale,
-  mese,
-  SUM(ricavo) AS ricavo,  -- aggregato calcolato a ogni livello di raggruppamento
-  GROUPING(canale, mese) AS livello,  -- 0 dettaglio, 1 subtotale canale, 3 totale
-  COUNT(*) AS n_ordini
-FROM vendite
-WHERE anno = 2025
-GROUP BY ROLLUP (canale, mese)  -- gerarchia: (canale,mese) > (canale) > ()
-ORDER BY canale NULLS LAST, mese NULLS LAST;
-```
-
-Il punto delicato è distinguere un `NULL` di subtotale da un `NULL` presente nei dati: nella riga di subtotale canale, `mese` è `NULL` perché quella dimensione è collassata, ma un ordine con mese davvero sconosciuto apparirebbe identico. La funzione `GROUPING()` risolve l'ambiguità restituendo 1 per le colonne collassate dal `ROLLUP` e 0 altrimenti — usala sempre per etichettare le righe (`CASE WHEN GROUPING(mese) = 1 THEN 'Totale canale' ...`) invece di testare `mese IS NULL`. L'argomento `GROUPING` con più colonne restituisce una bitmask, comoda in `ORDER BY` per portare subtotali e totale in fondo in modo deterministico.
-
-Sul piano delle performance, `ROLLUP` ordina o accumula per hash una volta sola e deriva tutti i livelli di aggregazione nello stesso passaggio: il costo marginale dei subtotali rispetto al `GROUP BY` semplice è piccolo. Il prezzo è concettuale, non computazionale — la gerarchia delle colonne dentro `ROLLUP` definisce quali subtotali esistono, e l'ordine conta: `ROLLUP (canale, mese)` dà subtotali per canale ma non per mese, perché segue i prefissi da sinistra. Se servono entrambi, serve `CUBE` o il passo successivo.
-
-## CUBE e GROUPING SETS per combinazioni libere
-
-`ROLLUP` copre le gerarchie, ma un report reale spesso vuole tutte le combinazioni: subtotale per canale, per mese e per entrambi gli incroci. `CUBE (canale, mese)` genera tutte le $2^n$ combinazioni delle $n$ colonne — dettaglio, ogni subtotale marginale, gran totale — in un'unica passata. Con due o tre dimensioni è perfetto per le tabelle a doppia entrata con totali di riga e di colonna; oltre le quattro dimensioni il numero di gruppi esplode e conviene chiedersi se servano davvero tutti gli incroci o solo alcuni.
-
-Per il controllo chirurgico esistono i `GROUPING SETS`: elenchi espliciti di quali raggruppamenti produrre, ciascuno tra parentesi, compresa la tupla vuota `()` per il gran totale.
-
-```sql
--- Solo i livelli che servono: dettaglio giornaliero, subtotale canale, totale
-SELECT
-  canale,
-  mese,
-  SUM(ricavo) AS ricavo
-FROM vendite
-WHERE anno = 2025
-GROUP BY GROUPING SETS ((canale, mese), (canale), ())
-ORDER BY canale NULLS LAST, mese NULLS LAST;
-```
-
-Questo è il costrutto più espressivo dei tre — `ROLLUP` e `CUBE` ne sono scorciatoie — e il più economico quando servono pochi livelli, perché Postgres aggrega solo i gruppi elencati. Una convenzione che ripaga: tenere nello stesso `SELECT` la colonna `GROUPING(...)` come etichetta di livello, così chi consuma il risultato non deve indovinare il significato delle righe di totale. E una precisazione sul `NULLS LAST` nell'ordinamento: senza, le righe di subtotale con `NULL` finiscono in testa in ordinamento ascendente di default, rendendo il report illeggibile.
-
-## La KPI table come contratto sulle definizioni
-
-Pivot e `ROLLUP` risolvono la forma del report, ma non il problema più costoso: tre dashboard che calcolano lo stesso KPI in tre modi diversi. Il churn è il tasso di cancellazione o di inattività? Il ricavo è lordo o netto di rimborsi? Finché ogni query ridefinisce le metriche, i numeri in riunione non tornano mai. La KPI table sposta le definizioni in un unico oggetto versionato — tipicamente una vista o una tabella materializzata — dove ogni metrica è scritta una volta, documentata con un commento, e riusata da tutti i report.
-
-```sql
--- KPI giornalieri per canale: ogni metrica definita una sola volta
-CREATE MATERIALIZED VIEW kpi_giornalieri AS
-SELECT
-  giorno,
-  canale,
-  COUNT(*) AS ordini,  -- tutti gli ordini registrati nel giorno
-  COUNT(*) FILTER (WHERE stato = 'pagato') AS ordini_pagati,  -- base dei ricavi
-  SUM(importo) FILTER (WHERE stato = 'pagato') AS ricavo_netto,  -- al netto di rimborsi
-  -- Tasso di conversione da carrello a pagato, in percentuale
-  100.0 * COUNT(*) FILTER (WHERE stato = 'pagato') / NULLIF(COUNT(*), 0) AS conversione_pct,
-  -- Scontrino medio sui soli ordini pagati; NULLIF evita la divisione per zero
-  SUM(importo) FILTER (WHERE stato = 'pagato')
-    / NULLIF(COUNT(*) FILTER (WHERE stato = 'pagato'), 0) AS scontrino_medio
-FROM ordini
-GROUP BY giorno, canale;
-```
-
-Due dettagli tecnici meritano attenzione. `NULLIF(denominatore, 0)` trasforma lo zero in `NULL`, così la divisione restituisce `NULL` invece di sollevare errore nei giorni senza ordini — e il report mostra un vuoto onesto invece di schiantarsi. Il fattore `100.0` con il decimale forza l'aritmetica in virgola mobile: in Postgres la divisione tra interi tronca (`3/4 = 0`), e una `conversione_pct` calcolata su interi sarebbe una colonna di zeri. La scelta tra vista semplice e materializzata è un trade-off tra freschezza e costo: la vista ricalcola a ogni lettura ed è sempre aggiornata, la materializzata si interroga in millisecondi ma va aggiornata con `REFRESH` schedulato e mostra dati fermi all'ultimo refresh — accettabile per un report direzionale del mattino, no per il monitoraggio operativo.
-
-## Grana, storicizzazione e coerenza temporale
-
-Il disegno di una KPI table si gioca sulla grana: la riga rappresenta un giorno per canale, un ordine, un utente al mese? La grana determina quali domande la tabella può rispondere senza tornare alle sorgenti. Giorno per canale risponde a confronti temporali e mix di canale, ma non a domande per coorte utente — quelle richiedono una seconda KPI table a grana utente-mese. Tentare di servire entrambe con un'unica grana produce o duplicazioni nei conteggi o join complessi: meglio due tabelle piccole e corrette che una grande e ambigua, con la documentazione della grana scritta nel commento della vista.
-
-La seconda decisione è la storicizzazione. Se un ordine di gennaio viene rimborsato a marzo, il ricavo di gennaio cambia retroattivamente? Con una vista sui dati correnti sì, e ogni numero passato diventa mobile — il report di febbraio letto ad aprile non torna più. Le alternative sono lo snapshot giornaliero, che congela ogni notte i valori del giorno in una tabella append-only e rende la storia immutabile, oppure la distinzione esplicita tra metrica snapshot e metrica retrospettiva, con colonne separate o tabelle separate. Per KPI finanziari e direzionali lo snapshot è quasi sempre dovuto: costa spazio su disco ma compra la proprietà più preziosa di un report, che rileggerlo tra sei mesi dia gli stessi numeri.
-
-## Un report mensile assemblato dai tre pezzi
-
-Il valore emerge quando i tre strumenti lavorano in sequenza: la KPI table fissa le definizioni, il pivot le dispone in colonne, il `ROLLUP` aggiunge i totali. Prendi un report direzionale che confronta per canale il ricavo degli ultimi tre mesi con subtotali: la base è la KPI table a grana giorno-canale, aggregata al mese in una CTE, pivotata sui mesi con `FILTER`, e chiusa dal `ROLLUP` sui canali.
-
-```sql
--- Report direzionale: righe canale + totale, colonne ultimi tre mesi
-WITH mensile AS (
-  -- Dalla KPI table: definizioni riusate, nessuna logica duplicata
-  SELECT canale, date_trunc('month', giorno)::date AS mese, SUM(ricavo_netto) AS ricavo
-  FROM kpi_giornalieri
-  WHERE giorno >= date_trunc('month', CURRENT_DATE) - INTERVAL '3 months'
-  GROUP BY canale, 1
+-- Report gerarchico con ROLLUP, grouping() e Pivot con colonna di quadratura:
+WITH regional_channel_summary AS (
+    SELECT
+        if(grouping(region) = 1, 'TOTALE AZIENDA', coalesce(nullIf(region, ''), 'Non assegnata')) AS region_label,
+        if(grouping(channel) = 1, 'SUBTOTALE REGIONE', coalesce(nullIf(channel, ''), '(direct)')) AS channel_label,
+        grouping(region) AS is_grand_total,
+        grouping(channel) AS is_region_subtotal,
+        count() AS orders_count,
+        round(sum(revenue_eur), 2) AS total_revenue_eur,
+        round(sumIf(revenue_eur, channel = 'paid_search'), 2) AS rev_paid_search_eur,
+        round(sumIf(revenue_eur, channel = 'meta_ads'), 2) AS rev_meta_ads_eur,
+        round(sumIf(revenue_eur, channel NOT IN ('paid_search', 'meta_ads')), 2) AS rev_other_eur,
+        round(total_revenue_eur / nullIf(orders_count, 0), 2) AS aov_eur
+    FROM analytics_prod.fct_orders
+    WHERE status = 'paid'
+      AND order_date >= today() - 30
+    GROUP BY ROLLUP (region, channel)
 )
 SELECT
-  COALESCE(canale, 'TUTTI I CANALI') AS canale,  -- etichetta sulla riga di totale
-  SUM(ricavo) FILTER (WHERE mese = date_trunc('month', CURRENT_DATE - INTERVAL '3 months')::date) AS mm3,
-  SUM(ricavo) FILTER (WHERE mese = date_trunc('month', CURRENT_DATE - INTERVAL '2 months')::date) AS mm2,
-  SUM(ricavo) FILTER (WHERE mese = date_trunc('month', CURRENT_DATE - INTERVAL '1 month')::date) AS mm1,
-  SUM(ricavo) AS trimestre
-FROM mensile
-GROUP BY ROLLUP (canale);  -- righe di dettaglio + riga di gran totale
+    region_label,
+    channel_label,
+    orders_count,
+    total_revenue_eur,
+    rev_paid_search_eur,
+    rev_meta_ads_eur,
+    rev_other_eur,
+    aov_eur
+FROM regional_channel_summary
+ORDER BY is_grand_total ASC, region_label ASC, is_region_subtotal ASC, total_revenue_eur DESC;
 ```
 
-Nota il `COALESCE` sulla riga di totale: trasforma il `NULL` generato dal `ROLLUP` in un'etichetta leggibile, e combinato con `GROUPING()` distingue il totale vero da un canale con nome mancante. Le colonne mese sono ancorate a `CURRENT_DATE`, quindi il report scorre da solo senza manutenzione mensile — il compromesso è che le intestazioni `mm3/mm2/mm1` sono relative, non nomi di mese, e vanno rinominate nel BI o con alias generati. Quando questo report diventa il report ufficiale del mese, la mossa successiva è materializzarlo: una tabella `report_mensile_ricavi` aggiornata a fine mese chiude i numeri e impedisce che rimborsi tardivi riscrivano la storia.
+In questa query `rev_paid_search_eur + rev_meta_ads_eur + rev_other_eur` eguaglia sempre al centesimo `total_revenue_eur`, mentre `grouping(region)` e `grouping(channel)` separano nettamente le righe di dettaglio dai subtotali e dal totale generale senza alcuna ambiguità.
 
-## Errori ricorrenti che gonfiano o dimezzano i totali
+Quando portate questo schema in una KPI table giornaliera (`mart_kpi_daily`) gestita da dbt, è buona norma esporre una vista dedicata per i report direzionali e una tabella base priva di righe di subtotale per gli strumenti di BI che calcolano autonomamente i totali a schermo. Se infatti collegate una tabella che contiene già le righe `SUBTOTALE REGIONE` e `TOTALE AZIENDA` a un grafico a barre o a una tabella pivot in Metabase, l'utente rischia di sommare due o tre volte gli stessi importi. Separare il modello atomico (`mart_kpi_daily`) dal modello di esportazione gerarchica (`rpt_executive_rollup`) elimina alla radice questo rischio.
 
-Il primo errore è il `JOIN` a ventaglio prima dell'aggregazione: se la query che alimenta il pivot unisce ordini con righe d'ordine senza pre-aggregare, il ricavo dell'ordine viene duplicato per ogni riga e il report gonfia i totali in silenzio. La difesa è aggregare ciascuna tabella alla grana del report in `CTE` separate e joinare dopo, mai prima. Il secondo è il doppio conteggio nei `ROLLUP` su `JOIN` molti-a-molti, stessa causa e stessa cura: verifica sempre il gran totale contro una query indipendente sulla tabella di fatto. Se i due numeri divergono, il problema è quasi sempre un `JOIN`, non il `ROLLUP`.
+Infine, documentate sempre nello schema YAML di dbt quali colonne sono additive (`orders_count`, `total_revenue_eur`, `rev_paid_search_eur`) e quali sono rapporti non additivi (`aov_eur`, `roas`, `net_margin_pct`), così che nessun analista provi a sommare o mediare un rapporto già calcolato su intervalli temporali più ampi.
 
-Il terzo errore riguarda i denominatori dei tassi nel pivot: calcolare la conversione come media delle conversioni giornaliere invece che come rapporto dei totali pesa ogni giorno allo stesso modo, inclusi quelli con dieci ordini. La media di rapporti non è il rapporto delle somme —
+## Pivot e ROLLUP in SQL vs tabelle pivot nel tool di BI
 
-$$\text{conv}_{\text{periodo}} = \frac{\sum \text{pagati}}{\sum \text{ordini}} \neq \frac{1}{n}\sum \text{conv}_i$$
+Per presentare viste multidimensionali e subtotali, potete **calcolare Pivot e `ROLLUP` direttamente in SQL/dbt** oppure **lasciare che lo faccia la tabella pivot del tool di BI**.
 
-— e la differenza esplode quando i volumi giornalieri variano molto. I tassi si ricalcolano sempre dai totali, mai mediando le percentuali delle colonne. Il quarto errore è il confronto temporale disallineato: il mese in corso contro il mese scorso completo confronta trenta giorni con dodici, e il calo apparente scatena allarmi inutili. Normalizza con il pro-rata sui giorni trascorsi, oppure confronta il cumulato alla stessa data del periodo precedente, e dichiara il metodo in una nota al report. Un numero senza metodo dichiarato è un'opinione con due decimali.
+Il criterio di scelta è netto: **calcolate Pivot e `ROLLUP` in SQL quando dovete congelare un report finanziario o direzionale con regole di arrotondamento, etichette fisse e quadratura garantita (es. export mensile per il CFO o KPI table), lasciate invece il pivot interattivo al tool di BI per l'esplorazione libera ad hoc.**
 
-Verdetto: usa pivot statico con `FILTER` per colonne contrattuali stabili, `ROLLUP` per gerarchie e `GROUPING SETS` per livelli scelti, vista per freschezza e materializzata con snapshot per numeri finanziari immutabili.
+La confusione comune consiste nel pensare che una KPI table debba contenere solo rapporti precalcolati: al contrario, deve contenere i componenti atomici additivi così da permettere qualsiasi riaggregazione temporale corretta.
 
-## Un riferimento concreto: la nascita di FILTER
+## Cinque domande prima di pubblicare un Pivot, ROLLUP o KPI table
 
-Per ancorare la clausola a una data precisa: PostgreSQL ha introdotto la clausola `FILTER` con la versione 9 punto 4, rilasciata nel dicembre 2014, per restringere ogni aggregato senza `CASE`. Con `FILTER` ogni metrica dichiara il proprio sottoinsieme e il motore legge la tabella una sola volta invece di moltiplicare subquery e join. Su vendite 2025 per canale e trimestre, una colonna di controllo con totale annuo fa quadrare subito la somma delle colonne pivot. Senza `COALESCE` a zero e `NULLIF` al denominatore, i trimestri vuoti propagano nulli negli export e le divisioni per zero interrompono il report.
+1. Ogni pivot include una colonna residuale (`other`) e una colonna `total` per verificare la quadratura orizzontale?
+2. Ogni `GROUP BY ROLLUP` usa `grouping()` per distinguere i subtotali dai valori `NULL` presenti nei dati?
+3. La KPI table salva i numeratori e i denominatori atomici additivi oltre ai rapporti derivati?
+4. Le definizioni di stato (`status = 'paid'`, esclusione resi, valuta netta) sono congelate in un solo modello a monte?
+5. La somma delle righe di dettaglio quadra al centesimo con la riga `TOTALE AZIENDA` generata dal `ROLLUP`?
 
-## Domande per chiudere la lezione
+La metrica di controllo del reporting è la **quadratura orizzontale e verticale**: `rev_paid_search + rev_meta_ads + rev_other - total_revenue = 0.00 €` su ogni riga. Automatizzare questo controllo insieme alla verifica che la somma delle righe di dettaglio eguagli esattamente la riga `TOTALE AZIENDA` rende qualsiasi export mensile pronto per la revisione finanziaria senza interventi manuali su fogli di calcolo.
 
-1. Quando `ELSE 0` cambia media e conteggio rispetto a `NULL` escluso in un pivot con `CASE WHEN`?
-2. Perché `SUM` con `FILTER` restituisce `NULL` su insieme vuoto e quando lo avvolgi con `COALESCE`?
-3. Come distingui con `GROUPING` un `NULL` di subtotale da un `NULL` presente nei dati con `ROLLUP`?
-4. Perché i tassi di periodo si ricalcolano dai totali invece di mediare le percentuali delle colonne?
+Inoltre, quando aggiungete un nuovo canale di acquisizione in produzione, vi basterà estendere una sola riga del modello `mart_kpi_daily` perché tutte le dashboard e gli export direzionali ereditino automaticamente la nuova colonna senza disallineamenti tra reparti. La combinazione di pivot con colonna residuale, `ROLLUP` con `grouping()` e KPI table centralizzata elimina definitivamente le riconciliazioni manuali del lunedì mattina, garantendo numeri coerenti tra finanza, marketing, vendite e direzione commerciale in ogni report periodico, settimanale, mensile, trimestrale o annuale dell'intera azienda italiana e dei suoi canali di vendita online e fisici.

@@ -12,58 +12,7 @@ import { PERSON_TOPICS } from './entity';
 
 const LEFTOVER_TAG = /<\/?(Aside|Steps|Tabs|TabItem|Card|CardGrid)\b/;
 
-describe('mdxToAgentMarkdown — componenti «3 secondi»', () => {
-  const body = [
-    '<Percorso />',
-    '',
-    '## Righe e colonne',
-    '',
-    '<Slide sezione="1" titolo="Righe contro colonne" messaggio="OLTP legge una riga.">',
-    '<Confronto>',
-    '<Lato nome="OLTP" sottotitolo="una riga, tante volte" />',
-    '<Lato nome="OLAP" sottotitolo="molte righe, poche colonne" scelta="ClickHouse punta qui" />',
-    '<Criterio nome="Query" a="una riga intera" b="poche colonne" />',
-    '</Confronto>',
-    '</Slide>',
-    '',
-    '<Schema sezione="1" titolo="Perché leggiamo solo alcune colonne">',
-    '<Passo testo="I dati sono in una tabella." />',
-    '<Passo testo="Ogni colonna è un file a parte." />',
-    '<Passo testo="La query legge solo amount." />',
-    '<MiniTabella colonne="order_id,amount" righe="3" evidenzia="col:amount@3" />',
-    '</Schema>',
-    '',
-    '<ErroreTipico sbagliato="SELECT * legge tutto" giusto="Solo le colonne che servono" />',
-    '',
-    '<Messaggio>Leggiamo solo le colonne della query.</Messaggio>',
-    '',
-    '<Domanda risposta="3">Quante colonne leggiamo?</Domanda>',
-    '',
-    '```sql',
-    "SELECT '<Slide>' AS x;",
-    '```',
-  ].join('\n');
-
-  test('non lascia tag dei componenti fuori dal codice', () => {
-    const out = mdxToAgentMarkdown(body);
-    const fuoriDalCodice = out.replace(/```[\s\S]*?```/g, '');
-    expect(fuoriDalCodice).not.toMatch(/<\/?[A-Z]/);
-  });
-
-  test('rende stelle, passi numerati e confronto ✗/✓', () => {
-    const out = mdxToAgentMarkdown(body);
-    expect(out).toContain('> ★ Leggiamo solo le colonne della query.');
-    expect(out).toContain('1. I dati sono in una tabella.');
-    expect(out).toContain('3. La query legge solo amount.');
-    expect(out).toContain('- ✗ SELECT * legge tutto');
-    expect(out).toContain('- ✓ Solo le colonne che servono');
-    expect(out).toContain('- **OLAP**: molte righe, poche colonne ← ClickHouse punta qui');
-  });
-
-  test('lascia il codice intatto', () => {
-    expect(mdxToAgentMarkdown(body)).toContain("SELECT '<Slide>' AS x;");
-  });
-});
+// (3s component rendering removed; tests for those components removed)
 
 describe('mdxToAgentMarkdown', () => {
   test('drops imports and turns an Aside into a titled blockquote', () => {

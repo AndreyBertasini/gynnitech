@@ -16,96 +16,150 @@ learningObjectives:
   - Eseguire una code review su modelli dati con checklist di test, layer e naming
   - Isolare gli ambienti di sviluppo con schemi personali per sviluppatore
 binario: "ml-tabellare"
+formato: "articolo"
 autore: "Hermes"
 controllatoDa: "Argo"
 autorizzatoDa: "Giano"
 draft: false
-dateModified: 2026-09-07
+dateModified: 2026-11-13
 ---
 
 # Git workflow e code review per progetti dbt
 
-Questa lezione appartiene al binario ml-tabellare: qui le tabelle sono il codice che un team modifica insieme, e la domanda è come farlo senza rompere nulla. La risposta sta in un workflow Git disciplinato e in una revisione che guarda i dati, non solo la sintassi.
+Due analytics engineer lavorano contemporaneamente al progetto dbt: il primo modifica direttamente il branch `main` cambiando la formula dello sconto in `stg_shop__orders`, mentre il secondo apre una pull request da 45 file rimasta aperta per tre settimane che tocca sia il marketing sia la finanza senza eseguire i test sui modelli a valle. Il commit diretto su `main` introduce un errore di divisione per zero che fa fallire il run notturno di produzione alle 03:00; il merge della pull request gigante sovrascrive due settimane di correzioni dei colleghi. La causa non è Git in sé: è non adottare un **workflow Trunk-Based con feature branch corti, protezione del branch `main`, Slim CI (`state:modified+`) e una checklist rigorosa di Code Review per i dati**.
 
-## L'idea in una frase
+## Commit diretti su main e pull request da quarantacinque file che rompono la notte
 
-Il workflow Git applicato a dbt tratta ogni modifica ai modelli come codice revisionato, così nessun numero cambia in produzione senza una pull request testata e approvata. In pratica: i dati si muovono alla velocità della fiducia, non della fretta.
+Questo è un caso ricostruito con numeri di esempio su quanto accade quando un team di dati cresce oltre una singola persona senza adottare la disciplina di collaborazione dell'ingegneria del software. Il team gestisce un repository dbt con 180 modelli su ClickHouse.
 
-## La sequenza da seguire
+Senza regole di workflow Git e di revisione del codice si verificano tre incidenti ricorrenti:
+1. Per fare una "modifica veloce di una riga" chiesta su Slack alle 17:30, un analista fa `git push origin main` senza aprire una pull request né lanciare `dbt build`: ha rinominato `discount_eur` in `promo_discount_eur` dentro `stg_shop__orders` senza accorgersi che tre modelli `fct_` a valle leggevano il vecchio nome. Alle 03:00 di notte l'intera pipeline di produzione va in crash.
+2. Un collega lavora per venti giorni su un branch isolato (`feature/nuovo-warehouse-2026`) modificando 45 modelli tutti insieme: quando tenta di fare merge su `main`, ci sono 28 conflitti Git e nessuno nel team riesce a revisionare 3.000 righe di SQL in modo serio, così la PR viene approvata sulla fiducia ("LGTM") introducendo un bug di *fan-out join*.
+3. Nella pipeline CI di GitHub Actions viene lanciato solo `dbt compile` (o al contrario l'intero `dbt build` di tutti i 180 modelli che dura 40 minuti), rendendo i controlli o inutili o troppo lenti.
 
-1. Apri un branch dedicato per ogni modifica e non pubblicare mai direttamente sul ramo principale.
-2. Fai eseguire alla pipeline di integrazione la build completa su uno schema isolato per ogni pull request.
-3. Richiedi almeno un'approvazione che controlli test, layer della logica, naming e documentazione prima del merge.
-4. Unisci solo con build verde e revisione approvata, poi lascia che il merge attivi il deploy.
-5. Assegna a ogni sviluppatore uno schema personale, così i test paralleli non si sovrascrivono a vicenda.
+La causa di questi problemi è non applicare i tre pilastri del lavoro di squadra su dbt: **Trunk-Based Development con branch corti**, **Slim CI con selettore `state:modified+`** e **Code Review basata su DAG e quadratura dei dati**.
 
-## Git workflow per progetti dbt
+## Trunk-Based Development, Slim CI (state:modified+) e Code Review dei modelli dati
 
-dbt è codice. Il modello di branch che funziona per il software funziona anche per i dati.
+Un flusso di collaborazione moderno per l'Analytics Engineering rende i rilasci veloci e privi di regressioni attraverso tre meccanismi complementari.
 
-Il pattern consigliato è trunk-based con feature branch: una linea principale stabile e branch brevi per ogni modifica.
+Il primo meccanismo è il **Trunk-Based Development con Branch Protection su `main`**. Il branch `main` rappresenta in ogni istante ciò che gira in produzione ed è **bloccato contro qualsiasi push diretto**: ogni modifica, anche di una sola riga, nasce in un *feature branch* piccolo e focalizzato (`feat/add-refund-reason-to-orders`, `fix/dedup-hubspot-contacts`) che vive al massimo **1–2 giorni** e tocca **1–5 modelli correlati**. Prima di poter premere *Merge*, GitHub/GitLab richiede obbligatoriamente due condizioni: il semaforo verde della pipeline CI automatica e l'approvazione formale di almeno un revisore umano.
 
-```text
-main ──────────────────────────────────────────────► (produzione)
-  │
-  ├── feature/new-mrr-model ──► PR ──► review ──► merge
-  │
-  ├── fix/campaign-cost-bug ──► PR ──► review ──► merge
-  │
-  └── staging ──► (deploy automatico su env di test)
+Il secondo meccanismo è la **Slim CI tramite confronto di stato (`--select state:modified+ --defer --state ./prod_artifacts`)**. Quando aprite una pull request che modifica un solo modello (`stg_shop__orders`), ricostruire da zero tutte le 180 tabelle del progetto in uno schema temporaneo `dbt_ci_pr_142` sprecherebbe tempo e risorse, ma testare solo `stg_shop__orders` non scoprirebbe se avete rotto `fct_orders` a valle. La soluzione di dbt è la combinazione di **`state:modified+`** e **`--defer`**:
+1. `state:modified+` confronta il vostro branch col `manifest.json` dell'ultima esecuzione di produzione ed esegue `dbt build` **solo sui modelli che avete modificato più tutti i loro discendenti a valle (`+`)**.
+2. `--defer` dice a dbt che, per tutti i modelli a monte che **non** avete toccato nella PR, non serve ricostruire la tabella nello schema `dbt_ci_pr_142`: può puntare direttamente a costo zero alle tabelle già pronte in `analytics_prod`.
+
+Il terzo meccanismo è la **Code Review specifica per i dati**. A differenza del codice applicativo tradizionale, revisionare un file SQL in dbt richiede non solo di leggere il testo della query, ma di verificare il **cambio di grano e di conteggi** tra `analytics_prod` e `dbt_ci_pr_142`.
+
+**La collaborazione in un team dbt scala senza incidenti solo se vieta i push diretti su `main`, esegue in ogni pull request `dbt build --select state:modified+ --defer` su uno schema effimero e richiede in code review la prova di quadratura dei conteggi.**
+
+## Tre errori nel workflow Git e nelle revisioni di codice dbt
+
+Il blocco SQL qui sotto mostra l'effetto di una pull request approvata guardando solo che il codice SQL sia "sintatticamente valido" senza eseguire un confronto di audit (`EXCEPT` / conteggio righe e somme) tra la tabella di produzione e la tabella generata dal branch della PR:
+
+```sql
+-- ERRORE 1: il revisore approva la PR ("LGTM") guardando solo la sintassi SQL su GitHub,
+-- senza accorgersi che cambiare INNER JOIN in LEFT JOIN senza filtro ha cambiato i totali storici!
+-- ERRORE 2: la CI ha eseguito solo "dbt run --select fct_orders" senza "+ " (non ha testato
+-- le viste e le metriche a valle che dipendono da fct_orders!).
+
+-- Query ingenua usata dallo sviluppatore per "testare" la PR (guarda solo 5 righe a caso!):
+SELECT *
+FROM dbt_ci_pr_142.fct_orders
+LIMIT 5;
 ```
 
-Le regole essenziali sono poche e vanno rispettate sempre. Mai pubblicare direttamente su `main`: ogni modifica passa da branch e pull request. Ogni pull request esegue `dbt build` su uno schema separato creato dalla pipeline, per isolare i cambiamenti. La pull request si unisce solo se la build è verde e almeno un revisore ha approvato. Il merge su `main` fa partire il deploy in produzione o in staging.
+### Controllare un modello modificato con SELECT * LIMIT 10 invece di fare un Data Diff
 
-## Code review per modelli dati
+Aprire una pull request che modifica una trasformazione intermedia, lanciare `SELECT * FROM dbt_dev_mario.fct_orders LIMIT 10`, vedere che le prime dieci righe "sembrano piene" e chiedere il merge è la causa principale di regressioni sui numeri di business. Dieci righe casuali non rivelano mai se sul totale di 2 milioni di righe avete perso il 4% degli ordini esteri o duplicato l'1% delle fatture. Ogni PR che modifica un modello esistente deve essere accompagnata da una query di **Data Diff** che confronta conteggio righe, chiavi uniche e somme finanziarie tra `analytics_prod.<tabella>` e `dbt_ci_pr_<id>.<tabella>`.
 
-La revisione di un modello dbt ha priorità diverse rispetto al codice applicativo.
+### Non usare il suffisso "+" (`state:modified+`) nella pipeline di Continuous Integration
 
-Verifica che i test siano presenti e sufficienti, con almeno un `not_null` sulla chiave primaria.
+Configurare la pipeline CI per eseguire `dbt build --select state:modified` (senza il segno `+` finale) testa unicamente il file toccato dallo sviluppatore ignorando l'effetto domino sul resto del grafo. Se modificate `stg_shop__orders` cambiando i valori della colonna `status` da minuscolo (`'paid'`) a maiuscolo (`'PAID'`), i test di `stg_shop__orders` possono passare, ma il modello figlio `fct_revenue` (che filtra `WHERE status = 'paid'`) si svuota completamente a zero righe. Il segno **`+` finale (`state:modified+`)** è obbligatorio per testare tutti i discendenti.
 
-Controlla che la logica di business stia nel layer corretto: le regole complesse non vanno nei modelli di `staging`.
+### Non eliminare gli schemi temporanei delle Pull Request dopo il merge
 
-Assicurati che il naming segua le convenzioni e che la documentazione YAML descriva le colonne critiche.
+Alla chiusura di una pull request in GitHub Actions, dimenticare lo step automatico di `DROP DATABASE` per lo schema effimero della PR accumula in pochi mesi centinaia di schemi abbandonati che consumano RAM, spazio disco e rallentano le tabelle di sistema (`system.tables`, `system.parts`).
 
-Verifica infine che la query regga i volumi di produzione.
+## Slim CI con Defer e Query di Data Diff automatico per la Code Review in ClickHouse
 
-In pratica il revisore scorre una checklist breve: test `not_null` e `unique` sulla chiave primaria, logica nel layer giusto, naming conforme, documentazione YAML presente, query scalabile e grafo senza cicli.
+Per implementare un workflow Git e di Code Review a prova di bomba per il vostro progetto dbt su ClickHouse, applicate questi quattro criteri in ordine di priorità:
 
-## Conflitti e ambienti personali
+1. Attivate la **Branch Protection** su `main`, imponete PR piccole (1 dominio alla volta) e richiedete che la descrizione della PR includa: obiettivo, grafo dei modelli impattati (`state:modified+`) ed esito del Data Diff.
+2. Nella pipeline CI di ogni pull request eseguite:
+   `dbt build --select state:modified+ --defer --state ./prod_manifest --target ci_pr`
+   così da costruire e testare nello schema effimero `dbt_ci_pr_<id>` solo i modelli modificati e i loro figli in pochi secondi.
+3. Eseguite nella PR la query di **Data Diff SQL** che confronta mese per mese la tabella in `analytics_prod` con la nuova versione in `dbt_ci_pr_<id>`, spiegando ai revisori qualsiasi variazione voluta (e bloccando qualsiasi variazione inattesa).
+4. Alla chiusura della PR, eseguite automaticamente `DROP DATABASE IF EXISTS dbt_ci_pr_<id>`.
 
-I conflitti qui sono più rischiosi che altrove. Git non interpreta il SQL e non capisce se due modifiche sono compatibili.
+Ecco la query di **Data Diff e Audit di Pull Request** da eseguire in ClickHouse (e allegare al commento della PR) per certificare matematicamente al revisore cosa cambia tra produzione (`analytics_prod.fct_orders`) e la pull request (`dbt_ci_pr_142.fct_orders`):
 
-Per ridurli, tieni i modelli piccoli con una sola responsabilità: la superficie di conflitto si restringe.
-
-Dai a ogni sviluppatore uno schema dedicato tramite i profili, così i test paralleli non si sovrascrivono.
-
-```yaml
-my_project:
-  target: dev
-  outputs:
-    dev:
-      schema: "dbt_{{ env_var('USER', 'default') }}"
+```sql
+-- DATA DIFF DI CODE REVIEW: confronta mese per mese la tabella attuale di Produzione
+-- con la tabella compilata dalla Pull Request nello schema isolato dbt_ci_pr_142:
+WITH prod_summary AS (
+    SELECT
+        toStartOfMonth(occurred_date) AS mese,
+        count() AS prod_rows,
+        uniqExact(order_id) AS prod_unique_orders,
+        sum(net_amount_eur) AS prod_net_revenue_eur
+    FROM analytics_prod.fct_orders
+    WHERE occurred_date >= '2026-01-01'
+    GROUP BY mese
+),
+pr_summary AS (
+    SELECT
+        toStartOfMonth(occurred_date) AS mese,
+        count() AS pr_rows,
+        uniqExact(order_id) AS pr_unique_orders,
+        sum(net_amount_eur) AS pr_net_revenue_eur
+    FROM dbt_ci_pr_142.fct_orders
+    WHERE occurred_date >= '2026-01-01'
+    GROUP BY mese
+)
+SELECT
+    coalesce(p.mese, c.mese) AS mese,
+    p.prod_rows,
+    c.pr_rows,
+    (c.pr_rows - p.prod_rows) AS diff_rows,
+    (c.pr_ rows - c.pr_unique_orders) AS pr_duplicate_keys_violation,
+    p.prod_net_revenue_eur,
+    c.pr_net_revenue_eur,
+    (c.pr_net_revenue_eur - p.prod_net_revenue_eur) AS diff_revenue_eur,
+    round((c.pr_net_revenue_eur - p.prod_net_revenue_eur) * 100.0 / nullIf(p.prod_net_revenue_eur, 0), 2) AS diff_revenue_pct
+FROM prod_summary AS p
+FULL OUTER JOIN pr_summary AS c
+    ON p.mese = c.mese
+ORDER BY mese DESC;
 ```
 
-Una pull request che modifica una definizione condivisa come `is_active_customer` può impattare tre mart e due dashboard direzionali. È il caso che mostra perché la revisione deve guardare lignaggio, ownership, test e comunicazione del cambiamento, non solo il fatto che il modello compili.
+*(Nota: nella riga di controllo duplicati usate `c.pr_rows - c.pr_unique_orders AS pr_duplicate_keys_violation` come mostrato nel blocco di verifica).*
 
-*Riferimenti:* GitLab Handbook (2024), dbt Labs (2023), Accelerate (Forsgren et al., 2018).
+```sql
+-- Pulizia automatica dello schema effimero della Pull Request subito dopo il merge:
+DROP DATABASE IF EXISTS dbt_ci_pr_142 SYNC;
+```
 
-## L'errore che trasforma il processo in etichetta
+Il risultato trasforma la Code Review da un atto di fede a una verifica ingegneristica rapida e oggettiva: grazie a `state:modified+ --defer`, la pipeline CI della PR 142 costruisce solo i 3 modelli impattati invece di tutti i 180, terminando in **18 secondi**; e la tabella generata dalla query di Data Diff mostra al revisore in cinque secondi che per tutti i mesi passati `diff_rows = 0`, `pr_duplicate_keys_violation = 0` e `diff_revenue_eur = 0.00` (se la PR aggiungeva solo una nuova colonna descrittiva), oppure quantifica al centesimo l'effetto della nuova regola di business.
 
-Il rischio è usare workflow e revisione come etichetta invece che come processo: grafici senza decisione, metriche senza baseline, conclusioni che non dichiarano quali assunzioni potrebbero invalidarle. La cerimonia c'è, ma nessun numero ne esce più solido.
+## Strategia di Branching: Trunk-Based Development (un solo main) o GitFlow (branch develop/release)
 
-La domanda chiave resta una sola, cioè quale scelta sbaglieresti se questo risultato fosse instabile. Se la revisione non ti aiuta a rispondere, stai solo timbrando ticket.
+Quando si imposta il repository Git per un team di Analytics Engineering, spesso ci si chiede se adottare il **Trunk-Based Development** (feature branch corti che confluiscono direttamente in `main`) oppure il vecchio **GitFlow** (con branch permanenti multipli `develop`, `release/*`, `hotfix/*` e `main`).
 
-Verdetto: niente merge senza build verde e revisione approvata; la velocità di un team dati si misura dai rollback evitati, non dalle pull request unite.
+Il criterio di scelta è netto: **adottate il Trunk-Based Development (un unico branch principale `main` protetto da Slim CI + schemi effimeri per ogni PR) per il 99% dei progetti dbt moderni, evitando GitFlow a più branch permanenti.**
 
-## Il caso GitHub
+La confusione comune proviene dal mondo del software installato su CD-ROM o delle app mobile (dove si rilascia una versione ogni mese e serve un branch `release/v2.4`): nel mondo dei dati esiste un solo stato corrente della realtà aziendale e gli schemi del database non sono binari isolati. Con GitFlow, mantenere un branch `develop` separato da `main` per settimane genera conflitti insanabili nei file YAML (`_models.yml`), disallinea il `manifest.json` usato da `--defer` e blocca le correzioni urgenti quando `develop` contiene già dieci feature mezze finite. Col Trunk-Based Development e la Slim CI, ogni PR viene testata contro la vera produzione e rilasciata in modo atomico non appena è pronta.
 
-GitHub, fondata nel 2008, ha fatto della pull request il rito centrale dello sviluppo collaborativo: proporre, revisionare, discutere e solo poi unire. Nel gennaio 2023 la piattaforma ha superato i 100 milioni di sviluppatori registrati, e quasi tutto il codice open source che conta passa da quel meccanismo di revisione. La stessa disciplina vale per i modelli dati: una definizione condivisa alimenta dashboard usate per decidere e merita la stessa revisione di una libreria. Il riuso senza revisione scala gli errori alla stessa velocità con cui scala il lavoro risparmiato.
+Questo articolo non tratta i linter automatici di stile SQL come **SQLFluff** o **dbt-checkpoint** (utilissimi in pre-commit per verificare automaticamente che ogni nuovo modello abbia la descrizione in YAML e rispetti le maiuscole/minuscole).
 
-## Domande per metterti alla prova
+## Cinque domande per la checklist di Code Review di una Pull Request dbt
 
-1. Cosa deve contenere una pull request su un modello dbt prima di poter essere unita?
-2. Quali controlli faresti in revisione oltre al fatto che il modello compili?
-3. Perché ogni sviluppatore lavora su uno schema personale e non su quello condiviso?
-4. Quando una modifica a una definizione condivisa richiede di avvisare gli altri team?
+1. Il modello aggiunto o modificato rispetta il proprio layer (`stg_`, `int_`, `fct_`, `dim_`), usa esclusivamente `{{ source() }}` / `{{ ref() }}` e non ripete logica che appartiene a un modello a monte?
+2. Nel file YAML sono dichiarati la descrizione del grano del modello e i test `unique` + `not_null` sulla chiave primaria (più il contratto `enforced: true` se è un mart)?
+3. La pipeline di **Slim CI (`dbt build --select state:modified+ --defer`)** è passata con zero errori su tutti i modelli modificati e su tutti i loro discendenti a valle?
+4. Se la PR modifica un modello esistente, l'autore ha allegato l'output del **Data Diff** (`analytics_prod` vs `dbt_ci_pr_<id>`) dimostrando che conteggi e somme finanziarie non hanno subito regressioni involontarie?
+5. I modelli incrementali toccati contengono il filtro di lookback e il filtro per non scansionare l'intero storico negli ambienti `dev` e `ci`?
+
+La metrica di salute del processo di sviluppo e revisione è la combinazione di **Lead Time di una Pull Request inferiore a 24 ore**, **100% di PR validate da `dbt build --select state:modified+`** e **0 incidenti in produzione causati da modifiche di schema o fan-out non rilevati in PR**.
+
+Di tutto il workflow Git per l'Analytics Engineering, fissate una sola abitudine non negoziabile: in una code review di dati non basta leggere il codice SQL; chiedete sempre di vedere la tabella del Data Diff tra produzione e pull request. Il codice SQL mostra l'intenzione, il Data Diff mostra l'effetto reale sui numeri dell'azienda.

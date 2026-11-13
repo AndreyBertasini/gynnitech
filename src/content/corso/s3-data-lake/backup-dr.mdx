@@ -16,64 +16,158 @@ learningObjectives:
 prerequisites:
   - s3-data-lake/monitoring
 binario: "ml-tabellare"
+formato: "articolo"
 autore: "Hermes"
 controllatoDa: "Argo"
 autorizzatoDa: "Giano"
 draft: false
-dateModified: 2026-09-07
+dateModified: 2026-11-13
 ---
+
 # Backup e disaster recovery del data lake
 
-Un data lake può contenere anni di eventi, tabelle curate e dataset critici per il reporting regolatorio. Sapere che S3 è durevole non basta: se una policy errata cancella oggetti o una regione diventa indisponibile, il team deve sapere quali dati ripristinare, in quale ordine e a quale costo. Questa lezione va letta con gli occhi di chi deve decidere, non solo configurare, e ti porta dal versioning al restore di prova.
+Un ingegnere è convinto che il data lake non abbia bisogno di backup perché "Amazon S3 ha già una durabilità del 99,999999999% su più Availability Zone". Un martedì pomeriggio uno script Terraform errato con permessi di amministratore (o un attaccante che ha compromesso una credenziale privilegiata) esegue `aws s3 rb s3://acme-lake-prod --force` svuotando anche tutte le versioni, oppure un bug applicativo corrompe i file e la replica automatica copia istantaneamente la cancellazione anche sul bucket secondario nello stesso account. La causa della perdita totale non è il guasto di un disco fisico di AWS: è confondere la **durabilità hardware dell'infrastruttura** con la **protezione da errori umani, bug distruttivi e ransomware**, che richiede replica Cross-Region/Cross-Account, S3 Object Lock e test periodici di ripristino con RPO/RTO misurati.
 
-## Prima di tutto: di cosa stiamo parlando
+## Undici nove di durabilità hardware che non salvano da uno script sbagliato
 
-Il backup e il disaster recovery di un data lake sono il piano verificato che riporta i dati giusti disponibili nei tempi promessi dopo cancellazioni, corruzioni o perdita di una regione. Non sono due tecnologie da acquistare, ma due discipline da provare: senza prove periodiche restano carta che nessuno legge.
+Questo è un caso ricostruito con numeri di esempio su quanto accade quando si scambia la ridondanza dei dischi di S3 per una strategia di backup e Disaster Recovery (DR). L'azienda conserva sul proprio bucket S3 principale (`eu-central-1`, Francoforte) cinque anni di dati contabili e comportamentali non più presenti nei database transazionali (che mantengono solo gli ultimi 6 mesi).
 
-## Il piano si costruisce in sei passi
+Il team non ha configurato un piano di DR perché "S3 salva già ogni file su tre data center diversi". Quando un job di pulizia mal scritto lancia una cancellazione ricorsiva delle versioni passate (`DeleteObject` con `VersionId` esplicito) su tutte le partizioni prima del 2025:
+1. I tre data center di Francoforte eseguono fedelmente e in meno di un minuto l'ordine di cancellare definitivamente quei byte da tutti i dischi: la durabilità di 11 nove protegge dalla rottura fisica di un hard disk, non da un comando autenticato che ordina di distruggere il dato.
+2. Anche dove era attiva una replica S3 base (*Cross-Region Replication*), poiché era stata lasciata attiva la replica delle cancellazioni (*Delete Marker Replication*) e il bucket secondario risiedeva nello stesso account AWS sotto il controllo dello stesso ruolo IAM compromesso, la distruzione si propaga identica sul secondo bucket.
+3. Quando si tenta di rimettere in piedi le tabelle Iceberg superstiti a partire dai soli file Parquet rimasti in un vecchio dump, ci si accorge che non era mai stato fatto il backup del Glue Data Catalog e nessuno aveva mai provato un restore prima di quel giorno.
 
-1. Classifica `bucket`, prefissi e tabelle per criticità e obblighi di retention.
-2. Attiva il `versioning` sui `bucket` con dati curated e critici.
-3. Abilita la replica `cross-region` verso una seconda regione per i dati che devono restare leggibili.
-4. Fissa `RPO` e `RTO` con il business e scrivili nella procedura di `restore`.
-5. Esegui un `restore` di prova su una partizione reale e documenta tempi ed esito.
-6. Applica `object lock` e `MFA Delete` dove cancellazioni o manomissioni sono inaccettabili.
+La causa del disastro è non progettare un'architettura di DR basata su **RPO (*Recovery Point Objective*)**, **RTO (*Recovery Time Objective*)**, **isolamento Cross-Account / Object Lock** e **restore drill verificati**.
 
-## Versioning, replica e le altre protezioni
+## RPO/RTO, Replica Cross-Region/Cross-Account (RTC) e S3 Object Lock
 
-Il `versioning` di `S3` crea una nuova versione a ogni modifica, quindi una cancellazione accidentale si recupera ripristinando la versione precedente. Il costo è lo storage extra delle versioni multiple, ma resta la base di quasi tutte le altre protezioni. Si attiva in un attimo, e da quel momento nessun `DELETE` è più definitivo:
+Una strategia di Disaster Recovery per un data lake S3 protegge l'azienda da tre minacce distinte (errore umano/software sul singolo prefisso, compromissione dell'account/ransomware, caduta di un'intera regione cloud) combinando tre meccanismi architetturali.
 
-```bash
-aws s3api put-bucket-versioning --bucket my-lake --versioning-configuration Status=Enabled
+Il primo meccanismo è la definizione contrattuale di **RPO (*Recovery Point Objective*: quanti minuti/ore di dati possiamo permetterci di perdere al massimo)** e **RTO (*Recovery Time Objective*: in quanti minuti/ore il data lake deve tornare operativo)** differenziati per zona. La zona **`raw/`** (che contiene i dati sorgente storici non rigenerabili da nessun altro sistema) ha criticità massima: richiede **Versioning + Object Lock** e replica continua con **`RPO <= 15 minuti`**. La zona **`curated/`** può essere replicata per avere un **`RTO < 1 ora`** sulle tabelle principali o rigenerata a partire da `raw/` se l'RTO concordato col business è di 8–12 ore.
+
+Il secondo meccanismo è la **Cross-Region & Cross-Account Replication con S3 Replication Time Control (S3 RTC)** e **S3 Object Lock (WORM)**. Per proteggersi non solo dal blackout di Francoforte (`eu-central-1`) ma anche dalla compromissione delle credenziali dell'account di produzione, la replica asincrona (`SRR/CRR`) deve inviare gli oggetti verso un bucket situato in un'altra regione geografica (es. `eu-west-1`, Dublino) e appartenente a un **Account AWS di Sicurezza separato (*Vault Account*)**, dove i ruoli dell'account di produzione non hanno alcun permesso di cancellazione (`s3:DeleteObjectVersion`). Attivando **S3 RTC**, AWS garantisce per contratto (SLA) che il 99,99% dei nuovi oggetti venga replicato entro **15 minuti**; attivando **S3 Object Lock (Governance o Compliance mode)** sul bucket di backup, nemmeno l'utente root dell'account può cancellare o sovrascrivere una versione prima della scadenza di ritenzione impostata.
+
+Il terzo meccanismo è il **ripristino chirurgico di partizione (S3 Batch Operations / Point-in-Time Restore di AWS Backup for S3) + backup dei metadati del Catalogo**. Un backup che non comprende i metadati (definizioni tabelle del Glue Catalog e file `metadata.json` di Iceberg) e che non viene testato ogni trimestre con un *restore drill* reale non è un backup: è solo una speranza.
+
+**Un piano di Disaster Recovery sul data lake è solido solo se isola la replica in una seconda regione e in un account separato con Object Lock, attiva S3 RTC per garantire un RPO di 15 minuti e collauda trimestralmente il restore di una partizione reale.**
+
+## Tre errori che rendono inutile il backup del data lake nel giorno dell'incidente
+
+Il blocco SQL qui sotto mostra l'audit della configurazione di DR e dei log di replica che porta alla luce le tre falle classiche: replicare anche le cancellazioni fisiche nello stesso account, non monitorare gli oggetti con stato `FAILED` o `PENDING` oltre i 15 minuti di RPO, e non avere mai testato un restore:
+
+```sql
+-- Audit dello stato di replica e DR su S3 Inventory + CloudWatch metrics:
+-- ERRORE 1: replication_status = 'FAILED' o 'NONE' su partizioni della zona raw/ critica!
+-- ERRORE 2: il bucket di destinazione risiede nello stesso account AWS e senza Object Lock.
+-- ERRORE 3: lag di replica superiore all'RPO di 15 minuti (900 secondi) senza alcun alert attivo.
+SELECT
+    splitByChar('/', key)[1] AS lake_zone,
+    replication_status,
+    object_lock_mode,
+    count() AS oggetti,
+    round(sum(size_bytes) / 1073741824.0, 2) AS volume_gb,
+    max(replication_latency_sec) AS max_rpo_lag_sec
+FROM monitoring.s3_dr_replication_audit
+WHERE audit_date = today()
+  AND lake_zone IN ('raw', 'curated')
+GROUP BY lake_zone, replication_status, object_lock_mode
+HAVING replication_status != 'COMPLETED'
+    OR max_rpo_lag_sec > 900
+    OR object_lock_mode = 'NONE';
 ```
 
-La `cross-region replication` copia automaticamente gli oggetti in una seconda regione e richiede il `versioning` attivo. Se una regione diventa indisponibile, i dati restano leggibili nell'altra.
+### Attivare la replica nello stesso account AWS replicando anche i Delete Marker
 
-```text
-S3 eu-west-1 → S3 us-east-1 (async replication)
+Configurare una regola di replica tra `acme-lake-prod` e `acme-lake-backup` dentro lo stesso account AWS e abilitare la sincronizzazione delle cancellazioni (`DeleteMarkerReplication = Enabled`) trasforma un sistema di backup in uno specchio sincrono dei vostri errori. Se un amministratore o un ransomware usa una credenziale dell'account di produzione per cancellare i dati, ha contemporaneamente accesso anche al bucket di backup (o la replica stessa propaga i *Delete Marker* nascondendo gli oggetti anche sulla copia secondaria). Nella replica di backup i *Delete Marker* **non devono mai essere replicati** e il bucket di destinazione deve risiedere in un account AWS isolato.
+
+### Fare il backup dei soli file Parquet dimenticando il Glue Catalog e i metadati Iceberg
+
+Replicare solo la sottocartella `/data/*.parquet` di una tabella Apache Iceberg o ignorare l'esportazione delle definizioni del Glue Data Catalog rende lentissimo il recupero (RTO fuori controllo). In una tabella Iceberg con centinaia di snapshot e *positional delete files*, se perdete la cartella `/metadata/` (`vN.metadata.json`, `snap-*.avro`) nella cartella `/data/` rimangono mescolati sia i file validi sia i file vecchi sostituiti o cancellati: ricostruire a mano quali file facessero parte dell'ultimo snapshot valido richiede ore di analisi forense. La replica deve sempre coprire l'intero prefisso della tabella (`/metadata/` + `/data/`) più l'infrastruttura del catalogo (Terraform / export JSON giornaliero del Glue Catalog).
+
+### Scrivere un documento di Disaster Recovery senza mai eseguire un Restore Drill reale
+
+Avere un documento PDF che dichiara *"RTO = 2 ore, RPO = 15 minuti"* senza aver mai provato a cancellare una partizione di test e ripristinarla cronometro alla mano nasconde sempre blocchi operativi imprevisti. Nel giorno dell'incidente vero si scopre invariabilmente che il ruolo IAM di S3 Batch Operations non ha il permesso `kms:Decrypt` sulla chiave KMS del bucket di backup, o che nessuno nel team sa come rimuovere in blocco 50.000 *Delete Markers* creati da uno script errato.
+
+## Procedura di Restore reale, verifica di quadratura e monitoraggio RPO/RTO
+
+Per progettare e verificare sul campo la resilienza del vostro data lake S3, applicate questi quattro criteri in ordine di priorità:
+
+1. Fissate per iscritto col business la matrice **RPO / RTO per zona** (es. Zona `raw` e tabelle `curated` critiche: `RPO = 15 min` tramite Cross-Region/Cross-Account Replication con **S3 RTC** e **Object Lock Governance/Compliance**; tabelle analitiche derivate: `RTO = 4 ore` tramite riesecuzione di dbt).
+2. Disabilitate la replica dei *Delete Marker* verso il bucket di backup nel *Vault Account*.
+3. Per il ripristino rapido da cancellazioni o corruzioni di una partizione sul bucket primario, usate **AWS Backup for S3 (Point-in-Time Restore)** oppure una query/job che promuove le versioni precedenti (`VersionId` antecedente all'incidente) o ricopia la partizione integra dal bucket secondario, verificando immediatamente il conteggio righe e i totali finanziari.
+4. Eseguite ogni trimestre un **Restore Drill** completo su una partizione reale in ambiente di collaudo, misurando i minuti effettivi impiegati (RTO reale) e registrando l'esito nel registro di audit.
+
+Ecco la procedura SQL completa di **Restore Verification & Drill Audit** in ClickHouse che ripristina una partizione danneggiata leggendola dal bucket di Disaster Recovery (in `eu-west-1`) e certifica al centesimo l'identità dei dati ripristinati rispetto allo snapshot pre-incidente:
+
+```sql
+-- 1. RIPRISTINO PARTIZIONE DA BUCKET DR (eu-west-1 -> eu-central-1) dopo simulazione di incidente
+-- sulla partizione dt=2026-11-10 della tabella curated/sales/orders:
+INSERT INTO FUNCTION s3(
+    'https://s3.eu-central-1.amazonaws.com/acme-lake-prod/curated/sales/orders_restored/dt=2026-11-10/part_restored.parquet',
+    'Parquet'
+)
+SETTINGS output_format_parquet_compression_method = 'zstd'
+SELECT
+    order_id,
+    customer_id,
+    order_date,
+    country_code,
+    amount_eur
+FROM s3(
+    'https://s3.eu-west-1.amazonaws.com/acme-lake-dr-vault/curated/sales/orders/dt=2026-11-10/*.parquet',
+    'Parquet'
+);
+
+-- 2. VERIFICA DI QUADRATURA POST-RESTORE (confronta righe, hash delle chiavi e ricavo al centesimo
+-- tra la partizione ripristinata e il registro di controllo pre-incidente, più controllo RTO <= 30 min):
+WITH restored_metrics AS (
+    SELECT
+        toDate('2026-11-10') AS partition_dt,
+        count() AS restored_rows,
+        uniqExact(order_id) AS restored_unique_orders,
+        sum(amount_eur) AS restored_revenue_eur,
+        bitXor(cityHash64(order_id, amount_eur)) AS restored_checksum_hash
+    FROM s3(
+        'https://s3.eu-central-1.amazonaws.com/acme-lake-prod/curated/sales/orders_restored/dt=2026-11-10/*.parquet',
+        'Parquet'
+    )
+)
+SELECT
+    r.partition_dt,
+    r.restored_rows,
+    b.expected_rows,
+    r.restored_revenue_eur,
+    b.expected_revenue_eur,
+    (r.restored_rows = b.expected_rows
+     AND r.restored_revenue_eur = b.expected_revenue_eur
+     AND r.restored_checksum_hash = b.expected_checksum_hash) AS is_bit_identical,
+    dateDiff('minute', b.drill_started_at, now()) AS actual_rto_minutes,
+    if(is_bit_identical AND actual_rto_minutes <= 30, 'DR_DRILL_PASSED', 'DR_DRILL_FAILED') AS drill_verdict
+FROM restored_metrics AS r
+INNER JOIN monitoring.dr_expected_baselines AS b
+    ON r.partition_dt = b.partition_dt;
 ```
 
-L'`object lock` blocca cancellazioni e modifiche per un periodo fisso, per esempio sette anni per la compliance fiscale. In modalità `Governance` l'override resta possibile con permessi speciali, mentre in modalità `Compliance` non è possibile per nessuno. Infine `MFA Delete` richiede un'autenticazione multifattore per eliminare versioni di oggetti, così credenziali API compromesse da sole non bastano a distruggere i dati.
+Il test di ripristino produce un verdetto oggettivo e documentabile per gli auditor: la partizione `dt=2026-11-10` recuperata dal bucket *Vault* di Dublino (`eu-west-1`) contiene esattamente lo stesso numero di righe, lo stesso fatturato al centesimo e lo stesso `cityHash64` (`is_bit_identical = 1`) registrati prima dell'incidente, con un tempo totale di ripristino `actual_rto_minutes = 6 minuti` (ampiamente entro l'obiettivo di RTO di 30 minuti). Avere provato e cronometrato questa procedura in un martedì tranquillo garantisce che, se mai dovesse verificarsi un incidente vero, qualsiasi ingegnere di turno saprà eseguire il restore in sei minuti senza panico.
 
-Se vuoi il riassunto in una riga: `versioning` sempre sui dati critici, replica `cross-region` per la continuità tra regioni, `object lock` e `MFA Delete` solo dove la cancellazione è inaccettabile.
+## Ripristino da Versioni Locali (S3 Versioning / Point-in-Time) o Failover Cross-Region (CRR)
 
-## RPO e RTO: i due numeri che governano tutto
+Di fronte a un incidente sui dati S3, esistono due meccanismi di recupero complementari: il **Rollback sulle Versioni Locali (rimozione dei Delete Marker o Point-in-Time Restore nello stesso bucket primario)** e il **Recupero/Failover dal Bucket Secondario Cross-Region/Cross-Account (`CRR`)**.
 
-Due numeri tengono insieme tutto il resto, e conviene padroneggiarli prima dell'incidente. L'`RPO` indica quanti dati puoi permetterti di perdere: con la replica `cross-region` scende intorno ai quindici minuti. L'`RTO` indica quanto tempo serve per tornare operativi: se `Athena` punta alla replica, l'`RTO` si misura in minuti perché basta cambiare la location della query. Concorda questi due valori con il business prima dell'incidente, non durante.
+Il criterio di scelta è netto: **usate il ripristino dalle Versioni Locali dello stesso bucket primario (o il Time Travel di Apache Iceberg) per il 95% degli incidenti operativi quotidiani (un rilascio errato di un job ETL che ha sovrascritto o cancellato una partizione negli ultimi giorni), attivate invece il recupero o il failover sul Bucket Cross-Account / Cross-Region in `eu-west-1` quando l'incidente coinvolge la compromissione dell'account primario, una cancellazione dolosa delle versioni o un'indisponibilità regionale prolungata di AWS.**
 
-## Gli errori che tornano puntuali
+La confusione comune consiste nell'avviare un trasferimento transnazionale di 50 TB da Dublino a Francoforte (pagando migliaia di dollari di traffico dati inter-regionale e aspettando ore) solo perché uno script ha messo per sbaglio dei *Delete Markers* sul bucket di Francoforte, quando le versioni originali erano ancora tutte presenti a costo zero nel bucket primario e bastava rimuovere i *Delete Markers* in due minuti. Sbagliare questa scelta trasforma un ripristino locale istantaneo in una migrazione di rete lunga e costosa.
 
-Il primo errore è trattare il backup come un'etichetta tecnica invece che come un criterio di scelta: si abilita il `versioning`, si mette una spunta e non si prova mai un `restore` reale. Il secondo è confondere la replica con il disaster recovery: avere i dati in due regioni non serve se nessuno sa quale procedura seguire quando una regione cade. Il terzo è ignorare il costo, perché versioni multiple e classi sbagliate possono far esplodere la spesa di storage senza alcun beneficio in termini di rischio.
+Questo articolo non tratta il failover automatico dei DNS per gli endpoint applicativi (Route 53 Application Recovery Controller). Ricordate che su **Apache Iceberg**, se un job scrive dati sbagliati senza cancellare fisicamente i vecchi file Parquet, il ripristino è istantaneo ($RTO < 10\text{ secondi}$): basta chiamare la procedura di catalogo `CALL system.rollback_to_snapshot('lakehouse.sales_orders', <snapshot_id_precedente>)`.
 
-## Dalla teoria a un incidente vero: GitLab, 2017
+## Cinque domande per validare il piano di Backup e Disaster Recovery del data lake
 
-Il 31 gennaio 2017 un manutentore di GitLab cancella per errore circa 300 GB di dati di produzione e il team scopre che i backup disponibili non sono ripristinabili. Il servizio viene ricostruito in meno di un giorno e l'azienda pubblica il post-mortem completo, trasmettendo parte del ripristino in diretta. Da allora il caso viene citato in ogni discussione seria di disaster recovery. La lezione è una sola: un backup mai ripristinato in prova non è un backup e il tempo di ripristino si misura con le esercitazioni, non con le slide.
+1. I bucket critici (almeno l'intera zona `raw/` e le tabelle `curated/` non rigenerabili rapidamente) hanno **S3 Versioning** attivo e vengono replicati automaticamente in una seconda regione e in un **Account AWS di sicurezza separato**?
+2. Sulla replica dei dati critici è attivo **S3 Replication Time Control (S3 RTC)** (per garantire un RPO contrattuale di 15 minuti con metriche CloudWatch di lag) e la replica dei *Delete Marker* è disabilitata?
+3. Sul bucket di backup nel *Vault Account* è attivo **S3 Object Lock** per impedire che una credenziale compromessa possa cancellare le copie di sicurezza?
+4. Il backup copre anche le definizioni del **Data Catalog (AWS Glue / Terraform)** e l'intera cartella `/metadata/` delle tabelle Apache Iceberg / Delta Lake?
+5. Avete eseguito negli ultimi 90 giorni un **Restore Drill reale** su una partizione, verificando l'uguaglianza dei conteggi/checksum e documentando l'RTO e l'RPO effettivamente ottenuti?
 
-Verdetto: `versioning` sempre sui dati critici, replica `cross-region` per la continuità tra regioni, `object lock` e `MFA Delete` solo dove la cancellazione è inaccettabile: fissa `RPO` e `RTO` con il business prima dell'incidente e prova un `restore` reale, perché un backup mai ripristinato non è un backup.
+La metrica di affidabilità del Disaster Recovery si riassume in due numeri misurati sul campo: **`Replication Latency Max < 900 secondi` (RPO $\le 15$ min certificato da S3 RTC)** e **`Ultimo Restore Drill = PASSED` con RTO misurato inferiore all'obiettivo di business**.
 
-## Domande per chiudere la lezione
-
-1. Quale dato ripristini per primo dopo la cancellazione di una partizione curated usata dal reporting finance?
-2. Quando la replica `cross-region` riduce davvero il tempo di ripartenza rispetto al solo `versioning`?
-3. Quale combinazione di `object lock` e `MFA Delete` applichi ai dati con obblighi di retention pluriennali?
-4. Quale prova periodica dimostra che `RPO` e `RTO` concordati sono rispettati?
+Di tutta la disciplina del Disaster Recovery su S3, ricordate sempre una sola verità: la durabilità di S3 protegge i dischi di Amazon, non protegge voi dai vostri script. E un backup di cui nessuno ha mai cronometrato il restore su una partizione vera non esiste finché non lo provate.

@@ -16,94 +16,168 @@ learningObjectives:
   - Creare viste aggregate per minuto con metriche di ordini e ricavi
   - Configurare un alert di anomalia con soglia, owner e prova di notifica
 binario: "ml-tabellare"
+formato: "articolo"
 autore: "Hermes"
 controllatoDa: "Argo"
 autorizzatoDa: "Giano"
 draft: false
-dateModified: 2026-09-07
+dateModified: 2026-11-13
 ---
+
 # Progetto: pipeline real-time end-to-end
 
-Chiudiamo il modulo con un lavoro completo, sempre sul binario **ml-tabellare**: qui non si spiega, si costruisce. Dovrai collegare producer Kafka, tabelle ClickHouse, viste aggregate, dashboard Grafana e alert in un'unica pipeline che regga duplicati, ritardi e picchi.
+Un marketplace B2C italiano lancia una vendita lampo con 1.500 ordini al minuto trasmessi su Kafka, ma durante la prima mezz'ora un gateway bancario smette di rispondere per i clienti con carta prepagata e un errore di rete duplica il 9% dei messaggi sul topic degli ordini. La vecchia pipeline basata su letture dirette dalla tabella di atterraggio somma due volte i pagamenti duplicati, rallenta i cruscotti a 18 secondi di attesa e non invia alcun allarme perché gli altri circuiti di pagamento compensano il volume totale. La causa non è un limite dello stack: è non aver collegato in un'architettura end-to-end la deduplicazione dell'evento, il rollup incrementale `-State`/`-Merge` per circuito e l'allerta stagionale per segmento.
 
-## L'obiettivo del progetto
+## Nove percento di ricavi duplicati e un circuito bancario morto in silenzio
 
-Il progetto collega producer Kafka, tabelle ClickHouse, viste aggregate, dashboard Grafana e alert in un'unica pipeline che regge duplicati, ritardi e picchi. Ogni pezzo ha un motivo e un criterio di fallimento esplicito.
+Questo è un caso ricostruito con numeri di esempio che mette insieme tutti i mattoni del modulo in un progetto completo da Kafka fino alla dashboard Grafana e al sistema di alerting. Durante l'evento promozionale delle 12:00, il servizio di checkout pubblica sul topic Kafka `checkout.events.v1` ogni tentativo di pagamento con `event_id`, `order_id`, `occurred_at`, `payment_gateway`, `status` (`approved` o `declined`), `amount_eur` e `gateway_latency_ms`.
 
-## La sequenza di montaggio
+Nel prototipo iniziale costruito in fretta prima del lancio si verificano tre guasti concatenati:
+1. A causa di un timeout sul bilanciatore di carico, il microservizio di checkout ritenta l'invio su Kafka del 9% degli eventi già pubblicati: la Materialized View che somma direttamente i messaggi in arrivo accredita due volte gli stessi incassi, mostrando 420.000 euro di vendite invece dei 385.000 euro reali.
+2. Alle 12:14 il gateway `PREPAID_IT` aggiorna i certificati TLS e inizia a rifiutare il 92% delle transazioni con latenza superiore a 4.000 millisecondi. Poiché l'unico alert esistente controlla che gli ordini approvati totali dell'intero sito siano superiori a 800 al minuto (e gli altri tre gateway stanno processando 1.150 ordini al minuto), nessun allarme scatta mentre migliaia di utenti con carta prepagata abbandonano il carrello.
+3. I trenta operatori collegati a Grafana interrogano ogni 5 secondi la tabella raw da 80 milioni di righe, portando la latenza dei grafici a 18 secondi.
 
-Segui questi cinque passi nell'ordine indicato.
+La causa del triplo problema è non aver separato lo strato di ingestione deduplicata dallo strato di rollup componibile per segmento e dalla query di allerta multi-finestra.
 
-1. Avvia `Kafka` e ClickHouse e verifica che entrambi rispondano prima di produrre dati.
-2. Pubblica eventi ecommerce con producer `Python` a ritmo costante e chiavi stabili.
-3. Crea tabelle di ingestion e viste aggregate per minuto con metriche di ordini e ricavi.
-4. Costruisci tre pannelli `Grafana` per ordini, ricavi e funnel con baseline esplicite.
-5. Configura un alert di anomalia con soglia, `owner` e prova di notifica prima della consegna.
+## Architettura a quattro stadi: Ingestione, Storage Raw, Rollup State e Osservabilità
 
-## Fase 1: setup Kafka e ClickHouse
+Una pipeline real-time end-to-end di livello industriale collega Kafka, ClickHouse e Grafana attraverso quattro stadi accoppiati ma con responsabilità distinte.
 
-```bash
-docker-compose up -d kafka clickhouse
-# Verifica: docker-compose logs kafka | grep "started"
-```
+Il primo stadio è il **trasporto e l'ingestione a micro-batch**. I produttori scrivono sul topic Kafka partizionato per `order_id` includendo un `event_id` univoco e il timestamp sorgente `occurred_at`. Il connettore (ClickHouse Kafka Engine o Kafka Connect Sink) drena i messaggi in blocchi da 20.000–50.000 righe ogni 1–2 secondi e li deposita nella tabella di atterraggio `checkout_events_raw` configurata con motore `ReplacingMergeTree(ingested_at)` e chiave di ordinamento `(payment_gateway, toStartOfHour(occurred_at), event_id)`.
 
-## Fase 2: producer Python
+Il secondo stadio è il **rollup incrementale al minuto su `AggregatingMergeTree`**. Una Materialized View (`mv_checkout_1m`) intercetta ogni blocco inserito e aggiorna la tabella `checkout_rollup_1m` raggruppata per `(payment_gateway, minuto)`. Per evitare che i retry duplicati dello stesso `event_id` gonfino i contatori della vista incrementale, il rollup usa stati idempotenti (`uniqState(event_id)` per contare gli eventi distinti e `uniqState((order_id, amount_eur))` o deduplicazione a monte nel buffer di stream) insieme a `quantileState(0.95)(gateway_latency_ms)`.
 
-```python
-from kafka import KafkaProducer
+Il terzo e quarto stadio sono la **dashboard live sub-50ms** e l'**alerting stagionale con runbook**. I pannelli Grafana leggono esclusivamente da `checkout_rollup_1m` con i combinatori `-Merge` fermandosi a `minuto < toStartOfMinute(now())`, mentre il job di alerting valuta ogni minuto gli ultimi 3 minuti chiusi per singolo `payment_gateway`, facendo scattare l'incidente `P1` se il tasso di errore supera il doppio della baseline storica e il 20% assoluto per tre minuti di fila.
 
-producer = KafkaProducer(bootstrap_servers='localhost:9092',
-    value_serializer=lambda v: json.dumps(v).encode('utf-8'))
+**Un progetto real-time end-to-end è pronto per la produzione solo se garantisce idempotenza sui retry di Kafka, serve le dashboard in meno di 50 millisecondi tramite stati `-State`/`-Merge` e isola le anomalie per singolo gateway con persistenza su tre minuti.**
 
-while True:
-    event = {"user_id": random.randint(1,1000), "event": random.choice(
-        ["page_view","add_cart","purchase"]), "amount": round(random.uniform(10,200),2),
-        "timestamp": time.time()}
-    producer.send('ecommerce_events', event)
-    time.sleep(0.1)  # 10 msg/sec
-```
+## Tre errori che fanno fallire il progetto end-to-end sotto carico
 
-## Fase 3: tabelle ClickHouse
+Il blocco SQL qui sotto mostra l'implementazione ingenua del progetto che somma i duplicati nella vista materializzata, mescola i gateway nell'allarme e interroga i dati grezzi fino all'istante corrente:
 
 ```sql
-CREATE TABLE kafka_events (...) ENGINE = Kafka SETTINGS ...;
-CREATE MATERIALIZED VIEW mv_events_per_min
-ENGINE = SummingMergeTree() ORDER BY (minute, event)
-AS SELECT toStartOfMinute(toDateTime(timestamp)) AS minute,
-       event, count() AS cnt, sum(amount) AS revenue
-FROM kafka_events GROUP BY minute, event;
+-- ERRORE 1: count() e sum() diretti in SummingMergeTree moltiplicano i retry di Kafka.
+CREATE MATERIALIZED VIEW realtime.mv_checkout_bad
+ENGINE = SummingMergeTree
+ORDER BY (minuto, payment_gateway)
+AS SELECT
+    toStartOfMinute(occurred_at) AS minuto,
+    payment_gateway,
+    countIf(status = 'approved') AS ordini_approvati_gonfiati,
+    sumIf(amount_eur, status = 'approved') AS ricavo_gonfiato_eur
+FROM realtime.checkout_events_raw
+GROUP BY minuto, payment_gateway;
+
+-- ERRORE 2: la query della dashboard legge fino a now() (minuto aperto) e non controlla il lag.
+-- ERRORE 3: l'alert guarda solo il totale globale ignorando il crollo del singolo payment_gateway.
+SELECT
+    minuto,
+    sum(ordini_approvati_gonfiati) AS totale_globale
+FROM realtime.mv_checkout_bad
+WHERE minuto >= now() - INTERVAL 1 HOUR
+GROUP BY minuto;
 ```
 
-## Fase 4: dashboard con Grafana
+### Sommare direttamente i messaggi nella Materialized View senza proteggersi dai retry
 
-Crea tre pannelli. Il primo mostra gli ordini al minuto, come time series su `mv_events_per_min` filtrato per `event='purchase'`. Il secondo mostra il revenue al minuto, come time series su somma dei ricavi. Il terzo costruisce il funnel da pagina vista ad aggiunta carrello fino ad acquisto con tassi di conversione tra stadi.
+Usare `countIf` e `sumIf` dentro una Materialized View collegata a uno stream Kafka *at-least-once* è la trappola più insidiosa di ClickHouse. Anche se la tabella sorgente `checkout_events_raw` usa `ReplacingMergeTree`, la Materialized View viene eseguita **prima** che il motore compatti e deduplichi i blocchi su disco: se un retry di rete invia lo stesso `event_id` cinque secondi dopo il primo, la Materialized View viene attivata due volte e aggiunge una seconda volta sia il conteggio sia l'importo in `SummingMergeTree`.
 
-## Fase 5: alert di anomalia
+### Non separare le metriche di salute tecnica (latenza p95, lag) dalle metriche di business
 
-Configura un alert in `Grafana`: se il tasso di purchase scende sotto la `baseline` del cinquanta per cento, invia una notifica `Slack` con `owner` e `runbook`.
+Costruire una pipeline che traccia solo il numero di ordini approvati e i ricavi in euro lascia il team al buio sulla causa tecnica di un calo. Quando gli ordini di un gateway scendono, senza il 95° percentile di `gateway_latency_ms`, il tasso di `declined` e il `freshness_lag_sec` nello stesso rollup, il reperibile non può distinguere in trenta secondi se i clienti hanno smesso di scegliere quel metodo di pagamento, se la banca sta andando in timeout o se il connettore Kafka ha smesso di scaricare la partizione.
 
-## Consegna
+### Configurare l'allarme sul totale del sito anziché per singolo gateway con persistenza
 
-- [ ] Producer Python in esecuzione (≥10 msg/sec)
-- [ ] ClickHouse con MV popolata in tempo reale
-- [ ] Dashboard Grafana con 3 pannelli funzionanti
-- [ ] Alert configurato e testato
+Valutare l'anomalia sulla somma di tutti i metodi di pagamento nasconde sistematicamente i guasti parziali ma gravissimi. Se un metodo di pagamento che vale il 18% del fatturato va completamente offline durante un picco di traffico (+30% di visite), l'aumento generale delle visite maschera la perdita del 18% nel totale aggregato: solo un controllo raggruppato per `payment_gateway` su 3 minuti consecutivi intercetta immediatamente il circuito rotto.
 
-Leggi il caso come design review. Ogni componente deve avere motivo, `owner` e criterio di fallimento. La domanda non è se farlo in real-time ma quali decisioni migliorano abbastanza da giustificare complessità, monitoraggio e costo operativo.
+## Implementazione completa: DDL, Materialized View idempotente, Dashboard e Alert SQL
 
-## Gli errori da non ripetere
+Per realizzare e collaudare l'intera pipeline end-to-end in ClickHouse, applicate questi quattro passi in sequenza:
 
-Il primo errore è lavorare su medie globali che nascondono segmenti opposti. Il secondo è ignorare qualità del dato con duplicati, timezone incoerenti e definizioni instabili. Il terzo è scambiare correlazione per causalità su feature e conversioni. Ogni analisi porta definizione esplicita, confronto per segmento e verifica contro periodo precedente o controllo.
+1. Create la tabella raw `checkout_events_raw` ordinata per `(payment_gateway, toStartOfHour(occurred_at), event_id)`.
+2. Create la tabella di rollup `checkout_rollup_1m` (`AggregatingMergeTree`) e la relativa Materialized View usando `uniqState(event_id)` e `uniqStateIf(event_id, status = 'approved')` per garantire conteggi idempotenti immuni dai retry di Kafka, più `quantileState(0.95)(gateway_latency_ms)`.
+3. Collegate il pannello principale di Grafana alla query con `-Merge` che esclude il minuto aperto (`minuto < toStartOfMinute(now())`) ed espone il lag di ingestione.
+4. Attivate la query di alerting al minuto che controlla per ogni `payment_gateway` gli ultimi 3 minuti chiusi e spara la notifica con runbook quando il tasso di rifiuto supera il 25% e il doppio della baseline su tutti e 3 i minuti.
 
-## Il progetto che ha ispirato tutto: Kafka a LinkedIn
+Ecco il codice SQL completo dei quattro componenti del progetto:
 
-LinkedIn crea Kafka nel 2011 per unificare log, eventi e pipeline in un unico flusso durevole e replayabile. Il progetto separa producer, broker e consumatori così ogni team rilegge gli stessi eventi senza export notturni. Da quel disegno discende la pipeline della lezione: producer Python, tabelle di ingestion, viste aggregate e dashboard live sullo stesso stream. Il criterio resta quello: un solo flusso ordinato alimenta operative, analitica e alert senza copie incoerenti.
+```sql
+-- PASSO 1 & 2: Tabella di Rollup 1m + Materialized View idempotente sui retry tramite uniqState(event_id)
+CREATE TABLE realtime.checkout_rollup_1m
+(
+    payment_gateway LowCardinality(String),
+    minuto DateTime('UTC'),
+    tentativi_unici_state AggregateFunction(uniq, String),
+    approvati_unici_state AggregateFunction(uniqIf, String, UInt8),
+    rifiutati_unici_state AggregateFunction(uniqIf, String, UInt8),
+    latenza_p95_state AggregateFunction(quantile(0.95), UInt32),
+    ultimo_ingest_state SimpleAggregateFunction(max, DateTime64(3, 'UTC'))
+)
+ENGINE = AggregatingMergeTree
+PARTITION BY toYYYYMM(minuto)
+ORDER BY (payment_gateway, minuto);
 
-Verdetto: il real-time vince solo quando le decisioni migliorano abbastanza da giustificare complessità, monitoraggio e costo operativo: ogni componente deve avere motivo, `owner` e criterio di fallimento, e l'alert di anomalia deve scattare su una soglia scritta con `baseline` esplicita.
+CREATE MATERIALIZED VIEW realtime.mv_checkout_rollup_1m
+TO realtime.checkout_rollup_1m
+AS SELECT
+    payment_gateway,
+    toStartOfMinute(occurred_at) AS minuto,
+    uniqState(event_id) AS tentativi_unici_state,
+    uniqIfState(event_id, status = 'approved') AS approvati_unici_state,
+    uniqIfState(event_id, status = 'declined') AS rifiutati_unici_state,
+    quantileState(0.95)(gateway_latency_ms) AS latenza_p95_state,
+    max(ingested_at) AS ultimo_ingest_state
+FROM realtime.checkout_events_raw
+GROUP BY payment_gateway, minuto;
 
-## Domande per ripassare
+-- PASSO 3 & 4: Query di Alerting (3 minuti chiusi consecutivi per gateway con soglia + owner + runbook)
+WITH finestra_3m AS (
+    SELECT
+        payment_gateway,
+        minuto,
+        uniqMerge(tentativi_unici_state) AS tentativi,
+        uniqIfMerge(rifiutati_unici_state) AS rifiutati,
+        round(rifiutati * 100.0 / nullIf(tentativi, 0), 2) AS decline_rate_pct,
+        round(quantileMerge(0.95)(latenza_p95_state), 0) AS p95_latency_ms,
+        dateDiff('second', max(ultimo_ingest_state), now()) AS lag_sec,
+        (tentativi >= 20 AND (decline_rate_pct > 25.0 OR p95_latency_ms > 2500)) AS is_minuto_critico
+    FROM realtime.checkout_rollup_1m
+    WHERE minuto >= toStartOfMinute(now()) - INTERVAL 3 MINUTE
+      AND minuto < toStartOfMinute(now())
+    GROUP BY payment_gateway, minuto
+)
+SELECT
+    payment_gateway,
+    countIf(is_minuto_critico) AS minuti_critici_su_3,
+    round(avg(decline_rate_pct), 2) AS decline_rate_medio_3m_pct,
+    max(p95_latency_ms) AS max_p95_latency_ms,
+    max(lag_sec) AS max_freshness_lag_sec,
+    'P1 - Team Payments On-Call: deviare traffico su gateway di backup' AS alert_payload
+FROM finestra_3m
+GROUP BY payment_gateway
+HAVING minuti_critici_su_3 = 3;
+```
 
-1. Quale ritmo e chiavi usi nel producer per test realistici?
-2. Quale vista aggregata alimenta ordini, ricavi e funnel?
-3. Quali tre pannelli mostrano se la pipeline è sana?
-4. Quando il tuo alert di anomalia deve scattare e chi avvisa?
+Il collaudo end-to-end dimostra la tenuta dell'architettura: anche iniettando nel topic Kafka il 9% di messaggi duplicati con lo stesso `event_id`, `uniqMerge(approvati_unici_state)` restituisce il conteggio esatto al 100% senza un solo ordine fantasma; la dashboard Grafana legge `checkout_rollup_1m` in 4 millisecondi anziché 18 secondi; e alle 12:17 (esattamente dopo i tre minuti 12:14, 12:15 e 12:16 di guasto su `PREPAID_IT` con `decline_rate_medio_3m_pct = 92.0%` e `max_p95_latency_ms = 4120`), la query di alerting restituisce la riga `P1` che permette al team di deviare il traffico sul gateway secondario salvando la vendita lampo. Usare `uniqState(event_id)` al posto di `count()` richiede di cambiare una parola nella vista; scoprire a fine giornata che i report live hanno sovrastimato l'incasso di decine di migliaia di euro mina la fiducia nell'intera piattaforma.
+
+## Ingestione nativa con ClickHouse Kafka Engine o connettore esterno Kafka Connect
+
+Nel progettare il primo anello della pipeline (il passaggio dal topic Kafka alla tabella ClickHouse), l'architetto deve scegliere tra due soluzioni: il motore integrato **`ENGINE = Kafka` nativo di ClickHouse** (abbinato a una Materialized View che riversa nella tabella `MergeTree`) e un **connettore esterno gestito su Kafka Connect** (o Vector / Bento) che spinge i blocchi via interfaccia HTTP/Native in ClickHouse.
+
+Il criterio di scelta è netto: **usate il ClickHouse Kafka Engine nativo quando volete un'architettura a zero componenti aggiuntivi per flussi JSON o Avro standard in cui ClickHouse tira direttamente i messaggi dal broker, usate invece il connettore esterno Kafka Connect (con Dead Letter Queue configurata) quando avete bisogno di instradare automaticamente i messaggi malformati su un topic di scarto senza bloccare la partizione, scalare i worker di ingestione in modo indipendente dai nodi del database o applicare mascheramenti PII prima che il dato tocchi il disco.**
+
+La confusione comune consiste nell'usare il Kafka Engine nativo senza impostare `kafka_skip_broken_messages` o la gestione degli errori per poi trovarsi l'intera ingestione bloccata da un singolo JSON corrotto inviato da un client, oppure nel mettere in piedi un cluster Kafka Connect di sei nodi per leggere un singolo topic interno già validato. Sbagliare questa scelta porta o a fermi imprevisti della pipeline al primo messaggio sporco, o a un carico operativo inutile di infrastruttura intermedia.
+
+Questo progetto non copre la riconciliazione finanziaria T+1 con i file di regolamento bancario (settlement CSV delle carte di credito) che avviene il giorno successivo nello strato batch di dbt. Per i ricavi in euro soggetti a possibili retry sul topic Kafka, se non si deduplica a monte prima della Materialized View, il valore esatto al centesimo per i bilanci si ottiene interrogando la tabella `checkout_events_raw` deduplicata per `event_id` con `argMax(amount_eur, ingested_at)`.
+
+## Cinque domande di collaudo prima del go-live della pipeline end-to-end
+
+1. Avete iniettato nel topic di test un lotto di messaggi con `event_id` duplicati e verificato che le metriche esposte dalla tabella di rollup (`uniqMerge`) non aumentino di una sola unità?
+2. I pannelli della dashboard live impiegano meno di 50 millisecondi su `system.query_log`, leggono esclusivamente da `checkout_rollup_1m` e tagliano il minuto corrente aperto (`minuto < toStartOfMinute(now())`)?
+3. È visibile in dashboard e incluso nel payload dell'alert il ritardo di freschezza (`now() - max(ingested_at)`), così da accorgersi subito se il consumatore Kafka si è fermato?
+4. Avete simulato il degrado di un singolo `payment_gateway` verificando che l'alert scatti esattamente dopo 3 minuti chiusi consecutivi indicando il gateway rotto, l'owner e l'azione di failover?
+5. La tabella raw ha un `TTL` configurato per eliminare o spostare su object storage i dati grezzi vecchi, mantenendo leggere le partizioni calde sui dischi SSD?
+
+La metrica di accettazione finale dell'intero laboratorio unisce latenza ed esattezza: **tempo end-to-end dal clic sul checkout alla comparsa dell'aggregato in dashboard inferiore a 5 secondi**, con **0% di errore sui conteggi in presenza di retry di rete** e **100% di rilevazione sui test di guasto per singolo gateway**.
+
+Di tutto il percorso sullo streaming con ClickHouse, portate con voi una sola certezza ingegneristica: il tempo reale non è nemico della precisione contabile quando ogni evento ha un'identità (`event_id`), un tempo di nascita (`occurred_at`) e uno stato binario componibile (`-State` / `-Merge`).

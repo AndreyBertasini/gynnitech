@@ -17,88 +17,122 @@ learningObjectives:
   - Dimensionare partizioni e broker sui volumi reali con test di carico
   - Scegliere la retention in base al valore del replay
 binario: "ml-tabellare"
+formato: "articolo"
 autore: "Hermes"
 controllatoDa: "Argo"
 autorizzatoDa: "Giano"
 draft: false
-dateModified: 2026-09-07
+dateModified: 2026-11-13
 ---
+
 # Architettura di Kafka: replica e garanzie di consegna
 
-Questa lezione prosegue il binario **ml-tabellare** del modulo: qui impari a leggere l'architettura di Kafka come una mappa di decisioni — chiavi, conferme di scrittura e retention — che determinano durabilità, ordine e costo dei tuoi dati.
+Un cluster Kafka a tre nodi ospita il topic dei pagamenti con fattore di replica 3, ma il producer è lasciato con l'impostazione `acks=1` e sul broker è abilitata l'elezione di leader non sincronizzati (`unclean.leader.election.enable=true`). Quando il nodo leader della partizione 0 subisce un riavvio improvviso prima di aver copiato gli ultimi due secondi di dati sui follower, un follower rimasto indietro viene eletto nuovo leader e 1.400 pagamenti già confermati con successo all'applicazione spariscono nel nulla. La causa non è un bug di Kafka: è non aver allineato la triade di durabilità (`replication.factor=3`, `min.insync.replicas=2`, `acks=all`).
 
-## L'idea in una frase
+## Millequattrocento pagamenti confermati e poi svaniti al riavvio del leader
 
-L'architettura di Kafka è un log partizionato e replicato dove chiavi, conferme di scrittura e retention decidono durabilità, ordine e costo.
+Questo è un caso ricostruito con numeri di esempio su quanto accade quando ci si illude che impostare `replication.factor=3` basti da solo a non perdere mai un dato. Un istituto di pagamento processa 700 transazioni al secondo su un cluster Kafka di tre broker (`broker-1`, `broker-2`, `broker-3`).
 
-## La procedura in cinque passi
+L'architetto crea il topic con tre repliche ma lascia tre parametri secondari ai vecchi valori permissivi: il producer usa `acks=1`, il topic ha `min.insync.replicas=1` e `unclean.leader.election.enable=true`. Alle 14:20 si verifica una congestione di rete di due secondi su `broker-1` (leader della partizione 0) seguita da un kernel panic:
+1. Negli ultimi due secondi prima del crash, il producer ha inviato 1.400 transazioni a `broker-1`. Poiché `acks=1` chiede conferma solo al leader locale, `broker-1` ha scritto i messaggi nella propria RAM e ha risposto immediatamente `OK` al producer prima che `broker-2` e `broker-3` facessero in tempo a scaricarli.
+2. Quando `broker-1` muore, il controller elegge nuovo leader `broker-2`, il cui log si fermava a due secondi prima: l'offset riparte da quel punto più vecchio e le 1.400 transazioni già confermate ai clienti sono perse per sempre.
 
-1. Scegli la chiave di partizionamento in base all'ordine che devi garantire.
-2. Fissa fattore di replica e ISR minime in base alla perdita che tolleri.
-3. Scegli il livello di `acks` dichiarando il compromesso tra durabilità e latenza.
-4. Fissa la retention in base al valore del replay: 7 giorni come standard, di più per audit.
-5. Dimensiona partizioni e broker sui volumi reali, con test di carico prima del rilascio.
+La causa della perdita dati è ignorare come interagiscono tra loro il leader della partizione, l'insieme delle repliche sincronizzate (**ISR**, *In-Sync Replicas*) e il livello di conferma del produttore.
 
-## Perché l'architettura conta
+## Leader/Follower, In-Sync Replicas (ISR) e la triade della durabilità
 
-Un broker Kafka non è una coda generica. Topic, partizioni, consumer group e retention definiscono come l'organizzazione pubblica gli eventi, li conserva e li rilegge. Il punto non è accumulare definizioni: è capire quale decisione di disegno cambia quando scegli una configurazione invece di un'altra. Se sbagli la chiave di partizionamento, il problema non resta tecnico. Diventa ordine rotto, consumer sbilanciati e analisi a valle che non tornano.
+L'alta affidabilità di Apache Kafka senza colli di bottiglia centralizzati poggia su tre meccanismi distribuiti coordinati dal controller KRaft.
 
-Il problema vero non è conoscere Kafka in astratto, ma disegnare i topic con vincoli reali: volumi che crescono, consumer che restano indietro, formati che devono restare compatibili nel tempo. Leggi l'architettura come mappa delle responsabilità. Chi produce, chi consuma, chi possiede il topic, quanto dura la retention e cosa succede quando un consumer accumula ritardo. Le basi servono quando ti permettono di prevedere il comportamento sotto carico, prima della produzione.
+Il primo meccanismo è il modello **Leader e Follower per singola partizione**. Ogni partizione di un topic con `replication.factor = 3` ha esattamente un broker designato come **Leader** e due broker designati come **Follower**. Tutte le scritture dei producer e (di norma) tutte le letture dei consumer passano per il Leader, mentre i Follower eseguono un ciclo continuo di fetch che copia sequenzialmente i segmenti del log dal Leader nel proprio page cache.
 
-Da qui in avanti collega ogni concetto a una scelta concreta: come partizionare, quale garanzia chiedere alla scrittura, quanta retention tenere. Se una nozione non cambia una di queste decisioni, è solo terminologia.
+Il secondo meccanismo è l'insieme dinamico **ISR (*In-Sync Replicas*)** e l'**High Watermark**. Un Follower fa parte dell'ISR solo se ha scaricato tutti i messaggi del Leader entro la finestra massima `replica.lag.time.max.ms` (tipicamente 30 secondi). Se un Follower rallenta o cade, il Leader lo espelle dall'ISR. L'*High Watermark* è l'offset dell'ultimo messaggio che è stato copiato con successo su **tutte** le repliche attualmente presenti nell'ISR: per garantire la coerenza, Kafka rende visibili ai consumer solo i messaggi fino all'High Watermark.
 
-## Replicazione e fault tolerance
+Il terzo meccanismo è l'**incastro matematico della triade `RF=3`, `min.insync.replicas=2` e `acks=all` (`-1`)** con `unclean.leader.election.enable=false`. Con `acks=all`, il Leader non risponde `OK` al producer finché il messaggio non è stato scritto da tutte le repliche nell'ISR, e `min.insync.replicas=2` impone che nell'ISR ci siano almeno due nodi vivi (il Leader più almeno un Follower). Se il Leader muore un millisecondo dopo aver dato l'`OK`, il Follower nell'ISR possiede già per certezza matematica il 100% dei messaggi confermati e diventa il nuovo Leader con zero byte persi.
 
-Ogni partizione ha un leader e N follower, configurati con `replication.factor`. Il leader gestisce tutte le letture e scritture, mentre i follower replicano passivamente. Se un broker muore, uno dei follower viene eletto leader.
+**Un topic Kafka garantisce zero perdita di messaggi confermati in caso di crollo di un nodo solo se combina contemporaneamente `replication.factor=3`, `min.insync.replicas=2`, `acks=all` e `unclean.leader.election.enable=false`.**
 
-Le ISR (In-Sync Replicas) sono le repliche allineate al leader, cioè con un lag inferiore a `replica.lag.time.max.ms` (default 30s). Solo una ISR può essere eletta leader. Se imposti `min.insync.replicas=2`, almeno due broker devono confermare una scrittura prima che sia considerata committed. Questo protegge dalla perdita di dati quando un broker muore subito dopo aver ricevuto una scrittura.
+## Tre errori di configurazione che azzerano le garanzie di Kafka
 
-## Garanzie di delivery: acks
+Il blocco di configurazione qui sotto mostra le tre combinazioni sbagliate che espongono il cluster o alla perdita silenziosa di dati o al blocco totale al primo riavvio di manutenzione:
 
-Il producer sceglie il livello di garanzia con il parametro `acks`:
+```sql
+# ERRORE 1 (Perdita dati): acks=1 con unclean leader election attiva.
+# Se il leader cade prima del fetch dei follower, i messaggi confermati vanno persi.
+acks=1
+unclean.leader.election.enable=true
 
-- `acks=0`: fuoco e dimentica, nessuna garanzia, throughput massimo.
-- `acks=1`: conferma il solo leader. Se il leader muore prima che i follower replichino, i dati vanno persi.
-- `acks=all` (o -1): confermano tutte le ISR, nessuna perdita di dati, latenza più alta.
+# ERRORE 2 (Blocco del cluster): replication.factor=3 con min.insync.replicas=3 e acks=all.
+# Basta riavviare un singolo broker per patch di sicurezza e TUTTI i producer si bloccano!
+replication.factor=3
+min.insync.replicas=3
+acks=all
 
-Per l'analytics, `acks=1` è spesso sufficiente, perché un evento perso ogni tanto non sposta le metriche. Per le transazioni finanziarie serve invece `acks=all`. La scelta rende esplicita la soglia di rischio: stai dichiarando quanta perdita tolleri in cambio di latenza.
+# ERRORE 3 (Esplosione metadati): creare 500 partizioni per un topic da 2 MB/sec.
+num.partitions=500
+segment.bytes=10485760
+```
 
-## Idempotenza e transazioni
+### Usare acks=1 o acks=0 per flussi transazionali e analitici critici
 
-Il producer idempotente, con idempotenza attiva, garantisce che un messaggio inviato più volte per via dei retry venga scritto una sola volta. Kafka assegna un identificativo di producer e un numero di sequenza a ogni messaggio, e il broker deduplica.
+Lasciare `acks=1` (o peggio `acks=0`, dove il producer spara il pacchetto sulla scheda di rete senza nemmeno aspettare che il broker risponda) viene spesso giustificato con la ricerca di qualche millisecondo in meno di latenza. In realtà con `acks=1` il messaggio risiede su un solo nodo nel momento in cui il producer riceve conferma e passa oltre: qualsiasi caduta dell'alimentazione, del disco o della macchina virtuale di quel singolo broker prima del ciclo di replica cancella dati che il resto dell'azienda considera già salvati.
 
-Le transazioni permettono di scrivere in modo atomico su più topic o partizioni: o tutti i messaggi sono committed, o nessuno lo è. Sono il meccanismo che abilita la semantica exactly-once in Kafka Streams.
+### Impostare min.insync.replicas uguale a replication.factor
 
-## Dimensionamento del cluster
+Configurare `replication.factor=3` e `min.insync.replicas=3` con `acks=all` sembra il massimo della sicurezza ("voglio che tutti e tre i nodi abbiano il dato"). In produzione trasforma un sistema tollerante ai guasti in un sistema fragile: non appena un singolo broker su tre si riavvia per trenta secondi durante un normale aggiornamento del sistema operativo, il numero di repliche nell'ISR scende a 2 e tutti i producer dell'azienda iniziano a fallire con `NotEnoughReplicasException`. La formula corretta è sempre $	ext{min.insync.replicas} = 	ext{replication.factor} - 1$ (2 su 3).
 
-Tre numeri guidano il dimensionamento. Le partizioni non devono scendere sotto il throughput target diviso 10 MB/s, perché una singola partizione regge circa 10-20 MB/s in scrittura: per 1 GB/s servono circa 100 partizioni. La retention bilancia costo di storage e valore analitico: 7 giorni è lo standard, mentre per audit e compliance si sale a 30-90 giorni. Sul fronte broker, il minimo per la fault tolerance è 3, e ogni broker regge circa 1-2 Gbps di throughput con hardware standard.
+### Sovradimensionare il numero di partizioni in piccoli segmenti su disco
 
-## Esempio: la decisione di partizionamento
+Creare un topic con 200 o 500 partizioni quando il traffico reale è di pochi megabyte al secondo frammenta il disco e rallenta i failover. Ogni partizione su ogni replica equivale a una directory con file `.log`, `.index` e `.timeindex` aperti dal kernel Linux: migliaia di partizioni inutili disperdono le scritture sequenziali in scritture casuali, saturano i file descriptor e allungano i tempi di rielezione dei leader quando un broker si riavvia.
 
-Il caso tipico è un team che progetta i topic per ordini, pagamenti e spedizioni. La scelta critica è se partizionare per `order_id`, `customer_id` o area geografica, perché da qui dipendono ordine degli eventi, parallelismo dei consumer e facilità di ricostruzione storica. La tabella seguente mostra come leggere alcuni segnali tipici prima di decidere.
+## Configurazione blindata del topic e formula di dimensionamento delle partizioni
 
-| Situazione | Lettura prudente | Decisione |
-|---|---|---|
-| Il throughput migliora ma su una baseline debole | Il guadagno potrebbe dipendere dal campione di carico | Rafforzare il test prima di scalare le partizioni |
-| Una sola partizione riceve la maggior parte del traffico | La chiave scelta crea hotspot | Rivedere la chiave o aumentare la cardinalità |
-| Il costo operativo cresce con le partizioni | Più partizioni significano più overhead di coordinamento | Fissare una soglia economica esplicita |
-| I consumer producono conteggi incoerenti | L'ordine per chiave non è garantito come previsto | Correggere ownership del topic e contratto degli eventi |
+Per configurare un cluster Kafka che tolleri la perdita di un intero nodo senza perdere un solo evento né interrompere le scritture, applicate questi quattro criteri in ordine di priorità:
 
-## Errori tipici da evitare
+1. Per tutti i topic di business applicate il profilo standard di durabilità: `replication.factor=3`, `min.insync.replicas=2` e `unclean.leader.election.enable=false` lato topic/broker, unito a `acks=all` e `enable.idempotence=true` lato producer.
+2. Dimensionate il numero di partizioni $P$ con la formula basata sul throughput target $T_{	ext{target}}$ (in MB/s), sul throughput di scrittura per partizione $T_p pprox 10	ext{ MB/s}$ e sul throughput di lettura di un singolo consumer $T_c$:
+   $$P = \max\left(\left\lceil rac{T_{	ext{target}}}{T_p} 
+ight
+ceil, \left\lceil rac{T_{	ext{target}}}{T_c} 
+ight
+ceil
+ight)$$
+   mantenendo per la stragrande maggioranza dei casi tra **6 e 24 partizioni** per topic.
+3. Impostate la retention (`retention.ms` e `retention.bytes`) oppure la compattazione per chiave (`cleanup.policy=compact`) in base alla natura del topic (eventi storici vs tabella di stato).
+4. Verificate dopo la creazione con `--describe` che tutte le partizioni abbiano 3 repliche nell'elenco `Isr`.
 
-L'errore più frequente è trattare l'architettura come un'etichetta invece che come criterio di scelta. Succede quando presenti un numero senza dire quale decisione cambia, quale baseline lo rende interpretabile e quale rischio resta aperto. In quel caso il dato sembra preciso, ma non guida l'azione.
+Ecco i comandi e le proprietà esatte per creare e verificare un topic ad alta affidabilità:
 
-Ce ne sono altri tre da tenere d'occhio. Il primo è lavorare su dati aggregati troppo presto: una media globale può nascondere due segmenti che si muovono in direzioni opposte. Il secondo è non controllare la qualità del dato, perché eventi duplicati, tracking incompleto, timezone incoerenti e cambi di definizione producono conclusioni false. Il terzo è confondere correlazione e causalità: se gli utenti che usano una feature convertono di più, non significa che la feature causi conversione, potrebbero usarla perché erano già più motivati. Per ridurre questi rischi tieni sempre una definizione esplicita della metrica, un confronto per segmento e una verifica contro un periodo precedente.
+```sql
+# 1. Creazione del topic blindato con la triade RF=3, min.insync.replicas=2 e unclean election disabilitata
+kafka-topics.sh --bootstrap-server kafka-1:9092,kafka-2:9092,kafka-3:9092 --create   --topic payments.authorized.v1   --partitions 12   --replication-factor 3   --config min.insync.replicas=2   --config unclean.leader.election.enable=false   --config cleanup.policy=delete   --config retention.ms=1209600000   --config compression.type=producer
 
-## L'esempio che fa da riferimento
+# 2. Verifica dello stato di salute delle partizioni: controlliamo che Replicas e Isr abbiano entrambe 3 nodi
+kafka-topics.sh --bootstrap-server kafka-1:9092   --describe --topic payments.authorized.v1
 
-Kafka nasce in LinkedIn per unificare la raccolta dei log e viene descritto nel 2011 da Kreps, Narkhede e Rao nel paper presentato a NetDB. Il disegno di log partizionato e replicato con leader, follower e ISR viene da quell'esigenza operativa. Nel 2015 Jun Rao ha documentato la semantica exactly-once in arrivo sulla piattaforma, chiudendo il triangolo tra replicazione, conferme di scrittura e transazioni. Da quel percorso discendono le scelte della lezione: chiavi, conferme, repliche e retention sono decisioni di durabilità, non parametri.
+# 3. Controllo rapido di eventuali partizioni sotto-replicate (deve restituire 0 righe in condizioni sane)
+kafka-topics.sh --bootstrap-server kafka-1:9092   --describe --under-replicated-partitions
+```
 
-Verdetto: per l'analytics `acks=1` è spesso sufficiente, per le transazioni finanziarie serve `acks=all`: la scelta della chiave, delle conferme e della retention dichiara quanta perdita tolleri in cambio di latenza, e se una nozione non cambia una di queste decisioni è solo terminologia.
+Con questa configurazione il cluster supera indenne il test di guasto: se `broker-1` viene spento brutalmente mentre i producer scrivono 700 pagamenti al secondo, l'ISR passa da `(1,2,3)` a `(2,3)` (che soddisfa ancora `min.insync.replicas=2`), il controller promuove istantaneamente `broker-2` a Leader in pochi millisecondi, i producer non ricevono alcun errore bloccante e le 1.400 transazioni degli ultimi due secondi sono tutte integre su `broker-2` e `broker-3`. Impostare questi quattro parametri richiede trenta secondi alla creazione del topic; scoprire durante un incidente reale che `unclean.leader.election.enable` era attivo significa dover spiegare al regolatore o ai clienti perché sono spariti ordini già pagati.
 
-## Domande per verificare la lezione
+## Politica di pulizia Delete per tempo o Log Compaction per chiave
 
-1. Quale chiave di partizionamento hai scelto e quale ordine garantisce?
-2. Quale fattore di replica e quante ISR minime proteggono le tue scritture?
-3. Quale livello di `acks` usi e quanta perdita tolleri in cambio di latenza?
-4. Quanta retention tieni e quale replay ti permette dopo un errore a valle?
+Ogni topic Kafka gestisce lo spazio su disco tramite il parametro `cleanup.policy`, che offre due modalità di conservazione strutturalmente diverse: **`delete`** (cancellazione dei segmenti più vecchi della soglia temporale o di dimensione) e **`compact`** (*log compaction*, che conserva per sempre almeno l'ultimo valore scritto per ciascuna chiave primaria del messaggio).
+
+Il criterio di scelta è netto: **usate `cleanup.policy=delete` (es. retention di 7 o 14 giorni) per i flussi di eventi immutabili (clic, ordini, transazioni, log di telemetria) dove conta la serie storica completa nel tempo, usate invece `cleanup.policy=compact` (o `compact,delete`) per i topic di anagrafica, configurazione e Change Data Capture (es. catalogo prodotti, profili clienti, tassi di cambio) dove un nuovo consumatore che parte da zero deve poter ricostruire l'ultimo stato corrente di ogni chiave anche se non viene modificata da sei mesi.**
+
+La confusione comune consiste nell'usare `cleanup.policy=delete` con retention di 7 giorni per il topic dell'anagrafica articoli (`dim_products`): se una scarpa in catalogo non subisce variazioni di prezzo per otto giorni, il suo messaggio viene cancellato dal broker e qualsiasi nuovo servizio o tabella che fa replay dal topic non troverà mai più quel prodotto. Sbagliare questa scelta costringe a riesportare periodicamente l'intero database sorgente via batch anziché sfruttare Kafka come sorgente di stato autoritativa.
+
+Questo articolo non tratta l'archiviazione a livelli (*Tiered Storage*, introdotta da KIP-405 per spostare automaticamente i segmenti storici del log dai dischi NVMe locali a bucket S3 economici) né il bilanciamento automatico delle partizioni tra dischi con Cruise Control. Ricordate che nella *log compaction* per cancellare fisicamente una chiave rimossa dal database sorgente occorre inviare un messaggio speciale chiamato **tombstone** (stessa `key` e payload `value = null`).
+
+## Cinque domande prima di approvare la configurazione di un topic in produzione
+
+1. Il topic ha `replication.factor=3`, `min.insync.replicas=2` e `unclean.leader.election.enable=false`, ed è alimentato da producer con `acks=all`?
+2. Il numero di partizioni è stato calcolato sul throughput reale in megabyte al secondo (tipicamente 6–24 partizioni) evitando di creare centinaia di partizioni vuote?
+3. Avete scelto consapevolmente tra `cleanup.policy=delete` (per flussi di eventi temporali) e `cleanup.policy=compact` (per stati di entità e tabelle di lookup)?
+4. Lo spazio disco sui broker è dimensionato con almeno il 30% di margine libero oltre a $	ext{throughput giornaliero} 	imes 	ext{giorni di retention} 	imes 	ext{replication.factor}$?
+5. Avete un allarme immediato sulla metrica `UnderReplicatedPartitions > 0` e `OfflinePartitionsCount > 0`?
+
+La metrica regina per verificare l'integrità della replica in qualsiasi istante è **`UnderReplicatedPartitions = 0`** accompagnata da **`ActiveControllerCount = 1`**: finché entrambe le condizioni sono vere, tutte le repliche sono allineate e il cluster è pronto ad assorbire la caduta di un nodo senza perdere un solo byte.
+
+Di tutta l'architettura interna di Kafka, una sola equazione merita di essere imparata a memoria: `replication.factor = 3` senza `min.insync.replicas = 2` e `acks = all` è solo un'illusione di sicurezza. I tre parametri funzionano solo se lavorano insieme.

@@ -16,189 +16,152 @@ learningObjectives:
 prerequisites:
   - data-warehousing/olap
 binario: "ml-tabellare"
+formato: "articolo"
 autore: "Hermes"
 controllatoDa: "Argo"
 autorizzatoDa: "Giano"
 draft: false
-dateModified: 2026-09-07
+dateModified: 2026-11-13
 ---
+
 # SQL per il data warehouse: i pattern essenziali
 
-Una query analitica sembra innocua finché due persone calcolano lo stesso KPI in due modi diversi e ottengono numeri diversi. A quel punto la riunione si sposta dal merito al metodo di conteggio. La difficoltà non è ricordare la sintassi di un join: è scrivere query con grain esplicito, duplicati gestiti e finestra temporale chiara. Qui impari i pattern difensivi che rendono ogni KPI riusabile.
+Un analista scrive una query per confrontare il fatturato mensile anno su anno e spaccare i ricavi per metodo di pagamento: applica una funzione alla colonna data nel filtro `WHERE`, fa un `SELF JOIN` sulla tabella degli ordini e unisce direttamente la tabella dei resi. La query impiega tre minuti invece di un secondo, salta i mesi senza resi e raddoppia il ricavo degli ordini rimborsati in due tranche. La causa non è il volume dei dati: è ignorare i tre pattern SQL fondamentali per i motori colonnari (predicati sargable con pre-aggregazione, window function con frame esplicito e aggregazione condizionale).
 
-## L'idea in una frase
+## Tre minuti di attesa e ricavi raddoppiati sugli ordini con reso
 
-I query pattern del warehouse rendono ogni `KPI` riusabile perché fissano `grain`, finestre temporali e controlli di cardinalità. La difficoltà non è la sintassi: è scrivere query difensive.
+Questo è un caso ricostruito con numeri di esempio su quanto si osserva ogni giorno nei repository analitici aziendali. La tabella `fct_orders` contiene 120 milioni di righe ordinate per `(order_date, customer_id)`, affiancata dalla tabella `fct_refunds` che registra i rimborsi parziali emessi dall'assistenza clienti.
 
-## La sequenza di scrittura
+Per preparare il report di chiusura trimestrale, l'analista scrive una query unica che presenta tre difetti strutturali:
+1. Filtra l'anno corrente scrivendo `WHERE toString(order_date) LIKE '2026-%'`, costringendo il motore a convertire in stringa 120 milioni di date e disabilitando l'indice sparso delle partizioni.
+2. Unisce `fct_orders` con `fct_refunds` tramite `LEFT JOIN ON o.order_id = r.order_id` prima di sommare il ricavo dell'ordine: per i 4.500 ordini che hanno subito due rimborsi parziali distinti, la riga dell'ordine viene duplicata dal join e `sum(o.gross_amount_eur)` inventa 380.000 euro di vendite inesistenti.
+3. Per confrontare ogni mese con lo stesso mese dell'anno precedente, esegue un `LEFT JOIN` della vista mensile con se stessa spostata di 12 mesi, ma dimentica di gestire i buchi del calendario per le nuove linee di prodotto lanciate a metà anno.
 
-1. Dichiara `grain`, finestra temporale e metrica prima di scrivere righe di codice.
-2. Filtra sulla dimensione temporale prima del raggruppamento e usa chiavi numeriche nei `join`.
-3. Isola aggregazione e confronto temporale in `CTE` separate con nomi espliciti e verificabili.
-4. Aggiungi un controllo di cardinalità contro i `join` che moltiplicano le righe prima di pubblicare.
-5. Rendi la query rileggibile con `CTE` ordinate e alias stabili che un collega modifica senza romperla.
+La causa di questi tre problemi è scrivere SQL analitico usando i costrutti improvvisati dei database piccoli, anziché applicare i pattern progettati per l'esecuzione vettorializzata e la conservazione della granularità.
 
-## Il problema concreto
+## Predicati sargable, pre-aggregazione CTE e window frame
 
-Una query analitica sembra innocua finché due persone calcolano lo stesso `KPI` in due modi diversi e ottengono numeri diversi. A quel punto la riunione si sposta dal merito al metodo di conteggio. La difficoltà non è ricordare la sintassi di un `join`: è scrivere query con `grain` esplicito, duplicati gestiti e finestra temporale chiara. Una query professionale è difensiva. Usa `CTE` leggibili, dedup esplicita, finestre dichiarate, controlli di cardinalità e aggregazioni al `grain` giusto.
+Scrivere SQL che scala su miliardi di righe senza mai alterare i totali contabili richiede di padroneggiare tre meccanismi fisici del motore di query.
 
-| Passaggio | Domanda da fare | Output atteso |
-|---|---|---|
-| Decisione | Quale numero deve produrre la query, e per quale scelta? | Metrica definita |
-| Segnale | Su quale grain e quale finestra temporale aggrego? | Granularità esplicita |
-| Baseline | Rispetto a cosa confronto il risultato? | Periodo o segmento |
-| Vincolo | Quali join possono moltiplicare le righe? | Controllo di cardinalità |
-| Azione | La query è leggibile e modificabile da un collega? | CTE e nomi chiari |
+Il primo meccanismo è il predicato *sargable* (*Search Argument Able*) abbinato al pruning delle partizioni. Quando il filtro `WHERE` confronta direttamente la colonna di ordinamento con una costante dello stesso tipo — `WHERE order_date >= '2026-01-01' AND order_date < '2027-01-01'` — il motore confronta i due estremi con i metadati min/max di ciascun blocco e salta su disco il 90% della tabella. Se invece si avvolge la colonna in una funzione non monotona (`toString(order_date)`, `extract(month FROM order_date) = 3`), l'ottimizzatore perde la relazione d'ordine e deve decomprimere ogni singola riga.
 
-| Elemento | Specifica richiesta |
-|---|---|
-| Unità di analisi | tabella, fact, dimensione, grain o modello dati |
-| Segnale principale | grain corretto, integrità, performance, costo query, tracciabilità |
-| Baseline | periodo precedente, gruppo comparabile o benchmark |
-| Decisione | schema, mart, query pattern o scelta architetturale |
-| Rischio | scambiare un numero disponibile per una prova sufficiente |
+Il secondo meccanismo è l'isolamento della granularità tramite CTE (*Common Table Expressions*) pre-aggregate prima del join. In SQL due tabelle possono essere unite senza moltiplicare le misure additive solo se almeno una delle due ha esattamente una riga per ciascun valore della chiave di join (relazione 1:1 o N:1). Quando si devono confrontare ordini e resi, o budget mensili e vendite giornaliere, ogni tabella va prima raggruppata nella propria CTE alla granularità comune — ad esempio `GROUP BY order_id` o `GROUP BY mese, categoria` — e solo dopo unita all'altra.
 
-## Pattern 1: aggregazione con dimensioni
+Il terzo meccanismo è la sostituzione dei `SELF JOIN` e dei pivot rigidi con window function (`LAG`, `SUM() OVER`) e aggregazioni condizionali (`sumIf` o `SUM(CASE WHEN ...)`). Una window function con clausola `ROWS BETWEEN` o `LAG(..., 12)` scorre in memoria la partizione ordinata in una sola passata senza duplicare il piano di lettura, mentre l'aggregazione condizionale ruota le righe in colonne durante lo stesso `GROUP BY`.
+
+**Una query analitica è solida e veloce solo se lascia intatte le colonne di filtro per il pruning, porta ogni CTE alla stessa granularità prima del join e calcola finestre e pivot in una sola scansione.**
+
+## Tre errori nelle query SQL su data warehouse
+
+Il blocco SQL qui sotto mostra i tre antipattern combinati: funzione sulla colonna di partizione, join 1:N prima dell'aggregazione e window function con frame implicito errato:
 
 ```sql
-SELECT d.year, d.quarter, c.country,
-       SUM(f.amount) AS revenue,
-       COUNT(DISTINCT f.customer_id) AS customers
-FROM sales_fact f
-JOIN dim_date d ON f.date_key = d.date_key
-JOIN dim_customer c ON f.customer_key = c.customer_key
-WHERE d.year = 2024
-GROUP BY d.year, d.quarter, c.country;
-```
-
-Tre regole valgono quasi sempre. Filtra sulla dimensione temporale prima del raggruppamento quando puoi. Usa chiavi numeriche come `date_key` e `customer_key` per i `join` invece delle stringhe. Aggrega nella fact table `sales_fact` e non nelle dimensioni. Sono accorgimenti semplici da enunciare e costosi da dimenticare, perché incidono insieme su correttezza e performance.
-
-## Pattern 2: analisi temporale con window function
-
-```sql
-WITH monthly AS (
-  SELECT d.year_month, SUM(f.amount) AS revenue
-  FROM sales_fact f JOIN dim_date d ON f.date_key = d.date_key
-  GROUP BY d.year_month
-)
-SELECT year_month, revenue,
-  LAG(revenue, 12) OVER (ORDER BY year_month) AS revenue_ly,
-  ROUND((revenue - LAG(revenue,12) OVER (ORDER BY year_month))
-        / LAG(revenue,12) OVER (ORDER BY year_month) * 100, 1) AS yoy_growth
-FROM monthly;
-```
-
-La `CTE` chiamata `monthly` isola l'aggregazione mensile. La window function `LAG` recupera il valore di dodici mesi prima per la crescita anno su anno. Separare aggregazione e confronto temporale rende la query leggibile e meno fragile al cambio di finestra.
-
-## Pattern 3: pivot con CASE WHEN
-
-```sql
-SELECT d.year_month,
-  SUM(CASE WHEN c.country = 'IT' THEN f.amount ELSE 0 END) AS revenue_IT,
-  SUM(CASE WHEN c.country = 'FR' THEN f.amount ELSE 0 END) AS revenue_FR,
-  SUM(CASE WHEN c.country = 'DE' THEN f.amount ELSE 0 END) AS revenue_DE
-FROM sales_fact f
-JOIN dim_date d ON f.date_key = d.date_key
-JOIN dim_customer c ON f.customer_key = c.customer_key
-GROUP BY d.year_month;
-```
-
-Il pivot con `CASE WHEN` è portabile su ogni database. L'operatore `PIVOT` nativo di SQL Server e Snowflake è più elegante ma meno portabile. Per query che girano su warehouse diversi conviene restare sul `CASE WHEN`.
-
-In sintesi: per aggregazioni portabili usa `CASE WHEN`, e riserva l'operatore `PIVOT` nativo ai soli warehouse dove la portabilità non serve.
-
-Verdetto: `CASE WHEN` vince per aggregazioni portabili su warehouse diversi; l'operatore `PIVOT` nativo solo dove la portabilità non serve.
-
-## Pattern 4: percent of total
-
-```sql
-SELECT country, SUM(amount) AS revenue,
-  ROUND(SUM(amount) * 100.0 / SUM(SUM(amount)) OVER (), 1) AS pct_of_total
-FROM sales_fact f JOIN dim_customer c ON f.customer_key = c.customer_key
-GROUP BY country ORDER BY revenue DESC;
-```
-
-L'espressione con window su aggregazione calcola il totale globale e lo rende disponibile a ogni riga. Così ogni paese diventa percentuale del totale senza seconda query o sottoquery di servizio.
-
-## Esempio SQL: costruire una vista di controllo
-
-Il pattern seguente è volutamente generico ma eseguibile nella maggior parte dei warehouse moderni. Crea una base analitica con metrica, segmento e finestra temporale, così confronti periodi e gruppi senza riscrivere la logica ogni volta.
-
-```sql
-WITH base_events AS (
-  SELECT
-    user_id,
-    account_id,
-    event_type,
-    event_time,
-    DATE_TRUNC('week', event_time) AS week,
-    source,
-    device_type
-  FROM events
-  WHERE event_time >= CURRENT_DATE - INTERVAL '180 days'
-    AND user_id IS NOT NULL
-),
-weekly_user_metrics AS (
-  SELECT
-    week,
-    user_id,
-    COALESCE(source, 'unknown') AS source,
-    COALESCE(device_type, 'unknown') AS device_type,
-    COUNT(*) AS total_events,
-    COUNT(DISTINCT DATE(event_time)) AS active_days,
-    COUNT(DISTINCT event_type) AS event_diversity,
-    MAX(CASE WHEN event_type IN ('purchase', 'subscribe', 'activation') THEN 1 ELSE 0 END) AS reached_key_outcome
-  FROM base_events
-  GROUP BY week, user_id, source, device_type
-)
+-- ERRORE 1: funzione sulla data nel WHERE (rompe il pruning delle partizioni).
+-- ERRORE 2: LEFT JOIN diretto con fct_refunds (1:N) che moltiplica o.gross_eur.
+-- ERRORE 3: last_value() senza ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING.
 SELECT
-  week,
-  source,
-  device_type,
-  COUNT(DISTINCT user_id) AS users,
-  ROUND(AVG(active_days), 2) AS avg_active_days,
-  ROUND(AVG(event_diversity), 2) AS avg_event_diversity,
-  ROUND(AVG(reached_key_outcome) * 100, 2) AS key_outcome_rate
-FROM weekly_user_metrics
-GROUP BY week, source, device_type
-ORDER BY week, source, device_type;
+    toStartOfMonth(o.order_date) AS mese,
+    sum(o.gross_eur) AS ricavo_lordo_gonfiato,
+    sum(r.refund_eur) AS rimborsi_eur,
+    last_value(toStartOfMonth(o.order_date)) OVER (
+        PARTITION BY o.customer_id
+        ORDER BY o.order_date
+    ) AS ultimo_mese_errato
+FROM fct_orders AS o
+LEFT JOIN fct_refunds AS r
+    ON o.order_id = r.order_id
+WHERE substring(toString(o.order_date), 1, 4) = '2026'
+GROUP BY mese, o.customer_id, o.order_date;
 ```
 
-Questa query crea una superficie di osservazione con trend, segmenti, differenze tra canali e variazioni nel tempo. Da qui l'analista formula ipotesi più precise.
+### Avvolgere la colonna di partizione o di ordinamento in una funzione nel WHERE
 
-## Esempio Python: controllare stabilità e anomalie
+Scrivere `WHERE substring(toString(order_date), 1, 4) = '2026'` o `WHERE date_Format(order_date, '%Y') = '2026'` sembra innocuo perché produce il risultato atteso su cento righe di test. Su un data warehouse colonnare impedisce il *partition pruning* e l'uso dell'indice primario: per sapere se la stringa inizia con `'2026'`, il motore deve prima leggere da disco tutti i blocchi dal 2018 a oggi, allocare memoria per convertire ogni data in testo e infine applicare il filtro, trasformando una lettura di 10 millisecondi in una scansione completa della tabella.
 
-Una metrica utile è stabile abbastanza da orientare decisioni e sensibile abbastanza da segnalare cambiamenti reali. In Python controlli le variazioni anomale settimana su settimana.
+### Unire tabelle con relazione 1:N prima di calcolare le somme
 
-```python
+Fare `FROM fct_orders LEFT JOIN fct_refunds USING (order_id)` e poi calcolare `sum(o.gross_eur)` è la causa numero uno di discrepanze finanziarie nei report SQL. Poiché un singolo ordine può avere due o tre righe di rimborso parziale in `fct_refunds`, il join ripete l'intera riga di `fct_orders` per ogni rimborso trovato: `sum(r.refund_eur)` risulta corretta, ma `sum(o.gross_eur)` viene moltiplicata per il numero di rimborsi dell'ordine.
 
-# df contiene: week, segment, users, key_outcome_rate
-# key_outcome_rate espresso in percentuale, es. 12.4
+### Omettere il frame esplicito nelle window function con ORDER BY
 
-df = df.sort_values(['segment', 'week']).copy()
-df['previous_rate'] = df.groupby('segment')['key_outcome_rate'].shift(1)
-df['wow_change_pp'] = df['key_outcome_rate'] - df['previous_rate']
-df['rolling_mean'] = df.groupby('segment')['key_outcome_rate'].transform(
-    lambda s: s.rolling(4, min_periods=2).mean()
+Chiamare `last_value(col) OVER (PARTITION BY customer_id ORDER BY order_date)` o calcolare medie mobili senza specificare la clausola `ROWS BETWEEN` è una trappola classica dello standard SQL. Quando è presente `ORDER BY` dentro `OVER(...)`, il frame predefinito non è l'intera partizione del cliente, bensì `RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW` (dalla prima riga fino alla riga corrente): di conseguenza `last_value()` restituisce semplicemente il valore della riga corrente stessa anziché l'ultimo valore assoluto della storia del cliente.
+
+## CTE pre-aggregate allo stesso grain, pivot condizionale e LAG su finestra
+
+Per scrivere query SQL veloci, leggibili e immuni dalla moltiplicazione delle righe, applicate questi quattro criteri in ordine di priorità:
+
+1. Scrivete sempre i filtri temporali come intervalli aperti-chiusi sulla colonna nuda (`order_date >= '2025-01-01' AND order_date < '2027-01-01'`), spostando qualsiasi trasformazione sulle costanti a destra dell'operatore.
+2. Prima di unire due tabelle di fatti o una tabella con relazioni 1:N, raggruppate ciascuna sorgente in una CTE dedicata alla stessa identica granularità della chiave di join.
+3. Usate `sumIf(valore, condizione)` (o `SUM(CASE WHEN ... END)` in SQL standard) per creare colonne pivot per canale o stato in un'unica lettura.
+4. Dichiarate sempre il frame esplicito (`ROWS BETWEEN ...`) nelle window function cumulative o di estremo, e usate `LAG(metrica, 12)` su una serie mensile densa per i confronti anno su anno (`YoY`).
+
+Ecco la query corretta in ClickHouse che pre-aggrega i resi, ruota i canali di pagamento e calcola la variazione anno su anno senza duplicare un solo centesimo:
+
+```sql
+WITH resi_per_ordine AS (
+    -- Passo 1: portiamo i resi esattamente a 1 riga per order_id prima del join.
+    SELECT
+        order_id,
+        sum(refund_eur) AS total_refund_eur
+    FROM fct_refunds
+    WHERE refund_date >= '2025-01-01'
+    GROUP BY order_id
+),
+mensile AS (
+    -- Passo 2: join sicuro 1:1 su order_id e pivot condizionale in una sola scansione.
+    SELECT
+        toStartOfMonth(o.order_date) AS mese,
+        sum(o.gross_eur) AS ricavo_lordo_eur,
+        sum(coalesce(r.total_refund_eur, 0)) AS rimborsi_eur,
+        sum(o.gross_eur - coalesce(r.total_refund_eur, 0)) AS ricavo_netto_eur,
+        sumIf(o.gross_eur, o.payment_method = 'card') AS ricavo_carte_eur,
+        sumIf(o.gross_eur, o.payment_method = 'bank_transfer') AS ricavo_bonifico_eur
+    FROM fct_orders AS o
+    LEFT JOIN resi_per_ordine AS r
+        ON o.order_id = r.order_id
+    WHERE o.order_date >= '2025-01-01'
+      AND o.order_date < '2027-01-01'
+    GROUP BY mese
 )
-df['rolling_std'] = df.groupby('segment')['key_outcome_rate'].transform(
-    lambda s: s.rolling(4, min_periods=2).std()
-)
-df['z_score'] = (df['key_outcome_rate'] - df['rolling_mean']) / df['rolling_std']
-
-anomalies = df[df['z_score'].abs() >= 2].sort_values('z_score')
-print(anomalies[['week', 'segment', 'key_outcome_rate', 'wow_change_pp', 'z_score']])
+-- Passo 3: window function con frame esplicito per cumulato e LAG(12) per confronto YoY.
+SELECT
+    mese,
+    ricavo_netto_eur,
+    ricavo_carte_eur,
+    ricavo_bonifico_eur,
+    lagInFrame(ricavo_netto_eur, 12) OVER (
+        ORDER BY mese ASC
+        ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING
+    ) AS ricavo_netto_anno_prec_eur,
+    sum(ricavo_netto_eur) OVER (
+        PARTITION BY toYear(mese)
+        ORDER BY mese ASC
+        ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+    ) AS progressivo_annuo_ytd_eur
+FROM mensile
+ORDER BY mese ASC;
 ```
 
-Il controllo con `rolling_mean`, `rolling_std` e `z_score` evita di reagire a ogni oscillazione casuale e segnala quando una variazione merita indagine. In azienda alimenta alert, review settimanali e retrospettive di prodotto.
+Il comportamento cambia su tutta la linea: il filtro intervallare permette a ClickHouse di leggere solo le partizioni del 2025 e 2026 riducendo il tempo di esecuzione da 180 secondi a 0,4 secondi; la CTE `resi_per_ordine` garantisce matematicamente che ogni riga di `fct_orders` trovi al massimo una controparte nel join, azzerando i 380.000 euro di gonfiamento; e `ROWS BETWEEN` rende deterministico sia il progressivo da inizio anno (`YTD`) sia il recupero del dodicesimo mese precedente. Riscrivere un join con una CTE pre-aggregata costa due minuti; pubblicare una vista con join 1:N nello strato `marts` avvelena tutti i report che vi si collegano.
 
-## Il warehouse che ha reso questi pattern un business
+## Window function in lettura o pre-aggregazione in tabella intermedia
 
-Nel settembre 2020 Snowflake si quota al New York Stock Exchange con il simbolo SNOW a 120 dollari per azione, raccogliendo circa 3,36 miliardi di dollari nella maggiore IPO software di sempre fino a quel momento. La valutazione premia un warehouse separato tra storage e compute con query SQL standard su scala elastica. Milioni di query analitiche come quelle di questa lezione girano ogni giorno su quel modello a consumo da 5 dollari per terabyte scansionato in modalità on-demand. Il punto è questo: i pattern di aggregazione, finestre e pivot restano il collo di bottiglia tra costo, latenza e fiducia nel numero.
+Quando una metrica derivata (come il rango del cliente per fatturato, la data del primo ordine o la media mobile a 30 giorni) viene chiesta da molti report, l'analytics engineer deve decidere se calcolarla al volo con una window function nella query di lettura o materializzarla in una tabella intermedia durante la build di dbt.
 
-## Domande per ripassare
+Il criterio di scelta è netto: **usate la window function al volo nella query o nella vista quando l'ordinamento e la finestra dipendono dai filtri scelti dinamicamente dall'utente nel cruscotto (es. classifica dei prodotti più venduti nella sola categoria e nell'intervallo di date selezionati a schermo), materializzate invece il risultato in una colonna di una tabella dbt quando la finestra dipende dalla storia immutabile dell'entità (es. numero progressivo dell'ordine del cliente `order_sequence_number` o data del primo acquisto `first_order_date`).**
 
-1. Quale `grain` dichiari prima di scrivere una aggregazione su fact e dimensioni?
-2. Quale controllo di cardinalità ti protegge dai `join` che moltiplicano le righe?
-3. Quando preferisci `CASE WHEN` portabile all'operatore `PIVOT` nativo?
-4. Quale `CTE` separa aggregazione mensile e confronto anno su anno?
+La confusione comune consiste nel ricalcolare a ogni apertura del cruscotto `min(order_date) OVER (PARTITION BY customer_id)` su cinque anni di storico per cento milioni di ordini, oppure nel pre-calcolare in tabella un `RANK()` statico che diventa falso non appena l'utente filtra per singola regione nel report. Sbagliare questa distinzione o satura inutilmente la RAM del motore OLAP per ordinare partizioni giganti su attributi che non cambiano mai, o mostra classifiche incoerenti con i filtri attivi nella pagina.
+
+Questo articolo non tratta l'ottimizzazione fisica dei join distribuiti tra nodi (`GLOBAL JOIN` vs hash join locale in ClickHouse) né le espressioni regolari avanzate per l'estrazione da testo libero. Nei confronti temporali con `LAG(metrica, 12)`, se una serie può avere mesi con zero assoluto di vendite, occorre prima fare un `LEFT JOIN` su uno spine di tutti i mesi del calendario così che lo scorrimento di 12 righe corrisponda sempre esattamente a 12 mesi di calendario.
+
+## Cinque domande prima di mettere in produzione una query analitica
+
+1. Tutti i filtri `WHERE` sulle colonne di partizione e di ordinamento confrontano la colonna nuda con intervalli costanti, senza racchiuderla dentro funzioni di conversione o estrazione?
+2. Prima di ogni `JOIN` nella query, avete verificato che le tabelle o le CTE coinvolte siano già raggruppate in modo che la chiave di unione sia unica su almeno uno dei due lati?
+3. Avete verificato che `SELECT count()` prima e dopo un `LEFT JOIN` di arricchimento restituisca esattamente lo stesso numero di righe?
+4. Tutte le window function che contengono una clausola `ORDER BY` dichiarano esplicitamente `ROWS BETWEEN ...` per evitare il comportamento implicito di `RANGE` fino alla riga corrente?
+5. Se usate `LAG()` o `LEAD()` per confronti mese su mese o anno su anno, la CTE sottostante è densa (nessun mese mancante nella sequenza) così che lo spostamento per riga coincida con lo spostamento temporale?
+
+La metrica di controllo più rapida contro i bug di SQL analitico è il rapporto di invarianza del conteggio righe (`count_post_join / count_pre_join`): su qualsiasi `LEFT JOIN` verso una dimensione o una CTE pre-aggregata, quel rapporto deve essere esattamente `1.0000`.
+
+Di tutti i pattern SQL per il data warehouse, uno solo previene la maggior parte degli incidenti contabili: non fare mai `JOIN` e `SUM()` nello stesso passaggio su tabelle che non hanno la stessa granularità. Prima si raggruppa ciascuna tabella nella propria CTE, poi si uniscono i risultati.
