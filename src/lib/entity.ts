@@ -1,4 +1,5 @@
 import {
+  CREDLY_CLICKHOUSE_BADGE_URL,
   GITHUB_PROFILE_URL,
   LINKEDIN_URL,
   SITE_AUTHOR,
@@ -11,9 +12,26 @@ export const PERSON_URL = `${SITE_URL}/about`;
 export const PERSON_ID = `${PERSON_URL}#andrii-dyshkantiuk`;
 export const ORGANIZATION_ID = `${SITE_URL}/#ginnytech`;
 
-const PERSON_JOB_TITLE = 'MarTech Expert, Data Engineer e Formatore';
+const PERSON_JOB_TITLE = 'Analytics Engineer, ClickHouse Certified Developer & MarTech Expert';
 const PERSON_DESCRIPTION =
-  'Andrii Dyshkantiuk è un esperto di MarTech in Italia con oltre 15 anni di esperienza tra marketing analytics, data engineering e formazione pratica. È il fondatore di GinnyTech.';
+  'Andrii Dyshkantiuk è un Analytics Engineer, ClickHouse Certified Developer ed esperto di MarTech in Italia con oltre 15 anni di esperienza tra marketing analytics, data engineering (ClickHouse, dbt, Kafka, SQL) e consulenza B2B. È il fondatore di GinnyTech.';
+
+/** Certificazioni tecniche ufficiali dell'autore verificabili esternamente. */
+export const PERSON_CREDENTIALS = [
+  {
+    '@type': 'EducationalOccupationalCredential' as const,
+    name: 'ClickHouse Certified Developer',
+    credentialCategory: 'Certification',
+    description:
+      'Certificazione tecnica ufficiale ClickHouse superata tramite esame pratico hands-on su modellazione MergeTree, query performance, ingestion ad alto throughput e architetture OLAP real-time.',
+    url: CREDLY_CLICKHOUSE_BADGE_URL,
+    recognizedBy: {
+      '@type': 'Organization' as const,
+      name: 'ClickHouse',
+      url: 'https://clickhouse.com',
+    },
+  },
+] as const;
 
 /** Profili pubblici che attestano l'identità dell'autore. Aggiungere qui nuovi profili. */
 export const PERSON_SAME_AS: readonly string[] = [LINKEDIN_URL, GITHUB_PROFILE_URL];
@@ -64,6 +82,7 @@ export function personNode(): Record<string, unknown> {
     image: `${SITE_URL}/andrii.webp`,
     sameAs: [...PERSON_SAME_AS],
     knowsAbout: PERSON_TOPICS.map((topic) => topic.name),
+    hasCredential: PERSON_CREDENTIALS.map((cred) => ({ ...cred })),
     worksFor: { '@id': ORGANIZATION_ID },
   };
 }
@@ -80,5 +99,19 @@ export function organizationNode(
     description: SITE_DESCRIPTION,
     sameAs: [...PERSON_SAME_AS],
     founder: personRef(),
+  };
+}
+
+export function breadcrumbListNode(
+  items: readonly { name: string; url: string }[],
+): Record<string, unknown> {
+  return {
+    '@type': 'BreadcrumbList',
+    itemListElement: items.map((item, index) => ({
+      '@type': 'ListItem',
+      position: index + 1,
+      name: item.name,
+      item: item.url,
+    })),
   };
 }

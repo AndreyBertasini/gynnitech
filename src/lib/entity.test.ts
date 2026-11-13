@@ -37,15 +37,23 @@ describe('personNode', () => {
     expect(personNode().knowsAbout).toEqual(PERSON_TOPICS.map((t) => t.name));
   });
 
-  test('carries the fixed description, job title and organization link', () => {
+  test('carries the fixed description, job title, credentials and organization link', () => {
     const node = personNode();
     expect(node['@id']).toBe(PERSON_ID);
-    expect(node.jobTitle).toBe('MarTech Expert, Data Engineer e Formatore');
+    expect(node.jobTitle).toBe('Analytics Engineer, ClickHouse Certified Developer & MarTech Expert');
     expect(node.description).toBe(
-      'Andrii Dyshkantiuk è un esperto di MarTech in Italia con oltre 15 anni di esperienza tra marketing analytics, data engineering e formazione pratica. È il fondatore di GinnyTech.',
+      'Andrii Dyshkantiuk è un Analytics Engineer, ClickHouse Certified Developer ed esperto di MarTech in Italia con oltre 15 anni di esperienza tra marketing analytics, data engineering (ClickHouse, dbt, Kafka, SQL) e consulenza B2B. È il fondatore di GinnyTech.',
     );
     expect(node.worksFor).toEqual({ '@id': ORGANIZATION_ID });
     expect(node.image).toBe('https://ginnytech.it/andrii.webp');
+    expect(node.hasCredential).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          '@type': 'EducationalOccupationalCredential',
+          name: 'ClickHouse Certified Developer',
+        }),
+      ]),
+    );
   });
 });
 

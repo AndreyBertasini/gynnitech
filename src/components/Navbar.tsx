@@ -15,6 +15,7 @@ export const Navbar = ({ lang }: { lang?: SiteLanguage }) => {
     ? {
         articles: 'Articles',
         agents: 'AI Agents',
+        consulting: 'Consulting',
         about: 'About',
         profile: 'About me',
         booking: 'Book a call',
@@ -24,6 +25,7 @@ export const Navbar = ({ lang }: { lang?: SiteLanguage }) => {
     : {
         articles: 'Articoli',
         agents: 'Agenti AI',
+        consulting: 'Consulenza',
         about: 'Informazioni',
         profile: 'Chi sono',
         booking: 'Prenota una call',
@@ -55,10 +57,11 @@ export const Navbar = ({ lang }: { lang?: SiteLanguage }) => {
         {/* Desktop Menu */}
         <div className="hidden md:flex items-center gap-8">
           <a href={localHref('/')} className="text-sm font-medium text-slate-300 hover:text-white transition-colors">Home</a>
+          <a href={localHref('/consulting')} className="text-sm font-medium text-slate-300 hover:text-white transition-colors">{copy.consulting}</a>
           <a href={localHref('/agenti-analisi-dati')} className="text-sm font-medium text-slate-300 hover:text-white transition-colors">{copy.agents}</a>
           <a href={localHref('/blog')} className="text-sm font-medium text-slate-300 hover:text-white transition-colors">{copy.articles}</a>
           <a href={localHref('/perche-questo-corso')} className="text-sm font-medium text-slate-300 hover:text-white transition-colors">{copy.about}</a>
-          <a href={LINKEDIN_URL} target="_blank" rel="noreferrer" className="text-sm font-medium text-slate-300 hover:text-white transition-colors">{copy.profile}</a>
+          <a href={localHref('/about')} className="text-sm font-medium text-slate-300 hover:text-white transition-colors">{copy.profile}</a>
           <SearchWidget language={language} />
         </div>
 
@@ -96,10 +99,11 @@ export const Navbar = ({ lang }: { lang?: SiteLanguage }) => {
         <div className="flex flex-col p-6 gap-4">
           <SearchWidget mobile language={language} />
           <a href={localHref('/')} className="text-slate-300 hover:text-white font-medium">Home</a>
+          <a href={localHref('/consulting')} className="text-slate-300 hover:text-white font-medium">{copy.consulting}</a>
           <a href={localHref('/agenti-analisi-dati')} className="text-slate-300 hover:text-white font-medium">{copy.agents}</a>
           <a href={localHref('/blog')} className="text-slate-300 hover:text-white font-medium">{copy.articles}</a>
           <a href={localHref('/perche-questo-corso')} className="text-slate-300 hover:text-white font-medium">{copy.about}</a>
-          <a href={LINKEDIN_URL} target="_blank" rel="noreferrer" className="text-slate-300 hover:text-white font-medium">{copy.profile}</a>
+          <a href={localHref('/about')} className="text-slate-300 hover:text-white font-medium">{copy.profile}</a>
           <hr className="border-glass-border my-2" />
           <a href={BOOKING_URL} target="_blank" rel="noreferrer" className="bg-accent/10 hover:bg-accent/20 text-accent border border-accent/30 hover:border-accent text-center py-3 rounded-lg font-semibold transition">
             {copy.booking}

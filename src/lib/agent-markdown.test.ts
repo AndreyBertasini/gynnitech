@@ -1,7 +1,13 @@
 import matter from 'gray-matter';
 import { describe, expect, test } from 'vitest';
 import { GITHUB_PROFILE_URL, LINKEDIN_URL } from '../consts';
-import { mdxToAgentMarkdown, renderAboutDocument, renderAgentDocument } from './agent-markdown';
+import {
+  mdxToAgentMarkdown,
+  renderAboutDocument,
+  renderAgentDocument,
+  renderClickHouseConsultingDocument,
+  renderConsultingDocument,
+} from './agent-markdown';
 import { PERSON_TOPICS } from './entity';
 
 const LEFTOVER_TAG = /<\/?(Aside|Steps|Tabs|TabItem|Card|CardGrid)\b/;
@@ -219,14 +225,35 @@ describe('renderAboutDocument', () => {
     }
   });
 
-  test('names the public profiles and the role', () => {
+  test('names the public profiles, the role and the ClickHouse certification', () => {
     expect(content).toContain(LINKEDIN_URL);
     expect(content).toContain(GITHUB_PROFILE_URL);
-    expect(content).toContain('MarTech Expert, Data Engineer e Formatore');
+    expect(content).toContain('Analytics Engineer, ClickHouse Certified Developer & MarTech Expert');
+    expect(content).toContain('ClickHouse Certified Developer');
     expect(content).toContain('GinnyTech');
   });
 
   test('contains no component tags', () => {
+    expect(doc).not.toMatch(LEFTOVER_TAG);
+  });
+});
+
+describe('renderConsultingDocument & renderClickHouseConsultingDocument', () => {
+  test('renderConsultingDocument points to /consulting/ and describes B2B services', () => {
+    const doc = renderConsultingDocument();
+    const { data, content } = matter(doc);
+    expect(data.url).toBe('https://ginnytech.it/consulting/');
+    expect(content).toContain('ClickHouse Certified Developer');
+    expect(content).toContain('https://ginnytech.it/consulenza/clickhouse');
+    expect(doc).not.toMatch(LEFTOVER_TAG);
+  });
+
+  test('renderClickHouseConsultingDocument points to /consulenza/clickhouse/ and covers ClickHouse consulting', () => {
+    const doc = renderClickHouseConsultingDocument();
+    const { data, content } = matter(doc);
+    expect(data.url).toBe('https://ginnytech.it/consulenza/clickhouse/');
+    expect(content).toContain('ClickHouse Certified Developer');
+    expect(content).toContain('MergeTree');
     expect(doc).not.toMatch(LEFTOVER_TAG);
   });
 });

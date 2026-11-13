@@ -1,5 +1,5 @@
-import { BOOKING_URL, CONTACT_EMAIL, SITE_AUTHOR, SITE_NAME, SITE_URL } from '../consts';
-import { PERSON_SAME_AS, PERSON_TOPICS, PERSON_URL, personNode } from './entity';
+import { BOOKING_URL, CONTACT_EMAIL, CREDLY_CLICKHOUSE_BADGE_URL, SITE_AUTHOR, SITE_NAME, SITE_URL } from '../consts';
+import { PERSON_CREDENTIALS, PERSON_SAME_AS, PERSON_TOPICS, PERSON_URL, personNode } from './entity';
 import { attr, convertLezioneLine, type AgentState } from './lezione/agent';
 
 export type AgentDocMeta = {
@@ -182,11 +182,16 @@ export function renderAgentDocument(meta: AgentDocMeta, body: string): string {
 export function renderAboutDocument(): string {
   const person = personNode();
   const topics = PERSON_TOPICS.map((topic) => `- [${topic.name}](${SITE_URL}${topic.href})`).join('\n');
+  const credentials = PERSON_CREDENTIALS.map(
+    (cred) => `- **${cred.name}** (${cred.recognizedBy.name}) — ${cred.description} Verifica badge: ${cred.url}`,
+  ).join('\n');
   const profiles = PERSON_SAME_AS.map((url) => `- ${url}`).join('\n');
   const body = [
     String(person.description),
     `**Ruolo:** ${String(person.jobTitle)}`,
     `**Organizzazione:** [${SITE_NAME}](${SITE_URL}), piattaforma gratuita e senza paywall per imparare MarTech, analytics engineering, A/B testing e data engineering.`,
+    `## Certificazioni e Credenziali Tecniche\n\n${credentials}`,
+    `## Servizi di Consulenza B2B\n\n- [Consulenza Analytics Engineering, Data Warehouse e Product Analytics](${SITE_URL}/consulting)\n- [Consulenza ClickHouse Italia: Migrazione, Ottimizzazione MergeTree e Real-Time Analytics](${SITE_URL}/consulenza/clickhouse)`,
     `## Temi su cui lavora e insegna\n\n${topics}`,
     `## Profili pubblici\n\n${profiles}`,
     `## Contatti\n\n- Email: ${CONTACT_EMAIL}\n- Prenota una call: ${BOOKING_URL}`,
@@ -197,6 +202,46 @@ export function renderAboutDocument(): string {
       title: `Chi è ${SITE_AUTHOR}`,
       description: String(person.description),
       url: `${PERSON_URL}/`,
+    },
+    body,
+  );
+}
+
+/** Markdown twin of /consulting: B2B Analytics Engineering, Data Warehouse & ClickHouse consulting services. */
+export function renderConsultingDocument(): string {
+  const body = [
+    `Consulenza tecnica diretta con **${SITE_AUTHOR}** (Analytics Engineer, **ClickHouse Certified Developer** e MarTech Expert con oltre 15 anni di esperienza) per aziende, scale-up SaaS, e-commerce e team dati in Italia.`,
+    `## Problemi aziendali che risolviamo\n\n- **Costi Data Warehouse fuori controllo (BigQuery, Snowflake, Redshift):** re-ingegnerizzazione dei modelli analitici, partizionamento e migrazione dei carichi event-driven su ClickHouse con riduzione drastica della spesa cloud.\n- **Dashboard lente e query PostgreSQL bloccate:** separazione tra database transazionale (OLTP) e motore analitico colonnare (OLAP) per portare i tempi di risposta da minuti a millisecondi.\n- **Numeri che non tornano tra GA4, CRM, Ads e Backend:** centralizzazione dei dati aziendali con pipeline server-side proprietarie e modellazione certificata in dbt (Single Source of Truth).\n- **Assenza di Product Analytics su misura:** progettazione di tassonomie eventi, analisi funnel, retention, cohort analysis e A/B testing statistico su dati proprietari.`,
+    `## Aree di intervento e Stack Tecnologico\n\n- **ClickHouse & Real-Time OLAP:** progettazione schema MergeTree, Materialized Views, ottimizzazione query, ingestion da Kafka e S3 ([Approfondisci la Consulenza ClickHouse](${SITE_URL}/consulenza/clickhouse)).\n- **Analytics Engineering & dbt:** trasformazione dati modulare, data quality test automatici, documentazione lineage e semantic layer.\n- **Event Streaming & Data Collection:** pipeline Kafka, CDC (Debezium), data lakehouse su S3/Parquet e tracking first-party server-side.\n- **Product & Marketing Analytics:** attribution modeling, marketing mix, sperimentazione A/B e dashboard esecutive.`,
+    `## Modalità di collaborazione\n\n1. **Audit Architetturale & Diagnosi Rapida:** revisione di query, costi cloud, modelli dbt o cluster ClickHouse con piano d'azione esecutivo.\n2. **Progetto Chiavi in Mano (End-to-End):** implementazione completa di data warehouse, migrazione a ClickHouse o pipeline analitica con affiancamento al team.\n3. **Fractional Analytics Engineer / Advisory:** supporto continuativo per guidare le scelte architetturali e formare il team interno.`,
+    `## Contatti e Prenotazione\n\n- Prenota una call conoscitiva gratuita di 15 minuti: ${BOOKING_URL}\n- Email diretta: ${CONTACT_EMAIL}\n- Profilo autore: ${PERSON_URL}`,
+  ].join('\n\n');
+
+  return renderAgentDocument(
+    {
+      title: `Consulenza Analytics Engineering, Data Warehouse e ClickHouse in Italia`,
+      description: `Consulenza B2B in Analytics Engineering, ClickHouse, dbt e Product Analytics con ${SITE_AUTHOR} (ClickHouse Certified Developer).`,
+      url: `${SITE_URL}/consulting/`,
+    },
+    body,
+  );
+}
+
+/** Markdown twin of /consulenza/clickhouse: Vertical landing page for ClickHouse consulting in Italy. */
+export function renderClickHouseConsultingDocument(): string {
+  const body = [
+    `Servizio specialistico di **Consulenza ClickHouse in Italia** guidato da **${SITE_AUTHOR}**, **ClickHouse Certified Developer** (esame pratico hands-on certificato) e Analytics Engineer con oltre 15 anni di esperienza su architetture dati ad alto volume.`,
+    `## Perché scegliere un ClickHouse Certified Developer\n\nClickHouse offre prestazioni straordinarie su miliardi di righe, ma richiede scelte architetturali rigorose su **ORDER BY (sorting key)**, **PRIMARY KEY**, famiglia **MergeTree** (\`MergeTree\`, \`ReplacingMergeTree\`, \`AggregatingMergeTree\`, \`CollapsingMergeTree\`), **Materialized Views** incrementali e strategie di partizionamento. Un design errato porta a \`Too many parts\`, Out-Of-Memory o scansioni inutili.`,
+    `## Scenari di intervento su ClickHouse\n\n- **Migrazione da BigQuery / Snowflake / Redshift a ClickHouse:** abbattimento dei costi pay-per-query su dataset di eventi, log, telemetria e product analytics.\n- **Affiancamento a PostgreSQL / MySQL per Analytics Real-Time:** eliminazione dei colli di bottiglia OLTP spostando reportistica, dashboard clienti e aggregazioni pesanti su ClickHouse (via CDC, PeerDB, Kafka o pipeline batch).\n- **Ottimizzazione e Tuning Cluster ClickHouse esistenti:** audit di \`system.query_log\`, \`system.parts\`, compression codec (ZSTD, Gorilla, DoubleDelta), indici data-skipping, proiezioni e gestione della memoria.\n- **Pipeline Real-Time Kafka + ClickHouse + dbt:** ingestione streaming fault-tolerant, deduplicazione idempotente e modellazione analitica con \`dbt-clickhouse\`.`,
+    `## Credenziali e Formazione Open-Source\n\n- Certificazione ufficiale: **ClickHouse Certified Developer** (${CREDLY_CLICKHOUSE_BADGE_URL})\n- Autore del modulo gratuito in italiano [Real-Time Analytics con ClickHouse](${SITE_URL}/course/real-time-analytics/) e [Kafka e Streaming di Eventi](${SITE_URL}/course/kafka-streaming/) su GinnyTech.`,
+    `## Contatti\n\n- Prenota un audit tecnico di 15 minuti: ${BOOKING_URL}\n- Email: ${CONTACT_EMAIL}`,
+  ].join('\n\n');
+
+  return renderAgentDocument(
+    {
+      title: `Consulenza ClickHouse Italia: Migrazione, Tuning e Real-Time Analytics`,
+      description: `Consulenza ClickHouse in Italia con ${SITE_AUTHOR}, ClickHouse Certified Developer. Architettura MergeTree, migrazione da BigQuery/PostgreSQL, pipeline Kafka e dbt.`,
+      url: `${SITE_URL}/consulenza/clickhouse/`,
     },
     body,
   );
