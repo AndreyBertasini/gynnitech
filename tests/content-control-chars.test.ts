@@ -33,6 +33,17 @@ describe('contenuti MDX senza escape LaTeX interpretati', () => {
     ]);
   });
 
+  it('rileva un TAB dentro un blocco $$ su più righe e su una riga', () => {
+    const multiriga = ['testo', '$$', 'x = \tfrac{a}{b}', '$$', 'fine'].join('\n');
+    expect(findControlCharIssues(multiriga)).toEqual([
+      expect.objectContaining({ line: 3, reason: 'TAB dentro una formula' }),
+    ]);
+    expect(findControlCharIssues('$$a \ttimes b$$')).toHaveLength(1);
+    // TAB dopo la chiusura del blocco: fuori dalla formula
+    expect(findControlCharIssues('$$a$$ | cella\tcon tab')).toEqual([]);
+    expect(findControlCharIssues(['$$', 'a', '$$', 'riga\tcon tab'].join('\n'))).toEqual([]);
+  });
+
   it('non segnala LaTeX corretto, TAB legittimi fuori dalle formule o dentro il codice', () => {
     const pulita = String.raw`$P(\text{A} \mid \neg B) \approx \alpha \times \frac{1}{2}$ e $\beta$`;
     expect(findControlCharIssues(pulita)).toEqual([]);

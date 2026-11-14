@@ -21,17 +21,35 @@ export function showControlChars(text: string): string {
         .slice(0, 140);
 }
 
-/** Restituisce una voce per ogni riga con un carattere di controllo o con un TAB dentro `$...$` (fuori dai fence di codice). */
+/**
+ * Restituisce una voce per ogni riga con un carattere di controllo o con un TAB dentro una formula
+ * (`$...$` su una riga, oppure blocco `$$...$$` anche su più righe), fuori dai fence di codice.
+ */
 export function findControlCharIssues(text: string): ControlCharIssue[] {
     const issues: ControlCharIssue[] = [];
     let inFence = false;
+    let inDisplay = false;
     text.split("\n").forEach((line, index) => {
         if (/^\s*(```|~~~)/.test(line)) inFence = !inFence;
         if (CONTROL_CHARS.test(line)) {
             issues.push({ line: index + 1, reason: "carattere di controllo", excerpt: showControlChars(line) });
             return;
         }
-        if (inFence || !line.includes("\t")) return;
+        if (inFence) return;
+        // Blocchi `$$`: ogni `$$` commuta lo stato; un TAB nei segmenti "dentro" è dentro la formula.
+        let state = inDisplay;
+        const parts = line.split("$$");
+        let tabInDisplay = false;
+        parts.forEach((part, i) => {
+            if (state && part.includes("\t")) tabInDisplay = true;
+            if (i < parts.length - 1) state = !state;
+        });
+        inDisplay = state;
+        if (tabInDisplay) {
+            issues.push({ line: index + 1, reason: "TAB dentro una formula", excerpt: showControlChars(line) });
+            return;
+        }
+        if (!line.includes("\t")) return;
         for (const match of line.matchAll(INLINE_MATH)) {
             if (match[1].includes("\t")) {
                 issues.push({ line: index + 1, reason: "TAB dentro una formula", excerpt: showControlChars(match[0]) });
