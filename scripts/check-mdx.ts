@@ -9,12 +9,17 @@ import path from "node:path";
 import { glob } from "glob";
 import { compile } from "@mdx-js/mdx";
 import remarkMath from "remark-math";
+import { findControlCharIssues } from "./lib/control-chars";
 
 const root = path.join(process.cwd(), "src/content");
 const files = await glob("**/*.md*", { cwd: root, nodir: true, absolute: true });
 const failures: string[] = [];
 for (const file of files) {
     const raw = await fs.readFile(file, "utf-8");
+    // Escape LaTeX interpretati (\text -> TAB+"ext", \frac -> FF+"rac"): il file compila ma la formula si rende male.
+    for (const issue of findControlCharIssues(raw)) {
+        failures.push(`${file}:${issue.line} :: ${issue.reason}: ${issue.excerpt}`);
+    }
     try {
         await compile(raw, {
             remarkPlugins: [remarkMath],
