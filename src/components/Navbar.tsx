@@ -14,7 +14,6 @@ export const Navbar = ({ lang }: { lang?: SiteLanguage }) => {
   const copy = language === 'en'
     ? {
         articles: 'Articles',
-        consulting: 'Consulting',
         about: 'About',
         profile: 'About me',
         booking: 'Book a call',
@@ -23,7 +22,6 @@ export const Navbar = ({ lang }: { lang?: SiteLanguage }) => {
       }
     : {
         articles: 'Articoli',
-        consulting: 'Consulenza',
         about: 'Informazioni',
         profile: 'Chi sono',
         booking: 'Prenota una call',
@@ -55,7 +53,6 @@ export const Navbar = ({ lang }: { lang?: SiteLanguage }) => {
         {/* Desktop Menu */}
         <div className="hidden md:flex items-center gap-8">
           <a href={localHref('/')} className="text-sm font-medium text-slate-300 hover:text-white transition-colors">Home</a>
-          <a href={localHref('/consulting')} className="text-sm font-medium text-slate-300 hover:text-white transition-colors">{copy.consulting}</a>
           <a href={localHref('/blog')} className="text-sm font-medium text-slate-300 hover:text-white transition-colors">{copy.articles}</a>
           <a href={localHref('/perche-questo-corso')} className="text-sm font-medium text-slate-300 hover:text-white transition-colors">{copy.about}</a>
           <a href={localHref('/about')} className="text-sm font-medium text-slate-300 hover:text-white transition-colors">{copy.profile}</a>
@@ -96,7 +93,6 @@ export const Navbar = ({ lang }: { lang?: SiteLanguage }) => {
         <div className="flex flex-col p-6 gap-4">
           <SearchWidget mobile language={language} />
           <a href={localHref('/')} className="text-slate-300 hover:text-white font-medium">Home</a>
-          <a href={localHref('/consulting')} className="text-slate-300 hover:text-white font-medium">{copy.consulting}</a>
           <a href={localHref('/blog')} className="text-slate-300 hover:text-white font-medium">{copy.articles}</a>
           <a href={localHref('/perche-questo-corso')} className="text-slate-300 hover:text-white font-medium">{copy.about}</a>
           <a href={localHref('/about')} className="text-slate-300 hover:text-white font-medium">{copy.profile}</a>
