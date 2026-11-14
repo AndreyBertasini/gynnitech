@@ -1,4 +1,4 @@
-import { BOOKING_URL, CONTACT_EMAIL, SITE_AUTHOR, SITE_NAME, SITE_URL } from '../consts';
+import { CONTACT_EMAIL, SITE_AUTHOR, SITE_NAME, SITE_URL } from '../consts';
 import { PERSON_CREDENTIALS, PERSON_SAME_AS, PERSON_TOPICS, PERSON_URL, personNode } from './entity';
 function attr(tag: string, name: string): string | undefined {
   return new RegExp(`\\b${name}="([^"]*)"`).exec(tag)?.[1];
@@ -188,7 +188,7 @@ export function renderAboutDocument(): string {
     `## Certificazioni e Credenziali Tecniche\n\n${credentials}`,
     `## Temi su cui lavora e insegna\n\n${topics}`,
     `## Profili pubblici\n\n${profiles}`,
-    `## Contatti\n\n- Email: ${CONTACT_EMAIL}\n- Prenota una call: ${BOOKING_URL}`,
+    `## Contatti\n\n- Email: ${CONTACT_EMAIL}`,
   ].join('\n\n');
 
   return renderAgentDocument(
