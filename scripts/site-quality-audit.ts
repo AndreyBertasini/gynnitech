@@ -3,6 +3,7 @@ import path from "path";
 import { redirectEntries } from "../src/lib/config/redirects.mjs";
 import { auditEntityGraph } from "./lib/entity-audit";
 import { auditMarkdownTwin } from "./lib/markdown-audit";
+import { extractAttributeRefs, stripCodeContent } from "./lib/html-refs";
 
 const DIST_ROOT = path.join(process.cwd(), "dist");
 const SITE_ORIGIN = "https://ginnytech.it";
@@ -28,11 +29,6 @@ const REDIRECT_SOURCE_FILES = new Set(
 type Issue = {
     file: string;
     message: string;
-};
-
-type AttrRef = {
-    attr: string;
-    value: string;
 };
 
 type RoutePerformance = {
@@ -117,28 +113,6 @@ function normalizeLocalUrl(rawValue: string): string | undefined {
     }
 
     return value;
-}
-
-function extractAttributeRefs(html: string): AttrRef[] {
-    const refs: AttrRef[] = [];
-    const attrPattern =
-        /\s(href|src|content|component-url|renderer-url|before-hydration-url)=["']([^"']+)["']/gi;
-    const srcsetPattern = /\ssrcset=["']([^"']+)["']/gi;
-
-    for (const match of html.matchAll(attrPattern)) {
-        refs.push({ attr: match[1].toLowerCase(), value: match[2] });
-    }
-
-    for (const match of html.matchAll(srcsetPattern)) {
-        for (const candidate of match[1].split(",")) {
-            const url = candidate.trim().split(/\s+/)[0];
-            if (url) {
-                refs.push({ attr: "srcset", value: url });
-            }
-        }
-    }
-
-    return refs;
 }
 
 function stripSearchAndHash(localUrl: string): { pathname: string; hash: string } {
@@ -451,12 +425,6 @@ function auditImages(html: string, file: string, issues: Issue[]): void {
             issues.push({ file, message: `image missing alt attribute: ${tag.slice(0, 140)}` });
         }
     }
-}
-
-function stripCodeContent(html: string): string {
-    return html
-        .replace(/<pre\b[\s\S]*?<\/pre>/gi, "")
-        .replace(/<code\b[\s\S]*?<\/code>/gi, "");
 }
 
 function auditMarkdownRendering(html: string, file: string, issues: Issue[]): void {
