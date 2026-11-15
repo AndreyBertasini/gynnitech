@@ -15,7 +15,7 @@ const MIN_CORSO_BODY_CHARACTERS = 1200;
 const MIN_CORSO_H2_HEADINGS = 3;
 const MIN_CORSO_INTRO_CHARACTERS = 120;
 const SUMMARY_SECTION_REGEX = /(^##\s+(?:\d+\.\s*)?(Riepilogo|Riepilogo operativo|Conclusioni|Sintesi)\b)/mi;
-const EXAMPLE_SIGNAL_REGEX = /```|\|[-]+\||\bEsempio\b|\bCaso pratico\b|\bTemplate\b/mi;
+const EXAMPLE_SIGNAL_REGEX = /```|^\s*\|?\s*:?-{3,}:?\s*\||\bEsempio\b|\bCaso pratico\b|\bTemplate\b|^##\s+Il caso\b/mi;
 const DURATION_FORMAT_REGEX = /^\d{1,3}\s*(min|minuti|h|ore)$/i;
 const ALLOWED_DIFFICULTY_VALUES = new Set(["beginner", "intermediate", "advanced", "base", "intermedio", "avanzato"]);
 // Pipeline generator → critic → gate (Hermes → Argo → Giano): rubrica a 6 regole.
@@ -121,6 +121,14 @@ function countSentences(text: string): number {
 function countNumberedQuestions(sectionText: string): number {
     const matches = sectionText.match(/^\s*\d+[.)]\s+.+\?\s*$/gm);
     return matches ? matches.length : 0;
+}
+
+/** Chiusura della pipeline: ultima sezione con 3-5 domande numerate e almeno una riga "Verdetto:". */
+export function hasPipelineClosure(body: string): boolean {
+    const titles = extractH2Titles(body);
+    if (titles.length === 0 || !/^Verdetto:/m.test(body)) return false;
+    const questions = countNumberedQuestions(extractH2Section(body, titles[titles.length - 1]));
+    return questions >= 3 && questions <= 5;
 }
 
 export type PipelineRuleResult = { regola: string; esito: "PASS" | "FAIL"; nota: string };
@@ -476,7 +484,8 @@ async function validateCollection(collection: "blog" | "corso"): Promise<Validat
             );
         }
 
-        if (intro.length < MIN_CORSO_INTRO_CHARACTERS) {
+        // Il formato articolo apre direttamente con la sezione del caso (R1): niente intro prima del primo H2.
+        if (intro.length < MIN_CORSO_INTRO_CHARACTERS && data.formato !== "articolo") {
             pushEditorialIssue(
                 result,
                 file,
@@ -486,7 +495,9 @@ async function validateCollection(collection: "blog" | "corso"): Promise<Validat
         }
 
         // Il formato articolo vieta il riassunto finale: l'avviso non si applica.
-        if (!hasSummarySection && data.formato !== "articolo") {
+        // Le lezioni della pipeline chiudono con le domande di autoverifica (regola 2) e riassumono
+        // ogni passaggio con una riga "Verdetto:": quella chiusura vale come sintesi.
+        if (!hasSummarySection && data.formato !== "articolo" && !hasPipelineClosure(trimmedContent)) {
             pushEditorialIssue(
                 result,
                 file,
