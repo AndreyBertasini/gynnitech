@@ -178,7 +178,7 @@ export function renderAboutDocument(): string {
   const person = personNode();
   const topics = PERSON_TOPICS.map((topic) => `- [${topic.name}](${SITE_URL}${topic.href})`).join('\n');
   const credentials = PERSON_CREDENTIALS.map(
-    (cred) => `- **${cred.name}** (${cred.recognizedBy.name}) — ${cred.description} Verifica badge: ${cred.url}`,
+    (cred) => `- **${cred.name}** (${cred.recognizedBy.name}) — ${cred.description} Certificato: ${cred.url}`,
   ).join('\n');
   const profiles = PERSON_SAME_AS.map((url) => `- ${url}`).join('\n');
   const body = [
