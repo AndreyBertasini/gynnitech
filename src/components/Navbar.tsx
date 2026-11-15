@@ -2,7 +2,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import { HamburgerMenuIcon, Cross2Icon } from '@radix-ui/react-icons';
 import LanguageSwitcher from './LanguageSwitcher';
 import { SearchWidget } from './ui/SearchWidget';
-import { BOOKING_URL, LINKEDIN_URL } from '../consts';
+import { LINKEDIN_URL } from '../consts';
 import { currentSiteLanguage, localizedPath, type SiteLanguage } from '../utils/language';
 
 export const Navbar = ({ lang }: { lang?: SiteLanguage }) => {
@@ -14,19 +14,15 @@ export const Navbar = ({ lang }: { lang?: SiteLanguage }) => {
   const copy = language === 'en'
     ? {
         articles: 'Articles',
-        consulting: 'Consulting',
         about: 'About',
         profile: 'About me',
-        booking: 'Book a call',
         closeMenu: 'Close menu',
         openMenu: 'Open menu',
       }
     : {
         articles: 'Articoli',
-        consulting: 'Consulenza',
         about: 'Informazioni',
         profile: 'Chi sono',
-        booking: 'Prenota una call',
         closeMenu: 'Chiudi menu',
         openMenu: 'Apri menu',
       };
@@ -55,7 +51,6 @@ export const Navbar = ({ lang }: { lang?: SiteLanguage }) => {
         {/* Desktop Menu */}
         <div className="hidden md:flex items-center gap-8">
           <a href={localHref('/')} className="text-sm font-medium text-slate-300 hover:text-white transition-colors">Home</a>
-          <a href={localHref('/consulting')} className="text-sm font-medium text-slate-300 hover:text-white transition-colors">{copy.consulting}</a>
           <a href={localHref('/blog')} className="text-sm font-medium text-slate-300 hover:text-white transition-colors">{copy.articles}</a>
           <a href={localHref('/perche-questo-corso')} className="text-sm font-medium text-slate-300 hover:text-white transition-colors">{copy.about}</a>
           <a href={localHref('/about')} className="text-sm font-medium text-slate-300 hover:text-white transition-colors">{copy.profile}</a>
@@ -65,9 +60,6 @@ export const Navbar = ({ lang }: { lang?: SiteLanguage }) => {
         {/* CTA */}
         <div className="hidden md:flex items-center gap-4">
           <LanguageSwitcher initialLanguage={language} />
-          <a href={BOOKING_URL} target="_blank" rel="noreferrer" className="bg-accent/10 hover:bg-accent/20 text-accent border border-accent/30 hover:border-accent px-5 py-2 rounded-full text-sm font-semibold transition">
-            {copy.booking}
-          </a>
         </div>
 
         {/* Mobile Toggle */}
@@ -96,14 +88,9 @@ export const Navbar = ({ lang }: { lang?: SiteLanguage }) => {
         <div className="flex flex-col p-6 gap-4">
           <SearchWidget mobile language={language} />
           <a href={localHref('/')} className="text-slate-300 hover:text-white font-medium">Home</a>
-          <a href={localHref('/consulting')} className="text-slate-300 hover:text-white font-medium">{copy.consulting}</a>
           <a href={localHref('/blog')} className="text-slate-300 hover:text-white font-medium">{copy.articles}</a>
           <a href={localHref('/perche-questo-corso')} className="text-slate-300 hover:text-white font-medium">{copy.about}</a>
           <a href={localHref('/about')} className="text-slate-300 hover:text-white font-medium">{copy.profile}</a>
-          <hr className="border-glass-border my-2" />
-          <a href={BOOKING_URL} target="_blank" rel="noreferrer" className="bg-accent/10 hover:bg-accent/20 text-accent border border-accent/30 hover:border-accent text-center py-3 rounded-lg font-semibold transition">
-            {copy.booking}
-          </a>
         </div>
       </div>
     </nav>

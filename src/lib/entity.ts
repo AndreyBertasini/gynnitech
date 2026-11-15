@@ -14,7 +14,7 @@ export const ORGANIZATION_ID = `${SITE_URL}/#ginnytech`;
 
 const PERSON_JOB_TITLE = 'Analytics Engineer, ClickHouse Certified Developer & MarTech Expert';
 const PERSON_DESCRIPTION =
-  'Andrii Dyshkantiuk è un Analytics Engineer, ClickHouse Certified Developer ed esperto di MarTech in Italia con oltre 15 anni di esperienza tra marketing analytics, data engineering (ClickHouse, dbt, Kafka, SQL) e consulenza B2B. È il fondatore di GinnyTech.';
+  'Andrii Dyshkantiuk è un Analytics Engineer, ClickHouse Certified Developer ed esperto di MarTech in Italia con oltre 15 anni di esperienza tra marketing analytics, data engineering (ClickHouse, dbt, Kafka, SQL) e formazione pratica. È il fondatore di GinnyTech.';
 
 /** Certificazioni tecniche ufficiali dell'autore verificabili esternamente. */
 export const PERSON_CREDENTIALS = [
