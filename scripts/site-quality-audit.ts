@@ -1,9 +1,9 @@
+import { stripTextRegions } from "./lib/html-text-regions";
 import { promises as fs } from "fs";
 import path from "path";
 import { redirectEntries } from "../src/lib/config/redirects.mjs";
 import { auditEntityGraph } from "./lib/entity-audit";
 import { auditMarkdownTwin } from "./lib/markdown-audit";
-import { extractAttributeRefs, stripCodeContent } from "./lib/html-refs";
 
 const DIST_ROOT = path.join(process.cwd(), "dist");
 const SITE_ORIGIN = "https://ginnytech.it";
@@ -29,6 +29,11 @@ const REDIRECT_SOURCE_FILES = new Set(
 type Issue = {
     file: string;
     message: string;
+};
+
+type AttrRef = {
+    attr: string;
+    value: string;
 };
 
 type RoutePerformance = {
@@ -113,6 +118,30 @@ function normalizeLocalUrl(rawValue: string): string | undefined {
     }
 
     return value;
+}
+
+function extractAttributeRefs(rawHtml: string): AttrRef[] {
+    // Gli esempi di codice contengono href="..." come testo: non sono link del sito.
+    const html = stripTextRegions(rawHtml);
+    const refs: AttrRef[] = [];
+    const attrPattern =
+        /\s(href|src|content|component-url|renderer-url|before-hydration-url)=["']([^"']+)["']/gi;
+    const srcsetPattern = /\ssrcset=["']([^"']+)["']/gi;
+
+    for (const match of html.matchAll(attrPattern)) {
+        refs.push({ attr: match[1].toLowerCase(), value: match[2] });
+    }
+
+    for (const match of html.matchAll(srcsetPattern)) {
+        for (const candidate of match[1].split(",")) {
+            const url = candidate.trim().split(/\s+/)[0];
+            if (url) {
+                refs.push({ attr: "srcset", value: url });
+            }
+        }
+    }
+
+    return refs;
 }
 
 function stripSearchAndHash(localUrl: string): { pathname: string; hash: string } {
@@ -375,6 +404,13 @@ function auditRoutePerformance(performance: RoutePerformance, file: string, issu
     }
 }
 
+const isNoindex = (html: string) =>
+    /<meta\b(?=[^>]*\bname=["']robots["'])(?=[^>]*\bcontent=["'][^"']*noindex)[^>]*>/i.test(html);
+
+// URL delle pagine non indicizzabili: escono dal gruppo hreflang (una traduzione /en/
+// rimasta in italiano è noindex, e l'originale non deve dichiararla come alternativa).
+const NOINDEX_URLS = new Set<string>();
+
 function auditSeo(html: string, file: string, issues: Issue[], isRedirectPage: boolean): void {
     if (isRedirectPage || file.endsWith("404.html")) {
         return;
@@ -395,17 +431,21 @@ function auditSeo(html: string, file: string, issues: Issue[], isRedirectPage: b
     }
     if (!canonical || !canonical.startsWith(SITE_ORIGIN)) {
         issues.push({ file, message: "missing canonical URL on site origin" });
-    } else {
+    } else if (!isNoindex(html)) {
         const expectedUrls = expectedLocalizedUrls(canonical);
+        const englishIndexable = expectedUrls ? !NOINDEX_URLS.has(expectedUrls.englishUrl) : true;
         const alternates = alternateLinksByHreflang(html);
         if (expectedUrls && !alternates.get("it-IT")?.has(expectedUrls.italianUrl)) {
             issues.push({ file, message: `missing it-IT alternate ${expectedUrls.italianUrl}` });
         }
-        if (expectedUrls && !alternates.get("en-US")?.has(expectedUrls.englishUrl)) {
+        if (expectedUrls && englishIndexable && !alternates.get("en-US")?.has(expectedUrls.englishUrl)) {
             issues.push({ file, message: `missing en-US alternate ${expectedUrls.englishUrl}` });
         }
         if (expectedUrls && !alternates.get("x-default")?.has(expectedUrls.italianUrl)) {
             issues.push({ file, message: `missing x-default alternate ${expectedUrls.italianUrl}` });
+        }
+        if (expectedUrls && !englishIndexable && alternates.get("en-US")?.has(expectedUrls.englishUrl)) {
+            issues.push({ file, message: `en-US alternate points to a noindex page ${expectedUrls.englishUrl}` });
         }
     }
     if (!ogTitle || !ogDescription || !ogImage) {
@@ -425,6 +465,12 @@ function auditImages(html: string, file: string, issues: Issue[]): void {
             issues.push({ file, message: `image missing alt attribute: ${tag.slice(0, 140)}` });
         }
     }
+}
+
+function stripCodeContent(html: string): string {
+    return html
+        .replace(/<pre\b[\s\S]*?<\/pre>/gi, "")
+        .replace(/<code\b[\s\S]*?<\/code>/gi, "");
 }
 
 function auditMarkdownRendering(html: string, file: string, issues: Issue[]): void {
@@ -473,6 +519,14 @@ async function main(): Promise<void> {
         cssAsset: emptyMetric(),
         fontAsset: emptyMetric(),
     };
+
+    for (const filePath of htmlFiles) {
+        const html = await fs.readFile(filePath, "utf-8");
+        if (isNoindex(html)) {
+            const pathname = `/${relativeDistPath(filePath).replace(/index\.html$/, "")}`;
+            NOINDEX_URLS.add(new URL(pathname, SITE_ORIGIN).href);
+        }
+    }
 
     for (const filePath of htmlFiles) {
         const file = relativeDistPath(filePath);
