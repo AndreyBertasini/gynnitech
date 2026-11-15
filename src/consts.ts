@@ -8,5 +8,6 @@ export const BOOKING_URL = 'https://tidycal.com/andrii-d/15-minute-meeting-mnllj
 export const GITHUB_REPO_URL = 'https://github.com/AndreyBertasini/gynnitech';
 export const CONTACT_EMAIL = 'info@ginnytech.it';
 export const GA_MEASUREMENT_ID = 'G-NXL5WZC0SR';
-// TODO: Sostituisci con l'URL pubblico del tuo badge Credly ClickHouse Certified Developer
-export const CREDLY_CLICKHOUSE_BADGE_URL = 'https://www.credly.com/badges/INSERISCI-ID-BADGE-CREDLY';
+// Certificato ufficiale ClickHouse Certified Developer (rilasciato il 7 novembre 2026), pubblicato sul sito.
+// Se in futuro esiste un badge Credly pubblico, sostituire questo URL con quello del badge.
+export const CLICKHOUSE_CERTIFICATE_URL = `${SITE_URL}/certificati/clickhouse-certified-developer.pdf`;

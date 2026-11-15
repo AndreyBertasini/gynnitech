@@ -1,5 +1,5 @@
 import {
-  CREDLY_CLICKHOUSE_BADGE_URL,
+  CLICKHOUSE_CERTIFICATE_URL,
   GITHUB_PROFILE_URL,
   LINKEDIN_URL,
   SITE_AUTHOR,
@@ -24,7 +24,8 @@ export const PERSON_CREDENTIALS = [
     credentialCategory: 'Certification',
     description:
       'Certificazione tecnica ufficiale ClickHouse superata tramite esame pratico hands-on su modellazione MergeTree, query performance, ingestion ad alto throughput e architetture OLAP real-time.',
-    url: CREDLY_CLICKHOUSE_BADGE_URL,
+    url: CLICKHOUSE_CERTIFICATE_URL,
+    dateCreated: '2026-11-07',
     recognizedBy: {
       '@type': 'Organization' as const,
       name: 'ClickHouse',
