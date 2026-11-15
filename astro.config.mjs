@@ -232,6 +232,7 @@ export default defineConfig({
         },
       ],
       customCss: [
+        'katex/dist/katex.min.css',
         './src/styles/custom.css',
       ],
       sidebar: [
