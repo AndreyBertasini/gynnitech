@@ -3,6 +3,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import * as parse5 from 'parse5';
 import { redirectEntries } from '../src/lib/config/redirects.mjs';
+import { emptyTally, isPageTranslated, type TranslationTally } from './lib/translation-coverage';
 
 type CacheEntry = {
   source: string;
@@ -491,10 +492,72 @@ const collectStrings = (node: any, strings: Map<string, string>, blocked = false
   }
 };
 
+// Conteggio per pagina: senza traduzione in cache il testo resta italiano, e la pagina
+// non può essere pubblicata come inglese (vedi isPageTranslated).
+let pageTally: TranslationTally | null = null;
+
 const translateCached = (cache: TranslationCache, text: string) => {
   const entry = cache.entries[hashText(text)];
+  if (pageTally) {
+    if (entry) pageTally.translatedChars += text.length;
+    else pageTally.untranslatedChars += text.length;
+  }
   return entry?.target ?? text;
 };
+
+const isCachedText = (cache: TranslationCache, raw: string | undefined) => {
+  if (raw === undefined) return true;
+  const core = raw.trim();
+  return !shouldTranslate(core) || Boolean(cache.entries[hashText(core)]);
+};
+
+const findHeadText = (document: any) => {
+  let title: string | undefined;
+  let description: string | undefined;
+  const visit = (node: any) => {
+    if (isElementNode(node)) {
+      if (node.tagName === 'title' && title === undefined) title = textContent(node);
+      if (node.tagName === 'meta' && attrValue(node, 'name') === 'description') description = attrValue(node, 'content');
+    }
+    for (const child of node.childNodes ?? []) visit(child);
+  };
+  visit(document);
+  return { title, description };
+};
+
+// Pagina /en/ rimasta in italiano: resta navigabile, ma dichiara la lingua vera,
+// punta all'originale come canonical, esce da hreflang e indice.
+const markAsUntranslated = (document: any, originalUrl: string) => {
+  let headNode: any | undefined;
+  let hasRobots = false;
+  const visit = (node: any) => {
+    if (isElementNode(node)) {
+      if (node.tagName === 'html') setAttr(node, 'lang', 'it');
+      if (node.tagName === 'head') headNode = node;
+      if (node.tagName === 'link' && attrValue(node, 'rel') === 'canonical') setAttr(node, 'href', originalUrl);
+      if (node.tagName === 'meta' && attrValue(node, 'name') === 'robots') {
+        setAttr(node, 'content', 'noindex, follow');
+        hasRobots = true;
+      }
+      node.childNodes = (node.childNodes ?? []).filter(
+        (child: any) => !(isElementNode(child) && child.tagName === 'link' && attrValue(child, 'rel') === 'alternate' && attrValue(child, 'hreflang')),
+      );
+    }
+    for (const child of node.childNodes ?? []) visit(child);
+  };
+  visit(document);
+  if (headNode && !hasRobots) {
+    headNode.childNodes.push({
+      nodeName: 'meta',
+      tagName: 'meta',
+      attrs: [{ name: 'name', value: 'robots' }, { name: 'content', value: 'noindex, follow' }],
+      namespaceURI: 'http://www.w3.org/1999/xhtml',
+      childNodes: [],
+    });
+  }
+};
+
+const untranslatedPages = new Set<string>();
 
 const originalPublicPath = (relativeHtmlPath: string) => {
   const normalized = relativeHtmlPath.split(path.sep).join('/');
@@ -854,9 +917,6 @@ const generateEnglishPages = async (htmlFiles: string[], cache: TranslationCache
     const html = await fs.readFile(sourcePath, 'utf8');
     const document = parse5.parse(html);
 
-    applyTranslations(document, cache);
-    rewriteDocumentMetadata(document, relativePath);
-
     const targetPath = path.join(distDir, 'en', relativePath);
     try {
       await fs.access(targetPath);
@@ -864,6 +924,27 @@ const generateEnglishPages = async (htmlFiles: string[], cache: TranslationCache
     } catch {
       // No explicit English page exists, so generate one from the Italian HTML.
     }
+
+    const head = findHeadText(document);
+    pageTally = emptyTally();
+    pageTally.titleTranslated = isCachedText(cache, head.title);
+    pageTally.descriptionTranslated = isCachedText(cache, head.description);
+    applyTranslations(document, cache);
+    const translated = isPageTranslated(pageTally);
+    pageTally = null;
+
+    rewriteDocumentMetadata(document, relativePath);
+
+    const normalizedRelativePath = normalizeRelativeHtmlPath(relativePath);
+    if (!translated && !isRedirectRelativePath(normalizedRelativePath) && normalizedRelativePath !== '404.html') {
+      untranslatedPages.add(normalizedRelativePath);
+      markAsUntranslated(document, absoluteUrl(originalPublicPath(normalizedRelativePath)));
+      // Anche l'originale italiano non deve dichiarare un'alternativa inglese che non esiste.
+      const enHref = absoluteUrl(englishPublicPath(normalizedRelativePath));
+      const italian = html.replace(/<link\b(?=[^>]*\brel="alternate")(?=[^>]*\bhreflang="en-US")[^>]*>\s*/g, (tag) => (tag.includes(enHref) ? '' : tag));
+      if (italian !== html) await fs.writeFile(sourcePath, italian, 'utf8');
+    }
+
     await fs.mkdir(path.dirname(targetPath), { recursive: true });
     await fs.writeFile(targetPath, parse5.serialize(document), 'utf8');
   }
@@ -881,7 +962,7 @@ const writeEnglishSitemap = async (htmlFiles: string[]) => {
   const urls = htmlFiles
     .filter((filePath) => {
       const relativePath = normalizeRelativeHtmlPath(path.relative(distDir, filePath));
-      return relativePath !== '404.html' && !isRedirectRelativePath(relativePath);
+      return relativePath !== '404.html' && !isRedirectRelativePath(relativePath) && !untranslatedPages.has(relativePath);
     })
     .map((filePath) => absoluteUrl(englishPublicPath(path.relative(distDir, filePath))))
     .sort();
@@ -944,6 +1025,7 @@ const main = async () => {
   await generateEnglishPages(htmlFiles, cache);
   await writeEnglishSitemap(htmlFiles);
   console.log(`[translate:static] generated ${htmlFiles.length} English HTML pages in ${path.join(distDir, 'en')}`);
+  console.log(`[translate:static] ${untranslatedPages.size} page(s) not translated enough: kept noindex, out of hreflang and sitemap-en`);
 };
 
 main().catch((error) => {
