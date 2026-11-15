@@ -11,6 +11,7 @@ import fs from 'node:fs';
 import mermaid from 'astro-mermaid';
 import remarkMath from 'remark-math';
 import rehypeKatex from 'rehype-katex';
+import rehypeStripCourseH1 from './src/lib/rehype-strip-course-h1.mjs';
 
 // Starlight Plugins
 import starlightImageZoom from 'starlight-image-zoom';
@@ -99,7 +100,7 @@ const applyMarkdownProcessor = (updateConfig) => {
       processor: unified({
         gfm: true,
         remarkPlugins: [remarkMath, ...legacyMarkdown.remarkPlugins],
-        rehypePlugins: [[rehypeKatex, { strict: 'ignore' }], ...legacyMarkdown.rehypePlugins],
+        rehypePlugins: [[rehypeKatex, { strict: 'ignore' }], rehypeStripCourseH1, ...legacyMarkdown.rehypePlugins],
         ...(legacyMarkdown.remarkRehype ? { remarkRehype: legacyMarkdown.remarkRehype } : {}),
       }),
     },
@@ -190,7 +191,7 @@ export default defineConfig({
     processor: unified({
       gfm: true,
       remarkPlugins: [remarkMath],
-      rehypePlugins: [[rehypeKatex, { strict: 'ignore' }]],
+      rehypePlugins: [[rehypeKatex, { strict: 'ignore' }], rehypeStripCourseH1],
     }),
   },
   integrations: [
