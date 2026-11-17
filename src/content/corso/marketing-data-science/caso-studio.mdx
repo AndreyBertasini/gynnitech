@@ -1,180 +1,305 @@
 ---
 title: "Caso studio: dal modello di churn alla decisione"
 description: >-
-  Progetto pratico: predire il churn e costruire una strategia data-driven di retention.
+  Progetto end-to-end di churn prediction e retention: feature temporali senza
+  leakage, split out-of-time, matrice rischio per valore, calcolo completo del
+  ROI netto e monitoraggio in produzione.
 module: "Modulo 8: Marketing data science e modelli predittivi"
 order: 19
 category: Lab
 headerImage: /course-headers/marketing-data-science-caso-studio-ginnytech-ad.webp
 headerImageAlt: "Caso studio: dal modello di churn alla decisione - immagine ufficiale della lezione su GinnyTech, creata da AD"
 difficulty: advanced
-duration: 28 min
-learningObjectives:
-  - Costruire 20 feature di churn da transazioni, utilizzo, attrito e tenure
-  - Addestrare un Gradient Boosting e incrociare rischio e valore per assegnare azioni
-  - Presentare precisione nel segmento critico e ROI in euro al decisore
+duration: "40 min"
 prerequisites:
   - marketing-data-science/cheat-sheet
+learningObjectives:
+  - Progettare feature di churn su snapshot temporali rispettando l'ordine causale tra finestra di osservazione ed esito futuro
+  - Valutare un modello Gradient Boosting su split out-of-time con PR-AUC e Precision@TopK collegandolo alla matrice rischio-valore
+  - Calcolare il ROI netto di un programma di retention considerando precisione reale, tasso di salvataggio su holdout, costi fissi e costi variabili
 binario: "ml-tabellare"
-autore: "Hermes"
-controllatoDa: "Argo"
-autorizzatoDa: "Giano"
 draft: false
-dateModified: 2026-09-07
+dateModified: 2026-11-17
+formato: "didattica-v2"
 ---
-# Caso studio: dal modello di churn alla decisione
 
-È l'ultima lezione del modulo, e la tratto come si tratta una consegna vera: un progetto completo di retention, dalla prima feature all'ultima slide per il decisore. Tutto il lavoro si svolge su tabelle di feature, modelli tabellari e pipeline di scoring, e l'obiettivo è un ROI in euro, non un AUC da esibire. Seguiamo il caso fase per fase, una settimana alla volta.
+Un rivenditore e-commerce multibrand di abbigliamento e accessori con `72.000` clienti attivi su base annua registra un tasso di abbandono trimestrale del `19%` nella fascia dei clienti con almeno due ordini storici (scenario costruito con numeri di esempio).
 
-## Di cosa parla il caso
+La direzione commerciale vuole attivare un piano di retention proattiva con contatto telefonico dedicato e incentivi mirati, ma fissa due vincoli rigidi prima di sbloccare il budget annuo massimo di `180.000 €`: zero utilizzo di segnali successivi alla data di previsione e dimostrazione aritmetica che l'intervento guidato dal modello produca un ritorno netto superiore sia al contatto casuale sia a una regola semplice basata sui soli giorni dall'ultimo acquisto.
 
-Il caso end-to-end collega feature, modello di churn, segmentazione per valore e attivazione quotidiana per decidere dove investire il budget di retention.
+> **Idea chiave:** Un modello di churn crea valore economico solo quando rispetta rigorosamente la linea del tempo nelle feature, incrocia la probabilità di abbandono con il margine residuo del cliente e verifica il proprio guadagno netto contro un gruppo di controllo permanente.
 
-## La sequenza di lavoro in cinque passaggi
+## Architettura della consegna end-to-end dal warehouse al CRM
 
-Prima di entrare nel dettaglio, ecco la mappa del progetto. La seguiremo fase per fase, una settimana alla volta.
+Un progetto reale di data science applicata al marketing non termina dentro un notebook con un valore elevato di `ROC-AUC`. Finisce quando le probabilità ordinate attivano azioni selettive nel CRM, preservano un campione non trattato per misurare il guadagno causale e alimentano un ciclo di sorveglianza mensile capace di segnalare il degrado prima che il budget vada in perdita.
 
-1. Ingegnerizza 20 feature da transazioni, utilizzo, attrito e tenure.
-2. Addestra un Gradient Boosting per la probabilità di churn a 30 giorni.
-3. Incrocia rischio e valore per assegnare azione, canale e budget.
-4. Attiva scoring giornaliero con soglia di degrado AUC e Reverse ETL.
-5. Presenta precisione nel segmento critico e ROI in euro al decisore.
-
-## Fase 1: feature engineering in settimana 1
-
-Si parte costruendo 20 feature da dati transazionali, navigazione, supporto e marketing. L'obiettivo è leggere il caso come una consegna di lavoro completa. Ogni feature deve spiegare quale comportamento cattura e quale segnale di rischio porta con sé.
-
-```python
-# Feature da dati transazionali
-df['recency_days'] = (df['today'] - df['last_order_date']).dt.days
-df['frequency_total'] = df.groupby('customer_id')['order_id'].transform('count')
-df['monetary_total'] = df.groupby('customer_id')['amount'].transform('sum')
-df['aov'] = df['monetary_total'] / df['frequency_total']
-
-# Trend di utilizzo
-df['active_days_last_14'] = df.groupby('customer_id')['active_day'].transform(
-    lambda x: x.rolling(14).sum())
-df['active_days_prev_14'] = df.groupby('customer_id')['active_day'].transform(
-    lambda x: x.shift(14).rolling(14).sum())
-df['usage_trend'] = df['active_days_last_14'] / df['active_days_prev_14'].clip(1)
-
-# Segnali di attrito
-df['has_payment_failure'] = (df['failed_payments_30d'] > 0).astype(int)
-df['support_tickets_30d'] = df['support_tickets_30d']
-df['avg_session_minutes_trend'] = df['avg_session_7d'] / df['avg_session_prev_7d'].clip(1)
-
-# Engagement depth
-features_list = ['feature_try_on', 'feature_style_quiz', 'feature_wishlist',
-                 'feature_reviews', 'feature_referral']
-df['engagement_depth'] = df[features_list].sum(axis=1)
-
-# Segnali temporali
-df['tenure_months'] = (df['today'] - df['signup_date']).dt.days / 30
-df['is_month_1'] = (df['tenure_months'] <= 1).astype(int)
+```mermaid
+flowchart LR
+    A["Data Warehouse: ordini, sessioni, ticket a cutoff t0"] --> B["Snapshot feature senza leakage (window t0 - 90g)"]
+    B --> C["Split temporale out-of-time + Gradient Boosting"]
+    C --> D["Score calibrato x LTV residuo -> Matrice Rischio-Valore"]
+    D --> E["90% Azioni CRM / Customer Success"]
+    D --> F["10% Holdout persistente (nessun intervento)"]
+    E --> G["Audit mensile: PSI, PR-AUC, tasso salvataggio e ROI netto"]
+    F --> G
 ```
 
-## Fase 2: modello predittivo in settimana 2
+L'architettura separa in modo netto tre responsabilità: il calcolo storico riproducibile (`snapshot` congelati a date di osservazione precise), il motore decisionale economico (`Matrice Rischio × Valore`, dove un cliente ad alto rischio ma basso margine riceve solo un'automazione a costo quasi zero mentre un cliente ad alto rischio e alto valore riceve attenzione umana) e la misura dell'effetto reale tramite il gruppo `holdout` permanente del `10%`.
 
-Con le feature pronte, addestriamo un Gradient Boosting per stimare la probabilità di `churn` nel mese successivo. Definiamo il `churn` come assenza di ordini nei 30 giorni seguenti. Teniamo d'occhio quali feature pesano di più nella decisione del modello.
+## Ingegneria delle feature su snapshot temporali senza leakage
 
-```python
-from sklearn.ensemble import GradientBoostingClassifier
-from sklearn.model_selection import train_test_split, cross_val_score
-from sklearn.metrics import roc_auc_score, classification_report
+L'errore più grave e frequente nei progetti di churn consiste nell'aggregare le tabelle transazionali usando l'intero storico fino a oggi per poi etichettare chi ha già cancellato l'account o smesso di comprare. Se includi nel calcolo variabili costruite dopo l'inizio del silenzio o durante la finestra stessa che vuoi prevedere, il modello ottiene punteggi quasi perfetti in laboratorio ma crolla appena arriva sui dati di produzione.
 
-feature_cols = ['recency_days', 'frequency_total', 'monetary_total', 'aov',
-    'usage_trend', 'has_payment_failure', 'support_tickets_30d',
-    'avg_session_minutes_trend', 'engagement_depth', 'tenure_months',
-    'is_month_1', 'days_since_last_login', 'email_open_rate_30d']
+Per evitare qualsiasi contaminazione temporale (`data leakage`), ogni riga del dataset di addestramento deve essere ancorata a una precisa `data_osservazione` ($t_0$). Tutte le variabili esplicative ($X$) vanno calcolate esclusivamente con eventi compresi fino a $t_0$ incluso, per esempio negli ultimi `30`, `60` o `90` giorni precedenti la data di taglio.
 
-X = df[feature_cols].fillna(0)
-y = df['churned_next_month']  # definizione: nessun ordine nei 30gg successivi
+La variabile obiettivo ($y = 1$ se il cliente non effettua alcun ordine, $0$ se resta attivo) va invece osservata esclusivamente nella finestra futura disgiunta $(t_0, t_0 + 90\text{ giorni}]$. Questa separazione netta garantisce che al momento dello scoring in produzione esistano esattamente gli stessi segnali usati in fase di addestramento.
 
-X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.3, stratify=y)
-
-model = GradientBoostingClassifier(
-    n_estimators=200, max_depth=4, learning_rate=0.05, random_state=42)
-model.fit(X_train, y_train)
-
-probs = model.predict_proba(X_test)[:, 1]
-auc = roc_auc_score(y_test, probs)
-print(f"AUC: {auc:.3f}")  # Target: >0.82
-
-# Feature importance
-importances = pd.Series(model.feature_importances_, index=feature_cols)
-print(importances.sort_values(ascending=False).head(10))
-```
-
-Risultato atteso: `AUC` intorno a 0.84, con `recency_days`, `usage_trend` e `tenure_months` tra le tre feature più importanti.
-
-## Fase 3: segmentazione per azione in settimana 3
-
-Un buon punteggio di rischio non basta. Dividi i clienti in quattro quadranti incrociando `Churn Risk` e `Customer Value`. La stessa probabilità di abbandono richiede risposte diverse a seconda del valore del cliente.
+Costruiamo le quattro famiglie di segnali su snapshot coerenti con questo vincolo, proteggendo ogni rapporto numerico da divisioni per zero:
 
 ```python
-df['churn_risk'] = model.predict_proba(df[feature_cols].fillna(0))[:, 1]
-df['risk_tier'] = pd.qcut(df['churn_risk'], 4, labels=['low','medium','high','critical'])
-df['value_tier'] = pd.qcut(df['monetary_total'], 4, labels=['low','medium','high','vip'])
+import numpy as np
+import pandas as pd
 
-segments = df.groupby(['risk_tier', 'value_tier']).agg(
-    customers=('customer_id', 'count'),
-    avg_ltv=('monetary_total', 'mean')
-).reset_index()
+def costruisci_feature_snapshot(
+    clienti: pd.DataFrame,
+    ordini: pd.DataFrame,
+    sessioni: pd.DataFrame,
+    ticket: pd.DataFrame,
+    cutoff_date: pd.Timestamp,
+) -> pd.DataFrame:
+    # Filtra rigorosamente tutti gli eventi prima o alla data di cutoff t0
+    ord_past = ordini[ordini["data_ordine"] <= cutoff_date].copy()
+    ses_past = sessioni[sessioni["data_sessione"] <= cutoff_date].copy()
+    tkt_past = ticket[ticket["data_apertura"] <= cutoff_date].copy()
+
+    t_30 = cutoff_date - pd.Timedelta(days=30)
+    t_60 = cutoff_date - pd.Timedelta(days=60)
+    t_90 = cutoff_date - pd.Timedelta(days=90)
+
+    # 1. Famiglia RFM storica fino a t0
+    rfm = (
+        ord_past.groupby("customer_id")
+        .agg(
+            ultimo_ordine=("data_ordine", "max"),
+            ordini_90g=("order_id", lambda s: (ord_past.loc[s.index, "data_ordine"] >= t_90).sum()),
+            margine_180g=("margine_lordo", "sum"),
+        )
+        .reset_index()
+    )
+    rfm["recency_giorni"] = (cutoff_date - rfm["ultimo_ordine"]).dt.days
+
+    # 2. Famiglia Trend di utilizzo (ultimi 30 giorni vs 30 giorni precedenti)
+    ses_30 = ses_past[ses_past["data_sessione"] >= t_30].groupby("customer_id").size().rename("ses_0_30")
+    ses_30_60 = (
+        ses_past[(ses_past["data_sessione"] >= t_60) & (ses_past["data_sessione"] < t_30)]
+        .groupby("customer_id")
+        .size()
+        .rename("ses_30_60")
+    )
+
+    # 3. Famiglia Segnali di attrito (ticket aperti o resi recenti)
+    tkt_60 = (
+        tkt_past[tkt_past["data_apertura"] >= t_60]
+        .groupby("customer_id")
+        .agg(ticket_60g=("ticket_id", "count"), ritardi_consegna=("flag_ritardo", "sum"))
+        .reset_index()
+    )
+
+    # 4. Unione e calcolo rapporti con denominatore protetto
+    df = clienti[["customer_id", "data_primo_ordine", "ltv_residuo_stimato"]].copy()
+    df["tenure_giorni"] = (cutoff_date - df["data_primo_ordine"]).dt.days.clip(lower=1)
+
+    df = df.merge(rfm, on="customer_id", how="left")
+    df = df.merge(ses_30, on="customer_id", how="left")
+    df = df.merge(ses_30_60, on="customer_id", how="left")
+    df = df.merge(tkt_60, on="customer_id", how="left")
+
+    for col in ["ordini_90g", "margine_180g", "ses_0_30", "ses_30_60", "ticket_60g", "ritardi_consegna"]:
+        df[col] = df[col].fillna(0)
+    df["recency_giorni"] = df["recency_giorni"].fillna(df["tenure_giorni"])
+
+    # Rapporto di accelerazione o rallentamento delle visite senza divisione per zero
+    df["trend_visite_ratio"] = df["ses_0_30"] / df["ses_30_60"].clip(lower=1)
+    df["cutoff_date"] = cutoff_date
+    return df
 ```
 
-A ogni quadrante corrisponde un'azione, un canale e un budget stimato.
+## Addestramento, split temporale e metriche orientate all'azione
 
-| Rischio per Valore | Segmento | Azione | Canale | Budget stimato |
-|-----------------|----------|--------|--------|----------------|
-| Critical per VIP | Save our stars | Call personale del customer success entro 24h | Telefono, email dedicata | 50-100 euro per cliente |
-| Critical per Low | Auto-save | Sequenza email automatica con offerta | Email, push | 5-10 euro per cliente |
-| High per VIP | Proactive love | Invito esclusivo, sneak peek nuove collezioni | Email, direct mail | 20-30 euro per cliente |
-| Low per VIP | Loyalty reward | Programma referral, accesso anticipato saldi | Email, in-app | 10-15 euro per cliente |
-| Low-Medium per Low | Nurture | Contenuti educativi, social proof | Email, in-app | 2-5 euro per cliente |
+Una volta generati più snapshot mensili (per esempio `31 marzo`, `30 aprile`, `31 maggio`, `30 giugno`), non si mescolano mai le righe in un `train_test_split` casuale. Lo split casuale mette lo stesso cliente o la stessa stagione promozionale sia nel training sia nel test, gonfiando artificialmente le metriche. Devi invece adottare uno **split out-of-time**: addestri sugli snapshot più vecchi (esempio marzo–maggio) e valuti sullo snapshot più recente con etichette già maturate (esempio giugno).
 
-Verdetto: il quadrante a rischio critico e valore VIP riceve contatto umano entro 24 ore, tutto il resto va in automazione pesata per costo.
-
-## Fase 4: deploy e monitoring in settimana 4
-
-Il modello vive solo se entra in un flusso quotidiano e se qualcuno si accorge quando smette di funzionare. La pipeline assegna gli `score` ogni mattina. Un controllo mensile verifica che l'`AUC` non scenda sotto la soglia di degrado.
+Anche la scelta della metrica segue la realtà operativa. Su un tasso di abbandono del `19%`, la sola accuratezza globale non distingue i veri casi urgenti dalla maggioranza stabile. Le metriche che governano la decisione sono tre: `PR-AUC` (sensibile ai falsi positivi nella classe minoritaria), `ROC-AUC` (ordinamento complessivo delle probabilità) e soprattutto la **Precision@TopK**, cioè la percentuale di veri churner dentro il sottoinsieme preciso che il team commerciale è in grado di gestire ogni anno.
 
 ```python
-# Pipeline di scoring giornaliera
-def daily_churn_scoring():
-    new_data = extract_features_from_warehouse()
-    new_data['churn_risk'] = model.predict_proba(new_data[feature_cols])[:, 1]
-    write_to_activation_table(new_data[['customer_id', 'churn_risk', 'risk_tier']])
+from sklearn.ensemble import HistGradientBoostingClassifier
+from sklearn.metrics import average_precision_score, roc_auc_score
+import numpy as np
 
-schedule.every().day.at("06:00").do(daily_churn_scoring)
+FEATURES = [
+    "recency_giorni",
+    "ordini_90g",
+    "margine_180g",
+    "tenure_giorni",
+    "ses_0_30",
+    "trend_visite_ratio",
+    "ticket_60g",
+    "ritardi_consegna",
+]
 
-# Monitoring AUC drift mensile
-def check_auc_drift():
-    recent_actuals = get_recent_outcomes()
-    recent_preds = model.predict_proba(recent_actuals[feature_cols])[:, 1]
-    current_auc = roc_auc_score(recent_actuals['churned'], recent_preds)
-    if current_auc < 0.78:  # soglia di degrado
-        send_alert(f"AUC drift detected: {current_auc:.3f}")
+def addestra_e_valuta_out_of_time(
+    df_panel: pd.DataFrame,
+    train_end: pd.Timestamp,
+    test_cutoff: pd.Timestamp,
+    capacita_top_k: int = 1800,
+) -> tuple[HistGradientBoostingClassifier, dict[str, float]]:
+    train_df = df_panel[df_panel["cutoff_date"] <= train_end]
+    test_df = df_panel[df_panel["cutoff_date"] == test_cutoff].copy()
+
+    model = HistGradientBoostingClassifier(
+        max_depth=4,
+        learning_rate=0.05,
+        max_iter=200,
+        min_samples_leaf=40,
+        random_state=42,
+    )
+    model.fit(train_df[FEATURES], train_df["churn_90g"])
+
+    test_df["churn_prob"] = model.predict_proba(test_df[FEATURES])[:, 1]
+    top_k = test_df.sort_values("churn_prob", ascending=False).head(capacita_top_k)
+
+    metriche = {
+        "roc_auc": round(float(roc_auc_score(test_df["churn_90g"], test_df["churn_prob"])), 4),
+        "pr_auc": round(float(average_precision_score(test_df["churn_90g"], test_df["churn_prob"])), 4),
+        "precision_top_k": round(float(top_k["churn_90g"].mean()), 4),
+    }
+    return model, metriche
 ```
 
-La tabella `mrt_activation__customer_health` viene sincronizzata via Reverse ETL su `Braze` e `Salesforce`. I customer success manager vedono la lista Save our stars direttamente nel CRM.
+## Matrice rischio per valore e allocazione dei canali
 
-## Fase 5: presentazione al decisore in 2 slide
+Ordinare tutti i `72.000` clienti solo per probabilità di churn rischia di sprecare il tempo limitato del Customer Success chiamando clienti che spendono `25 €` all'anno mentre trascura clienti da `2.400 €` di margine residuo che mostrano un rischio del `65%`.
 
-La prima slide dimostra che il modello funziona. L'`AUC` di 0.84 significa che nell'84 per cento dei casi una coppia churner e non-churner viene ordinata correttamente. Prendendo il 20 per cento più a rischio catturiamo il 64 per cento dei churner reali. Nel segmento Critical la `precision` è del 71 per cento: chi predici come critical churna davvero nel 71 per cento dei casi.
+L'uscita del modello va quindi incrociata con il **valore residuo atteso** (`LTV` netto nei successivi 24 mesi) in una matrice operativa a cinque zone chiare:
 
-La seconda slide traduce tutto in valore. La popolazione Critical per VIP conta 1800 clienti con `LTV` medio di 2400 euro. Salvandone il 40 per cento con intervento proattivo si preservano 720 clienti per 2400 euro, cioè 1.73 milioni di `LTV`. Il costo del programma è di 180000 euro all'anno, tra un FTE di customer success e i tool, per un `ROI` di 9.6x nel primo anno.
+| Quadrante Rischio × Valore | Soglia di probabilità e valore | Playbook operativo | Costo indicativo per cliente |
+|---|---|---|---|
+| `Critical × VIP` (Priorità 1) | Rischio `>= 0,60` e `LTV` top quartile | Chiamata Customer Success entro 24 ore + offerta su misura | `40 €` variabili (+ quota fissa team) |
+| `High × Medium` (Auto-save) | Rischio `>= 0,60` e `LTV` medio | Flusso automatico email + push con contenuto d'uso o piccolo bonus | `2 €–5 €` |
+| `Medium × VIP` (Proactive care) | Rischio `0,35–0,59` e `LTV` top quartile | Check-in di account o anteprima collezione senza sconti sul margine | `8 €` |
+| `Low × VIP` (Loyalty reward) | Rischio `< 0,35` e `LTV` top quartile | Riconoscimento VIP e accesso anticipato, nessuno sconto non richiesto | `0 €–3 €` |
+| `Low × Low` (Standard) | Rischio `< 0,60` e `LTV` basso | Comunicazione ordinaria di newsletter, nessuna azione extra | `0 €` |
 
-## Controllo di qualità
+## Derivazione economica completa del caso: dal decile di rischio al ROI netto
 
-Prima di usare questo lavoro in una decisione, controlla sempre completezza, duplicati, timezone, definizioni cambiate e segmenti esclusi. Molte analisi apparentemente sofisticate falliscono perché il dato di partenza misura un comportamento diverso da quello che il team crede di osservare. Chiediti infine: se il risultato fosse instabile, quale scelta sbaglieresti? Se la risposta non è concreta, manca ancora il collegamento tra analisi e azione.
+Verifichiamo ora con precisione aritmetica se il quadrante prioritario `Critical × VIP` rispetta il vincolo di budget di `180.000 €` imposto dalla direzione commerciale sullo scenario iniziale (`72.000` clienti attivi) (numeri di esempio).
 
-## Un caso che fa riflettere: Netflix
+Supponiamo che la matrice isoli **`1.800` clienti l'anno** nel quadrante `Critical × VIP`, ciascuno con un `LTV` netto residuo atteso di **`2.400 €`** su ventiquattro mesi. Sul gruppo di test out-of-time, la precisione reale del modello in questa selezione è del **`71%`**.
 
-Nel primo trimestre 2022 Netflix perse 200000 abbonati a livello globale, il primo calo netto dopo oltre un decennio di crescita continua. La società attribuì il calo a saturazione, concorrenza e condivisione delle password fuori nucleo. La risposta fu operativa: stretta sulla condivisione account e lancio del piano con pubblicità. Il caso mostra un progetto retention end-to-end: segnale di churn, segmentazione per valore e azione commerciale misurabile.
+Il programma prevede un costo fisso annuo di **`108.000 €`** per il team dedicato e il tooling di integrazione, più un costo variabile operativo e promozionale di **`40 €`** per ogni cliente contattato. Un esperimento pilota su gruppo di controllo ha misurato che l'intervento recupera in modo incrementale il **`35%`** dei veri potenziali churner contattati.
 
-## Domande per l'autoverifica
+Il primo passaggio consiste nel separare i veri potenziali churner dai falsi allarmi presenti nella lista dei `1.800` segnalati. Applicando la precisione del `71%`, i veri potenziali churner sono $1.800 \times 0{,}71 = 1.278$ clienti, mentre i restanti $1.800 - 1.278 = 522$ clienti sono falsi positivi che sarebbero rimasti comunque attivi anche senza nessuna telefonata. Un'analisi ingenua che trattasse tutti i `1.800` clienti come clienti certi di abbandono sovrastimerebbe la platea salvabile del `40,8%`.
 
-1. Quale soglia di rischio attiva il contatto umano entro 24 ore?
-2. Quale feature pesa di più tra recency, trend di utilizzo e tenure?
-3. Quale degrado di AUC fa scattare l'allarme di retraining?
-4. Quale ROI in euro giustifica il programma sul segmento a valore VIP?
+Nel secondo passaggio calcoliamo quanti clienti vengono effettivamente salvati grazie al lavoro del team. Applicando il tasso incrementale di salvataggio del `35%` misurato sul pilota ai soli `1.278` veri potenziali churner otteniamo $1.278 \times 0{,}35 = 447{,}3$, che arrotondiamo prudentemente a **`447` clienti salvati** in un anno.
+
+Nel terzo passaggio confrontiamo il valore economico preservato con i costi totali sostenuti sull'intera selezione. Il margine `LTV` preservato dai `447` clienti trattenuti ammonta a $447 \times 2.400 = 1.072.800$ €. Sul lato dei costi, invece, il costo variabile di `40 €` viene pagato su tutti i `1.800` clienti chiamati — compresi i `522` falsi positivi — per una spesa variabile di $1.800 \times 40 = 72.000$ €. Sommando il costo fisso di `108.000 €`, l'investimento totale annuo è $108.000 + 72.000 = 180.000$ €, esattamente dentro il tetto massimo approvato dalla direzione.
+
+Nel quarto passaggio ricaviamo il guadagno netto e il ritorno sull'investimento (`ROI`). Sottraendo l'investimento totale dal margine preservato otteniamo un beneficio netto annuo di $1.072.800 - 180.000 = +892.800$ €, equivalente a un `ROI` netto di $892.800 / 180.000 = 4{,}96\text{x}$, cioè **`+496%`**.
+
+Concludiamo con un controllo di robustezza sotto drift severo per fissare la soglia di arresto automatico. Se un cambio di canali di traffico facesse scendere la precisione dal `71%` al `40%`, i veri churner intercettati scenderebbero a `720`, i clienti salvati a `252` e il margine salvato a `604.800 €` (`+424.800 €` netti). Scendendo invece sotto l'`11,9%` di precisione (`214` veri churner, `75` salvati, `180.000 €` di margine salvato), il programma andrebbe in pareggio zero e poi in perdita: questo numero diventa il pavimento operativo scritto nel monitoraggio mensile.
+
+## Attivazione giornaliera, Reverse ETL, holdout e monitoring in produzione
+
+Il passaggio finale collega il modello al CRM quotidiano assicurandosi che il gruppo di controllo non venga mai perso. Ogni giorno il job di scoring genera la tabella analitica `mrt_activation__customer_health`, assegna in modo deterministico il `10%` di ogni quadrante al gruppo `holdout` tramite hash stabile sull'identificativo cliente e scrive solo il restante `90%` nelle liste attive del CRM.
+
+```python
+import hashlib
+
+def assegna_gruppo_e_azione(customer_id: str, churn_prob: float, ltv_residuo: float, soglia_vip: float = 1500.0) -> dict[str, str]:
+    # Assegnazione deterministica e permanente al 10% holdout
+    digest = hashlib.sha256(customer_id.encode("utf-8")).hexdigest()
+    bucket = int(digest[:8], 16) % 100
+    is_holdout = bucket < 10
+
+    if churn_prob >= 0.60 and ltv_residuo >= soglia_vip:
+        quadrante = "CRITICAL_VIP"
+        azione_base = "CS_CALL_24H"
+    elif churn_prob >= 0.60:
+        quadrante = "HIGH_MEDIUM"
+        azione_base = "AUTO_EMAIL_BONUS"
+    elif churn_prob >= 0.35 and ltv_residuo >= soglia_vip:
+        quadrante = "MEDIUM_VIP"
+        azione_base = "ACCOUNT_CHECKIN"
+    else:
+        quadrante = "LOW_STANDARD"
+        azione_base = "NESSUNA"
+
+    return {
+        "customer_id": customer_id,
+        "quadrante": quadrante,
+        "canale_attivato": "HOLDOUT_CONTROLLO" if is_holdout else azione_base,
+    }
+
+print(assegna_gruppo_e_azione("cust_90421", churn_prob=0.74, ltv_residuo=2400.0))
+```
+
+La disciplina dell'intervento selettivo sulla base installata ha avuto un riscontro noto su scala globale nel caso Netflix del primo trimestre 2022: dopo anni di crescita continua, l'azienda riportò la prima perdita netta di `200.000` abbonati nel trimestre, spingendo il management a riorientare le priorità verso misure dirette di tenuta degli utenti esistenti (come il contrasto alla condivisione non pagata delle password e l'introduzione di un piano più economico supportato da pubblicità).
+
+Sul piano analitico, il principio resta identico a qualsiasi scala: quando la crescita per acquisizione rallenta o il tasso di uscita sale, trattenere i segmenti ad alto valore recuperabile diventa la leva con il ritorno marginale più elevato dell'intero bilancio marketing.
+
+## Errori critici nei progetti end-to-end di churn
+
+### Split casuale invece dello split temporale out-of-time
+
+Usare `train_test_split` casuale su snapshot mensili mescola lo stesso mese commerciale tra addestramento e verifica. Se a maggio c'è stata una promozione straordinaria o un disservizio logistico che ha alterato tutti gli ordini, il modello memorizza la firma di quel periodo nei dati di test e sovrastima `PR-AUC` e `Precision@TopK` di 10–15 punti percentuali rispetto a ciò che accade poi in produzione su giugno o luglio.
+
+Esegui sempre la validazione su un periodo successivo separato temporalmente dal training.
+
+### Confondere la probabilità di churn con il valore economico dell'intervento
+
+Chiamare o offrire sconti ai clienti con la probabilità più alta in assoluto porta spesso a concentrare le risorse su utenti già quasi persi da mesi oppure su clienti a margine bassissimo che non ripagano il costo della telefonata.
+
+Ordina l'intervento incrociando probabilità, valore `LTV` residuo e suscettibilità stimata all'azione: alcuni clienti ad alto rischio vanno lasciati uscire con eleganza anziché sussidiati in perdita.
+
+### Spegnere il gruppo di holdout dopo la prima settimana di produzione
+
+Spesso il team commerciale chiede di togliere il gruppo di controllo del `10%` "per non perdere vendite su quei clienti". Così facendo, dopo due mesi nessuno sa più se il calo di churn dipenda dalle telefonate del Customer Success o da un cambio di stagionalità, e il dataset futuro viene contaminato dagli interventi stessi rendendo impossibile riaddestrare il modello in modo affidabile.
+
+Mantieni sempre un `holdout` stabile e mostra il bilancio economico trimestrale calcolato direttamente sulla differenza rispetto a quel controllo.
+
+## Revisione finale prima della consegna al decisore
+
+1. Nella funzione `costruisci_feature_snapshot`, perché filtriamo ordini, sessioni e ticket imponendo `data <= cutoff_date` prima di qualsiasi aggregazione invece di filtrare solo alla fine sulla tabella già unita?
+
+<details>
+<summary>Mostra risposta</summary>
+
+Perché aggregare prima del taglio includerebbe dentro medie, conteggi e date massime anche eventi avvenuti dopo `cutoff_date` (nella finestra futura target). Quel `data leakage` farebbe sembrare il modello molto più preciso in fase di test di quanto sia realmente il giorno del lancio in produzione, quando gli eventi futuri non esistono ancora.
+
+</details>
+
+2. Nel nostro conto economico, il costo variabile di `40 €` è stato moltiplicato per tutti i `1.800` clienti segnalati, mentre il salvataggio di `2.400 €` si è applicato solo a `447` clienti. Perché questa asimmetria è corretta?
+
+<details>
+<summary>Mostra risposta</summary>
+
+Perché al momento del contatto il team non conosce in anticipo chi tra i `1.800` clienti è un vero churner (`1.278`) né chi accetterà davvero di restare (`447`): sostiene quindi il costo operativo di `40 €` su tutta la lista selezionata (`72.000 €`). Al contrario, il beneficio economico incrementale nasce soltanto dai `447` clienti che sarebbero usciti senza intervento e che invece rimangono attivi generando i `2.400 €` di `LTV` residuo.
+
+</details>
+
+3. Che cosa accade al progetto se per errore il programma di retention inizia a telefonare anche ai clienti nel quadrante `Low × Low` oltre a `Critical × VIP` senza aumentare il budget fisso?
+
+<details>
+<summary>Mostra risposta</summary>
+
+La precisione reale e l'`LTV` medio della popolazione trattata crollano rapidamente, mentre i costi variabili di `40 €` continuano a crescere linearmente per ogni cliente contattato. In molti casi, su clienti con `LTV` basso e bassa probabilità di uscita, il costo operativo più l'eventuale incentivo superano il margine salvabile e distruggono parte del `ROI` positivo generato sul segmento `Critical × VIP`.
+
+</details>
+
+4. Qual è la soglia minima di `Precision@1800` sotto la quale l'intero programma da `180.000 €` del caso studio smette di generare profitto netto, assumendo invariati `LTV = 2.400 €` e salvataggio del `35%`?
+
+<details>
+<summary>Mostra risposta</summary>
+
+Serve che il margine salvato copra esattamente i `180.000 €` di investimento totale. Dividendo `180.000 €` per `2.400 €` occorrono almeno `75` clienti salvati; poiché si salva il `35%` dei veri churner, servono $75 / 0{,}35 \approx 214{,}3$ veri churner sui `1.800` contattati, cioè una precisione minima di $214{,}3 / 1.800 \approx 11{,}9\%$. Questo valore rappresenta il pavimento di sicurezza da monitorare mensilmente per scattare il blocco automatico.
+
+</details>
