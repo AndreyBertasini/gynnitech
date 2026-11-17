@@ -19,9 +19,20 @@ function parseCliArgs(argv: string[]): CliOptions {
       requireAll = true;
     } else if (arg.startsWith('--filter=')) {
       filterRaw = arg.slice('--filter='.length);
-    } else if (arg === '--filter' && i + 1 < argv.length) {
-      filterRaw = argv[i + 1];
+      if (filterRaw.trim().length === 0) {
+        throw new Error('Argomento non valido: --filter= richiede almeno un nome modulo.');
+      }
+    } else if (arg === '--filter') {
+      const nextArg = argv[i + 1];
+      if (!nextArg || nextArg.startsWith('-')) {
+        throw new Error(
+          'Argomento non valido: --filter richiede un valore (es. --filter advanced-sql).',
+        );
+      }
+      filterRaw = nextArg;
       i += 1;
+    } else if (arg.startsWith('-')) {
+      throw new Error(`Flag non riconosciuto: ${arg}`);
     }
   }
 
@@ -65,6 +76,10 @@ async function main() {
       const parsed = matter(raw);
       formato = parsed.data?.formato ?? null;
     } catch {
+      if (/^formato:\s*["']?didattica-v2["']?/m.test(raw)) {
+        v2Files.push({ rel, raw });
+        continue;
+      }
       if (requireAll) {
         notMigrated.push(`${rel} (frontmatter YAML non valido)`);
       }

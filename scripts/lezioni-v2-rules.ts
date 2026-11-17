@@ -60,33 +60,49 @@ const THEORETICAL_CATEGORIES = new Set([
 
 const ANALYTICAL_CODE_LANGS = new Set(['sql', 'python', 'py', 'r']);
 
-const FRASI_VIETATE: RegExp[] = [
-  /\bin questo modulo\b/i,
-  /\bin questa lezione\b/i,
-  /\bin questo articolo\b/i,
-  /\bvedremo come\b/i,
-  /\bvediamo ora\b/i,
-  /\bcapiremo insieme\b/i,
-  /\babbiamo visto\b/i,
-  /\bnel prossimo paragrafo\b/i,
-  /\bnei paragrafi successivi\b/i,
-  /\bin conclusione\b/i,
-  /\bricapitolando\b/i,
-  /\bvale la pena notare\b/i,
-  /\bè importante sottolineare\b/i,
-  /\bin poche parole\b/i,
-  /\bti mostro\b/i,
-  /\bvi mostro\b/i,
-  /\bti spiegherò\b/i,
-  /\bvi spiegherò\b/i,
-  /\bscoprirete\b/i,
-  /\bfacciamo un passo indietro\b/i,
-  /\bpartiamo dalle basi\b/i,
-];
+function wordBoundaryPhrase(phrase: string): RegExp {
+  const escaped = phrase.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return new RegExp(`(?<![\\p{L}\\p{N}_])${escaped}(?![\\p{L}\\p{N}_])`, 'iu');
+}
 
-const PRONOMI_VIETATI = /(?:^|[^A-Za-zÀ-ÿ])(?:[Nn]oi|vi|Vi)(?![A-Za-zÀ-ÿ])/;
-const EMOJI_REGEX = /[\u{1F300}-\u{1FAFF}\u{2600}-\u{26FF}\u{2700}-\u{27BF}]/u;
+const FRASI_VIETATE: RegExp[] = [
+  'in questo modulo',
+  'in questa lezione',
+  'in questo articolo',
+  'vedremo come',
+  'vediamo ora',
+  'capiremo insieme',
+  'abbiamo visto',
+  'nel prossimo paragrafo',
+  'nei paragrafi successivi',
+  'in conclusione',
+  'ricapitolando',
+  'vale la pena notare',
+  'è importante sottolineare',
+  'in poche parole',
+  'ti mostro',
+  'ti spiegherò',
+  'scoprirete',
+  'facciamo un passo indietro',
+  'partiamo dalle basi',
+  'nel mondo di oggi',
+  'sempre più',
+  'approfondiamo',
+  'scopriamo insieme',
+  'non è altro che',
+  'negli ultimi anni',
+  'vale la pena ricordare',
+  'in sintesi finale',
+]
+  .map(wordBoundaryPhrase)
+  .concat([/(?<![\p{L}\p{N}_])vi\s+(?:mostr|spieg)[\p{L}]*(?![\p{L}\p{N}_])/iu]);
+
+const PRONOMI_VIETATI = /(?<![\p{L}\p{N}_])(?:voi|vostr[oiae])(?![\p{L}\p{N}_])/iu;
+const EMOJI_REGEX = /[\p{Extended_Pictographic}\u2700-\u27BF]/u;
 const RIGA_IN_GRASSETTO = /^\s*\*\*[^*\n]+\*\*\s*$/;
+const OPENING_CASE_LINK = /https?:\/\/\S+/i;
+const OPENING_CASE_DISCLAIMER =
+  /\b(?:numeri di esempio|caso ricostruito|scenario costruito|esempio costruito)\b/i;
 
 const RESTO_3S: Array<{ pattern: RegExp; label: string }> = [
   { pattern: /^\s*import\s+/, label: 'import JSX/ESM' },
@@ -96,6 +112,32 @@ const RESTO_3S: Array<{ pattern: RegExp; label: string }> = [
   { pattern: /<Esercizio\b/, label: '<Esercizio>' },
   { pattern: /<Schema\b/, label: '<Schema>' },
   { pattern: /<Tabella\b/, label: '<Tabella>' },
+  { pattern: /<Percorso\b/, label: '<Percorso>' },
+  { pattern: /<Obiettivi\b/, label: '<Obiettivi>' },
+  { pattern: /<Slide\b/, label: '<Slide>' },
+  { pattern: /<Passo\b/, label: '<Passo>' },
+  { pattern: /<Confronto\b/, label: '<Confronto>' },
+  { pattern: /<Lato\b/, label: '<Lato>' },
+  { pattern: /<Criterio\b/, label: '<Criterio>' },
+  { pattern: /<Passi\b/, label: '<Passi>' },
+  { pattern: /<Fase\b/, label: '<Fase>' },
+  { pattern: /<Opzioni\b/, label: '<Opzioni>' },
+  { pattern: /<Opzione\b/, label: '<Opzione>' },
+  { pattern: /<MiniTabella\b/, label: '<MiniTabella>' },
+  { pattern: /<TabellaDati\b/, label: '<TabellaDati>' },
+  { pattern: /<Barre\b/, label: '<Barre>' },
+  { pattern: /<Barra\b/, label: '<Barra>' },
+  { pattern: /<NumeriGrandi\b/, label: '<NumeriGrandi>' },
+  { pattern: /<Numero\b/, label: '<Numero>' },
+  { pattern: /<Relazioni\b/, label: '<Relazioni>' },
+  { pattern: /<Nodo\b/, label: '<Nodo>' },
+  { pattern: /<Pattern\b/, label: '<Pattern>' },
+  { pattern: /<ErroreTipico\b/, label: '<ErroreTipico>' },
+  { pattern: /<Messaggio\b/, label: '<Messaggio>' },
+  { pattern: /<Domanda\b/, label: '<Domanda>' },
+  { pattern: /\bQuizExercise\b/, label: 'QuizExercise' },
+  { pattern: /\bSqlExercise\b/, label: 'SqlExercise' },
+  { pattern: /una sessione,\s*tre blocchi/i, label: 'una sessione, tre blocchi' },
   { pattern: /\bTODO\b/, label: 'TODO' },
   { pattern: /\bTBD\b/, label: 'TBD' },
   { pattern: /\bFIXME\b/, label: 'FIXME' },
@@ -388,59 +430,10 @@ function countProseWords(righe: Riga[]): number {
   return joined.split(/\s+/).filter(Boolean).length;
 }
 
-function hasSubstantialProse(righe: Riga[]): boolean {
-  const proseLines = righe.filter((r) => {
-    if (r.codice || r.vuota) return false;
-    const t = r.testo.trim();
-    if (/^#{1,6}\s+/.test(t)) return false;
-    if (/^<\/?(?:details|summary)\b[^>]*>$/i.test(t)) return false;
-    if (/^\s*(?:---+|===+|\*\*\*+)\s*$/.test(t)) return false;
-    return true;
-  });
-
-  if (proseLines.length === 0) return false;
-
-  const totalWords = proseLines
-    .map((r) => r.testo.trim())
-    .join(' ')
-    .split(/\s+/)
-    .filter(Boolean).length;
-
-  if (proseLines.length >= 2 && totalWords >= 4) {
-    return true;
-  }
-
-  if (proseLines.length === 1) {
-    const line = proseLines[0].testo.trim();
-    const sentences = line.split(/[.!?]+(?:\s+|$)/).filter((s) => s.trim().length > 0).length;
-    return totalWords >= 20 && sentences >= 2;
-  }
-
-  return false;
-}
-
-function maxConsecutiveListItems(righe: Riga[]): number {
-  let max = 0;
-  let current = 0;
-  for (const r of righe) {
-    if (r.codice) {
-      current = 0;
-      continue;
-    }
-    if (r.vuota) continue;
-    if (/^\s*(?:[-*+]|\d+[.)])\s+/.test(r.testo)) {
-      current += 1;
-      if (current > max) max = current;
-    } else {
-      current = 0;
-    }
-  }
-  return max;
-}
-
-function stripInlineCodeAndImages(line: string): string {
+function stripInlineCodeImagesAndLinkUrls(line: string): string {
   return line
     .replace(/!\[[^\]]*\]\([^)]*\)/g, ' ')
+    .replace(/\[([^\]]*)\]\([^)]*\)/g, '$1')
     .replace(/`[^`]*`/g, ' ');
 }
 
@@ -611,6 +604,16 @@ export function checkLezioneV2(
           `V2-R7: profilo conceptual (${data.senzaCodice === true ? 'senzaCodice: true' : category}) vieta blocchi di codice non-mermaid (trovati ${nonMermaidBlocks.length})`,
         );
       }
+      if (!enforceNoCode) {
+        const runnableBlocks = nonMermaidBlocks.filter(
+          (b) => b.lingua.length > 0 && b.nonEmptyLines >= 1,
+        );
+        if (runnableBlocks.length < 1) {
+          errors.push(
+            `V2-R7: profilo conceptual con categoria operativa ("${category || 'non specificata'}") richiede >= 1 blocco di codice con linguaggio esplicito oppure senzaCodice: true`,
+          );
+        }
+      }
       const structuralArtefacts =
         mermaidBlocks.length +
         tables.filter((t) => t.dataRows >= 3).length +
@@ -627,64 +630,7 @@ export function checkLezioneV2(
     );
   }
 
-  // V2-R8: Anti-snippet-orphan (every non-mermaid code block has prose before and after in the same section)
-  const nonMermaidIds = new Set(nonMermaidBlocks.map((b) => b.id));
-  const containers: Riga[][] = [intro, ...sezioni.map((s) => s.righe)];
-  for (const container of containers) {
-    const blocksInContainer: Array<{ id: number; start: number; end: number }> = [];
-    for (let i = 0; i < container.length; i += 1) {
-      const r = container[i];
-      if (r.codice && r.blockId !== null && nonMermaidIds.has(r.blockId)) {
-        const existing = blocksInContainer.find((b) => b.id === r.blockId);
-        if (existing) {
-          existing.end = i;
-        } else {
-          blocksInContainer.push({ id: r.blockId, start: i, end: i });
-        }
-      }
-    }
-
-    for (let idx = 0; idx < blocksInContainer.length; idx += 1) {
-      const current = blocksInContainer[idx];
-      const prevEnd = idx > 0 ? blocksInContainer[idx - 1].end + 1 : 0;
-      const nextStart =
-        idx + 1 < blocksInContainer.length ? blocksInContainer[idx + 1].start : container.length;
-
-      const beforeSlice = container.slice(prevEnd, current.start);
-      const afterSlice = container.slice(current.end + 1, nextStart);
-
-      if (!hasSubstantialProse(beforeSlice)) {
-        errors.push(
-          `V2-R8: blocco di codice non-mermaid alla riga ${container[current.start].indice + 1} privo di prosa contestuale prima (>= 2 righe nella sezione)`,
-        );
-      }
-      if (!hasSubstantialProse(afterSlice)) {
-        errors.push(
-          `V2-R8: blocco di codice non-mermaid alla riga ${container[current.end].indice + 1} privo di commento o implicazione dopo (>= 2 righe nella sezione)`,
-        );
-      }
-    }
-  }
-
-  // V2-R9: Final H2 section contains >= 2 <details> verification items
-  const lastSection = sezioni[sezioni.length - 1];
-  const lastSectionNonCode = lastSection
-    ? lastSection.righe
-        .filter((r) => !r.codice)
-        .map((r) => r.testo)
-        .join('\n')
-    : '';
-  const detailsMatches = [...lastSectionNonCode.matchAll(/<details\b[^>]*>([\s\S]*?)<\/details>/gi)];
-  const nonEmptyDetails = detailsMatches.filter(
-    (m) => m[1].replace(/<[^>]+>/g, ' ').trim().length > 0,
-  );
-  if (nonEmptyDetails.length < 2) {
-    errors.push(
-      `V2-R9: l'ultima sezione H2 deve contenere almeno 2 domande o esercizi con risposta in <details> (trovati ${nonEmptyDetails.length})`,
-    );
-  }
-
-  // V2-R10: Prose-first ratio >= 0.45, list cap <= 8, editorial voice, no emoji or !
+  // V2-R8: Prose-first ratio >= 0.45
   const textLines = righe.filter((r) => {
     if (r.codice || r.vuota) return false;
     const trimmed = r.testo.trim();
@@ -705,27 +651,89 @@ export function checkLezioneV2(
   const proseRatio = textLines.length > 0 ? proseLines.length / textLines.length : 0;
   if (proseRatio < 0.45) {
     errors.push(
-      `V2-R10: proseRatio ${(proseRatio * 100).toFixed(0)}% inferiore al minimo 45%`,
+      `V2-R8: proseRatio ${(proseRatio * 100).toFixed(0)}% inferiore al minimo 45%`,
     );
   }
 
-  const maxList = maxConsecutiveListItems(righe);
-  if (maxList > 8) {
-    errors.push(`V2-R10: elenco troppo lungo (${maxList} voci consecutive; massimo 8)`);
+  // V2-R9: Final H2 section contains 3-5 numbered ? questions each paired with <details><summary>...</summary>...</details>
+  const lastSection = sezioni[sezioni.length - 1];
+  const lastSectionNonCode = lastSection
+    ? lastSection.righe
+        .filter((r) => !r.codice)
+        .map((r) => r.testo)
+        .join('\n')
+    : '';
+  const questionMatches = [...lastSectionNonCode.matchAll(/^\s*\d+[.)]\s+.+\?\s*$/gm)].map(
+    (m) => ({
+      start: m.index ?? 0,
+      end: (m.index ?? 0) + m[0].length,
+    }),
+  );
+  const rawDetailsMatches = [
+    ...lastSectionNonCode.matchAll(/<details\b[^>]*>([\s\S]*?)<\/details>/gi),
+  ];
+  const validDetailsBlocks = rawDetailsMatches
+    .map((m) => {
+      const inner = m[1];
+      const summaryMatch = inner.match(/<summary\b[^>]*>([\s\S]*?)<\/summary>/i);
+      const summaryText = summaryMatch
+        ? summaryMatch[1].replace(/<[^>]+>/g, ' ').trim()
+        : '';
+      const bodyText = inner
+        .replace(/<summary\b[^>]*>[\s\S]*?<\/summary>/gi, ' ')
+        .replace(/<[^>]+>/g, ' ')
+        .trim();
+      return {
+        start: m.index ?? 0,
+        end: (m.index ?? 0) + m[0].length,
+        isValid: summaryText.length > 0 && bodyText.length > 0,
+      };
+    })
+    .filter((d) => d.isValid);
+
+  const everyQuestionHasPairedDetails =
+    questionMatches.length >= 3 &&
+    questionMatches.length <= 5 &&
+    rawDetailsMatches.length === questionMatches.length &&
+    validDetailsBlocks.length === questionMatches.length &&
+    questionMatches.every((q, idx) => {
+      const nextStart =
+        idx + 1 < questionMatches.length ? questionMatches[idx + 1].start : Infinity;
+      return validDetailsBlocks.some((d) => d.start >= q.end && d.end <= nextStart);
+    });
+
+  if (!everyQuestionHasPairedDetails) {
+    errors.push(
+      `V2-R9: l'ultima sezione H2 deve contenere 3–5 domande numerate con "?" ciascuna abbinata a <details><summary>...</summary>...</details> non vuoto (trovate ${questionMatches.length} domande e ${validDetailsBlocks.length} blocchi <details> validi)`,
+    );
+  }
+
+  // V2-R10: Opening case link/disclaimer, editorial voice, no AI-slop, no emoji or !
+  const openingCaseText = [...intro, ...(sezioni[0]?.righe ?? [])]
+    .filter((r) => !r.codice)
+    .map((r) => r.testo)
+    .join('\n');
+  if (
+    !OPENING_CASE_LINK.test(openingCaseText) &&
+    !OPENING_CASE_DISCLAIMER.test(openingCaseText)
+  ) {
+    errors.push(
+      'V2-R10: apertura (intro o prima sezione H2) priva di fonte esterna (https://...) o dichiarazione esplicita ("numeri di esempio", "caso ricostruito", "scenario costruito")',
+    );
   }
 
   for (const r of righe) {
     if (r.codice || r.vuota) continue;
-    const cleanText = stripInlineCodeAndImages(r.testo);
+    const cleanText = stripInlineCodeImagesAndLinkUrls(r.testo);
     if (PRONOMI_VIETATI.test(cleanText)) {
-      errors.push(`V2-R10: registro noi/vi vietato alla riga ${r.indice + 1}`);
+      errors.push(`V2-R10: registro voi/vostro vietato alla riga ${r.indice + 1}`);
       break;
     }
   }
 
   for (const r of righe) {
     if (r.codice || r.vuota) continue;
-    const cleanText = stripInlineCodeAndImages(r.testo);
+    const cleanText = stripInlineCodeImagesAndLinkUrls(r.testo);
     const matchedPhrase = FRASI_VIETATE.find((re) => re.test(cleanText));
     if (matchedPhrase) {
       errors.push(`V2-R10: frase meta/editoriale vietata alla riga ${r.indice + 1}`);
@@ -735,7 +743,7 @@ export function checkLezioneV2(
 
   for (const r of righe) {
     if (r.codice || r.vuota) continue;
-    const cleanText = stripInlineCodeAndImages(r.testo);
+    const cleanText = stripInlineCodeImagesAndLinkUrls(r.testo);
     if (EMOJI_REGEX.test(cleanText)) {
       errors.push(`V2-R10: emoji vietata nella prosa alla riga ${r.indice + 1}`);
       break;
@@ -744,14 +752,23 @@ export function checkLezioneV2(
 
   for (const r of righe) {
     if (r.codice || r.vuota) continue;
-    const cleanText = stripInlineCodeAndImages(r.testo);
+    const cleanText = stripInlineCodeImagesAndLinkUrls(r.testo);
     if (cleanText.includes('!')) {
       errors.push(`V2-R10: punto esclamativo nella prosa alla riga ${r.indice + 1}`);
       break;
     }
   }
 
-  // V2-R11: Zero 3S remnants or placeholders
+  // V2-R11: Zero legacy pipeline metadata, 3S remnants, or placeholders
+  const legacyMetaFields = ['autore', 'controllatoDa', 'autorizzatoDa'].filter(
+    (field) => data[field] !== undefined,
+  );
+  if (legacyMetaFields.length > 0) {
+    errors.push(
+      `V2-R11: metadati legacy vietati nel frontmatter (${legacyMetaFields.join(', ')})`,
+    );
+  }
+
   for (const r of righe) {
     if (r.codice || r.vuota) continue;
     const found = RESTO_3S.find((item) => item.pattern.test(r.testo));

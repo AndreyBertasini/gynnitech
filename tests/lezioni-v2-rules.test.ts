@@ -17,12 +17,18 @@ interface BuildLessonOverrides {
   wordsPerParagraph?: number;
   includeOpeningThesis?: boolean;
   openingThesisInSectionIndex?: number;
+  includeOpeningCaseContext?: boolean;
+  openingCaseLine?: string;
   includeMermaid?: boolean;
   tableDataRows?: number;
   includeWorkedExample?: boolean;
   codeBlocks?: Array<{ lang: string; body?: string; proseBefore?: string[]; proseAfter?: string[] }>;
   detailsInLastSection?: number;
   detailsWordCount?: number;
+  detailsQuestionPrefix?: (index: number) => string;
+  detailsQuestionSuffix?: string;
+  detailsSummaryText?: string;
+  detailsBodyOverride?: string;
   extraListItems?: string[];
   extraProseLines?: string[];
   forbiddenH2?: string;
@@ -65,16 +71,13 @@ function buildValidV2Lesson(overrides: BuildLessonOverrides = {}): { raw: string
       'Stimare il costo di partizionamento e ordinamento in una window function su tabelle superiori a 10 milioni di righe',
       'Scegliere tra frame ROWS e RANGE per evitare errori silenziosi in presenza di timestamp duplicati',
     ],
-    binario: 'dati-pipeline',
+    binario: 'ml-tabellare',
     formato: 'didattica-v2',
-    autore: 'Hermes',
-    controllatoDa: 'Argo',
-    autorizzatoDa: 'Giano',
     draft: false,
     dateModified: '2026-11-17',
   };
 
-  if (profile === 'conceptual') {
+  if (profile === 'conceptual' && !overrides.frontmatter?.category) {
     defaultFrontmatter.senzaCodice = true;
   }
 
@@ -98,11 +101,18 @@ function buildValidV2Lesson(overrides: BuildLessonOverrides = {}): { raw: string
 
   const includeOpeningThesis = overrides.includeOpeningThesis ?? true;
   const openingThesisInSectionIndex = overrides.openingThesisInSectionIndex ?? 0;
+  const includeOpeningCaseContext = overrides.includeOpeningCaseContext ?? true;
+  const openingCaseLine =
+    overrides.openingCaseLine ??
+    'Nel caso ricostruito di una piattaforma e-commerce da 120 mila ordini mensili, il calcolo cumulativo senza partizione corretta ha raddoppiato la latenza.';
   const includeMermaid = overrides.includeMermaid ?? true;
   const tableDataRows = overrides.tableDataRows ?? 3;
   const includeWorkedExample = overrides.includeWorkedExample ?? true;
-  const detailsInLastSection = overrides.detailsInLastSection ?? 2;
+  const detailsInLastSection = overrides.detailsInLastSection ?? 3;
   const detailsWordCount = overrides.detailsWordCount ?? 25;
+  const detailsQuestionPrefix = overrides.detailsQuestionPrefix ?? ((d: number) => `${d}.`);
+  const detailsQuestionSuffix = overrides.detailsQuestionSuffix ?? '?';
+  const detailsSummaryText = overrides.detailsSummaryText ?? 'Mostra risposta';
 
   const defaultCodeBlocks: Array<{
     lang: string;
@@ -151,6 +161,10 @@ function buildValidV2Lesson(overrides: BuildLessonOverrides = {}): { raw: string
         '> **Idea chiave:** La scelta del frame e della partizione determina sia la correttezza del calcolo sia il costo di memoria della query, quindi devi fissarli prima di ottimizzare gli indici.',
         '',
       );
+    }
+
+    if (idx === 0 && includeOpeningCaseContext) {
+      lines.push(openingCaseLine, '');
     }
 
     for (let p = 0; p < proseParagraphsPerSection; p += 1) {
@@ -228,13 +242,16 @@ function buildValidV2Lesson(overrides: BuildLessonOverrides = {}): { raw: string
 
     if (isLast && detailsInLastSection > 0) {
       for (let d = 1; d <= detailsInLastSection; d += 1) {
+        const answerBody =
+          overrides.detailsBodyOverride ??
+          `Confronta i numeri osservati con il baseline storico: ${makeWords(detailsWordCount, `risposta${d}`)}.`;
         lines.push(
-          `Domanda ${d}: come verifichi l impatto di questa scelta sui dati reali del tuo team?`,
+          `${detailsQuestionPrefix(d)} Come verifichi l impatto della scelta ${d} sui dati reali del tuo team${detailsQuestionSuffix}`,
           '',
           '<details>',
-          '<summary>Mostra risposta</summary>',
+          `<summary>${detailsSummaryText}</summary>`,
           '',
-          `Confronta i numeri osservati con il baseline storico: ${makeWords(detailsWordCount, `risposta${d}`)}.`,
+          answerBody,
           '',
           '</details>',
           '',
@@ -338,20 +355,13 @@ describe('checkLezioneV2 valid baselines', () => {
     expect(checkLezioneV2(crlfRaw, tech.rel).errors).toEqual([]);
   });
 
-  test('allows natural tu and bullet lists <= 8 items when proseRatio >= 0.45', () => {
+  test('allows natural tu, noi, impersonal vi è/sono, URL ! fragments, and bullet lists when proseRatio >= 0.45', () => {
     const lesson = buildValidV2Lesson({
-      extraListItems: [
-        '- Prima verifica sul tuo ambiente',
-        '- Seconda verifica sui tuoi dati',
-        '- Terza verifica sulla latenza',
-        '- Quarta verifica sul costo',
-        '- Quinta verifica sul piano query',
-        '- Sesta verifica sugli indici',
-        '- Settima verifica sulle partizioni',
-        '- Ottava verifica finale',
-      ],
+      extraListItems: Array.from({ length: 10 }, (_, i) => `- Verifica numero ${i + 1} sul tuo ambiente`),
       extraProseLines: [
         'Puoi adattare questa regola al tuo team senza cambiare il modello dati esistente.',
+        'Noi confrontiamo la latenza p95 prima e dopo il partizionamento, perché vi è un limite netto di memoria.',
+        'Consulta [la documentazione ufficiale](https://example.com/docs?flag=1!2#anchor) per i parametri.',
       ],
     });
     expect(checkLezioneV2(lesson.raw, lesson.rel).errors).toEqual([]);
@@ -431,8 +441,8 @@ describe('checkLezioneV2 rule enforcement V2-R1..V2-R11', () => {
     // <details> prose MUST count toward total prose words to clear the 1800-word threshold
     const rescuedByDetails = buildValidV2Lesson({
       wordsPerParagraph: 55,
-      detailsInLastSection: 2,
-      detailsWordCount: 300,
+      detailsInLastSection: 3,
+      detailsWordCount: 200,
     });
     expect(checkLezioneV2(rescuedByDetails.raw, rescuedByDetails.rel).errors).toEqual([]);
   });
@@ -509,6 +519,26 @@ describe('checkLezioneV2 rule enforcement V2-R1..V2-R11', () => {
       /V2-R7/,
     );
 
+    const conceptualOperationalNoCode = buildValidV2Lesson({
+      rel: 'src/content/corso/dashboard-visualizzazione/grafici-kpi.mdx',
+      frontmatter: { category: 'Visualizzazione' },
+      codeBlocks: [],
+    });
+    expect(
+      checkLezioneV2(conceptualOperationalNoCode.raw, conceptualOperationalNoCode.rel).errors.join(
+        '\n',
+      ),
+    ).toMatch(/V2-R7/);
+
+    const conceptualOperationalWithCode = buildValidV2Lesson({
+      rel: 'src/content/corso/dashboard-visualizzazione/grafici-kpi.mdx',
+      frontmatter: { category: 'Visualizzazione' },
+      codeBlocks: [{ lang: 'sql', body: 'SELECT metric_date, SUM(revenue) FROM kpi GROUP BY 1;' }],
+    });
+    expect(
+      checkLezioneV2(conceptualOperationalWithCode.raw, conceptualOperationalWithCode.rel).errors,
+    ).toEqual([]);
+
     const conceptualTooFewArtefacts = buildValidV2Lesson({
       rel: 'src/content/corso/filosofia-analisi-dati/few-artefacts.mdx',
       frontmatter: { senzaCodice: true },
@@ -522,85 +552,115 @@ describe('checkLezioneV2 rule enforcement V2-R1..V2-R11', () => {
     ).toMatch(/V2-R7/);
   });
 
-  test('V2-R8 rejects orphan code blocks lacking prose before or after', () => {
-    const consecutiveCode = buildValidV2Lesson({
+  test('V2-R8 enforces proseRatio >= 0.45 without failing on non-orphan code layout', () => {
+    const lowProseRatio = buildValidV2Lesson({
+      proseParagraphsPerSection: 1,
+      wordsPerParagraph: 250,
+      extraListItems: Array.from({ length: 45 }, (_, i) => `- Voce elenco ${i + 1}`),
+    });
+    expect(checkLezioneV2(lowProseRatio.raw, lowProseRatio.rel).errors.join('\n')).toMatch(
+      /V2-R8/,
+    );
+
+    const consecutiveCodeBlocks = buildValidV2Lesson({
       codeBlocks: [
         { lang: 'sql', body: 'SELECT 1;', proseAfter: [] },
         { lang: 'python', body: 'print(1)', proseBefore: [] },
       ],
     });
-    expect(checkLezioneV2(consecutiveCode.raw, consecutiveCode.rel).errors.join('\n')).toMatch(
-      /V2-R8/,
-    );
-
-    const orphanRightAfterH2 = buildValidV2Lesson({
-      extraProseLines: [
-        '## Sezione con codice immediato',
-        '```sql',
-        'SELECT 1;',
-        '```',
-        'Prima riga esplicativa dopo la query.',
-        'Seconda riga esplicativa dopo la query.',
-      ],
-    });
-    expect(
-      checkLezioneV2(orphanRightAfterH2.raw, orphanRightAfterH2.rel).errors.join('\n'),
-    ).toMatch(/V2-R8/);
-
-    const orphanAfter = buildValidV2Lesson({
-      codeBlocks: [
-        { lang: 'sql', body: 'SELECT 1;' },
-        { lang: 'python', body: 'print(1)', proseAfter: ['Solo una riga breve.'] },
-      ],
-    });
-    expect(checkLezioneV2(orphanAfter.raw, orphanAfter.rel).errors.join('\n')).toMatch(/V2-R8/);
+    expect(checkLezioneV2(consecutiveCodeBlocks.raw, consecutiveCodeBlocks.rel).errors).toEqual([]);
   });
 
-  test('V2-R9 requires >= 2 <details> exercises in the final H2 section', () => {
-    const onlyOneDetails = buildValidV2Lesson({ detailsInLastSection: 1 });
-    expect(checkLezioneV2(onlyOneDetails.raw, onlyOneDetails.rel).errors.join('\n')).toMatch(
+  test('V2-R9 requires 3-5 numbered ? questions paired with non-empty <details><summary> blocks', () => {
+    const tooFewQuestions = buildValidV2Lesson({ detailsInLastSection: 2 });
+    expect(checkLezioneV2(tooFewQuestions.raw, tooFewQuestions.rel).errors.join('\n')).toMatch(
+      /V2-R9/,
+    );
+
+    const tooManyQuestions = buildValidV2Lesson({ detailsInLastSection: 6 });
+    expect(checkLezioneV2(tooManyQuestions.raw, tooManyQuestions.rel).errors.join('\n')).toMatch(
+      /V2-R9/,
+    );
+
+    const fiveQuestionsValid = buildValidV2Lesson({ detailsInLastSection: 5 });
+    expect(checkLezioneV2(fiveQuestionsValid.raw, fiveQuestionsValid.rel).errors).toEqual([]);
+
+    const missingQuestionMark = buildValidV2Lesson({ detailsQuestionSuffix: '.' });
+    expect(
+      checkLezioneV2(missingQuestionMark.raw, missingQuestionMark.rel).errors.join('\n'),
+    ).toMatch(/V2-R9/);
+
+    const nonNumberedQuestion = buildValidV2Lesson({
+      detailsQuestionPrefix: (d) => `Domanda ${d}:`,
+    });
+    expect(
+      checkLezioneV2(nonNumberedQuestion.raw, nonNumberedQuestion.rel).errors.join('\n'),
+    ).toMatch(/V2-R9/);
+
+    const emptySummary = buildValidV2Lesson({ detailsSummaryText: '   ' });
+    expect(checkLezioneV2(emptySummary.raw, emptySummary.rel).errors.join('\n')).toMatch(/V2-R9/);
+
+    const emptyDetailsBody = buildValidV2Lesson({ detailsBodyOverride: '   ' });
+    expect(checkLezioneV2(emptyDetailsBody.raw, emptyDetailsBody.rel).errors.join('\n')).toMatch(
       /V2-R9/,
     );
   });
 
-  test('V2-R10 enforces proseRatio >= 0.45, list cap <= 8, editorial voice, no emoji or !', () => {
-    const tooLongList = buildValidV2Lesson({
-      extraListItems: Array.from({ length: 9 }, (_, i) => `- Voce elenco numero ${i + 1}`),
-    });
-    expect(checkLezioneV2(tooLongList.raw, tooLongList.rel).errors.join('\n')).toMatch(/V2-R10/);
+  test('V2-R10 enforces opening link/disclaimer, editorial voice, forbidden phrases, and no emoji or !', () => {
+    const missingOpeningSource = buildValidV2Lesson({ includeOpeningCaseContext: false });
+    expect(
+      checkLezioneV2(missingOpeningSource.raw, missingOpeningSource.rel).errors.join('\n'),
+    ).toMatch(/V2-R10/);
 
-    const lowProseRatio = buildValidV2Lesson({
-      proseParagraphsPerSection: 1,
-      wordsPerParagraph: 250,
-      extraListItems: Array.from({ length: 45 }, (_, i) =>
-        i % 9 === 0 ? `Testo separatore ${i}.` : `- Voce elenco ${i}`,
-      ),
+    const openingExternalLinkValid = buildValidV2Lesson({
+      openingCaseLine:
+        'Il benchmark pubblico su [ClickBench](https://benchmark.clickhouse.com/) mostra costi triplicati senza partizione.',
     });
-    expect(checkLezioneV2(lowProseRatio.raw, lowProseRatio.rel).errors.join('\n')).toMatch(
-      /V2-R10/,
-    );
+    expect(
+      checkLezioneV2(openingExternalLinkValid.raw, openingExternalLinkValid.rel).errors,
+    ).toEqual([]);
 
-    const noiVoice = buildValidV2Lesson({
-      extraProseLines: ['Adesso noi analizziamo questo risultato insieme.'],
+    const voiVoice = buildValidV2Lesson({
+      extraProseLines: ['Adesso voi confrontate i due piani di esecuzione.'],
     });
-    expect(checkLezioneV2(noiVoice.raw, noiVoice.rel).errors.join('\n')).toMatch(/V2-R10/);
+    expect(checkLezioneV2(voiVoice.raw, voiVoice.rel).errors.join('\n')).toMatch(/V2-R10/);
 
-    const viVoice = buildValidV2Lesson({
+    const viMostroVoice = buildValidV2Lesson({
       extraProseLines: ['Questo schema vi mostra il flusso completo.'],
     });
-    expect(checkLezioneV2(viVoice.raw, viVoice.rel).errors.join('\n')).toMatch(/V2-R10/);
-
-    const forbiddenPhrase = buildValidV2Lesson({
-      extraProseLines: ['In questa lezione esaminiamo i costi del cluster.'],
-    });
-    expect(checkLezioneV2(forbiddenPhrase.raw, forbiddenPhrase.rel).errors.join('\n')).toMatch(
+    expect(checkLezioneV2(viMostroVoice.raw, viMostroVoice.rel).errors.join('\n')).toMatch(
       /V2-R10/,
     );
 
-    const withEmoji = buildValidV2Lesson({
+    const forbiddenPhrases = [
+      'In questa lezione esaminiamo i costi del cluster.',
+      'Nel mondo di oggi i dati crescono velocemente.',
+      'Le query diventano sempre più pesanti.',
+      'Ora approfondiamo il partizionamento.',
+      'Adesso scopriamo insieme questa metrica.',
+      'La window function non è altro che un calcolo su finestra.',
+      'Negli ultimi anni molti team hanno migrato.',
+      'Vale la pena ricordare questo vincolo.',
+      'In sintesi finale conviene misurare prima.',
+    ];
+    for (const phrase of forbiddenPhrases) {
+      const bad = buildValidV2Lesson({ extraProseLines: [phrase] });
+      expect(checkLezioneV2(bad.raw, bad.rel).errors.join('\n')).toMatch(/V2-R10/);
+    }
+
+    const withRocketEmoji = buildValidV2Lesson({
       extraProseLines: ['Controlla sempre il piano di esecuzione 🚀 prima del rilascio.'],
     });
-    expect(checkLezioneV2(withEmoji.raw, withEmoji.rel).errors.join('\n')).toMatch(/V2-R10/);
+    expect(checkLezioneV2(withRocketEmoji.raw, withRocketEmoji.rel).errors.join('\n')).toMatch(
+      /V2-R10/,
+    );
+
+    const withCheckmarkEmoji = buildValidV2Lesson({
+      extraProseLines: ['Controllo completato ✅ prima del rilascio.'],
+    });
+    expect(checkLezioneV2(withCheckmarkEmoji.raw, withCheckmarkEmoji.rel).errors.join('\n')).toMatch(
+      /V2-R10/,
+    );
 
     const withExclamation = buildValidV2Lesson({
       extraProseLines: ['Attenzione a questo errore critico!'],
@@ -610,29 +670,30 @@ describe('checkLezioneV2 rule enforcement V2-R1..V2-R11', () => {
     );
   });
 
-  test('V2-R11 rejects 3S component remnants and placeholders', () => {
-    const withImport = buildValidV2Lesson({
-      extraProseLines: ["import LezioneCard from '../../components/LezioneCard.astro';"],
-    });
-    expect(checkLezioneV2(withImport.raw, withImport.rel).errors.join('\n')).toMatch(/V2-R11/);
+  test('V2-R11 rejects legacy pipeline metadata, 3S component remnants, and placeholders', () => {
+    for (const legacyField of ['autore', 'controllatoDa', 'autorizzatoDa']) {
+      const withLegacyMeta = buildValidV2Lesson({
+        frontmatter: { [legacyField]: 'Hermes' },
+      });
+      expect(checkLezioneV2(withLegacyMeta.raw, withLegacyMeta.rel).errors.join('\n')).toMatch(
+        /V2-R11/,
+      );
+    }
 
-    const with3SComponent = buildValidV2Lesson({
-      extraProseLines: ['<LezioneCard titolo="Esempio" />'],
-    });
-    expect(checkLezioneV2(with3SComponent.raw, with3SComponent.rel).errors.join('\n')).toMatch(
-      /V2-R11/,
-    );
-
-    const withTodo = buildValidV2Lesson({
-      extraProseLines: ['Questa parte va rivista: TODO aggiungere query finale.'],
-    });
-    expect(checkLezioneV2(withTodo.raw, withTodo.rel).errors.join('\n')).toMatch(/V2-R11/);
-
-    const withPlaceholder = buildValidV2Lesson({
-      extraProseLines: ['Inserisci qui [da completare] il caso reale.'],
-    });
-    expect(checkLezioneV2(withPlaceholder.raw, withPlaceholder.rel).errors.join('\n')).toMatch(
-      /V2-R11/,
-    );
+    const legacyMarkers = [
+      "import LezioneCard from '../../components/LezioneCard.astro';",
+      '<LezioneCard titolo="Esempio" />',
+      '<Percorso step="1" />',
+      '<Slide title="Intro" />',
+      '<TabellaDati rows={[]} />',
+      '<QuizExercise question="Test" />',
+      'Struttura basata su una sessione, tre blocchi per ogni modulo.',
+      'Questa parte va rivista: TODO aggiungere query finale.',
+      'Inserisci qui [da completare] il caso reale.',
+    ];
+    for (const marker of legacyMarkers) {
+      const bad = buildValidV2Lesson({ extraProseLines: [marker] });
+      expect(checkLezioneV2(bad.raw, bad.rel).errors.join('\n')).toMatch(/V2-R11/);
+    }
   });
 });
