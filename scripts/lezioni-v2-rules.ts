@@ -624,10 +624,14 @@ export function checkLezioneV2(
         );
       }
     }
-  } else if (data.senzaCodice === true && nonMermaidBlocks.length > 0) {
-    errors.push(
-      `V2-R7: senzaCodice: true vieta blocchi di codice non-mermaid (trovati ${nonMermaidBlocks.length})`,
-    );
+  } else {
+    const enforceIndexNoCode =
+      data.senzaCodice === true || (profile === 'conceptual' && THEORETICAL_CATEGORIES.has(category));
+    if (enforceIndexNoCode && nonMermaidBlocks.length > 0) {
+      errors.push(
+        `V2-R7: ${data.senzaCodice === true ? 'senzaCodice: true' : `indice conceptual (${category})`} vieta blocchi di codice non-mermaid (trovati ${nonMermaidBlocks.length})`,
+      );
+    }
   }
 
   // V2-R8: Prose-first ratio >= 0.45

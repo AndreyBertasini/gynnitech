@@ -13,7 +13,7 @@ Ogni file `.mdx` migrato a `didattica-v2` deve rispettare questo contratto YAML:
 ---
 title: "Titolo specifico della lezione"
 description: "Descrizione concreta di cosa sa fare lo studente dopo la lezione (niente boilerplate)."
-module: "nome-modulo"
+module: "Modulo X: Titolo canonico del modulo"
 order: 1
 category: "Categoria"
 binario: "ml-tabellare" # oppure "sistemi-llm"
@@ -27,12 +27,15 @@ learningObjectives:
   - "Diagnosticare ... confrontando ..."
 dateModified: 2026-11-17
 formato: "didattica-v2"
+# headerImage: "/images/corso/..."       # preservare dal file .mdx sorgente se presente
+# headerImageAlt: "Testo alternativo..."  # preservare dal file .mdx sorgente se headerImage è presente
 # senzaCodice: true  # opzionale; vietato nelle core technical
 ---
 ```
 
 ### Vincoli bloccanti sul file (`V2-R1`, `V2-R11`, `validation.ts`)
-- **Campi obbligatori:** `formato: "didattica-v2"`, `title`, `description` specifica (vietato `"Lezione core del modulo..."` / `"Lezione narrativa del modulo..."`), `module`, `order` intero univoco nel modulo, `category`, `binario` (`ml-tabellare` o `sistemi-llm`), `draft: false`, `duration`, `difficulty`, `prerequisites` (ogni slug deve esistere in `src/content/corso`), `learningObjectives` (almeno **2** obiettivi specifici e verificabili; vietati testi generici da template), `dateModified`.
+- **Campi obbligatori:** `formato: "didattica-v2"`, `title`, `description` specifica (vietato `"Lezione core del modulo..."` / `"Lezione narrativa del modulo..."`), `module` (stringa canonica esatta `"Modulo <N>: <Titolo>"` definita in `src/data/course-program.ts`, verificata da `tests/course-catalog-governance.test.ts` e `course_catalog.py audit`), `order` intero univoco nel modulo, `category`, `binario` (`ml-tabellare` o `sistemi-llm`), `draft: false`, `duration`, `difficulty`, `prerequisites` (ogni slug deve esistere in `src/content/corso`), `learningObjectives` (almeno **2** obiettivi specifici e verificabili; vietati testi generici da template), `dateModified`.
+- **Campi da preservare in migrazione:** mantieni sempre invariati dal file `.mdx` sorgente i valori esistenti di `module` (formato canonico `"Modulo <N>: <Titolo>"`, mai lo slug della cartella), `order`, `headerImage` e `headerImageAlt` (quando presenti, `validation.ts` verifica che l'immagine esista e che `headerImageAlt` sia valorizzato); aggiorna invece `dateModified` alla data corrente.
 - **Campi legacy vietati (`V2-R11`):** rimuovere sempre `autore`, `controllatoDa`, `autorizzatoDa`.
 - **Zero `# H1` nel body:** Astro genera già `<h1>` dal frontmatter `title`. Il body inizia con prosa o direttamente con la prima sezione `## H2`.
 - **Zero residui 3S e placeholder (`V2-R11`):** niente `import ...` JSX/ESM, niente componenti legacy (`<LezioneCard>`, `<Sezione>`, `<Quiz>`, `<Esercizio>`, `<Schema>`, `<Tabella>`, `<Percorso>`, `<Obiettivi>`, `<Slide>`, `<Passo>`, `<Confronto>`, `<Lato>`, `<Criterio>`, `<Passi>`, `<Fase>`, `<Opzioni>`, `<Opzione>`, `<MiniTabella>`, `<TabellaDati>`, `<Barre>`, `<Barra>`, `<NumeriGrandi>`, `<Numero>`, `<Relazioni>`, `<Nodo>`, `<Pattern>`, `<ErroreTipico>`, `<Messaggio>`, `<Domanda>`, `QuizExercise`, `SqlExercise`), niente `"una sessione, tre blocchi"`, niente `TODO`, `TBD`, `FIXME`, `[da completare]`, `[placeholder]`.
@@ -125,7 +128,7 @@ Le soglie di parole si riferiscono **alla sola prosa** (esclusi blocchi codice e
 | **`technical`** (core) | `data-collection`, `advanced-sql`, `data-warehousing`, `analytics-engineering`, `s3-data-lake`, `kafka-streaming`, `real-time-analytics`, `infrastructure-ops`, `ai-data-workflows`, `agentic-ai-data-workflows` | **1.800 – 3.800** | **6 – 10** | `senzaCodice: true` vietato. Minimo **2 blocchi di codice non-mermaid** con linguaggio esplicito |
 | **`analytical`** (core) | `metriche-fondamenti`, `matematica-analisi-dati`, `significativita-statistica`, `analisi-prodotto`, `analisi-marketing`, `marketing-data-science` | **1.800 – 3.800** | **6 – 10** | Minimo **1 blocco `sql` / `python` / `py` / `r`** (oppure `senzaCodice: true` con tabella di calcolo `>= 4` righe dati e `>= 3` numeriche) |
 | **`conceptual`** (core) | `panoramica`, `gestione-data-driven`, `dashboard-visualizzazione`, `direzioni-analitica`, `filosofia-analisi-dati` | **1.600 – 3.200** | **6 – 10** | Minimo **2 artefatti strutturali** (tabelle `>= 3` righe, `mermaid`, o blockquote `>= 3` righe). Regole codice sotto |
-| **Indice / Cheat sheet** | Qualsiasi modulo con `order: 0` oppure slug `indice*`, `cheat-sheet*`, `glossario*` | **1.200 – 2.600** | **4 – 8** | Se `senzaCodice: true`, zero blocchi non-mermaid |
+| **Indice / Cheat sheet** | Qualsiasi modulo con `order: 0` oppure slug `indice*`, `cheat-sheet*`, `glossario*` | **1.200 – 2.600** | **4 – 8** | Se `senzaCodice: true` o modulo `conceptual` con categoria in `THEORETICAL_CATEGORIES`, zero blocchi non-mermaid |
 
 ### Dettaglio profilo `technical` (10 moduli)
 - Usa il **linguaggio reale del modulo**: `sql` / `yaml` in `analytics-engineering`, `python` / `json` in `ai-data-workflows` e `agentic-ai-data-workflows`, `bash` / `yaml` / `toml` in `infrastructure-ops` e `kafka-streaming`, ecc. Niente SQL artificiale dove il flusso è in Python o YAML.
@@ -151,6 +154,7 @@ Il comportamento sul codice dipende dalla `category` nel frontmatter (`THEORETIC
 ### Dettaglio lezioni Indice (`order: 0` o slug `indice*` / `cheat-sheet*` / `glossario*`)
 - Coprono mappa del modulo, criteri di navigazione tra le lezioni e collegamento pratico ai concetti chiave.
 - Rispettano **1.200–2.600 parole** di prosa, **4–8 sezioni `## H2`**, arco d'apertura (link o disclaimer), tesi chiave nelle prime due sezioni, almeno 1 elemento visivo (`mermaid` o tabella `>= 3` righe), almeno 1 *worked example* numerico, `proseRatio >= 0.45`, voce/divieti e chiusura con 3–5 domande numerate + `<details>`.
+- **Divieto codice non-`mermaid` (`V2-R7`):** anche per le lezioni Indice vale il divieto di blocchi di codice non-`mermaid` sia quando `senzaCodice: true` sia quando il modulo appartiene al profilo `conceptual` con una `category` in `THEORETICAL_CATEGORIES` (anche se `senzaCodice` è omesso); i diagrammi ```` ```mermaid ```` restano invece consentiti.
 
 ---
 
@@ -159,7 +163,7 @@ Il comportamento sul codice dipende dalla `category` nel frontmatter (`THEORETIC
 Prima di fare commit su una o più lezioni migrate, esegui sempre in quest'ordine:
 
 ### Checklist editoriale rapida
-1. **Frontmatter pulito:** `formato: "didattica-v2"`, `binario` valido, `draft: false`, `learningObjectives` >= 2 specifici, zero `autore`/`controllatoDa`/`autorizzatoDa`.
+1. **Frontmatter pulito:** `formato: "didattica-v2"`, `module` (stringa canonica `"Modulo <N>: <Titolo>"`), `order`, `headerImage` e `headerImageAlt` preservati dal sorgente, `binario` valido, `draft: false`, `learningObjectives` >= 2 specifici, `dateModified` aggiornata, zero `autore`/`controllatoDa`/`autorizzatoDa`.
 2. **Body senza H1 e senza residui 3S:** nessun `# Titolo` nel body, nessun componente `<Slide>`/`<Quiz>`/`<Tabella>`, nessun `TODO`/`TBD`.
 3. **Arco in 5 momenti completo:** apertura con `https://...` o disclaimer esplicito; `> **Idea chiave:** ...` o grassetto isolato nelle prime 2 sezioni; >= 1 `mermaid` o tabella `>= 3` righe; worked example con >= 3 quantità + derivazione; 2–3 errori comuni con `###`; ultima `## H2` con 3–5 domande `?` ciascuna seguita da `<details><summary>Mostra risposta</summary>...</details>`.
 4. **Profilo rispettato:** parola-count nel range del profilo, H2 nel range (nessun titolo vietato), codice/artefatti conformi a `technical` / `analytical` / `conceptual` / `index`, `proseRatio >= 0.45`.

@@ -550,6 +550,40 @@ describe('checkLezioneV2 rule enforcement V2-R1..V2-R11', () => {
     expect(
       checkLezioneV2(conceptualTooFewArtefacts.raw, conceptualTooFewArtefacts.rel).errors.join('\n'),
     ).toMatch(/V2-R7/);
+
+    const conceptualIndexTheoreticalWithCode = buildValidV2Lesson({
+      rel: 'src/content/corso/filosofia-analisi-dati/indice-modulo.mdx',
+      frontmatter: { order: 0, category: 'Fondamenti' },
+      codeBlocks: [{ lang: 'python', body: 'print(1)' }],
+    });
+    expect(
+      checkLezioneV2(
+        conceptualIndexTheoreticalWithCode.raw,
+        conceptualIndexTheoreticalWithCode.rel,
+      ).errors.join('\n'),
+    ).toMatch(/V2-R7/);
+
+    const conceptualIndexTheoreticalMermaidOnly = buildValidV2Lesson({
+      rel: 'src/content/corso/filosofia-analisi-dati/indice-modulo.mdx',
+      frontmatter: { order: 0, category: 'Fondamenti' },
+      codeBlocks: [],
+      includeMermaid: true,
+    });
+    expect(
+      checkLezioneV2(
+        conceptualIndexTheoreticalMermaidOnly.raw,
+        conceptualIndexTheoreticalMermaidOnly.rel,
+      ).errors,
+    ).toEqual([]);
+
+    const technicalIndexWithCode = buildValidV2Lesson({
+      rel: 'src/content/corso/advanced-sql/indice-modulo.mdx',
+      frontmatter: { order: 0 },
+      codeBlocks: [{ lang: 'sql', body: 'SELECT 1;' }],
+    });
+    expect(
+      checkLezioneV2(technicalIndexWithCode.raw, technicalIndexWithCode.rel).errors,
+    ).toEqual([]);
   });
 
   test('V2-R8 enforces proseRatio >= 0.45 without failing on non-orphan code layout', () => {
