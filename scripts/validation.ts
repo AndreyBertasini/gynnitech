@@ -141,12 +141,14 @@ export type PipelineRuleResult = { regola: string; esito: "PASS" | "FAIL"; nota:
  */
 export function checkLessonPipeline(body: string, frontmatterBinario: unknown, formato?: unknown): PipelineRuleResult[] {
     const articolo = formato === "articolo";
+    const isV2 = formato === "didattica-v2";
+    const normalizedBody = body.replace(/\u000d\n/g, "\n");
     const results: PipelineRuleResult[] = [];
-    const h2Titles = extractH2Titles(body);
+    const h2Titles = extractH2Titles(normalizedBody);
     const lowerTitles = h2Titles.map((t) => t.toLowerCase());
     const sections = h2Titles.map((title, i) => ({
         title,
-        text: extractH2Section(body, title),
+        text: extractH2Section(normalizedBody, title),
     }));
 
     // Regola 1 — concetto/calcolo separati (titoli liberi).
@@ -156,17 +158,32 @@ export function checkLessonPipeline(body: string, frontmatterBinario: unknown, f
         (s) => s.text.length > 0 && countSentences(s.text) <= 4 && !/\$|\\\(|\\\[|\\frac|\\log|\\sum/.test(s.text),
     );
     const stepsSection = sections.find((s) => /^\s*(1[.)]|[-*]\s+)/m.test(s.text));
+    const bodyWithoutInlineCode = normalizedBody.replace(/`[^`\n]*`/g, "x");
+    const hasV2KeyIdea =
+        /^\s*>\s*\*\*[^*\n]+\*\*/m.test(bodyWithoutInlineCode) ||
+        /^\*\*[^*\n]+\*\*\s*$/m.test(bodyWithoutInlineCode);
+    const hasV2StructuredSteps =
+        /^\s*(?:\d+[.)]|[-*+])\s+/m.test(normalizedBody) ||
+        /^\s*\|(?:\s*:?-{3,}:?\s*\|)+\s*$/m.test(normalizedBody) ||
+        /(?:^|\n)```(?!mermaid\b)[^\n]*\n(?:(?!```)[\s\S])*?(?:^\s*(?:#|--|\/\/|\/\*)|\s(?:#|--|\/\/)\s)(?:(?!```)[\s\S])*?\n```/m.test(
+            normalizedBody,
+        );
     // Formato articolo: il principio è la riga in grassetto, il passo-passo l'elenco numerato dei criteri.
-        const regola1 = articolo
-            ? /^\*\*[^*\n]+\*\*\s*$/m.test(body.replace(/`[^`\n]*`/g, "x")) && /^\s*1[.)]\s/m.test(body)
-            : Boolean(definitionSection && stepsSection && definitionSection.title !== stepsSection.title);
+    // Formato didattica-v2: idea chiave (> **...** o tesi in grassetto isolata) + passaggi strutturati (elenco, tabella o codice commentato), senza limite di <= 4 frasi.
+    const regola1 = isV2
+        ? hasV2KeyIdea && hasV2StructuredSteps
+        : articolo
+          ? /^\*\*[^*\n]+\*\*\s*$/m.test(bodyWithoutInlineCode) && /^\s*1[.)]\s/m.test(normalizedBody)
+          : Boolean(definitionSection && stepsSection && definitionSection.title !== stepsSection.title);
     if (regola1) {
         results.push({ regola: "regola_1_concetto_calcolo", esito: "PASS", nota: "" });
     } else {
         results.push({
             regola: "regola_1_concetto_calcolo",
             esito: "FAIL",
-            nota: "servono due sezioni distinte: una che definisce il concetto (senza formule) e una passo-passo",
+            nota: isV2
+                ? "servono un'idea chiave (> **...** o tesi in grassetto) e passaggi strutturati (elenco, tabella o blocco codice commentato)"
+                : "servono due sezioni distinte: una che definisce il concetto (senza formule) e una passo-passo",
         });
     }
 
@@ -484,8 +501,8 @@ async function validateCollection(collection: "blog" | "corso"): Promise<Validat
             );
         }
 
-        // Il formato articolo apre direttamente con la sezione del caso (R1): niente intro prima del primo H2.
-        if (intro.length < MIN_CORSO_INTRO_CHARACTERS && data.formato !== "articolo") {
+        // I formati articolo e didattica-v2 aprono direttamente con hook/caso narrativo: niente intro prima del primo H2.
+        if (intro.length < MIN_CORSO_INTRO_CHARACTERS && data.formato !== "articolo" && data.formato !== "didattica-v2") {
             pushEditorialIssue(
                 result,
                 file,
@@ -494,10 +511,15 @@ async function validateCollection(collection: "blog" | "corso"): Promise<Validat
             );
         }
 
-        // Il formato articolo vieta il riassunto finale: l'avviso non si applica.
+        // I formati articolo e didattica-v2 vietano titoli generici di riassunto finale: l'avviso non si applica.
         // Le lezioni della pipeline chiudono con le domande di autoverifica (regola 2) e riassumono
         // ogni passaggio con una riga "Verdetto:": quella chiusura vale come sintesi.
-        if (!hasSummarySection && data.formato !== "articolo" && !hasPipelineClosure(trimmedContent)) {
+        if (
+            !hasSummarySection &&
+            data.formato !== "articolo" &&
+            data.formato !== "didattica-v2" &&
+            !hasPipelineClosure(trimmedContent)
+        ) {
             pushEditorialIssue(
                 result,
                 file,
