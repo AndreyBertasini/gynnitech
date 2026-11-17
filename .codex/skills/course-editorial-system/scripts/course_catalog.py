@@ -44,18 +44,35 @@ THEORETICAL_CATEGORIES = {
 
 CONCEPTUAL_FOLDERS = {
     "panoramica",
-    "data-collection",
-    "metriche-fondamenti",
     "gestione-data-driven",
-    "analisi-prodotto",
-    "analisi-marketing",
     "dashboard-visualizzazione",
-    "marketing-data-science",
     "direzioni-analitica",
     "filosofia-analisi-dati",
+}
+
+ANALYTICAL_FOLDERS = {
+    "metriche-fondamenti",
+    "matematica-analisi-dati",
+    "significativita-statistica",
+    "analisi-prodotto",
+    "analisi-marketing",
+    "marketing-data-science",
+}
+
+TECHNICAL_FOLDERS = {
+    "data-collection",
+    "advanced-sql",
+    "data-warehousing",
+    "analytics-engineering",
+    "s3-data-lake",
+    "kafka-streaming",
+    "real-time-analytics",
+    "infrastructure-ops",
     "ai-data-workflows",
     "agentic-ai-data-workflows",
 }
+
+SUPPORTED_FORMATS = {"articolo", "didattica-v2"}
 
 
 def clean_scalar(value: str | None) -> str:
@@ -68,17 +85,26 @@ def clean_scalar(value: str | None) -> str:
 
 
 def split_frontmatter(text: str) -> tuple[str, str]:
-    if not text.startswith("---"):
+    lines = text.splitlines()
+    if not lines or not lines[0].startswith("---"):
         return "", text
-    parts = text.split("---", 2)
-    if len(parts) < 3:
-        return "", text
-    return parts[1], parts[2]
+    for index in range(1, len(lines)):
+        if lines[index].strip() == "---":
+            return "\n".join(lines[1:index]), "\n".join(lines[index + 1 :])
+    return "", text
 
 
 def extract_field(frontmatter: str, field: str) -> str:
     match = re.search(rf"(?m)^{re.escape(field)}:\s*(.+)$", frontmatter)
     return clean_scalar(match.group(1)) if match else ""
+
+
+def is_senza_codice(frontmatter: str) -> bool:
+    return extract_field(frontmatter, "senzaCodice").lower() == "true"
+
+
+def requires_code_cleanliness(folder: str, category: str, senza_codice: bool) -> bool:
+    return senza_codice or (folder in CONCEPTUAL_FOLDERS and category in THEORETICAL_CATEGORIES)
 
 
 def has_order(frontmatter: str) -> bool:
@@ -115,6 +141,7 @@ def audit(repo_root: Path) -> int:
     missing_metadata: list[str] = []
     long_lessons: list[str] = []
     theory_with_fences: list[str] = []
+    invalid_formats: list[str] = []
 
     for file_path in lesson_files:
         raw = file_path.read_text(encoding="utf8")
@@ -123,6 +150,8 @@ def audit(repo_root: Path) -> int:
         expected_module = CANONICAL_MODULES.get(folder, "")
         actual_module = extract_field(frontmatter, "module")
         category = extract_field(frontmatter, "category")
+        formato = extract_field(frontmatter, "formato")
+        senza_codice = is_senza_codice(frontmatter)
         duration = extract_field(frontmatter, "duration")
         difficulty = extract_field(frontmatter, "difficulty")
         if has_order(frontmatter):
@@ -134,6 +163,9 @@ def audit(repo_root: Path) -> int:
 
         if expected_module and actual_module != expected_module:
             module_mismatches.append(f"{file_path.relative_to(repo_root)} -> {actual_module or '[missing]'} != {expected_module}")
+
+        if formato and formato not in SUPPORTED_FORMATS:
+            invalid_formats.append(f"{file_path.relative_to(repo_root)} -> {formato}")
 
         if not duration or not difficulty or not prerequisites_present or not objectives_present:
             missing = []
@@ -152,7 +184,7 @@ def audit(repo_root: Path) -> int:
             long_lessons.append(f"{words} words -> {file_path.relative_to(repo_root)}")
 
         disallowed_fence_count = count_disallowed_fenced_blocks(body)
-        if folder in CONCEPTUAL_FOLDERS and category in THEORETICAL_CATEGORIES and disallowed_fence_count > 0:
+        if requires_code_cleanliness(folder, category, senza_codice) and disallowed_fence_count > 0:
             theory_with_fences.append(
                 f"{disallowed_fence_count} disallowed fenced block(s) -> {file_path.relative_to(repo_root)}"
             )
@@ -190,8 +222,13 @@ def audit(repo_root: Path) -> int:
             print(f"- {item}")
 
     if theory_with_fences:
-        print("\nTheoretical lessons with disallowed fenced blocks:")
+        print("\nTheoretical or senzaCodice lessons with disallowed fenced blocks:")
         for item in theory_with_fences:
+            print(f"- {item}")
+
+    if invalid_formats:
+        print("\nUnsupported formato values:")
+        for item in invalid_formats:
             print(f"- {item}")
 
     if overview_issues:
@@ -201,7 +238,7 @@ def audit(repo_root: Path) -> int:
 
     issue_count = sum(
         len(group)
-        for group in (module_mismatches, missing_metadata, theory_with_fences, overview_issues)
+        for group in (module_mismatches, missing_metadata, theory_with_fences, invalid_formats, overview_issues)
     )
     if issue_count == 0:
         print("\nAudit clean.")
