@@ -163,6 +163,14 @@ describe("Content Schemas", () => {
                     }
                 });
 
+                test('accetta formato "didattica-v2"', () => {
+                    const result = corsoSchema.safeParse({ title: "Lesson 1", description: "Intro", formato: "didattica-v2" });
+                    expect(result.success).toBe(true);
+                    if (result.success) {
+                        expect(result.data.formato).toBe("didattica-v2");
+                    }
+                });
+
                 test("accetta senzaCodice: true e rifiuta un valore che non è booleano", () => {
                     const base = { title: "Lesson 1", description: "Intro", formato: "articolo" };
                     const ok = corsoSchema.safeParse({ ...base, senzaCodice: true });

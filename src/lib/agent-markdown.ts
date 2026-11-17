@@ -37,7 +37,12 @@ function rewriteProse(text: string): string {
       const title = attr(attrs, 'title');
       return title ? `**${title}**\n` : '';
     })
-    .replace(/<\/?(Steps|Tabs|TabItem|CardGrid|Card)\b[^>]*>/g, '');
+    .replace(/<\/?(Steps|Tabs|TabItem|CardGrid|Card)\b[^>]*>/g, '')
+    .replace(/<summary\b[^>]*>([\s\S]*?)<\/summary>/gi, (_m, label: string) => {
+      const trimmed = label.trim();
+      return trimmed ? `**${trimmed}**\n` : '';
+    })
+    .replace(/<\/?(?:details|summary)\b[^>]*>/gi, '');
 }
 
 /** Converts an MDX body into plain Markdown an AI agent can read: no imports, no component tags, code untouched. */
