@@ -1,105 +1,82 @@
 ---
 title: "Integrazioni: connettere tool e warehouse"
 description: >-
-  Pattern di integrazione per portare dati da tool SaaS al data warehouse.
+  Scegliere tra connettori ELT, CDC, webhook e pipeline Python, fissare la fonte autorevole e la chiave di join per ogni metrica e monitorare freschezza, volumi ed errori dei connettori.
 module: "Modulo 2: Raccolta dati e sistemi di tracking"
 order: 7
 category: Tecnico
 headerImage: /course-headers/data-collection-integrations-ginnytech-ad.webp
 headerImageAlt: "Integrazioni: connettere tool e warehouse - immagine ufficiale della lezione su GinnyTech, creata da AD"
 difficulty: advanced
-duration: 22 min
+duration: "35 min"
 learningObjectives:
   - Scegliere il pattern di integrazione tra managed, reverse ETL, webhook e script
-  - Definire chiavi di join, mapping dei campi e fonte autorevole per ogni metrica
+  - Definire chiavi di join, mapping dei campi e fonte autorevole per ogni metrica e misurare il tasso di abbinamento tra CRM ed ERP
   - Monitorare volumi, ritardi ed errori dei connettori con alert e owner
 prerequisites:
   - data-collection/jtbd
 binario: "ml-tabellare"
-formato: "articolo"
-autore: "Hermes"
-controllatoDa: "Argo"
-autorizzatoDa: "Giano"
+formato: "didattica-v2"
 draft: false
-dateModified: 2026-11-13
+dateModified: 2026-11-17
 ---
 
-# Integrazioni: connettere tool e warehouse
+Un'azienda deve portare in ClickHouse la spesa di Google Ads e Meta Ads, i ticket di Zendesk, i contatti di HubSpot e le fatture dell'ERP proprietario (caso ricostruito, con numeri di esempio). Un ingegnere scrive cinque script Python schedulati con `cron` che interrogano le API REST. Due mesi dopo Meta aggiorna la versione della Graph API e lo script va in errore per dieci giorni senza che nessuno riceva un avviso. Lo script di HubSpot salta pagine durante la paginazione quando un contatto cambia a metà estrazione. Il fatturato di Stripe non quadra con quello dell'ERP, perché nessuno ha deciso quale dei due comandi.
 
-Un'azienda deve portare in ClickHouse i dati di spesa da Google Ads e Meta Ads, i ticket da Zendesk, i contatti da HubSpot e le fatture dall'ERP proprietario. Un ingegnere scrive da zero cinque script Python schedulati con `cron` che interrogano le API REST: due mesi dopo Meta Ads aggiorna la versione della Graph API (`v18 -> v19`) mandando in crash lo script per dieci giorni senza che nessuno riceva un avviso, lo script di HubSpot salta le pagine durante la paginazione quando un contatto viene modificato a metà estrazione e il fatturato di Stripe non quadra con l'ERP perché non è stata definita quale delle due fonti sia il **System of Record (Fonte Autorevole)**. La causa non è l'instabilità delle API SaaS: è scrivere a mano connettori per sorgenti standard invece di usare **piattaforme ELT gestite (Airbyte/Fivetran/dlt)**, non definire la **matrice di Fonte Autorevole e Chiavi di Join** e non monitorare la freschezza dei connettori.
+Le API non sono instabili per natura. Gli script sono scritti a mano per sorgenti standard, manca una regola su chi è la fonte autorevole e nessuno controlla la freschezza dei dati.
 
-## Uno script Python rotto da dieci giorni per un cambio di versione API di Meta
+> **Idea chiave:** un'integrazione scala solo se delega i SaaS standard a connettori gestiti, fissa una sola fonte autorevole per ogni metrica con chiavi di collegamento esplicite e rende visibile ogni ritardo di sincronizzazione.
 
-Questo è un caso ricostruito con numeri di esempio su quanto accade quando un team dati sottovaluta la manutenzione delle integrazioni con i tool SaaS esterni. L'azienda utilizza 12 strumenti SaaS per marketing, vendite, supporto clienti e amministrazione.
+## Uno script rotto da dieci giorni
 
-Costruire e mantenere script artigianali senza un'architettura di integrazione porta rapidamente a tre blocchi operativi:
-1. Le API di Google Ads, Meta, TikTok, HubSpot e Stripe deprecano endpoint, cambiano i limiti di *rate limiting* (`HTTP 429 Too Many Requests`) e modificano i campi JSON ogni trimestre: il team spende metà del proprio tempo a rincorrere paginazioni basate su cursori, token OAuth2 scaduti e finestre di attribuzione pubblicitaria retroattive (dove il costo e le conversioni degli ultimi 7 giorni su Google Ads cambiano ogni notte per l'aggiornamento dei clic invalidi).
-2. La stessa entità "Cliente" o "Ordine" arriva da tre sistemi diversi (Sito Web, CRM HubSpot, Gestionale ERP) senza una chiave ponte comune e senza aver deciso quale sistema comandi in caso di conflitto: in HubSpot un contratto risulta `'Chiuso Vinto'` per 10.000 €, ma nell'ERP la fattura emessa è di 8.500 € dopo uno sconto amministrativo.
-3. I job `cron` falliscono in silenzio o importano 0 righe per tre giorni senza che alcuna tabella di monitoraggio segnali il ritardo al responsabile.
+Nel caso ricostruito l'azienda usa dodici strumenti SaaS per marketing, vendite, assistenza e amministrazione. Costruire e mantenere script artigianali, senza un'architettura di integrazione, produce tre blocchi operativi.
 
-La causa del caos è non applicare i tre pilastri dell'integrazione dati moderna: **selezione del pattern di trasporto corretto (Managed ELT vs Webhook vs Custom `dlt`), Matrice di System of Record & Crosswalk delle chiavi, e Osservabilità delle sincronizzazioni**.
+Il primo è la manutenzione. Le API di Google Ads, Meta, TikTok, HubSpot e Stripe cambiano endpoint, limiti di frequenza (`HTTP 429 Too Many Requests`) e campi JSON ogni trimestre. Il team passa metà del tempo a rincorrere paginazioni a cursore, token OAuth2 scaduti e finestre di attribuzione retroattive.
 
-## I quattro Pattern di Integrazione, la Matrice di Fonte Autorevole e l'Idempotenza
+Il secondo è l'identità. La stessa entità, cliente oppure ordine, arriva da sito web, CRM ed ERP senza una chiave ponte e senza una regola per i conflitti. In HubSpot un contratto risulta chiuso e vinto per 10.000 €, mentre nell'ERP la fattura emessa è di 8.500 € dopo uno sconto amministrativo. Entrambi i numeri sono corretti nel proprio contesto, ma un report che li somma o li confronta senza regole sbaglia.
 
-Connettere l'ecosistema dei tool aziendali al data warehouse senza creare un debito manutentivo insostenibile richiede tre scelte architetturali precise.
+Il terzo è il silenzio. I job `cron` falliscono senza rumore o importano zero righe per tre giorni, e nessuna tabella di monitoraggio avvisa un responsabile. La lezione affronta i tre blocchi in ordine: il pattern di trasporto, la fonte autorevole con le sue chiavi, l'osservabilità.
 
-Il primo meccanismo è la **scelta tra i quattro pattern di integrazione** in base alla natura della sorgente:
-1. **Connettori ELT Standard (Airbyte, Fivetran, Meltano)**: la scelta predefinita per tutti i SaaS di mercato diffusi (Google/Meta Ads, HubSpot, Salesforce, Stripe, Zendesk, Jira). Gestiscono automaticamente OAuth, paginazione, retry `429`, evoluzione dello schema e finestre di lookback pubblicitarie.
-2. **Database CDC (Debezium / ClickPipes / PeerDB)**: per i database relazionali interni (PostgreSQL, MySQL, SQL Server), leggendo il log binario (`WAL`) senza appesantire le tabelle di produzione.
-3. **Webhook Event-Driven (Endpoint HTTP + Coda Kafka/S3)**: quando il SaaS non deve essere interrogato a polling ma spinge in tempo reale un evento a ogni cambio di stato (es. webhook di pagamento Stripe, firma contratto DocuSign, aggiornamento spedizione corriere), validando sempre la firma crittografica `HMAC` dell'header e deduplicando su `webhook_delivery_id`.
-4. **Connettori Python strutturati (`dlt` - *data load tool*)**: solo per l'ultimo 10% di API proprietarie o verticali italiane (es. gestionali ERP locali, portali fornitori) per cui non esiste un connettore sul mercato, sfruttando una libreria che gestisce comunque stato incrementale, schema evolution e retry.
+## Quattro pattern di integrazione
 
-Il secondo meccanismo è la **Matrice di Fonte Autorevole (*System of Record*) e la Tabella di Crosswalk delle Chiavi**. Per ogni dominio e metrica si stabilisce una gerarchia immutabile: ad esempio, per l'**intenzione commerciale e la pipeline** la fonte autorevole è **HubSpot (`deal_id`)**, per il **fatturato riconosciuto e l'incasso netto** la fonte autorevole è l'**ERP (`invoice_id`)**, e per il **costo pubblicitario** sono le **piattaforme Ads (`campaign_id + date`)**. Il collegamento tra mondi avviene propagando fin dall'origine la chiave esterna (salvare `erp_customer_id` dentro HubSpot e `stripe_charge_id` dentro l'ERP).
+La prima decisione è come i dati raggiungono il warehouse. Il pattern dipende dalla natura della sorgente.
 
-Il terzo meccanismo è il **monitoraggio centralizzato di Freshness, Volume ed Errori** per ogni connettore con `owner` e SLA dichiarati.
+| Pattern | Quando si usa | Cosa gestisce per te |
+|---|---|---|
+| Connettore ELT standard (Airbyte, Fivetran, Meltano) | SaaS diffusi: Ads, HubSpot, Salesforce, Stripe, Zendesk | OAuth, paginazione, ritentativi su 429, evoluzione dello schema, lookback pubblicitario |
+| Change Data Capture (Debezium, ClickPipes, PeerDB) | Database interni PostgreSQL, MySQL, SQL Server | Lettura del log di replica senza caricare le tabelle di produzione |
+| Webhook event-driven | Il SaaS spinge un evento a ogni cambio di stato | Tempo reale, ma firma e deduplicazione restano a tuo carico |
+| Pipeline Python strutturata (`dlt`) | API proprietarie o verticali senza connettore sul mercato | Stato incrementale, evoluzione dello schema e ritentativi dentro un framework |
 
-**Un'architettura di integrazione è scalabile solo se delega i SaaS standard a connettori ELT gestiti, fissa un'unica fonte autorevole per ogni metrica con chiavi di crosswalk esplicite e monitora i ritardi di sincronizzazione.**
+La regola di partenza è scegliere un connettore gestito per ogni SaaS che ne ha uno. Il costo di inseguire le modifiche alle API supera quasi sempre il canone dello strumento. Il codice custom è riservato all'ultimo tratto, tipicamente gestionali locali e portali di fornitori, e anche lì conviene un framework di caricamento invece di `requests` e cicli scritti a mano, perché stato incrementale, creazione delle tabelle e ritentativi con attesa crescente sono problemi già risolti.
 
-## Tre errori quando si integrano tool SaaS e data warehouse
+I webhook sono il pattern più insidioso. Sembrano la scelta ideale perché danno tempo reale, ma tutti i sistemi di webhook applicano una consegna *at-least-once* e ritentano fino a molte volte se il tuo server risponde lentamente. Un endpoint che inserisce il JSON senza controlli accetta anche eventi falsi, e produce duplicati a ogni rallentamento di rete.
 
-Il blocco SQL qui sotto mostra cosa succede nel data warehouse quando un connettore di advertising carica i dati in solo append senza finestra di ricalcolo retroattivo, quando si uniscono CRM ed ERP sul nome testuale dell'azienda invece che su una chiave univoca, e quando non si deduplicano i webhook:
+## Fonte autorevole e chiavi di collegamento
 
-```sql
--- ERRORE 1: unire HubSpot ed ERP sulla ragione sociale testuale (company_name) invece che su
--- partita_iva o external_account_id -> perde il 35% dei match per "S.r.l." vs "SRL"!
--- ERRORE 2: sommare sia il valore della trattativa HubSpot sia la fattura ERP senza gerarchia
--- di Fonte Autorevole!
-SELECT
-    h.company_name,
-    sum(h.deal_amount_eur) AS ricavo_secondo_crm,
-    sum(e.invoice_net_eur) AS ricavo_secondo_erp
-FROM raw_hubspot.companies AS h
-INNER JOIN raw_erp.customers AS e
-    ON h.company_name = e.ragione_sociale
-GROUP BY h.company_name;
-```
+La seconda decisione è quale sistema comanda, per ogni dominio e metrica. Una matrice di fonte autorevole (*System of Record*) elenca per ogni grandezza il sistema che prevale in caso di conflitto e la chiave che la identifica.
 
-### Fare JOIN tra strumenti diversi usando i nomi delle aziende o stringhe non normalizzate
+| Dominio | Fonte autorevole | Chiave |
+|---|---|---|
+| Pipeline commerciale e intenzione d'acquisto | HubSpot | `deal_id` |
+| Fatturato riconosciuto e incasso netto | ERP | `invoice_id` |
+| Costo pubblicitario | Piattaforme Ads | `campaign_id` e data |
 
-Tentare di collegare i clienti di HubSpot con quelli del gestionale ERP o di Zendesk facendo `ON hubspot.company_name = erp.ragione_sociale` fallisce sistematicamente nella realtà italiana: in HubSpot il commerciale scrive `"Rossi Meccanica"`, mentre nell'ERP contabile è registrata come `"ROSSI MECCANICA S.R.L. UNIPERSONALE"`. L'integrazione tra strumenti non si fa mai indovinando le stringhe a valle in SQL: si fa **imponendo una chiave di join condivisa alla fonte** (Partita IVA / Codice Fiscale normalizzato a 11 cifre per il B2B italiano, oppure passando l'`account_id` generato dal database dentro il campo `external_id` di HubSpot e Stripe al momento della creazione).
+Il collegamento tra i mondi avviene propagando la chiave esterna fin dall'origine: salvare `erp_customer_id` dentro HubSpot e `stripe_charge_id` dentro l'ERP, oppure usare la Partita IVA normalizzata per l'anagrafica B2B italiana. Indovinare il collegamento a valle con stringhe di testo fallisce nella realtà italiana. In HubSpot il commerciale scrive `"Rossi Meccanica"`, nell'ERP la stessa azienda è `"ROSSI MECCANICA S.R.L. UNIPERSONALE"`.
 
-### Estrarre i dati di Google Ads / Meta Ads solo per "ieri" senza finestra di Lookback di 7–28 giorni
+Il worked example misura quanto vale la chiave. Il CRM contiene 400 account B2B e l'ERP li ha tutti.
 
-Configurare uno script che ogni notte alle 02:00 scarica da Google Ads o Meta Ads solo le statistiche del giorno precedente (`date = yesterday()`) e non le aggiorna mai più produce costi e conversioni disallineati fino al 15% rispetto alla console pubblicitaria. Le piattaforme pubblicitarie ricalcolano continuamente i dati degli ultimi 7–28 giorni (rimborsando clic fraudolenti e attribuendo conversioni avvenute giorni dopo il clic): ogni sincronizzazione di dati Ads deve usare una **finestra mobile di lookback di almeno 7–14 giorni** sovrascrivendo in modo idempotente le partizioni ricalcolate.
+1. Un join sulla ragione sociale testuale abbina 260 account su 400: 260 / 400 = 65%.
+2. Un join sulla Partita IVA normalizzata abbina 392 account su 400: 392 / 400 = 98%.
+3. Gli account persi dal join testuale sono 400 − 260 = 140 account, pari al 35% del totale.
+4. Per un account con trattativa chiusa a 10.000 € e fattura ERP di 8.500 €, la differenza è 10.000 − 8.500 = 1.500 €, cioè il 15% del valore firmato.
 
-### Ricevere Webhook senza verificare la firma HMAC e senza deduplicazione sul delivery ID
+Il 35% mancante non produce un errore visibile: i clienti senza abbinamento semplicemente spariscono dal report di ricavo per cliente. La differenza di 1.500 € non è un errore a sua volta, è lo sconto amministrativo. Se dichiari l'ERP fonte autorevole del fatturato, il report usa 8.500 € e la differenza diventa un indicatore di chiusura commerciale da controllare, non un conflitto da risolvere a mano.
 
-Esporre un endpoint per ricevere i webhook di Stripe, Shopify o HubSpot che inserisce direttamente il JSON nel database senza controllare l'header di firma (`Stripe-Signature` / `X-HubSpot-Signature`) e senza deduplicare sull'ID dell'evento espone a due problemi certi: chiunque su internet può inviare falsi eventi di pagamento al vostro endpoint, e poiché tutti i sistemi di webhook applicano una politica *at-least-once* (ritentando l'invio fino a 20 volte se il vostro server risponde in più di 2 secondi), ogni rallentamento di rete produrrà eventi duplicati.
-
-## Tabella di Crosswalk B2B, Finestra Lookback Ads e Monitoraggio Connettori in ClickHouse
-
-Per costruire uno strato di integrazione robusto, riconciliato e monitorato in ClickHouse, applicate questi quattro criteri in ordine di priorità:
-
-1. Usate connettori ELT standard (Airbyte / Fivetran / `dlt`) con **finestra di lookback di 14 giorni** per le piattaforme Ads e cursore incrementale (`updated_at`) su `ReplacingMergeTree` per i SaaS operativi.
-2. Costruite in dbt il modello di **Crosswalk delle Identità Aziendali (`int_accounts__crosswalk`)** che unisce CRM, Stripe ed ERP tramite chiave immutabile (`account_id` o `vat_number_clean`), applicando la regola di **Fonte Autorevole** (ERP vince su Stripe che vince su CRM per il fatturato effettivo; CRM vince per lo stadio di pipeline pre-contratto).
-3. Registrate ogni esecuzione dei connettori nella tabella `monitoring.connector_sync_runs` tracciando righe lette, durata, errori e timestamp dell'ultimo record.
-4. Attivate un alert automatico con indicazione dell'`owner` quando un connettore supera la sua SLA di freschezza o registra un crollo di volume.
-
-Ecco l'implementazione SQL completa in ClickHouse della riconciliazione multi-tool con Fonte Autorevole e della query di monitoraggio SLA dei connettori:
+Il modello che applica la gerarchia unisce le due fonti sulla chiave pulita. Nel codice che segue, l'ERP vince sul ricavo riconosciuto e HubSpot vince sullo stadio della trattativa.
 
 ```sql
--- 1. Riconciliazione Multi-Tool (HubSpot CRM + Stripe + ERP) su chiave solida (vat_number_clean)
--- con applicazione rigorosa della gerarchia di FONTE AUTOREVOLE (System of Record):
+-- Riconciliazione CRM + ERP su chiave solida (partita IVA normalizzata) con gerarchia di fonte autorevole
 WITH crm_deals AS (
     SELECT
         replaceRegexpAll(upper(trim(vat_number)), '[^A-Z0-9]', '') AS vat_clean,
@@ -120,18 +97,96 @@ erp_invoices AS (
 )
 SELECT
     coalesce(e.vat_clean, c.vat_clean) AS account_vat_key,
-    -- Fonte Autorevole per lo stadio commerciale pre-fattura -> HubSpot CRM:
+    -- fonte autorevole per lo stadio commerciale prima della fattura: HubSpot
     c.crm_pipeline_stage AS authoritative_sales_stage,
     c.crm_booked_amount_eur AS crm_contracted_value_eur,
-    -- Fonte Autorevole per il Ricavo Ufficiale a Bilancio -> Gestionale ERP:
+    -- fonte autorevole per il ricavo ufficiale: ERP
     coalesce(e.erp_recognized_revenue_eur, 0.00) AS authoritative_net_revenue_eur,
-    -- Controllo automatico di disallineamento tra Vendite (CRM) e Amministrazione (ERP):
-    (coalesce(e.erp_recognized_revenue_eur, 0.00) - coalesce(c.crm_booked_amount_eur, 0.00)) AS billing_vs_crm_variance_eur
+    -- scarto tra quanto firmato dalle vendite e quanto fatturato dall'amministrazione
+    coalesce(e.erp_recognized_revenue_eur, 0.00) - coalesce(c.crm_booked_amount_eur, 0.00) AS billing_vs_crm_variance_eur
 FROM erp_invoices AS e
-FULL OUTER JOIN crm_deals AS c
-    ON e.vat_clean = c.vat_clean;
+FULL OUTER JOIN crm_deals AS c ON e.vat_clean = c.vat_clean;
+```
 
--- 2. Monitoraggio Operativo dei Connettori SaaS (Freshness SLA, Errori API e Owner):
+## Finestra di lookback e idempotenza sulle piattaforme pubblicitarie
+
+Le piattaforme pubblicitarie ricalcolano continuamente i dati degli ultimi giorni. Rimborsano clic non validi e attribuiscono conversioni avvenute giorni dopo il clic, quindi il costo di ieri che leggi oggi non coincide con quello che leggerai tra una settimana. Uno script che ogni notte scarica solo `date = yesterday()` e non aggiorna mai più quelle righe resta disallineato dalla console.
+
+Il rimedio è una finestra mobile di lookback, di almeno 7 giorni e meglio 14, che a ogni esecuzione rilegge gli ultimi giorni e li sovrascrive in modo idempotente. Un esempio numerico: il costo della data 10 ottobre letto la notte dell'11 è 1.000 €. Nei giorni successivi la piattaforma rimborsa clic fraudolenti e il valore corretto diventa 1.150 € per effetto di conversioni attribuite in ritardo e di aggiustamenti di fatturazione. Con la sola estrazione di ieri il warehouse mostra 1.000 €, cioè 150 € in meno, pari a uno scarto del 13% sul valore finale (150 / 1.150). Con un lookback di 14 giorni la riga viene riscritta nelle notti successive e converge a 1.150 €.
+
+La sovrascrittura funziona se la chiave di unicità è stabile. Qui la chiave è `campaign_id` più `date`, e il motore di caricamento usa una disposizione di tipo *merge*.
+
+```python
+# Estrazione Ads con lookback di 14 giorni e caricamento idempotente (merge su campaign_id + date)
+import dlt
+import requests
+from datetime import date, timedelta
+
+LOOKBACK_GIORNI = 14
+
+@dlt.resource(name="ads_costi_giornalieri", write_disposition="merge", primary_key=("campaign_id", "date"))
+def costi_ads(api_token: str = dlt.secrets.value):
+    inizio = date.today() - timedelta(days=LOOKBACK_GIORNI)
+    pagina = None
+    while True:
+        # paginazione a cursore: il cursore viene restituito dalla risposta precedente
+        r = requests.get(
+            "https://api.esempio-ads.test/v1/costi",
+            params={"from": inizio.isoformat(), "to": date.today().isoformat(), "cursor": pagina},
+            headers={"Authorization": f"Bearer {api_token}"},
+            timeout=30,
+        )
+        r.raise_for_status()
+        corpo = r.json()
+        yield corpo["rows"]
+        pagina = corpo.get("next_cursor")
+        if not pagina:
+            break
+
+pipeline = dlt.pipeline(pipeline_name="ads", destination="clickhouse", dataset_name="raw_ads")
+pipeline.run(costi_ads())
+```
+
+L'indirizzo dell'API è un segnaposto: il punto del codice è la struttura, finestra di rilettura, chiave di merge e cursore. Con `dlt` lo stato e la creazione delle tabelle sono gestiti dal framework, e tu scrivi solo la logica di estrazione.
+
+## Webhook con firma e deduplicazione
+
+Un endpoint per i webhook di Stripe, Shopify o HubSpot espone due rischi insieme. Chiunque su internet può inviare falsi eventi di pagamento se non verifichi la firma. E, poiché la consegna è almeno una volta, ogni rallentamento di rete produce duplicati. L'endpoint deve quindi verificare la firma crittografica dell'intestazione e deduplicare sull'identificativo dell'evento.
+
+```python
+# Ricezione webhook: verifica HMAC-SHA256 della firma, risposta rapida e deduplicazione per delivery id
+import hmac
+import hashlib
+import json
+
+def firma_valida(payload: bytes, intestazione: str, segreto: str) -> bool:
+    # formato: "t=timestamp,v1=firma_esadecimale"
+    parti = dict(p.split("=", 1) for p in intestazione.split(","))
+    firmato = f"{parti['t']}.".encode() + payload
+    atteso = hmac.new(segreto.encode(), firmato, hashlib.sha256).hexdigest()
+    return hmac.compare_digest(atteso, parti["v1"])
+
+def gestisci(richiesta, segreto, gia_visti, coda):
+    if not firma_valida(richiesta.body, richiesta.headers["Stripe-Signature"], segreto):
+        return 400
+    evento = json.loads(richiesta.body)
+    if evento["id"] in gia_visti:      # ritentativo del mittente: già elaborato
+        return 200
+    coda.put(evento)                   # elaborazione asincrona, la risposta deve essere veloce
+    gia_visti.add(evento["id"])
+    return 200
+```
+
+La risposta deve arrivare entro un paio di secondi, perché un mittente che non riceve conferma ritenta. Per questo l'endpoint accoda l'evento e lo elabora altrove. La deduplicazione conserva gli identificativi già visti per un tempo almeno pari all'orizzonte dei ritentativi del fornitore.
+
+## Monitorare freschezza, volumi ed errori
+
+Un connettore può fallire in tre modi che richiedono controlli diversi. Può restituire un errore esplicito, per esempio un token OAuth scaduto. Può essere in ritardo, cioè l'ultima sincronizzazione riuscita è più vecchia dell'accordo di servizio. Può risultare verde ma importare zero righe, perché un filtro è cambiato, e questo è il caso più subdolo.
+
+Ogni esecuzione scrive una riga in una tabella di monitoraggio, con proprietario dichiarato e SLA di freschezza. Una query segnala gli stati anomali con una priorità.
+
+```sql
+-- Stato di salute dei connettori: errore, ritardo oltre SLA, sync verde con zero righe
 CREATE TABLE monitoring.connector_sync_health
 (
     connector_name LowCardinality(String),
@@ -139,7 +194,7 @@ CREATE TABLE monitoring.connector_sync_health
     owner_team LowCardinality(String),
     sla_max_lag_minutes UInt32,
     last_sync_finished_at DateTime('UTC'),
-    last_sync_status LowCardinality(String), -- 'SUCCESS', 'FAILED_AUTH', 'RATE_LIMITED'
+    last_sync_status LowCardinality(String), -- SUCCESS, FAILED_AUTH, RATE_LIMITED
     rows_synced_last_run UInt64,
     avg_rows_7d Float64,
     error_message String
@@ -149,7 +204,6 @@ ORDER BY connector_name;
 
 SELECT
     connector_name,
-    source_system,
     owner_team,
     last_sync_status,
     dateDiff('minute', last_sync_finished_at, now()) AS current_lag_minutes,
@@ -158,8 +212,8 @@ SELECT
     round(avg_rows_7d, 0) AS baseline_rows_7d,
     multiIf(
         last_sync_status != 'SUCCESS', concat('P1 [', owner_team, '] Connettore fallito: ', error_message),
-        current_lag_minutes > sla_max_lag_minutes, concat('P1 [', owner_team, '] Ritardo SLA superato (', toString(current_lag_minutes), 'm > ', toString(sla_max_lag_minutes), 'm)'),
-        rows_synced_last_run = 0 AND avg_rows_7d > 100, concat('P2 [', owner_team, '] Sync verde ma 0 righe importate vs media 7gg'),
+        current_lag_minutes > sla_max_lag_minutes, concat('P1 [', owner_team, '] Ritardo SLA superato (', toString(current_lag_minutes), 'm su ', toString(sla_max_lag_minutes), 'm)'),
+        rows_synced_last_run = 0 AND avg_rows_7d > 100, concat('P2 [', owner_team, '] Sync verde ma zero righe rispetto alla media a 7 giorni'),
         'HEALTHY'
     ) AS connector_alert
 FROM monitoring.connector_sync_health FINAL
@@ -167,26 +221,58 @@ WHERE connector_alert != 'HEALTHY'
 ORDER BY current_lag_minutes DESC;
 ```
 
-Il risultato porta chiarezza e controllo su tutte le integrazioni esterne: unendo HubSpot ed ERP sulla Partita IVA normalizzata (`vat_clean`) e dichiarando l'ERP come unica fonte autorevole per `authoritative_net_revenue_eur`, i report finanziari non sommano mai contratti non ancora fatturati e segnalano automaticamente alla contabilità qualsiasi scarto (`billing_vs_crm_variance_eur`) tra quanto firmato dal commerciale e quanto fatturato; contemporaneamente, se il token OAuth di Meta Ads scade o il connettore supera la sua SLA di freschezza, la query su `connector_sync_health` avvisa entro pochi minuti il team proprietario con l'errore esatto.
+Le due metriche che riassumono lo stato dello strato di integrazione sono la percentuale di sorgenti aggiornate entro la finestra promessa al business, con obiettivo sopra il 99,5%, e il tasso di abbinamento delle chiavi tra sistemi, sopra il 98% dei clienti del CRM abbinati con certezza all'ERP. Nel caso dei 400 account, il 98% corrisponde ai 392 abbinati, e gli 8 rimanenti sono una lista di lavoro per chi cura l'anagrafica.
 
-## Connettore ELT Managed (Airbyte / Fivetran) o Pipeline Python Custom (dlt)
+## Errori ricorrenti nell'integrazione
 
-Di fronte a una nuova sorgente dati da portare nel data warehouse, il bivio decisionale classico è **Comprare/Usare un connettore ELT standard (Fivetran, Airbyte Cloud/Self-Hosted)** oppure **Scrivere un connettore Python interno (con `dlt` o codice custom)**.
+### Fare join tra sistemi usando nomi o stringhe non normalizzate
 
-Il criterio di scelta è netto: **usate un connettore ELT gestito o open-source standard (Airbyte / Fivetran) per il 90% delle sorgenti SaaS commerciali (Google Ads, Meta, HubSpot, Salesforce, Stripe, Shopify, Zendesk) perché il costo di mantenere internamente le modifiche alle loro API supera sempre il costo dello strumento, sviluppate invece un connettore Python basato sul framework `dlt` (*data load tool*) esclusivamente per i gestionali proprietari, le API B2B verticali prive di connettore ufficiale o i flussi ad altissimo volume dove una trasformazione di pre-filtraggio in streaming abbatte del 90% i costi di ingestione.**
+Il sintomo è un report di ricavo per cliente che perde un terzo degli account, senza un errore. Sembra ragionevole perché il nome azienda è il campo che tutti conoscono. Succede perché le forme `S.r.l.`, `SRL` e maiuscole e minuscole differiscono tra i sistemi. La correzione è imporre una chiave condivisa alla fonte, Partita IVA normalizzata o identificativo interno scritto nel campo esterno di ogni strumento, e misurare il tasso di abbinamento.
 
-La confusione comune consiste nello scrivere da zero in Python con la libreria `requests` anche quell'ultimo 10% di connettori custom senza usare un framework di caricamento strutturato come `dlt`: finendo per dover riscrivere a mano la gestione dello stato incrementale, la creazione automatica delle tabelle in ClickHouse, l'evoluzione delle colonne JSON e i retry con backoff esponenziale. Anche quando il connettore è custom, il trasporto e lo schema management vanno delegati a una libreria collaudata.
+### Estrarre i costi pubblicitari solo per ieri
 
-Questo articolo completa i mattoni architetturali della raccolta e integrazione dati; nell'ultima lezione del modulo metteremo le mani sul codice con il **Quickstart pratico end-to-end in 30 minuti**.
+Il sintomo è un costo nel warehouse che resta sotto o sopra la console fino al 15%. Sembra ragionevole perché i dati di ieri sembrano definitivi. Succede perché le piattaforme riscrivono gli ultimi 7-28 giorni. La correzione è una finestra mobile di lookback di 7-14 giorni con sovrascrittura idempotente su una chiave stabile.
 
-## Cinque domande prima di attivare una nuova integrazione verso il warehouse
+### Accettare webhook senza firma né deduplicazione
 
-1. Avete verificato se esiste già un connettore standard (Airbyte / Fivetran / ClickPipes) prima di autorizzare la scrittura di codice custom di estrazione API?
-2. È documentato nella matrice aziendale quale sia la **Fonte Autorevole (*System of Record*)** per ciascuna metrica (es. ERP per il fatturato, CRM per la pipeline, Ads per la spesa) evitando che due tool diversi vengano usati in modo intercambiabile?
-3. Esiste una **chiave di join deterministica e immutabile** (`external_id`, `account_id`, Partita IVA pulita) propagata tra i tool, evitando qualsiasi join basato su nomi testuali di aziende o persone?
-4. I connettori verso le piattaforme pubblicitarie applicano una **finestra mobile di lookback (7–14 giorni)** con sovrascrittura idempotente per recepire i ricalcoli retroattivi di costi e conversioni?
-5. Ogni connettore scrive i propri log di esecuzione in una tabella monitorata con **SLA di freschezza, controllo di volume rispetto alla media a 7 giorni e `owner` nominativo**?
+Il sintomo è un ordine contato due volte, oppure un evento di pagamento che nessun sistema ha mai generato. Succede perché l'endpoint si fida di qualsiasi richiesta e perché la consegna avviene almeno una volta. La correzione è la verifica della firma HMAC, la risposta rapida con elaborazione asincrona e la deduplicazione sull'identificativo dell'evento.
 
-La metrica regina per valutare l'affidabilità dello strato di integrazione è il **Connector SLA Compliance Rate** (la percentuale di sorgenti dati aggiornate entro la finestra oraria promessa al business, obiettivo **$> 99,5\%$**) unita al **Cross-System Key Match Rate** ($> 98\%$ dei clienti CRM abbinati con certezza matematica all'ERP tramite chiave univoca).
+## Verifica sulle integrazioni
 
-Di tutta la lezione sulle integrazioni, ricordate una sola regola: non scrivete a mano un estrattore per Google Ads o HubSpot, e decidete sempre in anticipo la fonte autorevole e la chiave di `JOIN`.
+Prima di attivare una nuova integrazione, il controllo finale è procedurale: esiste già un connettore standard, è chiara la fonte autorevole di ogni metrica, la chiave di join è deterministica e ogni connettore ha SLA e proprietario.
+
+1. Il CRM ha 500 account e un join sul nome ne abbina 310. Quanti ne perdi e come lo correggi?
+
+<details>
+<summary>Mostra risposta</summary>
+
+Ne perdi 500 − 310 = 190, cioè il 38%, e il tasso di abbinamento è 310 / 500 = 62%. Si corregge introducendo una chiave deterministica, come la Partita IVA normalizzata, e controllando che il tasso superi il 98%, cioè almeno 490 account su 500.
+
+</details>
+
+2. Il costo di una data letto la prima notte è 2.000 € e il valore definitivo sarà 2.300 €. Quale scarto produce l'estrazione solo di ieri e quale finestra lo evita?
+
+<details>
+<summary>Mostra risposta</summary>
+
+Lo scarto è 2.300 − 2.000 = 300 €, pari a 300 / 2.300 = 13% del valore finale. Una finestra mobile di lookback di 14 giorni, con sovrascrittura su `campaign_id` e data, riscrive la riga nelle notti successive e la fa convergere a 2.300 €.
+
+</details>
+
+3. Un connettore risulta con stato SUCCESS ma ha importato 0 righe contro una media di 4.000 negli ultimi 7 giorni. Quale avviso scatta e perché è il guasto più difficile da vedere?
+
+<details>
+<summary>Mostra risposta</summary>
+
+Scatta l'avviso P2 di sync verde con zero righe, perché la media a 7 giorni supera 100. È il più difficile da vedere perché non c'è nessun errore da registrare: il job termina regolarmente, e senza il confronto con la media nessun controllo di stato lo segnala.
+
+</details>
+
+4. In HubSpot un contratto vale 10.000 € e l'ERP ha una fattura di 8.500 €. Quale cifra usi per il ricavo riconosciuto e che cosa fai della differenza?
+
+<details>
+<summary>Mostra risposta</summary>
+
+Usi 8.500 €, perché l'ERP è la fonte autorevole del fatturato. La differenza di 1.500 €, pari al 15% del valore firmato, resta visibile come indicatore di scarto tra vendite e amministrazione, da verificare quando supera una soglia concordata, e non viene sommata al ricavo.
+
+</details>
