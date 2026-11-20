@@ -1,149 +1,224 @@
 ---
 title: "OLAP: cubi, ROLLUP, CUBE e GROUPING SETS"
-description: >-
-  Cubi OLAP, window functions e pattern analitici avanzati per data warehouse.
+description: "Costruire report multidimensionali in una sola scansione con ROLLUP, CUBE e GROUPING SETS in ClickHouse, distinguere i subtotali dai NULL con grouping() e ricalcolare margini e clienti unici a ogni livello."
 module: "Modulo 9: Data warehouse e modellazione analitica"
 order: 5
 category: Tecnico
 headerImage: /course-headers/data-warehousing-olap-ginnytech-ad.webp
 headerImageAlt: "OLAP: cubi, ROLLUP, CUBE e GROUPING SETS - immagine ufficiale della lezione su GinnyTech, creata da AD"
-difficulty: advanced
-duration: 22 min
+difficulty: avanzato
+duration: "40 min"
 learningObjectives:
-  - Classificare le misure in additive, semi-additive e non additive per roll-up corretti
-  - Usare ROLLUP, CUBE e GROUPING SETS per totali e subtotali senza unioni manuali
-  - Coprire ranking, cumulati e confronti anno su anno con window function e finestre dichiarate
+  - Classificare una misura come additiva, semi-additiva o non additiva e scegliere come ricalcolarla sui subtotali di un cubo
+  - Scrivere in ClickHouse una query con ROLLUP o GROUPING SETS che produce dettaglio, subtotali e totale in una sola scansione, etichettando le righe di riepilogo con grouping()
+  - Calcolare quote sul totale padre, ranking e cumulati con window function sopra un risultato aggregato
 prerequisites:
   - data-warehousing/schema-evolution
 binario: "ml-tabellare"
-formato: "articolo"
-autore: "Hermes"
-controllatoDa: "Argo"
-autorizzatoDa: "Giano"
+formato: "didattica-v2"
 draft: false
-dateModified: 2026-11-13
+dateModified: 2026-11-17
 ---
 
-# OLAP: cubi, ROLLUP, CUBE e GROUPING SETS
+Scenario costruito con numeri di esempio: una catena retail con 120 punti vendita, quattro regioni e otto categorie merceologiche prepara ogni mese il prospetto per il comitato direttivo. L'analista incolla quattro `SELECT ... GROUP BY` con `UNION ALL`: la prima per regione e categoria, la seconda per sola regione, la terza per sola categoria, la quarta per il totale. La tabella dei fatti ha 200 milioni di righe, quindi ogni esecuzione la legge quattro volte. Il prospetto riporta poi un margine aziendale del 28% fatto con la media dei margini dei singoli negozi, mentre il bilancio dice 22%. Nessun dato in ingresso era sporco: erano sbagliati l'operatore e il modo di combinare le misure.
 
-Un'azienda retail costruisce il report mensile della direzione unendo con `UNION ALL` quattro query separate per avere il dettaglio per regione e categoria, il subtotale per regione, il subtotale per categoria e il totale generale. Oltre a leggere quattro volte la stessa tabella da duecento milioni di righe, il report fa la media delle percentuali di margine dei singoli negozi e presenta un margine aziendale del 34% quando quello reale in bilancio è del 21%. La causa non è un dato sporco in ingresso: è non usare gli operatori OLAP nativi (`GROUPING SETS`, `ROLLUP`, `CUBE`) e aggregare misure non additive come se fossero somme semplici.
+> **Idea chiave:** un cubo OLAP è corretto quando ogni livello di aggregazione nasce da una sola lettura dei dati e ogni rapporto viene ricalcolato come somma del numeratore diviso somma del denominatore, mai come media di rapporti.
 
-## Quattro scansioni inutili e tredici punti di margine inventati
+## Perché quattro query incollate non sono un cubo
 
-Questo è un caso ricostruito con numeri di esempio su quanto accade quando i report multidimensionali vengono assemblati a mano invece di sfruttare il motore OLAP del data warehouse. La catena gestisce 120 punti vendita divisi in quattro regioni e otto categorie merceologiche, più un canale di liquidazione all'ingrosso che muove volumi altissimi con margini ridotti al 4%.
+Un report multidimensionale chiede lo stesso numero a granularità diverse: dettaglio per regione e categoria, subtotale di regione, subtotale di categoria, totale generale. Con `UNION ALL` ogni livello è una query indipendente. Su un motore colonnare il costo si somma: se una scansione completa delle colonne necessarie richiede 12 secondi, quattro scansioni richiedono 4 × 12 = 48 secondi, mentre un'aggregazione multilivello in un solo passaggio ne richiede circa 14, perché legge i dati una volta e aggiorna più tabelle di aggregazione in memoria. Il filtro `WHERE` va inoltre copiato in quattro punti, e basta dimenticarne uno per avere subtotali calcolati su un periodo diverso dal dettaglio.
 
-L'analista incaricato di preparare la tabella riassuntiva per il comitato direttivo scrive quattro blocchi `SELECT ... GROUP BY` incollati con `UNION ALL`: il primo raggruppa per `(regione, categoria)`, il secondo per `(regione, NULL)`, il terzo per `(NULL, categoria)` e il quarto per `(NULL, NULL)`. Ogni esecuzione scansiona quattro volte l'intera tabella dei fatti, quadruplicando il tempo di calcolo. Peggio ancora, per riempire la riga del totale generale nella vista superiore, il cruscotto applica `AVG(margine_percentuale)` sulle righe già aggregate: dieci piccoli negozi di provincia con ricavo di 10.000 euro e margine del 40% pesano quanto l'intero canale ingrosso da 2 milioni di euro al 4%, gonfiando il margine medio dal 21% reale al 34% apparente. Inoltre, quando una riga della tabella originale contiene un valore `NULL` vero nella colonna `categoria`, il report la confonde con la riga del subtotale generata dal `UNION ALL`.
+Esiste poi un problema di significato. Nel blocco dei subtotali le colonne collassate vengono riempite con `NULL` o con una stringa fissa come `'TOTALE'`. Se nei dati reali esiste un prodotto senza categoria, la sua riga di dettaglio ha già `categoria IS NULL` e il report non sa più distinguerla dalla riga di riepilogo.
 
-La causa di questi errori è ignorare l'algebra degli operatori di raggruppamento multidimensionale e la distinzione tra misure che si possono sommare lungo una gerarchia e misure che vanno ricalcolate sui totali.
+SQL ha risolto questi due problemi con operatori di raggruppamento multidimensionale, introdotti nello standard SQL:1999 e ispirati al lavoro sul cubo di dati di Gray e colleghi ([Gray et al., 1997](https://doi.org/10.1023/A:1009726021843)). ClickHouse li supporta tutti e tre, con una particolarità sui valori mancanti che vediamo più sotto.
 
-## GROUPING SETS, ROLLUP, CUBE e la funzione GROUPING()
+## Il reticolo dei raggruppamenti: GROUPING SETS, ROLLUP e CUBE
 
-I motori analitici SQL eseguono raggruppamenti su più livelli gerarchici in una sola lettura dei dati grazie a tre meccanismi formali introdotti nello standard SQL:1999 e ottimizzati nei motori colonnari moderni ([Gray et al., 1997](https://doi.org/10.1023/A:1009726021843)).
+Un raggruppamento su due dimensioni, regione e categoria, può avere quattro forme: entrambe le colonne, solo la regione, solo la categoria, nessuna. Queste combinazioni formano un reticolo, e ciascun operatore sceglie quali nodi calcolare.
 
-Il primo meccanismo è `GROUPING SETS`, che generalizza la clausola `GROUP BY` permettendo di dichiarare in una sola istruzione l'elenco esatto delle combinazioni di dimensioni da calcolare: scrivere `GROUP BY GROUPING SETS ((regione, categoria), (regione), ())` istruisce il motore a leggere la tabella dei fatti una volta sola e a popolare in memoria i tre livelli di aggregazione richiesti. `ROLLUP(a, b, c)` e `CUBE(a, b, c)` sono abbreviazioni matematiche costruite sopra `GROUPING SETS`: `ROLLUP` genera i $N+1$ livelli di una gerarchia ordinata dall'alto verso il basso — `(a, b, c)`, `(a, b)`, `(a)` e `()` — ideale per `anno -> trimestre -> mese` o `paese -> regione -> città`; `CUBE` genera tutte le $2^N$ combinazioni possibili tra le dimensioni, incrociando ogni asse con tutti gli altri.
-
-Il secondo meccanismo è la funzione di metadato `GROUPING(colonna)`. Poiché le righe di subtotale e di totale generale mettono `NULL` nelle colonne raggruppate, serve un modo rigoroso per distinguere un `NULL` prodotto dal roll-up da un `NULL` realmente presente nei dati sorgente: `GROUPING(colonna)` restituisce `1` quando la colonna è stata collassata per formare il subtotale e `0` quando il valore (anche se `NULL`) appartiene al dato di dettaglio.
-
-Il terzo meccanismo è l'accoppiamento con la regola di additività e le window function (`SUM() OVER`, `LAG() OVER`, `RANK() OVER`). In ogni livello del cubo si sommano separatamente il numeratore (`sum(margine_eur)`) e il denominatore (`sum(ricavo_eur)`), calcolando i rapporti non additivi solo dopo il raggruppamento, mentre le window function calcolano quote percentuali sul totale padre e variazioni temporali senza alterare le righe restituite.
-
-**Un cubo OLAP è esatto ed efficiente solo se genera tutti i subtotali in un'unica scansione con `GROUPING SETS` o `ROLLUP`, distingue i totali dai dati mancanti con `GROUPING()` e ricalcola ogni percentuale come rapporto tra somme a ciascun livello.**
-
-## Tre errori nelle query multidimensionali e nei subtotali
-
-Il blocco SQL qui sotto mostra l'antipattern con `UNION ALL` manuali, media delle percentuali e confusione sui valori nulli:
-
-```sql
--- ERRORE: doppia scansione con UNION ALL, uso di stringhe fisse che si confondono coi NULL
--- e calcolo del margine tramite AVG() di una percentuale non additiva.
-SELECT
-    coalesce(regione, 'TOTALE') AS regione_label,
-    coalesce(categoria, 'SUBTOTALE') AS categoria_label,
-    sum(ricavo_netto_eur) AS ricavo_eur,
-    avg(margine_pct_riga) AS margine_medio_sbagliato_pct
-FROM fct_vendite_negozi
-GROUP BY regione, categoria
-
-UNION ALL
-
-SELECT
-    coalesce(regione, 'TOTALE') AS regione_label,
-    'SUBTOTALE' AS categoria_label,
-    sum(ricavo_netto_eur) AS ricavo_eur,
-    avg(margine_pct_riga) AS margine_medio_sbagliato_pct
-FROM fct_vendite_negozi
-GROUP BY regione;
+```mermaid
+flowchart TD
+    A["(regione, categoria)"] --> B["(regione)"]
+    A --> C["(categoria)"]
+    B --> D["() totale generale"]
+    C --> D
+    subgraph ROLLUP
+        A
+        B
+        D
+    end
 ```
 
-### Costruire i subtotali incollando più query con UNION ALL
+`GROUPING SETS` è la forma generale: elenchi tu le combinazioni esatte, per esempio `GROUP BY GROUPING SETS ((regione, categoria), (regione), ())`. `ROLLUP(a, b, c)` è una scorciatoia per una gerarchia ordinata e genera $N+1$ livelli: `(a, b, c)`, `(a, b)`, `(a)` e `()`. Si usa per percorsi come anno, trimestre, mese oppure paese, regione, città. `CUBE(a, b, c)` genera tutte le $2^N$ combinazioni e serve quando ogni dimensione va incrociata con tutte le altre.
 
-Scrivere tre o quattro `SELECT` separate unite da `UNION ALL` sembra intuitivo a chi conosce solo il `GROUP BY` elementare. Su un data warehouse con centinaia di milioni di righe è uno spreco diretto di I/O e CPU: a meno che l'ottimizzatore non riesca a fondere i rami da solo, il motore legge e decomprime le stesse colonne più volte di seguito, e qualsiasi modifica a un filtro `WHERE` deve essere copiata a mano in tutti i blocchi col rischio di dimenticarne uno.
+| Operatore | Livelli generati con 2 dimensioni | Livelli con 3 dimensioni | Uso tipico |
+|---|---|---|---|
+| `GROUPING SETS` | quelli elencati | quelli elencati | pochi tagli scelti dal business |
+| `ROLLUP(a, b)` | 3 | 4 | gerarchie ordinate (tempo, geografia) |
+| `CUBE(a, b)` | 4 | 8 | esplorazione libera su poche dimensioni |
 
-### Fare la media di percentuali o conteggi distinti lungo i livelli del cubo
+Un piccolo esempio numerico rende il conteggio concreto. Prendi due regioni e due categorie con questi ricavi in migliaia di euro: Nord-Food 400, Nord-Home 200, Sud-Food 250, Sud-Home 150. Con `ROLLUP(regione, categoria)` il risultato ha 4 righe di dettaglio, 2 subtotali di regione (Nord = 400 + 200 = 600 e Sud = 250 + 150 = 400) e 1 totale (600 + 400 = 1.000), cioè 7 righe. Con `CUBE(regione, categoria)` si aggiungono i 2 subtotali di categoria (Food = 400 + 250 = 650 e Home = 200 + 150 = 350) e si arriva a 9 righe. Il totale tornato da entrambe le vie è lo stesso, 650 + 350 = 1.000, ed è il primo controllo di quadratura da fare.
 
-Calcolare `avg(margine_pct_riga)` per ottenere il margine di regione o sommare i `countDistinct(customer_id)` dei singoli mesi per ottenere i clienti unici dell'anno sembra matematicamente plausibile a prima vista. In realtà viola la non-additività: la media semplice di due percentuali assegna lo stesso peso a un ordine da 5 euro e a una commessa da 500.000 euro, mentre sommare i clienti unici di gennaio e febbraio conta due volte ogni cliente che ha acquistato in entrambi i mesi.
+## grouping() e il problema dei NULL
 
-### Usare COALESCE sulla colonna raggruppata invece della funzione GROUPING()
+Le righe di subtotale hanno le colonne collassate vuote. Per sapere se un vuoto significa "tutte le regioni" oppure "regione non assegnata" serve un metadato, ed è il compito della funzione `grouping(colonna)`: restituisce 1 quando la colonna è stata collassata dal raggruppamento e 0 quando il valore, anche se `NULL`, appartiene a una riga di dettaglio. Sommando `grouping(regione) + grouping(categoria)` ottieni un indice di livello, 0 per il dettaglio, 1 per i subtotali di `ROLLUP`, 2 per il totale.
 
-Scrivere `coalesce(categoria, 'SUBTOTALE')` per etichettare le righe di riepilogo prodotte da `ROLLUP` o `UNION ALL` sembra una scorciatoia elegante. Fallisce silenziosamente non appena nei dati reali entra un prodotto privo di categoria (`categoria IS NULL`): la riga dei prodotti senza categoria viene etichettata anch'essa come `'SUBTOTALE'`, producendo nel report due righe con lo stesso nome `'SUBTOTALE'` e numeri diversi.
+In ClickHouse c'è una regola da conoscere. Per impostazione predefinita le colonne collassate non diventano `NULL` ma assumono il valore di default del tipo, cioè stringa vuota per `String` e zero per i numeri. Con `SETTINGS group_by_use_nulls = 1` il motore restituisce `NULL`, come fanno altri database. In entrambi i casi `grouping()` resta l'unico modo affidabile per riconoscere un subtotale: confrontare con `''` o con `NULL` è fragile, perché un dato reale può avere lo stesso valore.
 
-## Roll-up gerarchico in una sola scansione con GROUPING() e rapporti pesati
+Nelle query dei report conviene dunque etichettare le righe con un `CASE` su `grouping()` e trattare il `NULL` genuino con un'etichetta separata, per esempio `'CATEGORIA MANCANTE'`. Il lettore del report vede due righe diverse con nomi diversi, e il test di quadratura tra livelli continua a funzionare.
 
-Per costruire report multidimensionali e confronti temporali rapidi ed esatti, applicate questi quattro criteri in ordine di priorità:
+## Misure additive, semi-additive e non additive
 
-1. Sostituite ogni catena di `UNION ALL` di subtotali con `GROUP BY ROLLUP(...)` per le gerarchie lineari o `GROUP BY GROUPING SETS(...)` quando vi servono solo combinazioni specifiche senza l'esplosione combinatoria di `CUBE`.
-2. Usate sempre la funzione `GROUPING(colonna) = 1` dentro un `CASE WHEN` per etichettare i subtotali e distinguere le righe aggregate dai valori `NULL` presenti nei dati di origine.
-3. Calcolate tutte le misure non additive (margine percentuale, scontrino medio, tasso di conversione) dividendo la somma del numeratore per la somma del denominatore a ciascun livello del raggruppamento, e lasciate che sia `ROLLUP` a ricalcolare `countDistinct(customer_id)` sull'insieme esatto di ogni livello.
-4. Per aggiungere quote sul totale o confronti con il periodo precedente (`YoY`, `MoM`), applicate window function con `PARTITION BY` e `ORDER BY` espliciti sopra il risultato aggregato.
+Un cubo somma lungo le dimensioni, ma non tutte le misure possono essere sommate lungo ogni dimensione. Prima di costruire il cubo classifica ciascuna misura.
 
-Ecco la query corretta in ClickHouse che calcola dettaglio, subtotale regionale, totale generale e quota percentuale in un'unica passata:
+| Misura | Tipo | Regola sul subtotale |
+|---|---|---|
+| ricavo netto (euro) | additiva | `sum(ricavo)` su ogni dimensione |
+| giacenza di magazzino (pezzi) | semi-additiva | somma tra negozi, ma non nel tempo: usa l'ultimo valore o la media |
+| margine percentuale | non additiva | `sum(margine) / sum(ricavo)` a ogni livello |
+| clienti unici | non additiva | `uniqExact(customer_id)` calcolato sull'insieme di ogni livello |
+
+Il calcolo seguente mostra perché la media dei rapporti fallisce. La regione Nord ha tre negozi: A con ricavo 600.000 euro e margine 15%, B con 300.000 euro e margine 30%, C con 100.000 euro e margine 40%. I margini assoluti sono 600.000 × 0,15 = 90.000 euro, 300.000 × 0,30 = 90.000 euro e 100.000 × 0,40 = 40.000 euro. Il ricavo totale è 600.000 + 300.000 + 100.000 = 1.000.000 euro e il margine totale 90.000 + 90.000 + 40.000 = 220.000 euro, quindi il margine corretto è 220.000 / 1.000.000 = 22%. La media semplice dei tre rapporti dà (15 + 30 + 40) / 3 = 28,33%, cioè 6,33 punti percentuali di troppo. Il negozio C pesa un terzo del risultato pur generando un decimo del ricavo.
+
+Lo stesso accade con i conteggi distinti. Se a gennaio comprano 1.000 clienti, a febbraio 900 e 300 comprano in entrambi i mesi, i clienti unici del bimestre sono 1.000 + 900 − 300 = 1.600. La somma dei due mesi dà 1.900 e conta 300 persone due volte, con un errore del 18,75% (300 / 1.600). Per le giacenze il problema è diverso: 500 pezzi a fine gennaio e 520 a fine febbraio non fanno 1.020 pezzi a fine bimestre, ma 520, perché la giacenza è un livello e non un flusso.
+
+## La query corretta in ClickHouse
+
+La query seguente produce dettaglio, subtotale di regione e totale generale in un'unica lettura di `fct_vendite_negozi`, etichetta le righe con `grouping()` e ricalcola margine e clienti unici a ogni livello.
 
 ```sql
+-- Un solo passaggio sulla tabella dei fatti: dettaglio, subtotali di regione e totale.
 SELECT
     CASE
-        WHEN GROUPING(regione) = 1 THEN 'TOTALE AZIENDA'
+        WHEN grouping(regione) = 1 THEN 'TOTALE AZIENDA'
         ELSE coalesce(regione, 'REGIONE NON ASSEGNATA')
     END AS regione_report,
     CASE
-        WHEN GROUPING(categoria) = 1 THEN 'SUBTOTALE REGIONE'
+        WHEN grouping(categoria) = 1 THEN 'SUBTOTALE REGIONE'
         ELSE coalesce(categoria, 'CATEGORIA MANCANTE')
     END AS categoria_report,
-    GROUPING(regione) + GROUPING(categoria) AS livello_gerarchia,
-    sum(ricavo_netto_eur) AS ricavo_totale_eur,
-    sum(margine_netto_eur) AS margine_totale_eur,
-    -- Misura non additiva ricalcolata correttamente ad ogni livello del ROLLUP:
-    round(sum(margine_netto_eur) * 100.0 / nullIf(sum(ricavo_netto_eur), 0), 2) AS margine_reale_pct,
-    -- Misura non additiva di cardinalità valutata esattamente per ciascun insieme:
-    uniqExact(customer_id) AS clienti_unici_reali
+    grouping(regione) + grouping(categoria) AS livello,
+    sum(ricavo_netto_eur) AS ricavo_eur,
+    sum(margine_netto_eur) AS margine_eur,
+    -- Rapporto ricalcolato a ogni livello: somma del numeratore su somma del denominatore.
+    round(sum(margine_netto_eur) * 100.0 / nullIf(sum(ricavo_netto_eur), 0), 2) AS margine_pct,
+    -- Cardinalità esatta sull'insieme di ciascun livello, non somma dei livelli sotto.
+    uniqExact(customer_id) AS clienti_unici
 FROM fct_vendite_negozi
 WHERE data_vendita >= '2026-01-01'
+  AND data_vendita < '2027-01-01'
 GROUP BY ROLLUP(regione, categoria)
-ORDER BY
-    GROUPING(regione) ASC,
-    regione_report ASC,
-    GROUPING(categoria) ASC,
-    ricavo_totale_eur DESC;
+ORDER BY grouping(regione), regione_report, grouping(categoria), ricavo_eur DESC
+SETTINGS group_by_use_nulls = 1;
 ```
 
-Il risultato corregge in un colpo solo sia le prestazioni sia la contabilità: la tabella da duecento milioni di righe viene letta una sola volta, i prodotti con `categoria IS NULL` appaiono chiaramente sotto `'CATEGORIA MANCANTE'` senza confondersi con `'SUBTOTALE REGIONE'`, i clienti che comprano in più categorie vengono contati una sola volta nel subtotale regionale grazie a `uniqExact` valutato dal `ROLLUP`, e il margine aziendale torna al 21% reale di bilancio. Passare da `UNION ALL` a `ROLLUP` richiede cinque minuti di riscrittura SQL; prendere decisioni sui listini basandosi su una media non ponderata dei margini erode invece la cassa reale dell'azienda.
+Il controllo di quadratura è un risultato che puoi verificare a occhio. La somma di `ricavo_eur` sulle righe con `livello = 1` deve coincidere con la riga `livello = 2`. Nei numeri dell'esempio precedente 600 + 400 = 1.000. Per il margine, il totale dell'azienda non è la media dei margini regionali: se il Nord ha ricavo 600 e margine 22% e il Sud ricavo 400 e margine 18%, i margini assoluti sono 132 e 72, la loro somma è 204 e il margine aziendale è 204 / 1.000 = 20,4%, mentre la media semplice (22 + 18) / 2 = 20% sarebbe già sbagliata.
 
-## Operatore CUBE completo o selezione mirata con GROUPING SETS
+Il passaggio da `UNION ALL` a `ROLLUP` richiede pochi minuti di riscrittura e porta il tempo da circa 48 a circa 14 secondi nei numeri di esempio: il costo cala per un fattore di 48 / 14 ≈ 3,4.
 
-Quando un report richiede di tagliare i dati lungo più dimensioni (ad esempio regione, categoria, canale di acquisizione, fascia cliente e trimestre), occorre scegliere tra due operatori SQL: `CUBE(d1, d2, ..., dn)` e `GROUPING SETS(...)`.
+## Quote, ranking e cumulati con le window function
 
-Il criterio di scelta è netto: **usate `CUBE` solo quando le dimensioni sono due o al massimo tre ($2^3 = 8$ combinazioni) e l'utente finale deve esplorare liberamente ogni incrocio possibile in una tabella pivot piccola, usate invece `GROUPING SETS` elencando solo le combinazioni effettivamente lette dal business non appena le dimensioni salgono a quattro o più.**
+Dopo l'aggregazione servono spesso quote sul totale padre, classifiche e progressivi. Le window function lavorano sulle righe già aggregate e non ne cambiano il numero. Conviene calcolarle su un risultato di solo dettaglio, in una CTE, perché mescolare righe di dettaglio e subtotali nella stessa partizione conta due volte lo stesso ricavo.
 
-La confusione comune consiste nel lanciare `GROUP BY CUBE(regione, categoria, canale, segmento, mese, dispositivo)` pensando di preparare in anticipo tutte le viste possibili. Sbagliare questa scelta fa esplodere la memoria del motore analitico: con 6 dimensioni `CUBE` calcola $2^6 = 64$ raggruppamenti distinti, e se ciascuna dimensione ha una cardinalità moderata (es. $20 \times 50 \times 10 \times 5 \times 12 \times 4$), il numero di celle intermedie supera i milioni di righe per la maggior parte inutilizzate da qualsiasi report umano. Con `GROUPING SETS` si selezionano solo i 4 o 5 tagli che servono davvero al cruscotto, mantenendo il costo di memoria lineare.
+```sql
+-- Quota di categoria sul ricavo della regione, ranking e cumulato mensile.
+WITH vendite_mese AS (
+    SELECT
+        regione,
+        categoria,
+        toStartOfMonth(data_vendita) AS mese,
+        sum(ricavo_netto_eur) AS ricavo_eur
+    FROM fct_vendite_negozi
+    WHERE data_vendita >= '2026-01-01'
+      AND data_vendita < '2027-01-01'
+    GROUP BY regione, categoria, mese
+)
+SELECT
+    regione,
+    categoria,
+    mese,
+    ricavo_eur,
+    -- Quota sul totale padre: la finestra ha come partizione regione e mese.
+    round(ricavo_eur * 100.0 / sum(ricavo_eur) OVER (PARTITION BY regione, mese), 1) AS quota_regione_pct,
+    -- Classifica delle categorie dentro la regione per ciascun mese.
+    rank() OVER (PARTITION BY regione, mese ORDER BY ricavo_eur DESC) AS posizione,
+    -- Cumulato da inizio anno con frame esplicito, per ogni coppia regione e categoria.
+    sum(ricavo_eur) OVER (
+        PARTITION BY regione, categoria
+        ORDER BY mese
+        ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+    ) AS cumulato_anno_eur
+FROM vendite_mese
+ORDER BY regione, mese, posizione;
+```
 
-Questo articolo non tratta le strutture di pre-aggregazione probabilistica (come gli sketch HyperLogLog salvati su disco) né i motori MOLAP proprietari multidimensionali fuori dallo standard SQL. In ClickHouse, `ROLLUP`, `CUBE` e `GROUPING SETS` sono pienamente supportati e possono essere affiancati dal modificatore leggero `WITH TOTALS` quando serve unicamente la riga del totale generale.
+Con i dati del Nord a gennaio, Food 400 e Home 200 mila euro, la quota di Food è 400 / 600 = 66,7% e quella di Home 200 / 600 = 33,3%. Le due quote sommano a 100%, un secondo controllo di quadratura facile da automatizzare.
 
-## Cinque domande prima di pubblicare una query OLAP con subtotali
+## Tre errori che falsano un cubo
 
-1. Avete eliminato tutte le catene di `UNION ALL` scritte solo per aggiungere righe di subtotale o totale, sostituendole con `ROLLUP` o `GROUPING SETS`?
-2. State usando la funzione `GROUPING(colonna)` per identificare le righe di riepilogo anziché affidarvi a `IS NULL` o `COALESCE` che confondono i subtotali con i dati mancanti?
-3. Ogni percentuale, media ponderata o rapporto nel cubo viene calcolato come `SUM(numeratore) / SUM(denominatore)` invece che come `AVG(rapporto)`?
-4. Se il cubo espone conteggi distinti (`COUNT(DISTINCT ...)` o `uniqExact`) o giacenze semi-additive, avete impedito che lo strumento di Business Intelligence sommi tra loro i subtotali?
-5. Se il raggruppamento coinvolge più di tre dimensioni, avete usato `GROUPING SETS` espliciti invece di `CUBE` per evitare l'esplosione esponenziale $2^N$?
+### Costruire i subtotali con UNION ALL
 
-La metrica di verifica per qualsiasi query OLAP gerarchica è il test di quadratura tra livelli: la somma di una misura additiva (come `ricavo_totale_eur`) sulle righe dove `GROUPING(regione) = 0 AND GROUPING(categoria) = 1` deve coincidere al centesimo con l'unica riga di totale generale dove `GROUPING(regione) = 1 AND GROUPING(categoria) = 1`, mentre le misure non additive devono riflettere il rapporto esatto di quei totali.
+Sintomo: il prospetto impiega un multiplo del tempo atteso e i subtotali differiscono dal dettaglio di pochi euro. Succede perché ogni ramo è una query a sé, con il proprio `WHERE`, e chi modifica un filtro in un punto solo non aggiorna gli altri. Correzione: sostituisci la catena con `ROLLUP` o `GROUPING SETS`, così il filtro è scritto una volta e la tabella è letta una volta.
 
-Di tutta l'algebra OLAP, una regola separa l'analista rigoroso da chi produce numeri ingannevoli: i rapporti e i conteggi distinti non si sommano e non si mediano mai lungo una gerarchia, si ricalcolano sempre sui totali del livello superiore.
+### Mediare percentuali o sommare conteggi distinti lungo i livelli
+
+Sintomo: il margine del totale non coincide con il bilancio, i clienti unici dell'anno superano il numero di clienti in anagrafica. Succede perché `avg(margine_pct_riga)` dà lo stesso peso a un ordine da 5 euro e a una commessa da 500.000 euro, e perché un cliente attivo in due mesi viene contato due volte. Correzione: calcola `sum(margine) / sum(ricavo)` a ogni livello e usa `uniqExact` dentro lo stesso raggruppamento. Se il motore di BI espone le misure non additive, imposta l'aggregazione di default a "non sommare" per impedire che sommi i subtotali.
+
+### Etichettare i subtotali con COALESCE invece di grouping()
+
+Sintomo: nel report compaiono due righe chiamate `SUBTOTALE` con cifre diverse. Succede perché `coalesce(categoria, 'SUBTOTALE')` tratta allo stesso modo il `NULL` prodotto dal roll-up e il `NULL` di un prodotto senza categoria. Correzione: decidi il significato con `grouping()` e usa `coalesce` solo dentro il ramo `ELSE`, con un'etichetta diversa per il dato mancante.
+
+## CUBE completo o GROUPING SETS mirati
+
+Con due o tre dimensioni `CUBE` è comodo: 2² = 4 oppure 2³ = 8 livelli sono pochi e l'utente può incrociare ogni asse. Con più dimensioni il numero di livelli cresce in modo esponenziale e le celle intermedie esplodono. Prendi sei dimensioni, regione (20 valori), categoria (50), canale (10), segmento (5), mese (12) e dispositivo (4). Il dettaglio più fine può avere fino a 20 × 50 × 10 × 5 × 12 × 4 = 2.400.000 combinazioni, e `CUBE` ne calcola le proiezioni su 2⁶ = 64 livelli. Gran parte di quelle viste non viene mai letta da nessun report.
+
+La regola pratica è questa. Usa `CUBE` fino a tre dimensioni quando l'esplorazione libera è l'obiettivo. Oltre, elenca con `GROUPING SETS` solo i quattro o cinque tagli che il cruscotto mostra davvero, per esempio `(regione, mese)`, `(categoria, mese)`, `(canale, mese)` e `()`. La memoria cresce in modo lineare con il numero di tagli scelti e non con le combinazioni possibili.
+
+Due note sui limiti. Se ti serve soltanto la riga del totale generale, il modificatore `WITH TOTALS` di ClickHouse è più leggero di un `ROLLUP`. Se i conteggi distinti sono molto costosi e puoi accettare un errore di circa l'1%, `uniq` o `uniqHLL12` al posto di `uniqExact` riducono memoria e tempo, ma allora il subtotale non quadra al centesimo e va dichiarato nel report.
+
+## Verifica sulle tue query OLAP
+
+1. Un report ha quattro `SELECT` unite da `UNION ALL` per ottenere dettaglio, subtotale di regione, subtotale di categoria e totale. Con quale operatore lo riscrivi e quanti livelli genera con due dimensioni?
+
+<details>
+<summary>Mostra risposta</summary>
+
+Usi `GROUP BY CUBE(regione, categoria)`, che genera 2² = 4 livelli: dettaglio, regione, categoria e totale. In alternativa `GROUPING SETS ((regione, categoria), (regione), (categoria), ())` dà lo stesso risultato con l'elenco esplicito. La tabella viene letta una volta e il `WHERE` è scritto una volta.
+
+</details>
+
+2. Tre negozi hanno ricavi di 200.000, 300.000 e 500.000 euro e margini del 10%, 20% e 30%. Calcola il margine aziendale e confrontalo con la media dei tre margini.
+
+<details>
+<summary>Mostra risposta</summary>
+
+I margini assoluti sono 200.000 × 0,10 = 20.000 euro, 300.000 × 0,20 = 60.000 euro e 500.000 × 0,30 = 150.000 euro. Il totale è 20.000 + 60.000 + 150.000 = 230.000 euro su 1.000.000 euro di ricavo, cioè 23%. La media semplice (10 + 20 + 30) / 3 = 20% sottostima di 3 punti percentuali perché dà al negozio più piccolo lo stesso peso di quello più grande.
+
+</details>
+
+3. In una query con `ROLLUP(regione, categoria)` compaiono due righe con la categoria vuota nella regione Nord. Come distingui il subtotale dal dato mancante?
+
+<details>
+<summary>Mostra risposta</summary>
+
+La riga con `grouping(categoria) = 1` è il subtotale di regione, quella con `grouping(categoria) = 0` e categoria vuota o `NULL` è un dato di dettaglio senza categoria. Etichettali con un `CASE` su `grouping()` e dai al dato mancante un nome diverso, per esempio `'CATEGORIA MANCANTE'`. Ricorda che in ClickHouse le colonne collassate valgono la stringa vuota se non imposti `group_by_use_nulls = 1`.
+
+</details>
+
+4. A gennaio comprano 1.200 clienti, a febbraio 1.000, e 400 comprano in entrambi i mesi. Quanti sono i clienti unici del bimestre e di quanto sbaglia la somma dei due mesi?
+
+<details>
+<summary>Mostra risposta</summary>
+
+I clienti unici sono 1.200 + 1.000 − 400 = 1.800. La somma dei due mesi dà 2.200, con un eccesso di 400 clienti, pari a 400 / 1.800 ≈ 22,2%. Il valore corretto si ottiene con `uniqExact(customer_id)` nello stesso raggruppamento del bimestre.
+
+</details>
+
+5. Una proposta chiede `CUBE` su otto dimensioni per "avere tutte le viste pronte". Quanti livelli genera e che cosa proponi al suo posto?
+
+<details>
+<summary>Mostra risposta</summary>
+
+Genera 2⁸ = 256 livelli. Proponi `GROUPING SETS` con i quattro o cinque tagli che i cruscotti leggono davvero, verificandoli in `system.query_log`, così il costo di memoria resta proporzionale ai tagli scelti e non alle 256 combinazioni possibili.
+
+</details>

@@ -1,60 +1,135 @@
 ---
 title: "Data Warehouse: OLTP vs OLAP, storage colonnare e motore vettorializzato"
-description: >-
-  Perché i database transazionali crollano sotto query analitiche e come
-  funzionano internamente i data warehouse moderni: layout row-oriented vs
-  column-oriented, compressione, pruning ed esecuzione vettorializzata SIMD.
+description: "Perché un report su 50 milioni di ordini blocca il checkout di PostgreSQL e come uno storage colonnare ordinato, compresso e vettorializzato riduce la lettura da 40 GB a pochi megabyte."
 module: "Modulo 9: Data warehouse e modellazione analitica"
 order: 1
 category: Tecnico
 headerImage: /course-headers/data-warehousing-fondamenti-ginnytech-ad-v3.webp
 headerImageAlt: "Data Warehouse: OLTP vs OLAP, storage colonnare e motore vettorializzato - immagine ufficiale della lezione su GinnyTech, creata da AD"
 difficulty: intermediate
-duration: 24 min
+duration: "40 min"
 prerequisites: []
 learningObjectives:
-  - Distinguere carichi OLTP e OLAP per pattern di accesso, layout su disco e garanzie di isolamento
-  - Calcolare il risparmio di I/O dello storage colonnare rispetto al layout row-oriented su tabelle ampie
-  - Spiegare il legame tra ordinamento fisico, compressione e pruning dei blocchi con esecuzione vettorializzata SIMD
+  - "Calcolare i byte letti da una query aggregata su layout row-oriented e column-oriented a partire da larghezza di riga, numero di colonne e numero di righe"
+  - "Scegliere la chiave di ordinamento di una tabella MergeTree in ClickHouse in base ai filtri dominanti e stimare la frazione di granuli saltati"
+  - "Diagnosticare con system.query_log il rapporto tra righe lette e righe restituite e correggere SELECT *, chiavi casuali e UPDATE puntuali"
 binario: "ml-tabellare"
-formato: "articolo"
-autore: "Hermes"
-controllatoDa: "Argo"
-autorizzatoDa: "Giano"
 draft: false
-dateModified: 2026-11-13
+dateModified: 2026-11-17
+formato: "didattica-v2"
 ---
 
-# Data Warehouse: OLTP vs OLAP, storage colonnare e motore vettorializzato
+Il lunedì alle nove un e-commerce B2B lancia sul PostgreSQL di produzione la query settimanale del margine per regione. Per quattro minuti il disco resta saturo, la CPU sale al 98% e chi prova a pagare riceve un timeout al checkout. È uno scenario costruito con numeri di esempio: la tabella `orders` ha 50 milioni di righe, 60 colonne e circa 800 byte per riga, quindi 40 GB su disco. Nessun indice è mancante e il server non è sottodimensionato. Il problema è il tipo di lavoro che stai chiedendo a un motore nato per un altro mestiere.
 
-Un e-commerce B2B con cinquanta milioni di righe d'ordine lancia ogni lunedì alle nove una query di margine per categoria direttamente sul database PostgreSQL di produzione. Per quattro minuti il disco satura la banda di lettura, la CPU sale al 98% e i clienti che provano a pagare ricevono un errore di timeout al checkout. La causa non è un server sottodimensionato né un indice mancante: è chiedere una scansione aggregata su milioni di record a un motore progettato per leggere e scrivere intere righe una alla volta.
+> **Idea chiave:** un database transazionale è ottimizzato per leggere e scrivere poche righe intere, un data warehouse per leggere poche colonne di moltissime righe. Cambia il layout fisico, e con il layout cambia il costo di ogni query.
 
-## Quattro minuti di checkout bloccato per un report del lunedì
+## Cosa chiede un carico transazionale e cosa chiede uno analitico
 
-Questo è un caso ricostruito con numeri di esempio su quanto avviene nelle aziende che usano il database applicativo come data warehouse. La tabella `orders` su PostgreSQL conta 50 milioni di righe e 60 colonne: identificativi, indirizzi di spedizione, note testuali del corriere, codici promozionali, stato di fatturazione e importi. Ogni riga occupa in media 800 byte, portando la tabella fisica a circa 40 gigabyte su disco.
+Il checkout del sito esegue operazioni brevi: inserisce un ordine, legge un cliente per identificativo, aggiorna lo stato di una spedizione. Ognuna tocca una manciata di righe e ha bisogno di tutti i loro campi. Un carico di questo tipo si chiama OLTP (*online transaction processing*) e pretende garanzie forti: isolamento tra transazioni concorrenti, scritture durevoli, latenze di pochi millisecondi.
 
-Il lunedì mattina la direzione commerciale apre il cruscotto settimanale che calcola il fatturato netto per regione negli ultimi dodici mesi. La query ha bisogno di sole tre colonne su sessanta (`created_at`, `region_code`, `net_amount_eur`), pari a 20 byte per riga. Eppure, poiché un database relazionale orientato alle righe (OLTP) memorizza tutti i sessanta attributi di un ordine in modo contiguo dentro pagine da 8 kilobyte, il disco è costretto a caricare in memoria tutti i 40 gigabyte della tabella per estrarre meno di un gigabyte di numeri utili.
+Il report del lunedì fa l'opposto. Scorre dodici mesi di ordini, usa tre campi, restituisce una ventina di righe aggregate. È un carico OLAP (*online analytical processing*): letture enormi, quasi nessuna scrittura puntuale, tolleranza a latenze di secondi. Le due richieste differiscono su ogni asse che conta per l'architettura.
 
-Quella lettura massiva espelle dalla RAM (`shared_buffers`) le pagine calde degli utenti attivi sul sito e satura i canali di I/O: mentre l'analista aspetta il grafico, centinaia di transazioni di acquisto restano in coda. La causa del blocco non è una query scritta male: è la fisica del layout per riga applicata a un carico di lavoro analitico (OLAP).
+| Aspetto | OLTP (PostgreSQL, MySQL) | OLAP (data warehouse colonnare) |
+|---|---|---|
+| Operazione tipica | Leggere o scrivere 1-100 righe intere | Aggregare milioni di righe su 3-10 colonne |
+| Layout su disco | Una riga dopo l'altra, tutte le colonne contigue | Un file per colonna, valori omogenei contigui |
+| Scritture | Aggiornamenti puntuali, transazioni ACID | Caricamenti a blocchi, in sola aggiunta |
+| Indice principale | B-tree sulla chiave primaria | Indice sparso su una chiave di ordinamento |
+| Metrica di successo | Latenza per transazione, concorrenza | Byte letti per risposta, throughput di scansione |
 
-## Come lavorano lo storage colonnare e il motore SIMD
+Quando carichi un report analitico su un motore OLTP non stai usando male uno strumento valido: stai pagando una struttura pensata per la lettura di righe intere in un caso in cui ti servono soltanto tre numeri per riga.
 
-I data warehouse analitici separano il carico dalle applicazioni transazionali e ribaltano l'architettura interna grazie a tre meccanismi fisici descritti nella letteratura sui motori colonnari ([Abadi et al., 2008](https://doi.org/10.1145/1376616.1376712)).
+## Perché il layout per riga spreca la lettura
 
-Il primo meccanismo è la memorizzazione per colonna (*column-oriented storage*). Invece di salvare in sequenza tutti i campi della riga 1 seguiti da tutti i campi della riga 2, il motore salva ogni colonna in un file separato: tutti i valori di `created_at` insieme, tutti i `region_code` insieme e tutti i `net_amount_eur` insieme. Quando una query chiede tre colonne su sessanta, il disco legge solo i tre file corrispondenti e ignora fisicamente il restante 95% della tabella.
+PostgreSQL salva le righe dentro pagine da 8 KB. Dentro una pagina i campi di una riga sono contigui, seguiti dai campi della riga successiva. Per estrarre `net_amount_eur` da una riga il disco deve caricare l'intera pagina, quindi anche le note del corriere, gli indirizzi e i codici promozionali. Nel nostro scenario la query usa `created_at`, `region_code` e `net_amount_eur`, in tutto 20 byte per riga su 800.
 
-Il secondo meccanismo è l'accoppiamento tra ordinamento fisico, compressione omogenea e salto dei blocchi (*zone maps* o indice sparso). Mettere nello stesso file milioni di valori dello stesso tipo e ordinarli per chiave primaria permette ad algoritmi come Run-Length Encoding (RLE), Delta e ZSTD di comprimere i dati da cinque a dieci volte più di una pagina OLTP mista. Inoltre il motore registra per ogni blocco di 8.192 righe il valore minimo e massimo: se la query filtra un mese specifico, il lettore controlla gli estremi e salta interi blocchi senza nemmeno decomprimerli.
+Il confronto tra i due layout si vede meglio disegnato.
 
-Il terzo meccanismo è l'esecuzione vettorializzata tramite istruzioni SIMD (*Single Instruction, Multiple Data*) della CPU. Un database tradizionale valuta le espressioni riga per riga invocando una catena di chiamate a funzione per ogni singolo record; un motore analitico moderno carica in cache L1 vettori contigui di migliaia di valori della stessa colonna e applica somme, filtri e confronti su più elementi contemporaneamente in un singolo ciclo di clock.
+```mermaid
+flowchart TB
+    subgraph R["Layout per riga (OLTP)"]
+        direction LR
+        R1["Riga 1: id, data, regione, note, payload, importo"]
+        R2["Riga 2: id, data, regione, note, payload, importo"]
+        R3["Riga 3: id, data, regione, note, payload, importo"]
+    end
+    subgraph C["Layout per colonna (OLAP)"]
+        direction LR
+        C1["File data: d1, d2, d3, ..."]
+        C2["File regione: r1, r2, r3, ..."]
+        C3["File importo: i1, i2, i3, ..."]
+        C4["File note: n1, n2, n3, ... (non letto)"]
+    end
+    Q["Query: data, regione, importo"] --> R
+    Q --> C
+```
 
-**Un data warehouse ottiene ordini di grandezza di velocità sugli aggregati perché legge da disco solo le colonne richieste, salta i blocchi fuori intervallo grazie all'ordinamento fisico e processe vettori compressi direttamente nei registri SIMD della CPU.**
+Con il layout per riga, la query legge tutte le pagine che contengono righe del periodo, cioè tutta la tabella. Con il layout per colonna legge soltanto i tre file richiesti e ignora gli altri.
 
-## Tre errori quando si progetta una tabella analitica
+### Calcolo dei byte letti, passo per passo
 
-Il blocco SQL qui sotto mostra tre abitudini importate dal mondo OLTP che annullano i vantaggi di un motore colonnare:
+Facciamo il conto con i numeri di esempio. La tabella ha 50.000.000 righe da 800 byte.
+
+1. Layout per riga: il motore legge tutte le pagine, quindi 50.000.000 × 800 byte = 40.000.000.000 byte, pari a 40 GB.
+2. Layout per colonna, nessun altro accorgimento: servono 3 colonne da 20 byte per riga in totale, quindi 50.000.000 × 20 byte = 1.000.000.000 byte, pari a 1 GB.
+3. Il rapporto tra i due risultati è 40 GB / 1 GB = 40x di lettura in meno, solo per avere scelto le colonne.
+4. Con un disco che sostiene 500 MB/s, la prima lettura richiede 40.000 MB / 500 MB/s = 80 secondi di solo I/O, la seconda 1.000 MB / 500 MB/s = 2 secondi.
+
+I quattro minuti del lunedì includono la contesa con le transazioni, l'espulsione delle pagine calde da `shared_buffers` e il calcolo riga per riga, ma il peso dominante è quel 40x che il layout per riga non può evitare.
+
+## Compressione, ordinamento e salto dei blocchi
+
+Il layout per colonna ha un secondo vantaggio, meno visibile. In un file di colonna tutti i valori hanno lo stesso tipo e spesso la stessa distribuzione, quindi si comprimono bene. Una colonna `region_code` con venti valori distinti si riduce con un dizionario o con una codifica a ripetizioni (*run-length encoding*) di un fattore molto alto. Una colonna di timestamp ordinati si comprime con la codifica delle differenze (*delta*) perché due valori consecutivi si distinguono di pochi secondi. Su dati reali un fattore da 5 a 10 sulle colonne numeriche e testuali a bassa cardinalità è normale, anche se il valore effettivo dipende dall'entropia dei dati e dal codec scelto.
+
+L'ordinamento fisico moltiplica l'effetto. ClickHouse, che useremo come motore di riferimento in tutto il modulo, divide ogni parte di tabella in granuli da 8.192 righe e conserva per ogni granulo un riferimento nell'indice sparso (la chiave di ordinamento della prima riga). Se la tabella è ordinata per `(region_code, created_at)`, le righe di una regione sono adiacenti e al loro interno le date crescono. Una query con `WHERE region_code = 'IT-LOM' AND created_at >= '2026-01-01'` consulta l'indice, individua il tratto di granuli che può contenere quelle righe e salta tutti gli altri senza decomprimerli. La documentazione di ClickHouse descrive questo meccanismo nella sezione sugli indici primari sparsi ([guida all'indice primario](https://clickhouse.com/docs/guides/best-practices/sparse-primary-indexes)).
+
+> L'indice sparso non individua una riga. Individua un intervallo di granuli. Più i valori del filtro sono raggruppati nella chiave di ordinamento, più l'intervallo si stringe.
+
+### Stima dei granuli letti con la chiave giusta
+
+Riprendiamo lo scenario e aggiungiamo ipotesi dichiarate: la tabella contiene 5 anni di storia (60 mesi), 10 regioni equidistribuite e il report interroga 1 regione e gli ultimi 12 mesi.
+
+1. Dimensione di partenza delle 3 colonne: 1 GB (calcolo precedente).
+2. Partizionamento mensile: i 48 mesi più vecchi non vengono nemmeno aperti. Restano 12 mesi su 60, cioè 20% → 1 GB × 0,20 = 200 MB.
+3. Chiave `(region_code, created_at)`: dentro ogni partizione le righe di `IT-LOM` sono un tratto contiguo pari a 1/10 → 200 MB × 0,10 = 20 MB non compressi.
+4. Compressione 5x sulle colonne lette: 20 MB / 5 = 4 MB effettivamente letti dal disco.
+5. Tempo di I/O a 500 MB/s: 4 MB / 500 MB/s = 8 ms.
+
+Da 40 GB a 4 MB: un fattore 10.000 combinando tre meccanismi indipendenti (40x per le colonne, 5x per le partizioni, 10x per la chiave, 5x per la compressione, per un totale di 40 × 5 × 10 × 5 = 10.000). Nessuno dei tre è magico. Ognuno richiede però una decisione presa alla creazione della tabella.
+
+## Esecuzione vettorializzata
+
+Quando i byte sono arrivati in memoria, resta il costo del calcolo. Un motore a righe valuta l'espressione `net_amount_eur * 1.22` una riga alla volta, con una catena di chiamate a funzione per ogni record. Un motore vettorializzato prende un blocco di alcune migliaia di valori della stessa colonna, che stanno contigui in memoria e quindi nella cache della CPU, e applica l'operazione a tutto il blocco con istruzioni SIMD (*single instruction, multiple data*): un registro a 256 bit contiene quattro valori a 64 bit e li somma in un solo ciclo.
+
+Il vantaggio è composto. Meno chiamate di funzione per riga, accessi sequenziali alla memoria che sfruttano la prefetch del processore, un singolo ciclo per più valori. Non devi scrivere nulla di speciale per ottenerlo, ma ci sono scelte di schema che lo rendono possibile: tipi numerici a larghezza fissa (`UInt32`, `Decimal(12, 2)`) si vettorializzano bene, stringhe di lunghezza variabile molto meno, e le `LowCardinality(String)` ritrovano una rappresentazione numerica interna.
+
+Per verificare quanto lavoro fa davvero una query non serve intuire. ClickHouse registra le statistiche di ogni esecuzione.
 
 ```sql
--- Schema modellato come un database transazionale e interrogato senza pruning.
+-- Righe e byte letti dalle ultime query del report, confrontati con le righe restituite.
+SELECT
+    query_id,
+    read_rows,
+    formatReadableSize(read_bytes) AS letti,
+    result_rows,
+    round(read_rows / greatest(result_rows, 1)) AS righe_lette_per_riga_restituita,
+    query_duration_ms
+FROM system.query_log
+WHERE type = 'QueryFinish'
+  AND event_date = today()
+  AND query ILIKE '%ordini_analytics_corretto%'
+ORDER BY event_time DESC
+LIMIT 10;
+```
+
+Il rapporto `righe_lette_per_riga_restituita` è il termometro della progettazione: un report settimanale che restituisce 52 righe e ne legge 50 milioni segnala che indice e partizionamento non stanno lavorando.
+
+## Tre errori importati dal mondo transazionale
+
+Chi arriva da PostgreSQL porta con sé abitudini corrette nel loro contesto e dannose qui. Il blocco seguente le riunisce in una sola tabella e una sola query.
+
+```sql
+-- Schema modellato come un database transazionale, da non copiare.
 CREATE TABLE ordini_analytics_errato
 (
     order_uuid String,
@@ -67,37 +142,36 @@ CREATE TABLE ordini_analytics_errato
 ENGINE = MergeTree
 ORDER BY order_uuid;
 
--- Query lanciata dai report: SELECT * e chiave di ordinamento su UUID casuale.
+-- Query del report: SELECT * e filtro lontano dalla chiave di ordinamento.
 SELECT *
 FROM ordini_analytics_errato
 WHERE created_at >= '2026-01-01 00:00:00'
   AND region_code = 'IT-LOM';
 ```
 
-### Usare SELECT * nelle query e nelle viste di reporting
+### SELECT * nelle viste di reporting
 
-Scrivere `SELECT *` in una vista o in un estratto per lo strumento di Business Intelligence sembra innocuo perché nei database a righe il costo di leggere tre colonne o sessanta colonne dalla stessa pagina già in memoria è quasi identico. In un data warehouse colonnare è l'errore più costoso in assoluto: obbliga il motore ad aprire, leggere da disco e decomprimere i file di tutte le sessanta colonne (incluse le note testuali e i payload JSON da kilobyte), bruciando in un istante tutto il risparmio di I/O dell'architettura per colonna.
+Il sintomo è una dashboard che peggiora a ogni colonna aggiunta alla tabella, anche se nessun grafico la usa. Succede perché nei database a righe leggere tre o sessanta campi della stessa pagina costa quasi uguale, e l'abitudine passa al warehouse intatta. In un motore colonnare ogni colonna elencata è un file in più da aprire, leggere e decomprimere, inclusi note testuali e payload JSON da kilobyte per riga. La correzione è elencare le colonne necessarie e, nei modelli condivisi, vietare l'asterisco con una regola di lint.
 
-### Ordinare la tabella per un UUID casuale invece che per le colonne di filtro
+### Chiave di ordinamento su un UUID casuale
 
-Mettere `order_uuid` come chiave di `ORDER BY` sembra naturale a chi proviene da PostgreSQL o MySQL, dove la chiave primaria serve a cercare il singolo ordine per identificativo. Su uno storage colonnare un UUID casuale distrugge sia la compressione sia il pruning dei blocchi: poiché le date `created_at` e le regioni `region_code` finiscono sparse in modo uniforme in tutti i blocchi della tabella, il valore minimo e massimo di ogni blocco copre l'intero arco di cinque anni e il motore deve leggere il 100% della tabella a ogni query temporale.
+Il sintomo è una query temporale che legge il 100% delle righe pur filtrando un solo mese. Un UUID come prima colonna della chiave sembra naturale perché è la chiave primaria dell'ordine. Ma gli UUID sono distribuiti uniformemente, quindi in ogni granulo finiscono date e regioni di tutti i periodi, e il minimo e il massimo di ogni blocco coprono l'intero intervallo di cinque anni. Il filtro non scarta nulla. La compressione peggiora per lo stesso motivo: valori vicini non sono simili. La correzione è mettere in chiave le colonne dei filtri più frequenti e tenere l'identificativo come ultima colonna, utile solo per i rari lookup puntuali.
 
-### Eseguire aggiornamenti riga per riga con UPDATE invece di inserire a blocchi
+### UPDATE puntuali per sincronizzare lo stato
 
-Mandare migliaia di comandi `UPDATE ordini SET status = 'shipped' WHERE order_uuid = '...'` al minuto contro il data warehouse sembra il modo più diretto per tenere sincronizzato lo stato degli ordini. Non funziona perché i file colonnari compressi sono immutabili: modificare una singola riga costringe il motore a riscrivere interi blocchi o a pianificare costose mutazioni asincrone su disco, saturando la coda di compattazione fino a bloccare le nuove scritture.
+Il sintomo è una coda di mutation che cresce e scritture nuove che rallentano. Mandare migliaia di `UPDATE ordini SET status = 'shipped' WHERE ...` al minuto sembra il modo più diretto per riflettere lo stato dell'ordine. Ma i file colonnari compressi sono immutabili: ogni mutation riscrive la colonna modificata in tutte le parti che contengono le righe toccate. La correzione è inserire una nuova riga con lo stato aggiornato e leggere l'ultima versione, con motori come `ReplacingMergeTree` o con una tabella di eventi, e caricare a blocchi di migliaia di righe.
 
-## Tabella colonnare con chiave d'ordine per cardinalità e proiezione stretta
+## La tabella analitica corretta
 
-Per sfruttare la fisica di un data warehouse moderno e abbattere tempi e costi di lettura, applicate questi quattro criteri in ordine di priorità:
+Mettiamo insieme i criteri in ordine di priorità.
 
-1. Separate sempre il database transazionale (OLTP) dal motore analitico (OLAP), alimentando il secondo a micro-batch o in streaming append-only senza mai far girare report pesanti sul database che serve i clienti.
-2. Definite la chiave di ordinamento fisico (`ORDER BY`) partendo dalle colonne usate più spesso nei filtri `WHERE`, disponendole da cardinalità più bassa (es. regione o stato) a cardinalità più alta (es. data o timestamp).
-3. Assegnate tipi di dato compatti (`LowCardinality` per le stringhe ripetute, `Decimal` o interi per gli importi) ed escludete dalle tabelle calde i blob testuali che non servono ai raggruppamenti.
-4. Scrivete query che elencano esplicitamente le sole colonne necessarie al calcolo, lasciando fuori ogni attributo non utilizzato.
-
-Ecco lo schema e la query corretti in ClickHouse:
+1. Isola il carico analitico dal database di produzione: il warehouse si alimenta in micro-batch o in streaming append-only, mai con report lanciati sul database che serve i clienti.
+2. Scegli la chiave di ordinamento dai filtri dominanti, dalle colonne con meno valori distinti a quelle con più valori distinti: prima la regione, poi il timestamp, poi l'identificativo.
+3. Usa tipi compatti e a larghezza fissa: `LowCardinality(String)` per le stringhe ripetute, `Decimal(12, 2)` o interi per gli importi, e lascia fuori dalla tabella calda blob testuali che non servono ai raggruppamenti.
+4. Scrivi query che elencano le sole colonne necessarie.
 
 ```sql
+-- Schema corretto: partizione mensile, chiave dai filtri, tipi compatti.
 CREATE TABLE ordini_analytics_corretto
 (
     region_code LowCardinality(String),
@@ -111,7 +185,7 @@ ENGINE = MergeTree
 PARTITION BY toYYYYMM(created_at)
 ORDER BY (region_code, created_at, order_id);
 
--- La query legge solo 2 colonne su 6 e salta tutti i blocchi fuori da 'IT-LOM' e dal 2026.
+-- Legge 2 colonne di dati più le 2 della chiave, salta partizioni e blocchi fuori intervallo.
 SELECT
     toStartOfWeek(created_at) AS settimana,
     count() AS numero_ordini,
@@ -123,26 +197,60 @@ GROUP BY settimana
 ORDER BY settimana ASC;
 ```
 
-Il salto prestazionale è netto: su 50 milioni di righe, invece di leggere 40 gigabyte da disco in quattro minuti bloccando i pagamenti, il motore salta le partizioni degli anni passati, salta tutti i blocchi delle altre regioni grazie all'ordinamento su `(region_code, created_at)` e legge meno di 45 megabyte compressi, restituendo il risultato in 35 millisecondi. Scegliere le colonne in una `SELECT` è una correzione immediata a costo zero; sbagliare invece la chiave di `ORDER BY` e il partizionamento su una tabella che ha già accumulato cinque terabyte di storia richiede una riscrittura fisica completa della tabella.
+Il costo delle correzioni è asimmetrico. Riscrivere una `SELECT` è gratis. Cambiare chiave di ordinamento o partizionamento su una tabella che ha già accumulato cinque terabyte richiede di creare una tabella nuova e ricaricarla. Per questo la chiave va scelta prima, guardando le query che il business lancia davvero.
 
-## Data warehouse cloud pay-per-scan o motore colonnare dedicato per analitica in tempo reale
+## Warehouse cloud a consumo o motore colonnare dedicato
 
-Una volta deciso di adottare uno storage colonnare, occorre scegliere quale famiglia di motori OLAP risponde meglio al carico aziendale. Le opzioni principali sono due: i data warehouse cloud con tariffazione a consumo per terabyte scansionato o per crediti elastici (come BigQuery e Snowflake) e i motori colonnari ad alte prestazioni con risorse dedicate per query a bassa latenza (come ClickHouse).
+Dopo avere scelto lo storage colonnare resta da scegliere la famiglia di motore. Da una parte i data warehouse cloud con tariffazione a consumo, per byte scansionato o per crediti di calcolo (BigQuery, Snowflake). Dall'altra i motori colonnari con risorse dedicate e latenza bassa, come ClickHouse.
 
-Il criterio di scelta è netto: **usate un data warehouse cloud serverless o a crediti elastici se il carico consiste in trasformazioni batch orarie o notturne e report interni consultati da poche decine di analisti durante la giornata, usate invece un motore colonnare ad alta concorrenza come ClickHouse se dovete servire cruscotti esposti ai clienti finali, centinaia di query al secondo sotto i 100 millisecondi o flussi continui di eventi e telemetria ad alto volume.**
+Il criterio è questo: se il carico è fatto di trasformazioni batch notturne e report consultati da poche decine di analisti, il modello a consumo paga solo quando lavori e non ti chiede di gestire un cluster. Se invece servi cruscotti esposti a clienti esterni, centinaia di query al secondo sotto i 100 ms o flussi continui di eventi, un motore dedicato costa meno e risponde prima, perché non paghi a ogni ricarica di pagina.
 
-La confusione comune consiste nell'usare un warehouse pay-per-scan per alimentare un grafico dentro l'applicazione vista da diecimila utenti contemporanei, oppure nell'installare e gestire un cluster distribuito a bassa latenza per far girare tre report finanziari la mattina. Sbagliare questa scelta brucia il budget: diecimila clienti che aggiornano una pagina collegata a un motore tariffato a terabyte scansionato generano fatture da decine di migliaia di euro al mese e code di concorrenza, mentre mantenere nodi dedicati sempre accesi per dieci query al giorno spreca capacità computazionale rimasta inattiva per il 95% del tempo.
+### Un conto di esempio
 
-Questo articolo non tratta i formati di tabella aperti su object storage (Apache Iceberg e Delta Lake) né la modellazione dimensionale a stella, approfonditi nelle lezioni successive del modulo. I rapporti di compressione effettivi dipendono dall'entropia dei dati e dal codec scelto per ciascuna colonna.
+Con numeri di esempio, supponi che un grafico dentro la tua applicazione faccia 100.000 ricariche al giorno e che ciascuna scansioni 200 MB di colonne.
 
-## Cinque domande prima di creare una tabella nel data warehouse
+1. Dati scansionati al giorno: 100.000 × 200 MB = 20.000.000 MB, cioè 20 TB.
+2. In un mese di 30 giorni: 20 TB × 30 = 600 TB scansionati.
+3. A una tariffa ipotetica di 5 dollari per TB scansionato: 600 × 5 = 3.000 dollari al mese solo per quel grafico.
 
-1. Il carico analitico è completamente isolato dal database OLTP di produzione così che nessuna query pesante possa rallentare le transazioni dei clienti?
-2. La clausola `ORDER BY` della tabella elenca per prime le colonne effettivamente usate nei filtri `WHERE`, ordinate da cardinalità minore a cardinalità maggiore?
-3. Tutte le query dei report e dei modelli elencano solo le colonne strettamente necessarie, bandendo qualsiasi `SELECT *` sulle tabelle dei fatti?
-4. Gli aggiornamenti e i caricamenti avvengono a blocchi (batch di migliaia di righe) o in append con deduplicazione asincrona, evitando `UPDATE` e `DELETE` puntuali riga per riga?
-5. Avete usato tipi di dato specifici (`LowCardinality`, interi dimensionati, `Decimal`) anziché stringhe generiche per massimizzare la compressione e l'esecuzione SIMD?
+Sullo stesso grafico un servizio dedicato ha un costo fisso, indipendente dal numero di ricariche entro la sua capacità. Il risultato inverte la scelta quando le ricariche aumentano, e la inverte nell'altro verso quando il grafico viene guardato cinque volte al giorno da tre persone. Non si tratta di quale prodotto sia migliore, ma di quale curva di costo segue il tuo carico. I rapporti di compressione e le tariffe reali variano per fornitore e per contratto, quindi rifai il calcolo con i tuoi numeri prima di decidere.
 
-La metrica che separa un data warehouse ben progettato da uno che spreca risorse è il rapporto tra le righe lette da disco (`read_rows` / `read_bytes`) e le righe effettivamente restituite o aggregate dalla query: quando l'indice sparso e la selezione delle colonne lavorano insieme, una query su un mese legge solo pochi punti percentuali della tabella complessiva.
+Questa lezione non tratta i formati di tabella aperti su object storage come Apache Iceberg e Delta Lake, né la modellazione dimensionale a stella, che compaiono nelle lezioni successive del modulo.
 
-Di tutta l'architettura colonnare, una decisione conta ordini di grandezza più del resto: ordinare fisicamente la tabella sulle colonne con cui filtrate i dati ogni giorno. È quell'ordinamento che trasforma una scansione cieca di terabyte in una lettura mirata di pochi megabyte.
+## Verifica sulla tua prima tabella analitica
+
+1. Una tabella ha 20 milioni di righe da 500 byte e un report usa 2 colonne da 8 byte ciascuna. Quanti GB legge un layout per riga e quanti uno per colonna, ignorando compressione e partizioni?
+
+<details>
+<summary>Mostra risposta</summary>
+
+Per riga: 20.000.000 × 500 byte = 10.000.000.000 byte, cioè 10 GB. Per colonna: 20.000.000 × 16 byte = 320.000.000 byte, cioè 320 MB. Il rapporto è 10.000 MB / 320 MB, circa 31x di lettura in meno solo per la scelta delle colonne.
+
+</details>
+
+2. Una tabella è ordinata per `(created_at, region_code)` e una query filtra soltanto `region_code = 'IT-LOM'` su 10 regioni equidistribuite. Il pruning funziona bene?
+
+<details>
+<summary>Mostra risposta</summary>
+
+No. La regione compare come seconda colonna della chiave, quindi le righe di `IT-LOM` sono sparse in ogni intervallo di date e quasi ogni granulo ne contiene qualcuna. Il motore salta poco o niente. Con la chiave `(region_code, created_at)` il filtro individua un tratto contiguo pari a circa 1/10 della tabella.
+
+</details>
+
+3. Perché sommare la giacenza di magazzino su un intero mese con `sum()` dà un risultato sbagliato anche se il motore è velocissimo?
+
+<details>
+<summary>Mostra risposta</summary>
+
+La velocità del motore non cambia la semantica della misura. Una giacenza è una fotografia a un istante: 100 pezzi fermi per 30 giorni diventano 3.000 pezzi se sommi i giorni. Per il tempo servono media, ultimo valore o massimo, e la lezione sulla modellazione dimensionale tratta le misure semi-additive.
+
+</details>
+
+4. Un report restituisce 40 righe e legge 80 milioni di righe. Quale rapporto calcoli e cosa ti suggerisce?
+
+<details>
+<summary>Mostra risposta</summary>
+
+Il rapporto è 80.000.000 / 40 = 2.000.000 righe lette per riga restituita. Un valore così alto non è un errore in sé, perché un'aggregazione deve leggere molto, ma se il filtro riguarda una regione e un mese deve far scendere `read_rows` di uno o due ordini di grandezza. Controlla chiave di ordinamento, partizionamento e colonne selezionate.
+
+</details>
