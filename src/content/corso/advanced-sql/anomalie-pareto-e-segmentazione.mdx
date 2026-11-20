@@ -1,9 +1,6 @@
 ---
 title: "Anomalie, Pareto e segmentazione RFM in SQL"
-description: >-
-  Trovare con SQL i pochi clienti che contano: decili di spesa, z-score su
-  baseline mobile per le anomalie, curva di Pareto sul margine e segmentazione
-  RFM con gruppo di controllo.
+description: "Calcolare in ClickHouse la curva di Pareto sul margine netto, lo z-score su baseline mobile che esclude il giorno corrente e i punteggi RFM con NTILE, riservando un gruppo di controllo deterministico alle campagne."
 module: "Modulo 14: SQL avanzato per l'analisi"
 order: 12
 category: Decisione
@@ -12,127 +9,144 @@ headerImageAlt: >-
   Anomalie, Pareto e Segmentazione con SQL - immagine ufficiale della lezione
   su GinnyTech, creata da AD
 difficulty: advanced
-duration: 18 min
+duration: "40 min"
 prerequisites:
   - advanced-sql/pivot-rollup-e-kpi-table
 learningObjectives:
-  - Calcolare decili, z-score su baseline mobile e curva di Pareto cumulata sul margine netto
-  - Segmentare i clienti con RFM e NTILE e misurare le azioni contro un gruppo di controllo
+  - "Calcolare la curva di Pareto cumulata sul margine netto con una somma su finestra ordinata e verificare la chiusura al 100%"
+  - "Costruire uno z-score su baseline mobile che esclude la riga corrente e spiegare perché una baseline contaminata nasconde l'anomalia"
+  - "Assegnare punteggi RFM con NTILE rispettando la direzione di ogni asse e isolare un gruppo di controllo deterministico con cityHash64"
 binario: "ml-tabellare"
-formato: "articolo"
-autore: "Hermes"
-controllatoDa: "Argo"
-autorizzatoDa: "Giano"
 draft: false
-dateModified: 2026-11-13
+dateModified: 2026-11-17
+formato: "didattica-v2"
 ---
 
-# Anomalie, Pareto e segmentazione RFM in SQL
+Scenario costruito con numeri di esempio: un direttore commerciale guarda il fatturato mensile, lo trova stabile e decide uno sconto del 15% su tutti i clienti attivi. Prima di lanciare la campagna un analista ordina i clienti per margine netto e fa la somma cumulata: sui 10 clienti dell'estratto che useremo in questa lezione, i primi 2 (il 20%) producono il 68% del margine, i primi 3 il 79%. Quei clienti comprano già a prezzo pieno, e lo sconto sarebbe un costo senza nessun ricavo aggiuntivo, mentre i 4 clienti in coda, con il 3,5% del margine, assorbirebbero la maggior parte del budget promozionale.
 
-Un direttore commerciale guarda il fatturato mensile e decide di lanciare uno sconto del 15% su tutti i clienti attivi perché gli ordini sembrano stabili. Analizzando però i dati con una curva di Pareto e una segmentazione RFM in SQL, emerge che il 18% dei clienti genera l'82% del margine netto e sta già acquistando a prezzo pieno, mentre il 40% dei clienti a basso margine assorbe quasi tutto il budget promozionale. La causa non è la mancanza di dati: è guardare medie aggregate invece di applicare **curva di Pareto sul margine netto, z-score su baseline mobile per le anomalie e segmentazione RFM deterministica**.
+> **Idea chiave:** prima di agire su una base clienti ordina i clienti per valore reale (margine netto) e confronta ogni giorno con la sua storia recente; le medie aggregate nascondono sia la concentrazione sia le anomalie.
 
-## Sconto del 15% regalato a chi comprava già a prezzo pieno
+## Tre tecniche, tre domande
 
-Questo è un caso ricostruito con numeri di esempio su quanto accade quando si prendono decisioni promozionali o di allerta operativa senza segmentare i clienti per valore reale e senza rilevare le anomalie rispetto alla propria baseline storica.
+Le tre tecniche della lezione rispondono a domande operative diverse e condividono lo stesso strumento, la window function. La tabella mette in ordine che cosa misura ciascuna e dove di solito si sbaglia.
 
-Le tre tecniche analitiche di questa lezione trasformano i dati transazionali in priorità operative immediate:
-
-| Tecnica SQL | Cosa misura | Domanda operativa a cui risponde | Errore comune |
+| Tecnica | Cosa calcola | Domanda a cui risponde | Errore tipico |
 | :--- | :--- | :--- | :--- |
-| **Curva di Pareto cumulata** | Quota cumulata di margine ordinata per cliente | Quale % di clienti genera l'80% del margine netto? | Ordinare per fatturato lordo ignorando resi e costi |
-| **Z-score su baseline mobile** | `(valore - media_mobile) / stddev_mobile` | Il calo di oggi è rumore statistico o un'anomalia reale? | Usare soglie fisse (`< 1000 €`) che ignorano la stagionalità |
-| **Segmentazione RFM (`NTILE`)** | Recency, Frequency, Monetary per cliente | Chi sono i Champions a rischio e i clienti dormienti? | Assegnare `NTILE` alto alla Recency alta (invertita) |
+| Curva di Pareto | Quota cumulata di margine ordinando i clienti dal più al meno redditizio | Quanti clienti servono per arrivare all'80% del margine | Ordinare per fatturato lordo e ignorare resi e costi |
+| Z-score su baseline mobile | Scarto del giorno rispetto alla media dei giorni precedenti, in unità di deviazione standard | Il calo di oggi è rumore o un'anomalia | Includere il giorno corrente nella baseline |
+| Segmentazione RFM | Recency, Frequency, Monetary trasformate in punteggi da 1 a 5 | Chi sono i migliori clienti e chi sta scivolando via | Dare punteggio alto a chi non compra da più tempo |
 
-Usare queste tre lenti insieme permette di concentrare il budget solo dove genera margine incrementale.
+Usate insieme, le tre lenti permettono di decidere dove mettere il budget: la curva dice quanto pesa ciascun cliente, lo z-score dice se il ritmo giornaliero si è rotto, e RFM dice che tipo di azione serve a ciascun gruppo.
 
-## Pareto sul margine netto, Z-score mobile e RFM con gruppo di controllo
+## Pareto sul margine netto con una somma su finestra
 
-Il primo meccanismo è la **curva di Pareto calcolata con somma cumulata sul margine netto**. Ordinando i clienti in modo decrescente per `net_margin_eur` (`ORDER BY net_margin_eur DESC, customer_id ASC`) e calcolando `SUM(net_margin_eur) OVER (ORDER BY net_margin_eur DESC, customer_id ASC ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) / SUM(net_margin_eur) OVER ()`, si ottiene la quota cumulata di margine dal cliente più redditizio all'ultimo. Dividendo la posizione del cliente per il totale dei clienti, si verifica esattamente la soglia 80/20.
-
-Il secondo meccanismo è il **rilevamento anomalie tramite Z-score su baseline mobile**. Confrontare il fatturato di oggi con una soglia fissa non funziona quando il weekend vende la metà del lunedì. Calcolando media mobile e deviazione standard mobile sugli ultimi 28 giorni precedenti (`ROWS BETWEEN 28 PRECEDING AND 1 PRECEDING`, escludendo la riga corrente), lo z-score `(today_val - rolling_avg) / nullIf(rolling_std, 0)` segnala immediatamente qualsiasi deviazione superiore a `2.5` o inferiore a `-2.5` deviazioni standard.
-
-Il terzo meccanismo è la **segmentazione RFM con `NTILE(5)` e gruppo di controllo**. Per ogni cliente si calcolano `Recency` (giorni dall'ultimo ordine), `Frequency` (numero ordini) e `Monetary` (spesa o margine totale). Attenzione alla direzione: per Frequency e Monetary un valore più alto merita punteggio `5` (`ORDER BY frequency ASC`), mentre per Recency un valore più basso (acquisto più recente) merita punteggio `5` (`ORDER BY recency_days DESC`).
-
-**Calcolate sempre Pareto sul margine netto, escludete il giorno corrente dalla baseline mobile dello z-score e invertite l'ordinamento di `NTILE` per la Recency.**
-
-## Tre errori comuni in Pareto, Z-score e RFM
-
-Il blocco SQL qui sotto mostra l'errore tipico di chi inverte il punteggio di Recency in `NTILE` e include la giornata corrente nella baseline dello z-score:
+I dati di partenza sono un riepilogo per cliente: data dell'ultimo ordine, numero di ordini e margine netto in euro (ricavo meno costo, resi e sconti). In produzione lo ottieni aggregando la tabella ordini; qui lo inseriamo direttamente per poter controllare ogni numero.
 
 ```sql
--- ERRORE 1: Recency ordinata ASC assegna punteggio 5 ai clienti che NON comprano da più tempo!
--- ERRORE 2: includere CURRENT ROW nella baseline dello z-score smorza l'anomalia stessa!
-SELECT
-    customer_id,
-    ntile(5) OVER (ORDER BY recency_days ASC) AS wrong_r_score_inverted,
-    avg(daily_rev) OVER (ORDER BY day ROWS BETWEEN 28 PRECEDING AND CURRENT ROW) AS contaminated_baseline
-FROM analytics_prod.fct_customer_metrics;
+-- Riepilogo per cliente: ultimo ordine, numero di ordini, margine netto in euro
+CREATE TABLE customer_metrics
+(
+    customer_id UInt32,
+    last_order_date Date,
+    orders_count UInt32,
+    net_margin_eur Decimal(10,2)
+) ENGINE = MergeTree ORDER BY customer_id;
+
+INSERT INTO customer_metrics VALUES
+(1, '2026-11-10', 14, 4200.00), (2, '2026-11-02', 9, 2600.00), (3, '2026-03-02', 5, 1100.00),
+(4, '2026-10-20', 6, 700.00), (5, '2026-06-30', 3, 500.00), (6, '2026-11-05', 4, 400.00),
+(7, '2026-03-12', 2, 200.00), (8, '2026-08-01', 2, 150.00), (9, '2026-02-20', 1, 100.00),
+(10, '2026-11-12', 1, 50.00);
 ```
 
-### Assegnare punteggio 5 a chi non compra da più giorni (Recency invertita)
-
-`NTILE(5)` assegna `1` alle prime righe e `5` alle ultime. Se ordinate `recency_days ASC`, chi ha comprato ieri (`recency_days = 1`) prende `1` e chi è sparito da tre anni (`recency_days = 1095`) prende `5`. Per la Recency dovete sempre ordinare `recency_days DESC` così che i clienti più recenti ricevano `5`.
-
-### Includere il giorno corrente nel calcolo della baseline dello z-score
-
-Se un bug blocca il checkout oggi e le vendite crollano a `0 €`, includere `CURRENT ROW` nella media e nella deviazione standard mobile trascina giù la media e gonfia la deviazione standard, riducendo artificiosamente lo z-score e nascondendo l'anomalia. La finestra della baseline deve sempre fermarsi a `1 PRECEDING`.
-
-### Applicare azioni promozionali a tutto un segmento RFM senza gruppo di controllo
-
-Inviare un coupon a tutti i clienti "A rischio" impedisce di sapere quanti avrebbero comunque riacquistato da soli. Tenere un 10% casuale deterministico (`cityHash64(customer_id) % 10 = 0`) come gruppo di controllo *holdout* permette di misurare l'incremento reale della campagna.
-
-## Curva di Pareto sul margine e segmentazione RFM in ClickHouse
-
-Per costruire Pareto sul margine e segmentazione RFM pronti per il CRM in ClickHouse, applicate questi quattro passi:
-
-1. Aggregate per `customer_id` calcolando `recency_days`, `orders_count` e `net_margin_eur`.
-2. Calcolate la quota cumulata di margine ordinando per `net_margin_eur DESC, customer_id ASC` con `ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW`.
-3. Calcolate i punteggi `r_score`, `f_score`, `m_score` con `NTILE(5)` rispettando la direzione corretta per Recency (`DESC`) rispetto a Frequency e Monetary (`ASC`).
-4. Assegnate un flag deterministico `is_holdout_control` al 10% dei clienti per misurare l'efficacia delle campagne.
-
-Ecco la query SQL completa in ClickHouse:
+La curva si ottiene ordinando per margine decrescente e sommando dalla prima riga fino alla riga corrente. Il frame `ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW` va dichiarato in modo esplicito, e l'ordinamento ha un secondo criterio (`customer_id`) che rende il risultato deterministico anche quando due clienti hanno lo stesso margine.
 
 ```sql
--- Curva di Pareto sul margine netto + Segmentazione RFM deterministica con gruppo di controllo:
-WITH customer_base AS (
-    SELECT
-        customer_id,
-        dateDiff('day', max(order_date), today()) AS recency_days,
-        count() AS frequency_orders,
-        round(sum(net_margin_eur), 2) AS monetary_margin_eur
-    FROM analytics_prod.fct_orders
-    WHERE status = 'paid'
-      AND order_date >= today() - 365
-    GROUP BY customer_id
-    HAVING monetary_margin_eur > 0
-),
-pareto_and_rfm AS (
-    SELECT
-        customer_id,
-        recency_days,
-        frequency_orders,
-        monetary_margin_eur,
-        round(
-            sum(monetary_margin_eur) OVER (
-                ORDER BY monetary_margin_eur DESC, customer_id ASC
-                ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
-            ) * 100.0 / sum(monetary_margin_eur) OVER (),
-            2
-        ) AS cumulative_margin_pct,
-        ntile(5) OVER (ORDER BY recency_days DESC, customer_id ASC) AS r_score,
-        ntile(5) OVER (ORDER BY frequency_orders ASC, customer_id ASC) AS f_score,
-        ntile(5) OVER (ORDER BY monetary_margin_eur ASC, customer_id ASC) AS m_score
-    FROM customer_base
-)
+-- Curva di Pareto: somma cumulata del margine in ordine decrescente
 SELECT
     customer_id,
-    recency_days,
-    frequency_orders,
-    monetary_margin_eur,
-    cumulative_margin_pct,
-    r_score,
-    f_score,
-    m_score,
+    net_margin_eur,
+    sum(net_margin_eur) OVER (
+        ORDER BY net_margin_eur DESC, customer_id ASC
+        ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+    ) AS cum_margin_eur,
+    round(cum_margin_eur * 100.0 / sum(net_margin_eur) OVER (), 1) AS cumulative_margin_pct,
+    round(row_number() OVER (ORDER BY net_margin_eur DESC, customer_id ASC) * 100.0 / count() OVER (), 0) AS customers_pct
+FROM customer_metrics
+ORDER BY net_margin_eur DESC, customer_id ASC;
+```
+
+Ecco le righe restituite, lette dall'alto in basso.
+
+| Cliente | Margine netto | Somma cumulata | Margine cumulato | Clienti cumulati |
+| ---: | ---: | ---: | ---: | ---: |
+| 1 | 4.200 € | 4.200 € | 42,0% | 10% |
+| 2 | 2.600 € | 6.800 € | 68,0% | 20% |
+| 3 | 1.100 € | 7.900 € | 79,0% | 30% |
+| 4 | 700 € | 8.600 € | 86,0% | 40% |
+| 5 | 500 € | 9.100 € | 91,0% | 50% |
+| 6 | 400 € | 9.500 € | 95,0% | 60% |
+| 7 | 200 € | 9.700 € | 97,0% | 70% |
+| 8 | 150 € | 9.850 € | 98,5% | 80% |
+| 9 | 100 € | 9.950 € | 99,5% | 90% |
+| 10 | 50 € | 10.000 € | 100,0% | 100% |
+
+Esempio numerico svolto: il margine totale è 4.200 + 2.600 + 1.100 + 700 + 500 + 400 + 200 + 150 + 100 + 50 = 10.000 €. Alla seconda riga la somma cumulata è 4.200 + 2.600 = 6.800 €, quindi 6.800 / 10.000 = 68%. Per superare l'80% servono 4 clienti, cioè il 40% della base, perché a 3 clienti ci si ferma al 79%. L'ultima riga vale esattamente 100,0%: è il controllo di chiusura, e se non torna significa che una riga è stata esclusa o che il margine contiene valori `NULL`.
+
+## Z-score su una baseline che esclude oggi
+
+Lo z-score risponde alla domanda se il valore di oggi sia compatibile con quello che è successo nei giorni scorsi. Si calcola come (valore di oggi meno media della baseline) diviso deviazione standard della baseline. La baseline non può contenere il giorno che stai giudicando: se lo includi, il valore anomalo trascina la media e gonfia la deviazione, e l'anomalia si attenua da sola.
+
+```sql
+-- Ricavi giornalieri: l'8 novembre un bug al checkout dimezza le vendite
+CREATE TABLE daily_revenue (day Date, revenue_eur Float64) ENGINE = MergeTree ORDER BY day;
+INSERT INTO daily_revenue VALUES
+('2026-11-01', 1000), ('2026-11-02', 1040), ('2026-11-03', 980), ('2026-11-04', 1020),
+('2026-11-05', 1010), ('2026-11-06', 990), ('2026-11-07', 1060), ('2026-11-08', 540), ('2026-11-09', 1030);
+```
+
+La query confronta due finestre con nome: `w_prev`, che arriva fino alla riga precedente, e `w_curr`, che include la riga corrente. In produzione la baseline è di 28 giorni; qui è di 7 per tenere la tabella leggibile.
+
+```sql
+-- Z-score con baseline corretta (w_prev) e con baseline contaminata (w_curr)
+SELECT
+    day,
+    revenue_eur,
+    round(avg(revenue_eur) OVER w_prev, 2) AS baseline_avg,
+    round(stddevPop(revenue_eur) OVER w_prev, 2) AS baseline_std,
+    round((revenue_eur - avg(revenue_eur) OVER w_prev) / nullIf(stddevPop(revenue_eur) OVER w_prev, 0), 2) AS z_score,
+    round((revenue_eur - avg(revenue_eur) OVER w_curr) / nullIf(stddevPop(revenue_eur) OVER w_curr, 0), 2) AS wrong_z
+FROM daily_revenue
+WINDOW w_prev AS (ORDER BY day ROWS BETWEEN 7 PRECEDING AND 1 PRECEDING),
+       w_curr AS (ORDER BY day ROWS BETWEEN 7 PRECEDING AND CURRENT ROW)
+ORDER BY day;
+```
+
+| Giorno | Ricavo | Media baseline | Dev. standard | Z-score corretto | Z-score contaminato |
+| :--- | ---: | ---: | ---: | ---: | ---: |
+| 2026-11-06 | 990 € | 1.010,00 | 20,00 | -1,00 | -0,85 |
+| 2026-11-07 | 1.060 € | 1.006,67 | 19,72 | 2,70 | 1,75 |
+| 2026-11-08 | 540 € | 1.014,29 | 26,11 | -18,17 | -2,61 |
+| 2026-11-09 | 1.030 € | 948,57 | 168,73 | 0,48 | 0,45 |
+
+Esempio numerico svolto per l'8 novembre: la baseline è la media dei 7 giorni precedenti, (1.000 + 1.040 + 980 + 1.020 + 1.010 + 990 + 1.060) / 7 = 7.100 / 7 = 1.014,29 €, con deviazione standard 26,11 €. Lo scarto è 540 - 1.014,29 = -474,29 €, e -474,29 / 26,11 = -18,17 deviazioni standard: un blocco evidente. Con la baseline contaminata la media scende a 955 € e la deviazione sale, quindi lo z-score si ferma a -2,61: ancora sotto una soglia di -2,5, ma di poco, e una soglia più prudente lo lascerebbe passare.
+
+Due cautele che la tabella rende visibili. La prima: il 7 novembre lo z-score corretto vale 2,70 per un ricavo di 1.060 €, appena 53 € sopra la media, perché la baseline ha solo 6 righe e una dispersione piccola. Con una finestra di 28 giorni questa oscillazione si assorbe, e comunque conviene richiedere un numero minimo di punti, per esempio `count() OVER w_prev >= 14`, prima di emettere un allarme. La seconda: il 9 novembre la baseline contiene il giorno del guasto, quindi la deviazione standard salta da 26 a 169 €, e un secondo crollo pochi giorni dopo risulterebbe poco visibile. Una pratica comune è marcare i giorni già riconosciuti come anomalie ed escluderli dalla baseline con una media condizionale (`avgIf`).
+
+## RFM con NTILE e direzione dei punteggi
+
+La segmentazione RFM descrive ogni cliente con tre numeri: Recency, i giorni dall'ultimo ordine; Frequency, il numero di ordini; Monetary, la spesa o il margine totale. `NTILE(5)` divide i clienti in cinque fasce di uguale numerosità, numerate da 1 a 5 secondo l'ordinamento della finestra, e la fascia 5 è l'ultima nell'ordine. Questo fissa la direzione: per Frequency e Monetary, dove un valore alto è buono, ordini in modo crescente così che i migliori ricevano 5; per Recency, dove un valore basso è buono, devi ordinare in modo decrescente.
+
+```sql
+-- RFM con NTILE(5): Recency ordinata DESC, Frequency e Monetary ASC; holdout deterministico
+SELECT
+    customer_id,
+    dateDiff('day', last_order_date, toDate('2026-11-15')) AS recency_days,
+    orders_count,
+    net_margin_eur,
+    ntile(5) OVER (ORDER BY recency_days DESC, customer_id ASC) AS r_score,
+    ntile(5) OVER (ORDER BY orders_count ASC, customer_id ASC) AS f_score,
+    ntile(5) OVER (ORDER BY net_margin_eur ASC, customer_id ASC) AS m_score,
     multiIf(
         r_score >= 4 AND f_score >= 4 AND m_score >= 4, 'Champions',
         r_score >= 3 AND f_score >= 3, 'Loyal',
@@ -140,34 +154,82 @@ SELECT
         r_score <= 2 AND f_score <= 2, 'Hibernating',
         'Developing'
     ) AS rfm_segment,
-    if(cityHash64(customer_id) % 10 = 0, 1, 0) AS is_holdout_control
-FROM pareto_and_rfm
-ORDER BY monetary_margin_eur DESC
-LIMIT 100;
+    cityHash64(customer_id) % 5 = 0 AS is_holdout_control
+FROM customer_metrics
+ORDER BY customer_id;
 ```
 
-In questa query ogni cliente riceve sia la sua posizione esatta lungo la curva di Pareto (`cumulative_margin_pct`), sia il segmento RFM azionabile, sia l'assegnazione stabile al gruppo di controllo (`is_holdout_control`) tramite `cityHash64`.
+Con 10 clienti ogni fascia contiene 2 persone. Il cliente 3 è il caso istruttivo: ha ordinato 5 volte e ha prodotto 1.100 € di margine, quindi F e M valgono 4, ma l'ultimo ordine risale al 2 marzo (258 giorni), per cui R vale 1 e la regola lo classifica come `At Risk High Value`. È un cliente che vale la pena richiamare con attenzione. I clienti 1 e 2, con R pari a 5 e 4 e F e M uguali a 5, sono `Champions`: ricevono un trattamento diverso dallo sconto, perché non ne hanno bisogno. I clienti 7 e 9, con tutti i punteggi a 1 o 2, sono `Hibernating`.
 
-Per completare il sistema di monitoraggio in produzione, potete affiancare a questa segmentazione una vista giornaliera basata sullo **z-score mobile a 28 giorni** (`(today_margin - rolling_28d_avg) / nullIf(rolling_28d_std, 0)`), impostando un alert automatico verso Slack o Telegram quando un segmento ad alto valore (`Champions` o `At Risk High Value`) scende sotto `-2.5` deviazioni standard rispetto alla propria baseline storica. In questo modo il team commerciale non reagisce a oscillazioni casuali del weekend, ma interviene tempestivamente quando un calo di margine segnala un problema reale di churn, di prezzo o di rottura di stock.
+La colonna `is_holdout_control` usa l'hash del `customer_id`, quindi lo stesso cliente cade sempre nello stesso gruppo, a ogni esecuzione e su qualunque macchina. Sulle 10 righe dell'esempio il resto della divisione per 5 vale 0 per i clienti 5 e 8, cioè il 20%; in produzione usa `% 10` per tenere fuori il 10%.
 
-Ricordate infine di salvare i risultati della segmentazione RFM in uno snapshot storico settimanale (`snap_customer_rfm_weekly`): osservare quanti clienti passano da `Champions` a `At Risk High Value` mese dopo mese è un indicatore anticipatore di churn molto più preciso del solo tasso di abbandono aggregato.
+## Il gruppo di controllo misura l'effetto vero
 
-## Segmentazione RFM con NTILE(5) vs soglie fisse di business
+Mandare un coupon a tutti i clienti `At Risk High Value` non dice quanti di loro avrebbero riacquistato comunque. Il gruppo di controllo, cioè un sottoinsieme che non riceve la campagna, risponde a questa domanda. Esempio numerico svolto con numeri di esempio su un segmento di 2.000 clienti: il 10% viene tenuto da parte, quindi il gruppo trattato ha 1.800 clienti e il controllo 200. Dopo 30 giorni 396 clienti trattati hanno riacquistato, pari a 396 / 1.800 = 22,0%, mentre nel controllo hanno riacquistato in 30, pari a 30 / 200 = 15,0%. L'effetto della campagna è 22,0% - 15,0% = 7,0 punti percentuali, cioè 1.800 × 7,0% = 126 ordini aggiuntivi. Senza il controllo avresti attribuito alla campagna tutti i 396 ordini, e il costo per ordine incrementale sarebbe risultato circa tre volte più basso del reale.
 
-Per classificare i clienti in fasce RFM, potete usare **i quintili relativi (`NTILE(5)`)** oppure **soglie fisse di business** (es. `recency <= 30`, `orders >= 5`).
+```mermaid
+flowchart LR
+    A["Segmento RFM (2.000 clienti)"] --> B["cityHash64(customer_id) % 10"]
+    B -->|"resto 0"| C["Controllo: 200 clienti"]
+    B -->|"altri resti"| D["Trattati: 1.800 clienti"]
+    C --> E["Riacquisto 15,0%"]
+    D --> F["Riacquisto 22,0%"]
+    E --> G["Effetto: 7,0 pp"]
+    F --> G
+```
 
-Il criterio di scelta è netto: **usate `NTILE(5)` per l'analisi esplorativa iniziale e per garantire che ogni fascia contenga sempre il 20% dei clienti, passate alle soglie fisse di business quando alimentate automazioni CRM quotidiane così che un cliente non cambi segmento solo perché altri clienti sono entrati o usciti dal database.**
+## Tre errori da riconoscere
 
-La confusione comune consiste nel pensare che `NTILE(5)` produca soglie stabili nel tempo: essendo relativo alla distribuzione corrente, le soglie numeriche di confine si spostano leggermente ogni settimana.
+### Recency con l'ordinamento sbagliato
 
-## Cinque domande prima di attivare segmenti RFM o alert Z-score
+Sintomo: i clienti spariti da anni risultano tra i `Champions` e quelli che hanno comprato ieri finiscono in `Hibernating`. Succede perché `ntile(5) OVER (ORDER BY recency_days ASC)` assegna 1 ai valori piccoli, cioè ai clienti più recenti: sembra naturale ordinare in modo crescente come per le altre due dimensioni. Si evita ordinando Recency in modo decrescente, e si verifica con un controllo a campione: nella tabella dei risultati i clienti con `recency_days` più basso devono avere `r_score` uguale a 5.
 
-1. La curva di Pareto è calcolata sul **margine netto** (al netto di resi e sconti) invece che sul fatturato lordo?
-2. Il punteggio `r_score` di `NTILE(5)` ordina `recency_days DESC` così che `5` indichi i clienti più recenti?
-3. La baseline mobile dello z-score si ferma a `1 PRECEDING` escludendo la riga corrente?
-4. Avete riservato un gruppo di controllo *holdout* deterministico prima di inviare sconti o campagne automatiche?
-5. Avete verificato che il totale del margine all'ultima riga della curva di Pareto sia esattamente `100.00%`?
+### Baseline che include la riga corrente
 
-La metrica di controllo per la curva di Pareto e l'RFM è la **chiusura al 100.00%**: l'ultima riga ordinata per margine deve avere `cumulative_margin_pct = 100.00` e la somma dei clienti in tutti i segmenti RFM deve eguagliare il totale dei clienti attivi con margine positivo.
+Sintomo: un crollo evidente genera uno z-score modesto, e l'allarme non scatta. Succede perché la finestra `... AND CURRENT ROW` porta il valore anomalo dentro la media e nella deviazione standard. Si evita fermando la finestra a `1 PRECEDING`, come nella finestra `w_prev` dell'esempio, dove l'8 novembre passa da -2,61 a -18,17.
 
-Verificare questi due invarianti ad ogni esecuzione schedulata vi assicura che nessuna esclusione silenziosa o errore di ordinamento stia distorcendo le priorità commerciali. Quando il team CRM attiva una campagna di retention o di cross-selling, leggere insieme la curva di Pareto, il segmento RFM e il risultato rispetto al gruppo di controllo *holdout* permette di misurare il ritorno reale sul margine netto anziché inseguire metriche di vanità sul volume lordo, sul tasso di clic, sulle impressioni pubblicitarie o sul tasso di apertura delle email inviate ai clienti attivi nel corso dell'ultimo trimestre fiscale in azienda italiana.
+### Campagna a un intero segmento senza controllo
+
+Sintomo: la campagna mostra un riacquisto del 22% e nessuno sa se sia merito dello sconto. Succede perché i clienti `At Risk High Value` hanno comunque una probabilità di rientrare, e senza un gruppo escluso a priori non si può separare quella quota dall'effetto della campagna. Si evita assegnando il controllo prima dell'invio con una funzione deterministica come `cityHash64`, e conservando l'assegnazione nello snapshot del segmento.
+
+## NTILE o soglie fisse
+
+I quintili di `NTILE` garantiscono che ogni fascia contenga il 20% dei clienti, e per questo sono ottimi per una prima esplorazione. Hanno però un difetto per le automazioni: le soglie numeriche si spostano a ogni esecuzione, perché dipendono dalla distribuzione corrente. Un cliente con 30 giorni di recency può essere nella fascia 4 questa settimana e nella 3 la prossima solo perché altri clienti hanno comprato. Per alimentare un flusso CRM quotidiano usa soglie fisse decise dal business (per esempio recency entro 30 giorni, almeno 5 ordini), e riserva `NTILE` all'analisi esplorativa e al controllo della distribuzione.
+
+## Controllo prima di attivare segmenti o allarmi
+
+1. La curva di Pareto dell'esempio sale al 68% con il 20% dei clienti. Quale controllo ti dice che la somma cumulata è corretta?
+
+<details>
+<summary>Mostra risposta</summary>
+
+L'ultima riga ordinata deve avere `cumulative_margin_pct = 100,0`, cioè 10.000 € cumulati su 10.000 € totali. Un valore inferiore indica righe escluse dal filtro o margini `NULL`; un valore superiore indica righe duplicate nella tabella di partenza.
+
+</details>
+
+2. Il 12 del mese un blocco del checkout porta i ricavi a 540 € contro una media di 1.014,29 € e una deviazione di 26,11 €. Quale z-score ottieni con la baseline corretta e che cosa cambia se includi la riga corrente?
+
+<details>
+<summary>Mostra risposta</summary>
+
+Con la baseline corretta lo scarto è 540 - 1.014,29 = -474,29 €, quindi lo z-score è -474,29 / 26,11 = -18,17. Con la finestra che include la riga corrente la media scende a 955 € e la deviazione sale, quindi lo z-score si riduce a circa -2,61 e l'anomalia sembra molto più debole.
+
+</details>
+
+3. Due clienti hanno la stessa Recency, 40 giorni: possono ricevere punteggi R diversi con `NTILE`? Come eviti l'ambiguità?
+
+<details>
+<summary>Mostra risposta</summary>
+
+Sì: `NTILE` divide le righe in gruppi di uguale numerosità, quindi due valori uguali possono cadere in fasce diverse se il confine passa tra loro. Si evita aggiungendo un secondo criterio, come `customer_id`, che rende l'assegnazione deterministica, oppure usando soglie fisse quando il punteggio alimenta un'automazione.
+
+</details>
+
+4. Un segmento di 2.000 clienti ha un controllo del 10%: 396 riacquisti su 1.800 trattati e 30 su 200 nel controllo. Quanti ordini aggiuntivi attribuisci alla campagna?
+
+<details>
+<summary>Mostra risposta</summary>
+
+Il riacquisto è 22,0% nei trattati e 15,0% nel controllo, con una differenza di 7,0 punti percentuali. Gli ordini aggiuntivi sono 1.800 × 7,0% = 126, un terzo circa dei 396 riacquisti osservati: la parte restante sarebbe avvenuta senza campagna.
+
+</details>
