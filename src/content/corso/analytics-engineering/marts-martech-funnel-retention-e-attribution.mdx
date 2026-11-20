@@ -1,16 +1,14 @@
 ---
 title: "Marts Martech: funnel, retention e attribution in dbt"
 description: >-
-  Come progettare in dbt i tre marts fondamentali per prodotto e marketing:
-  funnel con progressione monotona per sessione, retention di coorte con spine
-  calendario e attribution multi-touch deterministica con test di riconciliazione.
+  Come progettare in dbt su ClickHouse tre marts per marketing e prodotto: funnel con progressione monotona per sessione, retention di coorte con spine di calendario e attribution multi-touch che conserva al centesimo il ricavo contabile.
 module: "Modulo 16: Analytics engineering con dbt"
 order: 5
 category: Tecnico
 headerImage: /course-headers/analytics-engineering-marts-martech-funnel-retention-e-attribution-ginnytech-ad.webp
 headerImageAlt: "Marts Martech: funnel, retention e attribution in dbt - immagine ufficiale della lezione su GinnyTech, creata da AD"
 difficulty: advanced
-duration: 26 min
+duration: 35 min
 prerequisites:
   - analytics-engineering/dbt-e-ruolo-dell-analytics-engineer
 learningObjectives:
@@ -18,143 +16,215 @@ learningObjectives:
   - Costruire una matrice di retention per coorte usando uno spine di calendario per preservare i periodi a zero attività
   - Implementare un mart di attribution multi-touch in SQL che conservi esattamente il 100% del ricavo contabile
 binario: "ml-tabellare"
-formato: "articolo"
-autore: "Hermes"
-controllatoDa: "Argo"
-autorizzatoDa: "Giano"
+formato: "didattica-v2"
 draft: false
-dateModified: 2026-11-13
+dateModified: 2026-11-17
 ---
 
-# Marts Martech: funnel, retention e attribution in dbt
+Caso ricostruito con numeri di esempio: un e-commerce investe 90.000 euro al mese in campagne e legge sui cruscotti tre numeri impossibili. Il passaggio dal carrello al checkout supera il 115%, la retention alla quarta settimana sembra tenere anche per chi ha smesso di comprare, e la somma dei ricavi attribuiti ai canali supera del 28% l'incasso reale. Il tracciamento funziona e lo strumento grafico pure: a sbagliare sono tre modelli SQL dello strato `marts` di dbt, scritti con `COUNT` e `LEFT JOIN` piatti.
 
-Un'azienda e-commerce investe 90.000 euro al mese in campagne pubblicitarie e legge sui cruscotti tre numeri impossibili: il tasso di passaggio dal carrello al checkout supera il 115%, la retention alla quarta settimana ignora chi ha smesso di comprare per un mese intero e la somma dei ricavi attribuiti ai canali supera del 28% l'incasso reale in banca. La causa non è il tracciamento né lo strumento grafico: sono tre errori algebrici nei modelli SQL dello strato `marts` in dbt.
+## Il funnel al 115% e il ricavo che non torna
 
-## Centoquindici percento di conversione e ventottomila euro fantasma
+Nel primo cruscotto del lunedì il funnel conta 4.000 sessioni con evento `add_to_cart` e 4.600 con `checkout_started`. Molti clienti riaprono il link del carrello salvato il giorno prima e vanno dritti al pagamento, senza passare dalla scheda prodotto nella stessa sessione. Contando gli eventi uno per uno, quelle sessioni finiscono nello step 3 ma non negli step 1 e 2, e il rapporto tra secondo e terzo passo diventa 4.600 ÷ 4.000 = 115%.
 
-Questo è un caso ricostruito con numeri di esempio su quanto accade quando i modelli di marketing e prodotto vengono scritti aggregando eventi grezzi senza vincoli di sequenza, senza griglia temporale e senza normalizzazione dei pesi.
+Nel secondo cruscotto la curva di retention fa un balzo alla settimana 3. La query raggruppa solo le settimane in cui esistono ordini, e le settimane vuote spariscono dal denominatore. Nel terzo, un join tra ordini e clic pubblicitari degli ultimi trenta giorni assegna l'intero valore di un ordine da 200 euro a ciascuno dei quattro annunci cliccati: 100.000 euro di vendite contabili diventano 128.000 euro di ricavo attribuito.
 
-Nel primo cruscotto del lunedì, la tabella del funnel conta 4.000 sessioni con evento `add_to_cart` e 4.600 sessioni con evento `checkout_started`: molti utenti aprono direttamente il link del carrello salvato il giorno prima senza passare dalla scheda prodotto nella stessa sessione, portando il rapporto tra secondo e primo passo al 115%. Nel secondo cruscotto, la curva di retention delle coorti mostra un balzo improvviso alla settimana 3 perché la query raggruppa solo le settimane in cui esistono ordini e fa sparire dal denominatore i periodi vuoti. Nel terzo cruscotto, un join tra ordini e sessioni pubblicitarie degli ultimi trenta giorni assegna l'intero valore di un ordine da 200 euro a ciascuno dei tre annunci cliccati dal cliente, trasformando 100.000 euro di vendite contabili in 128.000 euro di ricavo attribuito.
+> **Idea chiave:** un mart di marketing è corretto solo se rispetta tre invarianti, e ciascuno va scritto nel modello e controllato da un test: ordine temporale nel funnel, griglia completa nella retention, somma dei pesi uguale a uno nell'attribution.
 
-La causa di tutte e tre le distorsioni è modellare funnel, coorti e attribuzione con semplici `COUNT` e `LEFT JOIN` piatti, invece di imporre i tre invarianti strutturali dei marts Martech in dbt.
+## I tre invarianti dei marts martech
 
-## I tre invarianti fisici di funnel, retention e attribution
+Il primo invariante è la progressione monotona del funnel. Una sessione supera il passo $k$ solo se ha già completato il passo $k-1$ in un istante precedente o uguale, cioè $t_1 \le t_2 \le t_3$. Un conteggio indipendente per evento non verifica questa catena, e qualsiasi ingresso a metà percorso gonfia il numeratore e rompe la monotonia decrescente dell'imbuto.
 
-Costruire marts di marketing e prodotto affidabili in dbt richiede di rispettare tre meccanismi matematici distinti.
+Il secondo è la griglia densa di calendario, detta date spine. La retention alla settimana $n$ è il rapporto tra utenti attivi nella settimana $n$ e la dimensione della coorte al tempo zero. Le tabelle di eventi hanno righe solo quando qualcuno compie un'azione, quindi raggruppare direttamente sugli eventi omette le coppie coorte-settimana con zero attivi. Solo un incrocio tra le coorti e l'elenco completo delle settimane produce una matrice rettangolare, in cui ogni cella esiste anche quando vale zero.
 
-Il primo meccanismo è la progressione temporale monotona del funnel. Un utente o una sessione supera il passo $k$ del funnel solo se ha già completato il passo $k-1$ in un istante precedente o uguale ($t_1 \le t_2 \le t_3$). Se si contano gli eventi in modo indipendente senza verificare la catena temporale, qualsiasi ingresso diretto a metà percorso gonfia il numeratore e rompe la monotonicità decrescente del funnel.
+Il terzo è la conservazione della somma. Se un ordine di valore $V$ è preceduto da $N$ tocchi di marketing nella finestra di conversione, i pesi assegnati devono soddisfare $\sum_{i=1}^{N} w_i = 1$. Gli ordini senza tocchi tracciati confluiscono su una riga sintetica `direct` con peso 1. In questo modo il totale attribuito coincide con il totale della tabella contabile `fct_orders`.
 
-Il secondo meccanismo è l'incrocio con una griglia densa (*date spine*) per la retention di coorte. La retention nella settimana $n$ è il rapporto tra gli utenti attivi nella settimana $n$ e la dimensione fissa iniziale della coorte al tempo $0$. Poiché le tabelle degli eventi contengono righe solo quando un utente compie un'azione, raggruppare direttamente sugli eventi omette le coppie `(coorte, settimana)` con zero attivi; solo un `CROSS JOIN` tra le coorti e la serie completa delle settimane garantisce una matrice rettangolare priva di buchi.
+| Mart | Invariante | Sintomo se manca | Controllo in dbt |
+| --- | --- | --- | --- |
+| `fct_session_funnel` | $t_1 \le t_2 \le t_3$ | Passaggi superiori al 100% | Test: ogni step non supera il precedente |
+| `fct_cohort_retention` | Griglia coorte per settimana completa | Settimane vuote che spariscono | Test: righe attese = coorti × settimane |
+| `fct_order_attribution` | $\sum w_i = 1$ per ordine | Ricavo attribuito oltre l'incasso | Test singolare sul totale |
 
-Il terzo meccanismo è la conservazione della somma nell'attribuzione multi-touch. Quando un ordine di valore $V$ viene preceduto da $N$ tocchi di marketing nella finestra di conversione, i pesi $w_i$ assegnati ai singoli tocchi per quell'ordine devono sommare esattamente a $1$ ($\sum_{i=1}^N w_i = 1$), e gli ordini privi di tocchi tracciati devono confluire su una riga sintetica `direct / untouch` con peso $1$: in questo modo la somma dei ricavi attribuiti nel mart coincide al centesimo con il totale della tabella contabile `fct_orders`.
+## Funnel per sessione con progressione monotona
 
-**Un mart Martech è corretto solo se il funnel impone $t_1 \le t_2 \le t_3$, la retention poggia su una griglia completa di date e l'attribution conserva al centesimo il totale degli ordini contabili.**
-
-## Tre errori nei modelli SQL di marketing e prodotto
-
-Il blocco SQL qui sotto mostra i tre antipattern che generano funnel sopra il 100% e ricavi moltiplicati quando si aggregano eventi e touchpoint senza regole di dominio:
-
-```sql
--- 1) FUNNEL ERRATO: conta gli step in modo indipendente senza verificare t1 <= t2 <= t3.
-SELECT
-    countDistinctIf(session_id, event_name = 'product_viewed') AS step_1_view,
-    countDistinctIf(session_id, event_name = 'add_to_cart') AS step_2_cart,
-    countDistinctIf(session_id, event_name = 'checkout_started') AS step_3_checkout
-FROM stg_events;
-
--- 2) ATTRIBUTION ERRATA: il join 1:N con i touchpoint moltiplica net_revenue_eur per N tocchi.
-SELECT
-    t.utm_channel,
-    sum(o.net_revenue_eur) AS ricavo_gonfiato_eur
-FROM fct_orders AS o
-LEFT JOIN stg_marketing_touches AS t
-    ON o.customer_id = t.customer_id
-   AND t.touch_at BETWEEN o.order_at - INTERVAL 30 DAY AND o.order_at
-GROUP BY t.utm_channel;
-```
-
-### Contare gli step del funnel senza imporre l'ordine temporale degli eventi
-
-Usare `countDistinctIf` separati per ogni nome di evento nella stessa query sembra il modo più veloce per riempire un grafico a imbuto. Non funziona perché tratta ogni passo come un insieme indipendente anziché come una sequenza ordinata: se un cliente riapre il sito con il carrello già pieno dal giorno prima e va dritto al pagamento, la sessione conta in `step_3_checkout` ma non in `step_1_view` né in `step_2_cart`, producendo tassi di passaggio superiori al 100% che rendono impossibile calcolare l'abbandono reale.
-
-### Calcolare la retention senza incrociare le coorti con uno spine di calendario
-
-Raggruppare gli eventi per `(cohort_week, activity_week)` senza una tabella di calendario intermedia sembra sufficiente finché la coorte ha migliaia di utenti attivi ogni settimana. Appena si analizza un segmento B2B o una coorte più piccola in cui nella settimana 4 nessun cliente effettua ordini, quella riga sparisce del tutto dal risultato SQL: i cruscotti a valle saltano dalla settimana 3 alla settimana 5 o calcolano medie sulle sole settimane presenti, sovrastimando la tenuta del prodotto.
-
-### Fare join tra ordini e touchpoint senza dividere il ricavo per i pesi
-
-Unire `fct_orders` con tutti i clic pubblicitari degli ultimi trenta giorni e sommare `o.net_revenue_eur` direttamente sul risultato del join è l'errore più diffuso nei report di marketing. Poiché un cliente che clicca su tre annunci prima di comprare genera tre righe nel join, l'importo dell'ordine viene sommato tre volte: più il cliente interagisce con le campagne, più il modello inventa fatturato inesistente.
-
-## I modelli dbt corretti con sequenza monotona, spine e pesi normalizzati
-
-Per costruire in dbt tre marts Martech certificati e privi di distorsioni, applicate questi quattro criteri in ordine di priorità:
-
-1. Nel mart di funnel (`fct_session_funnel`), calcolate il primo timestamp di ogni passo per sessione e validate il passo successivo solo se il suo timestamp è maggiore o uguale a quello del passo precedente.
-2. Nel mart di retention (`fct_cohort_retention`), fissate la dimensione della coorte al tempo zero e incrociate ogni coorte con la griglia delle settimane (`int_week_spine`) prima di fare il `LEFT JOIN` con le attività.
-3. Nel mart di attribution (`fct_order_attribution`), calcolate il numero totale di tocchi validi per ciascun ordine con una window function `count() OVER (partition by order_id)` e moltiplicate il ricavo dell'ordine per il peso normalizzato $w_i$, assegnando `direct` con peso $1$ quando non ci sono tocchi.
-4. Aggiungete un test singolare dbt che fallisce se la somma del ricavo attribuito in `fct_order_attribution` differisce per più di un centesimo dalla somma di `fct_orders`.
-
-Ecco i modelli SQL corretti pronti per lo strato `marts` di dbt:
+Il modello calcola per ogni sessione il primo istante di ciascun evento e il conteggio di quanti eventi di quel tipo esistono. Serve il conteggio, e non solo il minimo, perché in ClickHouse `minIf` su un insieme vuoto restituisce il valore di default (1970-01-01) e non `NULL`: senza un controllo di presenza una sessione senza carrello sembrerebbe avere un carrello al 1970.
 
 ```sql
--- A) models/marts/product/fct_session_funnel.sql (progressione monotona t1 <= t2 <= t3)
+-- models/marts/product/fct_session_funnel.sql
+-- Progressione monotona: ogni step vale solo se esiste ed è successivo al precedente
 WITH tempi_per_sessione AS (
     SELECT
         session_id,
-        minIf(occurred_at, event_name = 'product_viewed') AS t1_view,
-        minIf(occurred_at, event_name = 'add_to_cart') AS t2_cart,
+        countIf(event_name = 'product_viewed')    AS n_view,
+        countIf(event_name = 'add_to_cart')       AS n_cart,
+        countIf(event_name = 'checkout_started')  AS n_checkout,
+        minIf(occurred_at, event_name = 'product_viewed')   AS t1_view,
+        minIf(occurred_at, event_name = 'add_to_cart')      AS t2_cart,
         minIf(occurred_at, event_name = 'checkout_started') AS t3_checkout
     FROM {{ ref('stg_events') }}
     GROUP BY session_id
 )
 SELECT
     session_id,
-    t1_view IS NOT NULL AS has_step_1_view,
-    (t1_view IS NOT NULL AND t2_cart IS NOT NULL AND t2_cart >= t1_view) AS has_step_2_cart,
-    (t1_view IS NOT NULL AND t2_cart IS NOT NULL AND t3_checkout IS NOT NULL
+    n_view > 0 AS has_step_1_view,
+    (n_view > 0 AND n_cart > 0 AND t2_cart >= t1_view) AS has_step_2_cart,
+    (n_view > 0 AND n_cart > 0 AND n_checkout > 0
         AND t2_cart >= t1_view AND t3_checkout >= t2_cart) AS has_step_3_checkout
-FROM tempi_per_sessione;
+FROM tempi_per_sessione
+```
 
--- B) models/marts/marketing/fct_order_attribution.sql (conservazione del 100% del ricavo)
-WITH ordini_con_tocchi AS (
+Un esempio svolto con numeri costruiti. Su 10.000 sessioni, 3.900 hanno una visita seguita da un carrello e 4.000 hanno un evento `add_to_cart`: le 100 sessioni di scarto hanno il carrello senza una visita precedente nella stessa sessione. I checkout grezzi sono 4.600, ma 1.000 arrivano da link di carrelli salvati, senza visita né carrello nella sessione, quindi quelli validi sono 4.600 − 1.000 = 3.600. Il tasso grezzo tra carrello e checkout è 4.600 ÷ 4.000 = 115%. I tassi corretti sono 3.900 ÷ 10.000 = 39% tra visita e carrello e 3.600 ÷ 3.900 = 92,3% tra carrello e checkout, tutti sotto il 100%.
+
+Le 1.000 sessioni escluse non sono rumore da buttare: sono un segnale di prodotto, il ritorno da carrello salvato. Conviene tenerle in una colonna separata (`is_resumed_cart`) invece di cancellarle, così il marketing può misurare quanto pesa il canale email di recupero carrello.
+
+## Retention di coorte con spine di calendario
+
+Il modello fissa la dimensione della coorte al tempo zero e la incrocia con le settimane possibili prima di agganciare le attività. Le tabelle `int_user_cohorts` (utente e settimana di acquisizione), `int_user_activity_weeks` (utente e settimana di attività) e `int_week_spine` (numeri di settimana da 0 a 12) sono mattoni intermedi.
+
+```sql
+-- models/marts/product/fct_cohort_retention.sql
+-- Matrice rettangolare coorte x settimana: le celle senza attivi valgono 0
+WITH coorti AS (
+    SELECT cohort_week, count() AS cohort_size
+    FROM {{ ref('int_user_cohorts') }}
+    GROUP BY cohort_week
+),
+griglia AS (
+    SELECT c.cohort_week, c.cohort_size, s.week_offset
+    FROM coorti AS c
+    CROSS JOIN {{ ref('int_week_spine') }} AS s
+),
+attivi AS (
+    SELECT
+        u.cohort_week,
+        dateDiff('week', u.cohort_week, a.activity_week) AS week_offset,
+        uniqExact(a.user_id) AS active_users
+    FROM {{ ref('int_user_cohorts') }} AS u
+    INNER JOIN {{ ref('int_user_activity_weeks') }} AS a ON u.user_id = a.user_id
+    GROUP BY u.cohort_week, week_offset
+)
+SELECT
+    g.cohort_week,
+    g.week_offset,
+    g.cohort_size,
+    -- In ClickHouse il LEFT JOIN restituisce 0 (non NULL) per le righe senza corrispondenza
+    a.active_users AS active_users,
+    round(a.active_users * 100.0 / g.cohort_size, 1) AS retention_pct
+FROM griglia AS g
+LEFT JOIN attivi AS a
+    ON g.cohort_week = a.cohort_week AND g.week_offset = a.week_offset
+```
+
+Esempio numerico: una coorte di 200 utenti ha 120 attivi alla settimana 1, 90 alla 2, 80 alla 3, nessuno alla 4 e 60 alla 5. Le retention sono 120 ÷ 200 = 60%, 45%, 40%, 0% e 30%. Senza spine la riga della settimana 4 non esiste e la media delle quattro settimane presenti è (60 + 45 + 40 + 30) ÷ 4 = 43,75%. Con la griglia completa la media su cinque settimane è (60 + 45 + 40 + 0 + 30) ÷ 5 = 35%. La differenza, 43,75 − 35 = 8,75 punti percentuali, è la tenuta immaginaria che il modello senza spine regala al prodotto.
+
+## Attribution che conserva il ricavo
+
+Il join diretto tra ordini e tocchi moltiplica le righe, quindi si inverte l'ordine: prima si cercano i tocchi validi di ogni ordine in una CTE con join interno e filtro sulla finestra di conversione, poi si riagganciano gli ordini, così quelli senza tocchi restano. Condizioni su intervalli dentro `ON` non sono supportate da tutte le versioni di ClickHouse, e la forma con `WHERE` funziona ovunque.
+
+```sql
+-- models/marts/marketing/fct_order_attribution.sql
+-- Pesi lineari: ogni ordine distribuisce il 100% del ricavo sui suoi tocchi
+WITH touch_validi AS (
+    SELECT o.order_id, t.utm_channel
+    FROM {{ ref('fct_orders') }} AS o
+    INNER JOIN {{ ref('stg_marketing_touches') }} AS t
+        ON o.customer_id = t.customer_id
+    WHERE t.touch_at BETWEEN o.order_at - INTERVAL 30 DAY AND o.order_at
+),
+ordini_con_tocchi AS (
     SELECT
         o.order_id,
         o.net_revenue_eur,
-        coalesce(t.utm_channel, 'direct') AS utm_channel,
+        -- Senza corrispondenza il LEFT JOIN restituisce stringa vuota: la riga diventa 'direct'
+        if(v.utm_channel = '', 'direct', v.utm_channel) AS utm_channel,
         count() OVER (PARTITION BY o.order_id) AS touches_count
     FROM {{ ref('fct_orders') }} AS o
-    LEFT JOIN {{ ref('stg_marketing_touches') }} AS t
-        ON o.customer_id = t.customer_id
-       AND t.touch_at BETWEEN o.order_at - INTERVAL 30 DAY AND o.order_at
+    LEFT JOIN touch_validi AS v ON o.order_id = v.order_id
 )
 SELECT
     order_id,
     utm_channel,
     1.0 / touches_count AS attribution_weight,
-    round(net_revenue_eur * (1.0 / touches_count), 2) AS attributed_revenue_eur
-FROM ordini_con_tocchi;
+    round(net_revenue_eur / touches_count, 2) AS attributed_revenue_eur
+FROM ordini_con_tocchi
 ```
 
-Con questi due modelli il tasso di conversione tra ogni passo del funnel resta matematicamente compreso tra lo 0% e il 100% senza mai superare il passo precedente, e un ordine da 200 euro preceduto da quattro clic pubblicitari distribuisce esattamente 50 euro a ciascun tocco: lo scostamento tra i report di marketing e il bilancio finanziario scende dal 28% a zero. Scrivere la logica di pesatura in un modello dbt richiede trenta righe di SQL facilmente reversibili se domani si vuole passare dal peso lineare a un decadimento temporale; presentare invece al CFO un report di campagna con ricavi gonfiati distrugge la credibilità dell'intero team dati.
+Un test singolare di dbt blocca la build quando il totale attribuito si discosta dal contabile. Il file vive in `tests/` e restituisce righe solo in caso di errore:
 
-## Attribuzione multi-touch deterministica in dbt o Marketing Mix Modeling econometrico
+```sql
+-- tests/assert_attribution_conserves_revenue.sql
+-- Fallisce se la differenza assoluta supera un centesimo
+SELECT abs(a.attributed_eur - o.orders_eur) AS scarto_eur
+FROM (SELECT sum(attributed_revenue_eur) AS attributed_eur FROM {{ ref('fct_order_attribution') }}) AS a
+CROSS JOIN (SELECT sum(net_revenue_eur) AS orders_eur FROM {{ ref('fct_orders') }}) AS o
+WHERE abs(a.attributed_eur - o.orders_eur) > 0.01
+```
 
-Una volta messo in sicurezza il mart di attribution sui touchpoint tracciati, resta da capire fino a dove può arrivare questo modello e quando serve invece un approccio statistico diverso. I due strumenti sono l'attribuzione multi-touch deterministica basata sugli eventi individuali (MTA in dbt) e il Marketing Mix Modeling econometrico su serie storiche aggregate (MMM).
+Esempio con tre ordini. L'ordine A da 200 euro ha 4 tocchi, l'ordine B da 120 euro ne ha 3, l'ordine C da 80 euro non ne ha. Il totale contabile è 200 + 120 + 80 = 400 euro. Con il join piatto la somma è 200 × 4 + 120 × 3 + 80 × 1 = 800 + 360 + 80 = 1.240 euro, un gonfiamento di (1.240 − 400) ÷ 400 = 210%. Con i pesi, A distribuisce 4 × 50 = 200 euro, B 3 × 40 = 120 euro e C assegna 80 euro a `direct`: 200 + 120 + 80 = 400 euro, e il test passa.
 
-Il criterio di scelta è netto: **usate il mart di attribution deterministica in dbt per allocare il budget quotidiano tra campagne digitali tracciabili sullo stesso dispositivo o utente autenticato (ricerca a pagamento, email, affiliate, social con parametri UTM), usate invece il Marketing Mix Modeling o test di incrementalità geografica quando una quota rilevante della spesa va su canali non tracciabili a livello di singolo clic (TV, cartellonistica, podcast, campagne video upper-funnel o traffico con forte rifiuto dei cookie).**
+Il peso lineare è la scelta più semplice, e si cambia modificando una sola espressione: un decadimento temporale o una regola per posizione sostituiscono `1.0 / touches_count` mantenendo il vincolo $\sum w_i = 1$ per ordine. Il test sul totale resta lo stesso, quindi un cambio di regola non può rompere la quadratura senza che la build se ne accorga.
 
-La confusione comune consiste nel pretendere che la tabella `fct_order_attribution` misuri il ritorno di uno spot televisivo o di una campagna di notorietà su utenti che non cliccano sul banner ma cercano il marchio su Google tre giorni dopo, oppure nell'usare un complesso modello bayesiano trimestrale per decidere quale annuncio di ricerca spegnere il martedì mattina. Sbagliare questa distinzione porta a sovra-finanziare i canali di fondo imbuto (come le campagne sul proprio marchio, che intercettano l'ultimo clic di chi aveva già deciso di comprare) tagliando i canali superiori che alimentano la domanda nuova.
+Per far girare tutto con i controlli, il comando di sviluppo costruisce i tre marts e le relative dipendenze:
 
-Questo articolo non tratta la stima dei modelli bayesiani di Marketing Mix Modeling né la risoluzione probabilistica delle identità tra dispositivi privi di login. La durata della finestra di lookback (7, 14 o 30 giorni) va calibrata sulla lunghezza media del ciclo d'acquisto del vostro prodotto.
+```bash
+# Costruisce funnel, retention e attribution con modelli, test e test singolari a monte
+dbt build --select +fct_session_funnel +fct_cohort_retention +fct_order_attribution
+```
 
-## Cinque domande prima di pubblicare i marts di marketing e prodotto
+## Errori tipici nei marts di marketing e prodotto
 
-1. Nel modello di funnel, il superamento dello step $k$ verifica esplicitamente che l'utente abbia completato lo step $k-1$ con un timestamp precedente o uguale nella stessa finestra di conversione?
-2. La matrice di retention fa un `CROSS JOIN` tra l'elenco delle coorti e uno spine completo di settimane o mesi, così che i periodi con zero utenti attivi compaiano con valore `0` anziché sparire?
-3. La dimensione iniziale di ogni coorte (`cohort_size`) è calcolata una sola volta al periodo zero e mantenuta invariata come denominatore per tutti i periodi successivi?
-4. Nel modello di attribution, gli ordini che non hanno alcun touchpoint nella finestra di lookback vengono conservati sulla categoria `direct` con peso uguale a `1`?
-5. Avete aggiunto in dbt un test automatico che blocca la build se `SUM(attributed_revenue_eur)` differisce da `SUM(net_revenue_eur)` della tabella contabile degli ordini?
+### Contare gli step del funnel senza ordine temporale
 
-La metrica di controllo che garantisce la tenuta dell'intero strato Martech è la differenza assoluta tra il totale di `fct_order_attribution` e il totale di `fct_orders`, affiancata dalla verifica che nessun passo $k$ del funnel abbia un conteggio superiore al passo $k-1$: entrambi gli scarti devono essere pari a zero a ogni esecuzione di `dbt build`.
+Il sintomo è un tasso di passaggio sopra il 100%. Sembra ragionevole perché `countDistinctIf` per ogni evento è il modo più rapido di riempire un grafico a imbuto. Il problema è che ogni passo diventa un insieme indipendente e non una sequenza. La cura è il modello monotono visto sopra, con il test che verifica che il conteggio dello step $k$ non superi quello dello step $k-1$.
 
-Di tutti i principi visti, uno solo evita le discussioni più accese in azienda: la somma dei pesi di attribuzione per ogni singolo `order_id` deve sempre fare esattamente uno. Quando il marketing e la finanza leggono lo stesso totale in fondo alla tabella, la conversazione smette di riguardare chi ha i numeri giusti e passa finalmente a come allocare il budget.
+### Calcolare la retention senza spine
+
+Il sintomo è una curva che salta da una settimana alla successiva o una media troppo alta. Con coorti da migliaia di utenti il difetto non si vede, perché ogni settimana ha almeno un attivo. Appare in un segmento B2B o in una coorte piccola, quando una settimana intera ha zero ordini e la riga sparisce. La cura è l'incrocio con `int_week_spine` e il conteggio righe atteso (coorti per settimane) in un test.
+
+### Sommare il ricavo dopo un join uno-a-molti
+
+Il sintomo è il ricavo attribuito più alto dell'incasso. Capita perché il join con i tocchi è naturale e il risultato sembra plausibile fino al confronto con il bilancio. Più il cliente interagisce con le campagne, più il modello inventa fatturato. La cura è dividere per il numero di tocchi dell'ordine, riagganciare gli ordini senza tocchi a `direct` e fissare il test sul totale.
+
+## Attribuzione deterministica o Marketing Mix Modeling
+
+Messo in sicurezza il mart di attribution, resta da capire fin dove arriva. L'attribuzione multi-touch deterministica lavora su eventi individuali con identità nota, e serve ad allocare il budget quotidiano tra campagne tracciabili: ricerca a pagamento, email, affiliate, social con parametri UTM. Il Marketing Mix Modeling lavora su serie storiche aggregate e serve quando una parte rilevante della spesa va su canali che non producono un clic, come televisione, cartellonistica, podcast o video di notorietà.
+
+Chiedere a `fct_order_attribution` il ritorno di uno spot televisivo non ha senso, perché chi lo vede cerca poi il marchio su Google e il tocco registrato è quello di ricerca. Usare invece un modello bayesiano trimestrale per decidere quale annuncio spegnere martedì mattina è sproporzionato. Le campagne sul proprio marchio meritano un'attenzione particolare: intercettano l'ultimo clic di chi aveva già deciso di comprare, e un modello che le premia taglia i canali che generano domanda nuova. La durata della finestra di lookback (7, 14 o 30 giorni) si calibra sulla lunghezza media del ciclo d'acquisto.
+
+## Verifica sui marts di marketing e prodotto
+
+1. Su 8.000 sessioni, 3.200 hanno una visita seguita da un carrello e 2.560 hanno visita, carrello e checkout in ordine. Quali sono i due tassi di passaggio?
+
+<details>
+<summary>Mostra risposta</summary>
+
+Il tasso tra visita e carrello è 3.200 ÷ 8.000 = 40%. Il tasso tra carrello e checkout è 2.560 ÷ 3.200 = 80%. Entrambi sono sotto il 100% perché ogni step è contato solo se preceduto dal passo precedente.
+
+</details>
+
+2. Una coorte di 150 utenti ha 90 attivi alla settimana 1, 60 alla 2, 0 alla 3 e 45 alla 4. Quanto vale la media di retention sulle quattro settimane con spine, e quanto senza?
+
+<details>
+<summary>Mostra risposta</summary>
+
+Le retention sono 60%, 40%, 0% e 30%. Con spine la media è (60 + 40 + 0 + 30) ÷ 4 = 32,5%. Senza spine la settimana 3 sparisce e la media su tre settimane è (60 + 40 + 30) ÷ 3 = 43,3%, circa 10,8 punti percentuali sopra il valore corretto.
+
+</details>
+
+3. Un ordine da 150 euro ha 5 tocchi nella finestra. Quanto riceve ogni tocco, e quanto sarebbe la somma con un join piatto?
+
+<details>
+<summary>Mostra risposta</summary>
+
+Ogni tocco riceve 150 ÷ 5 = 30 euro, e la somma dei pesi è 5 × 30 = 150 euro. Con il join piatto la riga ricavo si ripete cinque volte e la somma diventa 5 × 150 = 750 euro, cinque volte il valore reale.
+
+</details>
+
+4. Perché nel modello di funnel serve `countIf` oltre a `minIf` quando si usa ClickHouse?
+
+<details>
+<summary>Mostra risposta</summary>
+
+Perché `minIf` su un insieme vuoto restituisce il valore di default del tipo, cioè 1970-01-01 per un `DateTime`, e non `NULL`. Una sessione senza carrello apparirebbe con un carrello all'epoca Unix, e i confronti sui timestamp darebbero risultati sbagliati. Il conteggio dice se l'evento esiste davvero.
+
+</details>

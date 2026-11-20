@@ -1,7 +1,7 @@
 ---
 title: "Materializzazioni in dbt: view, table e incremental"
 description: >-
-  Strategie di materializzazione in dbt per bilanciare costo, freschezza e storicità.
+  Come scegliere tra view, ephemeral, table e incremental in dbt su ClickHouse, scrivere un blocco is_incremental con finestra di lookback idempotente, limitare i dati in sviluppo e storicizzare le sorgenti mutevoli con gli snapshot.
 module: "Modulo 16: Analytics engineering con dbt"
 order: 6
 category: Tecnico
@@ -9,7 +9,7 @@ headerImage: /course-headers/analytics-engineering-materialization-incremental-e
 headerImageAlt: >-
   Materialization dbt - immagine ufficiale della lezione su GinnyTech, creata da AD
 difficulty: advanced
-duration: 18 min
+duration: 32 min
 prerequisites:
   - analytics-engineering/marts-martech-funnel-retention-e-attribution
 learningObjectives:
@@ -17,105 +17,71 @@ learningObjectives:
   - Configurare un modello incremental con strategia append, merge o insert_overwrite
   - Limitare la finestra dati in sviluppo per contenere i costi del warehouse
 binario: "ml-tabellare"
-formato: "articolo"
-autore: "Hermes"
-controllatoDa: "Argo"
-autorizzatoDa: "Giano"
+formato: "didattica-v2"
 draft: false
-dateModified: 2026-11-13
+dateModified: 2026-11-17
 ---
 
-# Materializzazioni in dbt: view, table e incremental
+Caso ricostruito con numeri di esempio: un progetto dbt su ClickHouse costruisce la tabella dei fatti `fct_web_events`, 900 milioni di righe e circa cinque anni di storico, con `materialized = 'table'` e un run ogni ora. A ogni esecuzione il warehouse cancella e riscrive tutto, e il run dura 38 minuti. Quando il team passa a `incremental` con un filtro ingenuo sul massimo timestamp, i tempi scendono a pochi secondi, ma il modello perde silenziosamente gli eventi mobile arrivati in ritardo e non aggiorna gli ordini passati da `pending` a `paid`.
 
-Un progetto dbt costruisce la tabella dei fatti `fct_web_events` da 900 milioni di righe con l'impostazione `materialized = 'table'` eseguita ogni ora: a ogni run il data warehouse cancella e ricalcola da zero cinque anni di storico impiegando 38 minuti; quando il team passa a `materialized = 'incremental'` con filtro `WHERE event_time > (SELECT max(event_time) FROM {{ this }})`, i tempi scendono a 15 secondi ma il modello perde tutti gli eventi arrivati con tre minuti di ritardo da mobile e non aggiorna gli ordini passati da `'pending'` a `'paid'`. La causa non è un limite di dbt: è scegliere la materializzazione sbagliata e scrivere la clausola `is_incremental()` senza **finestra di lookback mobile (`- INTERVAL 3 DAY`)** e senza strategia di sostituzione per chiave o partizione.
+## Trentotto minuti per un run orario e gli eventi persi sul confine
 
-## Trentotto minuti per ricalcolare cinque anni o eventi persi sul confine del watermark
+Il team ha attraversato due estremi. All'inizio i modelli `stg_`, `int_` e `fct_` erano tutti `view`: le dashboard rieseguivano sette join a cascata a ogni clic, impiegando 25 secondi. Passando `fct_web_events` a `table` le letture sono diventate immediate, ma il costo si è spostato nel run: 38 minuti ogni ora significa che il warehouse passa il 63% del tempo a ricalcolare dati che non cambiano.
 
-Questo è un caso ricostruito con numeri di esempio su quanto accade quando si passa dalle tabelle complete ai modelli incrementali in dbt senza gestire i dati in ritardo (*late-arriving data*) e gli aggiornamenti di stato. L'azienda trasforma 900 milioni di eventi e 40 milioni di ordini su ClickHouse.
+Il secondo passaggio è stato `incremental` con la condizione `WHERE occurred_at > (SELECT max(occurred_at) FROM {{ this }})`. Se il run delle 10:00 chiude con massimo `09:59:58`, quello delle 11:00 legge solo eventi con `occurred_at` successivo. Un evento generato su smartphone alle `09:58:30` e consegnato da Kafka alle `10:01:10` ha un timestamp precedente al watermark e non verrà mai ricaricato.
 
-Nel corso dell'evoluzione del progetto il team cade nei due estremi opposti:
-1. All'inizio tutti i modelli `stg_`, `int_` e `fct_` sono lasciati come `view`, per cui le dashboard di BI devono rieseguire sette join a cascata a ogni clic impiegando 25 secondi; allora il team imposta `materialized = 'table'` su `fct_web_events`, costringendo `dbt build` a riscrivere 900 milioni di righe ogni ora.
-2. Per velocizzare il run orario, il modello viene convertito in `materialized = 'incremental'` con la condizione ingenua `WHERE occurred_at > (SELECT max(occurred_at) FROM {{ this }})`. Se il run delle 10:00 trova come massimo `09:59:58`, al run delle 11:00 legge solo gli eventi con `occurred_at > 09:59:58`: tutti gli eventi generati su smartphone alle `09:58:30` ma consegnati da Kafka alle `10:01:10` vengono ignorati per sempre.
-3. In ambiente di sviluppo (`dev`), quando un analista lancia `dbt build` per testare una nuova colonna, il suo laptop scarica e ricalcola tutti i 900 milioni di righe invece degli ultimi 3 giorni.
+> **Idea chiave:** `incremental` scambia tempo di calcolo con stato da custodire. Il guadagno è reale solo se il confine temporale è protetto da una finestra di lookback e da una strategia che rende la rilettura idempotente.
 
-La causa di questi problemi è non padroneggiare le quattro materializzazioni di dbt (`view`, `ephemeral`, `table`, `incremental`), le strategie incrementali di ClickHouse (`append`, `delete+insert`, `insert_overwrite`) e il filtro di sviluppo su `target.name`.
+## Le quattro materializzazioni e quando usarle
 
-## Le quattro Materializzazioni, il blocco is_incremental() con Lookback e gli Snapshot SCD2
+La materializzazione decide come l'istruzione `SELECT` di un modello diventa un oggetto fisico nel warehouse. In dbt le scelte di base sono quattro, e conviene attraversarle in ordine di costo di storage e di calcolo.
 
-In dbt la **materializzazione** definisce come il codice SQL del vostro modello viene persistito fisicamente nel data warehouse.
+| Materializzazione | Cosa crea | Costo di build | Costo di lettura | Uso tipico |
+| --- | --- | --- | --- | --- |
+| `view` | Solo la definizione della query | Nullo | Ricalcolo a ogni lettura | Modelli `stg_` |
+| `ephemeral` | Nessun oggetto: una CTE nel modello a valle | Nullo | Dentro la query a valle | Piccoli `int_` usati da uno o due modelli |
+| `table` | Tabella ricostruita a ogni run | Proporzionale al dataset | Veloce | Dimensioni `dim_` e fatti medi |
+| `incremental` | Tabella aggiornata solo nelle righe selezionate | Proporzionale al nuovo | Veloce | Fatti molto grandi |
 
-Il primo meccanismo è la **progressione delle quattro materializzazioni (`ephemeral`, `view`, `table`, `incremental`)** lungo i layer del DAG:
-1. **`view`**: salva nel database solo la definizione testuale della query (`CREATE VIEW`); occupa zero byte di disco ed è sempre aggiornata all'istante, ideale per il 100% dei modelli **`staging` (`stg_`)**.
-2. **`ephemeral`**: non crea nemmeno una vista nel database, ma compila il modello come una CTE (`WITH ...`) iniettata dentro i modelli a valle; utile per piccoli mattoni **`intermediate`** riutilizzati da uno o due modelli senza inquinare lo schema.
-3. **`table`**: ad ogni run esegue `CREATE OR REPLACE TABLE` ricalcolando l'intero dataset da zero; garantisce letture velocissime nelle dashboard ed è la scelta ideale per tutte le dimensioni **`dim_`** e per le tabelle dei fatti **`fct_`** fino a qualche decina di milioni di righe (che ClickHouse ricostruisce in meno di 5 secondi).
-4. **`incremental`**: al primo run (o con `--full-refresh`) costruisce l'intera tabella, mentre nei run successivi elabora solo le righe selezionate dal blocco condizionale `{% if is_incremental() %}`.
+Lo staging resta quasi sempre `view`, perché è una proiezione leggera della tabella grezza e non vale la pena duplicare lo storage. Un modello `ephemeral` non lascia traccia nello schema, il che rende più difficile il debug: va riservato a piccoli mattoni. Una `table` si ricostruisce con `CREATE OR REPLACE` ed è la scelta naturale per le dimensioni e per i fatti fino a qualche decina di milioni di righe, che ClickHouse riscrive in pochi secondi.
 
-Il secondo meccanismo è la **finestra mobile di lookback (`lookback window`) abbinata a `unique_key` o partizione**. Per non perdere gli eventi arrivati in ritardo e catturare gli aggiornamenti di stato (es. un ordine creato ieri e pagato oggi), il filtro dentro `{% if is_incremental() %}` non deve mai partire da `max(ts)` esatto, ma deve tornare indietro di una finestra di sicurezza (es. **48 o 72 ore**: `WHERE occurred_at >= (SELECT max(occurred_at) - INTERVAL 3 DAY FROM {{ this }})`). Per evitare che la rilettura degli ultimi 3 giorni crei duplicati, si configura la strategia incrementale (`delete+insert` su `unique_key = 'order_id'`, `insert_overwrite` dell'intera partizione su ClickHouse/S3, oppure motore `ReplacingMergeTree` nativo).
+La scelta di passare a `incremental` si decide con un numero, non con un'impressione: quando il ricalcolo completo supera i 30-60 secondi o il modello arriva a decine di milioni di righe. Sotto quella soglia la complessità aggiunta non compensa. Un modello incrementale accumula stato: se si cambia un `CASE WHEN` storico, le righe già scritte non si aggiornano finché non si lancia `dbt build --full-refresh`.
 
-Il terzo meccanismo è la **limitazione automatica dei dati in sviluppo (`target.name != 'prod'`)** e gli **Snapshots dbt (SCD Tipo 2)** per storicizzare con `dbt_valid_from` e `dbt_valid_to` le tabelle sorgente che sovrascrivono i dati sul posto.
-
-**Una strategia di materializzazione in dbt è ottimale solo se mantiene gli staging come `view`, costruisce i marts medi come `table` e usa `incremental` solo sui grandi volumi applicando sempre una finestra di lookback deduplicata e un filtro di sviluppo per `dev`.**
-
-## Tre errori nella configurazione dei modelli incremental in dbt
-
-Il blocco SQL/Jinja qui sotto mostra i tre errori classici che corrompono i conteggi o rallentano un modello incrementale: filtrare su `> max(occurred_at)` senza lookback, usare `append` puro quando si rilegge una finestra sovrapposta, e non limitare i dati in ambiente `dev`:
-
-```sql
--- ERRORE 1: incremental_strategy = 'append' senza unique_key né ReplacingMergeTree!
--- ERRORE 2: filtro > max(occurred_at) senza finestra di lookback (- INTERVAL 3 DAY):
--- tutti gli eventi mobile arrivati con 2 minuti di ritardo vengono persi per sempre!
--- ERRORE 3: nessun filtro per target.name == 'dev', quindi un full-refresh locale legge 5 anni!
-{{
-    config(
-        materialized = 'incremental',
-        incremental_strategy = 'append'
-    )
-}}
-SELECT
-    event_id,
-    user_id,
-    occurred_at,
-    revenue_eur
-FROM {{ ref('stg_tracking__events') }}
-{% if is_incremental() %}
-WHERE occurred_at > (SELECT max(occurred_at) FROM {{ this }})
-{% endif %}
+```mermaid
+flowchart TD
+    A["Modello da materializzare"] --> B{"Layer staging?"}
+    B -->|"Sì"| V["view"]
+    B -->|"No"| C{"Mattone piccolo, usato da 1-2 modelli?"}
+    C -->|"Sì"| E["ephemeral"]
+    C -->|"No"| D{"Ricalcolo completo sopra 30-60 s?"}
+    D -->|"No"| T["table"]
+    D -->|"Sì"| I["incremental con lookback e strategia"]
 ```
 
-### Filtrare su occurred_at > max(occurred_at) senza finestra di lookback
+## Watermark, lookback e idempotenza
 
-Scrivere `WHERE occurred_at > (SELECT max(occurred_at) FROM {{ this }})` presuppone un mondo irreale in cui gli eventi arrivano nel data warehouse nello stesso identico ordine millisecondo per millisecondo in cui sono stati generati sui dispositivi degli utenti. Nella realtà basta che un solo utente abbia l'orologio avanti di 10 secondi o che un batch da mobile arrivi con 3 minuti di ritardo perché il watermark `max(occurred_at)` avanzi lasciandosi dietro per sempre migliaia di eventi validi. Bisogna sempre sottrarre una finestra di sicurezza (`max(occurred_at) - INTERVAL 3 DAY`) o filtrare sul timestamp di caricamento del server (`_ingested_at`) combinato con deduplicazione su `unique_key`.
+Il blocco `{% if is_incremental() %}` si applica solo ai run successivi al primo: al primo run (o con `--full-refresh`) dbt costruisce l'intera tabella ignorandolo. Dentro il blocco, il filtro non deve partire dal massimo esatto del timestamp, ma tornare indietro di una finestra di sicurezza pari almeno al ritardo massimo delle sorgenti. Tre giorni coprono i batch mobile ritardatari e i cambi di stato recenti, come un ordine creato ieri e pagato oggi.
 
-### Usare incremental su tabelle piccole da 500.000 righe che si ricalcolano in un secondo
+La rilettura però crea un problema: ogni evento nella finestra viene scritto una seconda volta. L'idempotenza, cioè la proprietà per cui rileggere gli stessi dati non cambia il risultato, richiede una regola che sostituisca le righe già presenti: una `unique_key` con cancellazione e inserimento, la sostituzione di intere partizioni, oppure un motore `ReplacingMergeTree` che deduplica in background.
 
-Trasformare in `materialized = 'incremental'` una tabella di anagrafica o di ordini B2B da 500.000 righe che ClickHouse ricostruisce da zero come `table` in 0,4 secondi introduce complessità e rischio di disallineamento (*state drift*) senza alcun beneficio. Nei modelli incrementali, se modificate la logica di un `CASE WHEN` storico, i vecchi record già scritti nella tabella non si aggiornano finché non lanciate manualmente `dbt build --full-refresh`. Passate a `incremental` solo quando il ricalcolo `table` supera i **30–60 secondi** o decine di milioni di righe.
+Un esempio numerico. L'azienda genera circa 480.000 eventi al giorno, cioè 20.000 all'ora, e il 2% arriva con ritardo oltre il watermark. Con il filtro ingenuo si perdono 20.000 × 2% = 400 eventi all'ora, quindi 400 × 24 = 9.600 al giorno e 9.600 × 30 = 288.000 al mese. Con il lookback di tre giorni la finestra riletta vale 3 × 480.000 = 1.440.000 righe, pari a 1.440.000 ÷ 900.000.000 = 0,16% della tabella. Il tempo del run è proporzionale: 38 minuti sono 2.280 secondi e 2.280 × 0,16% = 3,65 secondi, a cui si somma circa mezzo secondo di costo fisso: il run orario scende a circa 4,2 secondi. Nell'arco di un giorno, 24 run da 38 minuti sono 912 minuti, oltre 15 ore di calcolo; 24 run da 4,2 secondi sono 100,8 secondi. Gli eventi persi sono zero.
 
-### Non filtrare l'orizzonte temporale in sviluppo (dev / ci)
+## Un modello incremental su ClickHouse
 
-Quando uno sviluppatore crea un nuovo modello incrementale o lancia `dbt build --full-refresh` sul proprio schema `dbt_dev_mario`, senza una guardia sul target il modello elabora tutti i 5 anni di storico solo per verificare che la sintassi SQL funzioni. Aggiungere in fondo al modello una clausola Jinja `{% if target.name != 'prod' %} AND occurred_date >= today() - 7 {% endif %}` riduce i tempi di sviluppo e di CI da 20 minuti a 2 secondi.
-
-## Modello Incremental su ClickHouse con Lookback di 3 giorni, Strategia Partizione e Dev Filter
-
-Per implementare un modello incrementale robusto, veloce e a prova di ritardi in dbt + ClickHouse, applicate questi quattro criteri in ordine di priorità:
-
-1. Configurate sul modello `materialized = 'incremental'`, motore `MergeTree()` (o `ReplacingMergeTree`), `partition_by = 'toYYYYMM(occurred_date)'`, `order_by = '(tenant_id, occurred_date, event_id)'` e scegliete la strategia: **`delete+insert`** con `unique_key = 'event_id'` per aggiornamenti sparsi, oppure **`insert_overwrite`** per sostituire atomicamente le partizioni giornaliere/mensili toccate dal lookback.
-2. Nel blocco `{% if is_incremental() %}`, tornate indietro di **3 giorni** (`WHERE occurred_date >= (SELECT max(occurred_date) - INTERVAL 3 DAY FROM {{ this }})`) per catturare il 100% degli eventi in ritardo e i cambi di stato recenti.
-3. Aggiungete il filtro di ambiente `{% if target.name != 'prod' %}` per limitare i run di sviluppo e CI agli ultimi **7 giorni**.
-4. Pianificate un `dbt build --full-refresh` settimanale (es. la domenica notte) se la logica dipende da dimensioni storiche mutevoli.
-
-Ecco il modello incrementale completo pronto per dbt-clickhouse, seguito dalla query di controllo sui metadati delle partizioni:
+Il modello usa `delete_insert` su `unique_key = 'event_id'`, il motore `MergeTree` e la partizione mensile. Su dbt-clickhouse le strategie disponibili includono `append`, `delete_insert` e `insert_overwrite`, e conviene verificare nella documentazione dell'adapter quali siano abilitate nella versione in uso.
 
 ```sql
--- 1. Modello Incrementale robusto: models/marts/product/fct_product_events.sql
--- Usa lookback di 3 giorni con delete+insert su unique_key e limita dev/ci a 7 giorni:
+-- models/marts/product/fct_product_events.sql
+-- Lookback di 3 giorni con delete_insert su event_id; dev e CI leggono solo 7 giorni
 {{
     config(
         materialized = 'incremental',
         engine = 'MergeTree()',
         unique_key = 'event_id',
-        incremental_strategy = 'delete+insert',
+        incremental_strategy = 'delete_insert',
         partition_by = 'toYYYYMM(occurred_date)',
-        order_by = '(tenant_id, occurred_date, event_id)'
+        order_by = '(tenant_id, occurred_date, event_id)',
+        on_schema_change = 'append_new_columns'
     )
 }}
 
@@ -130,19 +96,21 @@ SELECT
 FROM {{ ref('stg_tracking__events') }}
 WHERE 1 = 1
 {% if is_incremental() %}
-  -- Lookback di 3 giorni: cattura tutti i late-arriving events e sostituisce i duplicati via unique_key:
-  AND toDate(occurred_at_utc) >= (
-      SELECT max(occurred_date) - INTERVAL 3 DAY
-      FROM {{ this }}
-  )
+  -- Rilegge gli ultimi 3 giorni: assorbe i late-arriving events e i cambi di stato
+  AND toDate(occurred_at_utc) >= (SELECT max(occurred_date) - INTERVAL 3 DAY FROM {{ this }})
 {% endif %}
 {% if target.name != 'prod' %}
-  -- In dev e CI elaboriamo solo gli ultimi 7 giorni per risposte sub-secondo e zero sprechi:
+  -- In sviluppo e CI si elaborano solo gli ultimi 7 giorni
   AND toDate(occurred_at_utc) >= today() - 7
-{% endif %};
+{% endif %}
+```
 
--- 2. Verifica in ClickHouse (system.parts) dell'efficienza del modello incrementale:
--- Controlla che solo la partizione del mese corrente sia stata modificata nell'ultimo run orario:
+Il filtro su `target.name` riduce il costo dello sviluppo: un `--full-refresh` locale che prima scansionava 900 milioni di righe ne legge 7 × 480.000 = 3.360.000, circa lo 0,37% del totale. La guardia protegge anche il budget del warehouse, perché ogni analista che prova una colonna nuova non innesca una scansione di cinque anni.
+
+Per controllare che il modello tocchi solo ciò che serve, la tabella di sistema `system.parts` mostra le partizioni attive e la loro ultima modifica. Dopo un run orario deve risultare cambiata solo la partizione del mese corrente:
+
+```sql
+-- Verifica su ClickHouse: dopo un run orario cambia solo la partizione corrente
 SELECT
     partition,
     count() AS active_parts,
@@ -155,29 +123,94 @@ WHERE database = 'analytics_prod'
   AND active = 1
 GROUP BY partition
 ORDER BY partition DESC
-LIMIT 6;
+LIMIT 6
 ```
 
-Il risultato unisce la velocità del tempo reale alla precisione del ricalcolo completo: invece di impiegare 38 minuti per riscrivere 900 milioni di righe di tutti i 60 mesi, il run orario in produzione tocca esclusivamente gli ultimi 3 giorni nella partizione corrente `202611` completando in **4,2 secondi**; grazie al lookback di 3 giorni e a `unique_key = 'event_id'`, qualsiasi evento arrivato da mobile con ore di ritardo viene inserito senza creare un solo duplicato; e in ambiente `dev` o `ci`, un `--full-refresh` legge solo 7 giorni e termina in **0,8 secondi**.
+## Append, delete_insert o insert_overwrite
 
-## Scelta della strategia incrementale: Append, Delete+Insert (Merge) o Insert Overwrite
+La strategia dipende da dove cadono gli aggiornamenti. Se si concentrano nelle ultime partizioni temporali, `insert_overwrite` sostituisce intere partizioni fisiche (ultimi giorni con partizione giornaliera) senza frammentare i file. Se singoli record vecchi, sparsi su molti mesi, possono cambiare, come lo stato di un contratto pluriennale, serve `delete_insert` su `unique_key`. L'`append` puro è corretto solo quando si filtra su un identificativo strettamente monotono senza lookback, oppure quando la tabella di destinazione è un `ReplacingMergeTree` che deduplica per conto suo.
 
-Quando configurate un modello `materialized = 'incremental'` in dbt (su ClickHouse, BigQuery, Snowflake o Spark/Iceberg), dovete scegliere quale **`incremental_strategy`** adottare tra **`append`**, **`delete+insert` / `merge`** e **`insert_overwrite`**.
+Su ClickHouse un punto delicato è il costo di `delete_insert`. La cancellazione viene eseguita come mutazione, e una mutazione riscrive fisicamente i blocchi su disco. Lanciarla ogni cinque minuti su una tabella da miliardi di righe che tocca trenta partizioni accoda lavoro in `system.mutations` e può saturare il server. Per grandi flussi di eventi la scelta più robusta è `insert_overwrite` per partizione, oppure `append` su `ReplacingMergeTree`, riservando `delete_insert` a tabelle di dimensione moderata.
 
-Il criterio di scelta è netto: **usate `insert_overwrite` (che sostituisce atomicamente intere partizioni fisiche, es. gli ultimi 3 giorni partizionati per `toYYYYMMDD`) su ClickHouse e S3/Iceberg quando gli aggiornamenti sono concentrati nelle ultime partizioni temporali perché scambiare un'intera partizione `ALTER TABLE ... REPLACE PARTITION` è istantaneo e non frammenta i file, usate `delete+insert` (o `merge` su `unique_key`) quando singoli record vecchi sparsi in molti mesi passati possono subire aggiornamenti (es. stato di un contratto pluriennale), e usate `append` puro solo se filtrate su un ID strettamente monotono senza lookback oppure se la tabella di destinazione usa `ReplacingMergeTree` per deduplicare in background.**
+Quando si aggiunge una colonna a un modello incrementale, `on_schema_change` evita che il run fallisca: `append_new_columns` aggiunge la colonna alle righe nuove, `sync_all_columns` allinea anche rimozioni, `fail` interrompe e obbliga a una decisione esplicita. Una pianificazione settimanale di `--full-refresh`, per esempio la domenica notte, ripulisce la deriva di stato quando la logica dipende da dimensioni storiche mutevoli.
 
-La confusione comune su ClickHouse consiste nell'usare la strategia `delete+insert` (che esegue una mutazione `ALTER TABLE ... DELETE WHERE event_id IN (...)`) ogni 5 minuti su una tabella da miliardi di righe toccando 30 partizioni diverse: in ClickHouse le mutazioni `DELETE` riscrivono fisicamente i blocchi disco e se lanciate ad altissima frequenza saturano la coda delle mutazioni (`system.mutations`). Su ClickHouse, per grandi flussi di eventi, la combinazione regina è **`insert_overwrite` per partizione** oppure **`append` su motore `ReplacingMergeTree`**.
+## Snapshot per le sorgenti che sovrascrivono
 
-Questo articolo non approfondisce la sintassi completa dei blocchi `{% snapshot %}` di dbt (che usano `strategy='timestamp'` o `strategy='check'` per costruire tabelle SCD di Tipo 2 su sorgenti prive di storico). Ricordate che quando aggiungete una nuova colonna a un modello `incremental`, potete configurare `on_schema_change = 'append_new_columns'` (o `'sync_all_columns'`) per evitare che il run fallisca senza dover lanciare subito un `--full-refresh` manuale.
+Un modello incrementale non basta quando la sorgente sovrascrive i valori sul posto: se un cliente cambia piano e la tabella applicativa conserva solo l'ultimo, la storia è persa. Lo snapshot di dbt costruisce una tabella a variazione lenta di tipo 2, con `dbt_valid_from` e `dbt_valid_to` per ogni versione della riga.
 
-## Cinque domande prima di scegliere la materializzazione di un modello dbt
+```sql
+-- snapshots/snap_subscriptions.sql
+-- Storicizza ogni cambio di piano o stato della sottoscrizione (SCD di tipo 2)
+{% snapshot snap_subscriptions %}
+{{
+    config(
+        target_schema = 'snapshots',
+        unique_key = 'subscription_id',
+        strategy = 'check',
+        check_cols = ['plan_tier', 'status']
+    )
+}}
+SELECT subscription_id, customer_id, plan_tier, status
+FROM {{ source('app', 'subscriptions') }}
+{% endsnapshot %}
+```
 
-1. Avete seguito la regola di default (tutti gli `staging` come `view`, i `marts` fino a qualche milione di righe come `table`) passando a `incremental` solo dove il tempo di build di `table` supera davvero i 30–60 secondi?
-2. Nel blocco `{% if is_incremental() %}` avete incluso una **finestra di lookback** (es. `- INTERVAL 3 DAY`) capace di assorbire il ritardo massimo delle sorgenti senza perdere eventi sul confine del watermark?
-3. La strategia incrementale scelta (`insert_overwrite` sulla partizione, `delete+insert` su `unique_key` o `ReplacingMergeTree`) garantisce che la rilettura della finestra di lookback sia **100% idempotente** e non crei righe duplicate?
-4. Avete configurato `on_schema_change = 'sync_all_columns'` (o `'fail'`) e inserito il filtro `{% if target.name != 'prod' %}` per limitare i dati letti in sviluppo e CI?
-5. Su ClickHouse avete controllato `system.mutations` e `system.parts` per verificare che il modello incrementale non stia generando mutazioni pesanti accodate o troppe part piccole?
+```bash
+# Esegue gli snapshot, poi costruisce i modelli incrementali con i loro test
+dbt snapshot
+dbt build --select fct_product_events
+```
 
-La metrica di efficienza per valutare le materializzazioni di un progetto dbt è il **tempo totale di esecuzione di `dbt build` in produzione** (obiettivo: **$< 5\text{ minuti}$ per i run orari**) unito a **`0 discrepanze di conteggio` tra il modello incrementale e un ricalcolo completo `--full-refresh`**.
+Con la strategia `check` dbt confronta le colonne indicate a ogni esecuzione e chiude la riga vecchia quando uno dei valori cambia. Se la sorgente ha un timestamp di ultima modifica affidabile, la strategia `timestamp` è più economica, perché evita di confrontare le colonne.
 
-Di tutta la gestione delle materializzazioni in dbt, ricordate sempre un solo principio: `incremental` è un'ottimizzazione di performance che scambia tempo di calcolo con complessità di stato. Quando la usate, proteggete sempre il confine temporale con una finestra di lookback idempotente.
+## Errori tipici nelle materializzazioni
+
+### Filtrare su max(occurred_at) senza lookback
+
+Il sintomo è un conteggio dell'incrementale leggermente più basso di quello di un ricalcolo completo, con differenze che crescono nel tempo. Sembra ragionevole perché presuppone che gli eventi arrivino nell'ordine in cui sono stati generati. Basta un orologio sbagliato di 10 secondi o un batch mobile in ritardo di 3 minuti per lasciare indietro eventi validi. La cura è sottrarre una finestra di sicurezza dal massimo, oppure filtrare sul timestamp di caricamento (`_ingested_at`) abbinato a una deduplicazione su `unique_key`.
+
+### Usare incremental su tabelle che si ricostruiscono in un secondo
+
+Il sintomo è un modello da 500.000 righe, che come `table` si ricostruirebbe in 0,4 secondi, trasformato in incrementale con regole di lookback e di schema. Sembra una ottimizzazione prudente, ma introduce deriva di stato senza alcun beneficio: dopo una modifica alla logica, i vecchi record restano calcolati con la regola precedente. La cura è tornare a `table` e riservare `incremental` ai modelli oltre la soglia dei 30-60 secondi.
+
+### Non limitare l'orizzonte temporale in sviluppo
+
+Il sintomo è un analista che lancia `dbt build --full-refresh` nel proprio schema e aspetta venti minuti per verificare una virgola. Succede perché il modello non distingue gli ambienti e ricalcola cinque anni. La cura è la guardia su `target.name` mostrata sopra: i run di sviluppo e di CI scendono da circa 20 minuti a pochi secondi.
+
+## Verifica sulle materializzazioni
+
+1. Un modello `table` da 120 milioni di righe impiega 20 minuti. Passandolo a incremental con lookback di 2 giorni su 400.000 righe al giorno, quante righe rilegge a ogni run e quale tempo approssimativo ti aspetti?
+
+<details>
+<summary>Mostra risposta</summary>
+
+Rilegge 2 × 400.000 = 800.000 righe, pari a 800.000 ÷ 120.000.000 = 0,67% della tabella. Il tempo proporzionale è 1.200 secondi × 0,67% = 8 secondi circa, a cui va aggiunto un costo fisso di avvio. Il passaggio a incremental è giustificato, perché 20 minuti superano di gran lunga la soglia dei 60 secondi.
+
+</details>
+
+2. Un modello `stg_` e un modello da 500.000 righe che si ricostruisce in 0,4 secondi: quale materializzazione scegli per ciascuno?
+
+<details>
+<summary>Mostra risposta</summary>
+
+Lo staging resta `view`, perché non conviene duplicare lo storage grezzo. Il modello da 500.000 righe va in `table`: il ricalcolo costa 0,4 secondi, molto sotto la soglia dei 30-60 secondi, e un incrementale aggiungerebbe solo rischio di deriva di stato.
+
+</details>
+
+3. Un ordine creato 5 giorni fa passa da `pending` a `paid` oggi. Il modello ha lookback di 3 giorni e `unique_key = order_id`. Lo stato aggiornato compare nella tabella?
+
+<details>
+<summary>Mostra risposta</summary>
+
+No, perché la finestra copre solo gli ultimi 3 giorni e l'ordine ha 5 giorni. La rilettura non lo raggiunge e la riga resta `pending`. Soluzioni: allungare il lookback fino al ritardo massimo di aggiornamento che puoi tollerare, pari ad almeno 5 giorni in questo caso, oppure filtrare sulla data di ultima modifica della sorgente e non su quella di creazione.
+
+</details>
+
+4. Quante righe legge un run di sviluppo con guardia a 7 giorni su 480.000 eventi al giorno, e quale quota rappresenta di 900 milioni?
+
+<details>
+<summary>Mostra risposta</summary>
+
+Legge 7 × 480.000 = 3.360.000 righe. La quota è 3.360.000 ÷ 900.000.000 = 0,37%, cioè circa 270 volte meno dati del ricalcolo completo.
+
+</details>

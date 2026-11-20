@@ -1,7 +1,9 @@
 ---
 title: "Reverse ETL e activation layer con dbt"
 description: >-
-  Reverse ETL e activation layer. Lezione su come portare i dati del warehouse nei tool operativi.
+  Come costruire in dbt un activation layer per il Reverse ETL: modello act_
+  deduplicato sulla chiave del CRM, filtro di consenso GDPR, payload_hash per
+  inviare solo il delta e circuit breaker sul volume, con i conti della quota API.
 module: "Modulo 16: Analytics engineering con dbt"
 order: 11
 category: Decisione
@@ -9,94 +11,69 @@ headerImage: /course-headers/analytics-engineering-deploy-orchestrazione-e-ci-cd
 headerImageAlt: >-
   Reverse ETL - immagine ufficiale della lezione su GinnyTech, creata da AD
 difficulty: advanced
-duration: 18 min
+duration: 32 min
 prerequisites:
   - analytics-engineering/semantic-layer-e-metriche-riusabili
 learningObjectives:
-  - Costruire modelli activation-ready a granularità di cliente o account
-  - Configurare sincronizzazioni con deduplica, mapping dei campi e filtri di consenso
-  - Monitorare freshness e volumi di ogni sincronizzazione verso i tool operativi
+  - Costruire un modello act_ a granularità di contatto con una sola riga per chiave di upsert del CRM
+  - Calcolare il risparmio di quota API ottenuto inviando solo i record con payload_hash cambiato
+  - Configurare filtro di consenso e circuit breaker in modo che un bug a monte non produca comunicazioni sbagliate
+  - Decidere tra Reverse ETL dal warehouse e streaming diretto in base a latenza e complessità del calcolo
 binario: "ml-tabellare"
-formato: "articolo"
-autore: "Hermes"
-controllatoDa: "Argo"
-autorizzatoDa: "Giano"
+formato: "didattica-v2"
 draft: false
-dateModified: 2026-11-13
+dateModified: 2026-11-17
 ---
 
-# Reverse ETL e activation layer con dbt
+Un'azienda B2B calcola nel warehouse un punteggio di rischio abbandono (`churn_risk_score`) e il valore cliente (`ltv_eur`). Per portarli in HubSpot un connettore di Reverse ETL punta direttamente a una vista non deduplicata sull'email, senza filtro sul consenso marketing e con un ricalcolo completo ogni ora di `500.000` contatti (scenario costruito con numeri di esempio).
 
-Un'azienda B2B calcola nel data warehouse un punteggio di rischio abbandono (`churn_risk_score`) e il valore del cliente (`ltv_eur`), ma per inviarli a HubSpot e Google Ads un connettore di Reverse ETL punta direttamente a una vista non deduplicata sull'email, priva del filtro sul consenso marketing GDPR e che ricalcola da zero 500.000 contatti ogni ora. Alla prima sincronizzazione il connettore crea 14.000 contatti duplicati nel CRM, brucia l'intera quota giornaliera di chiamate API di HubSpot bloccando i moduli del sito web e invia email promozionali a 3.200 utenti che avevano revocato il consenso. La causa non è lo strumento di Reverse ETL: è non costruire in dbt un **Activation Layer (`act_`) dedicato, deduplicato sulla chiave esterna del tool, filtrato per il consenso privacy e basato sul diff incrementale (`payload_hash`)**.
+Alla prima sincronizzazione il connettore crea `14.000` contatti duplicati, esaurisce in pochi minuti la quota giornaliera di chiamate API bloccando i moduli del sito e manda email promozionali a `3.200` persone che avevano revocato il consenso. Lo strumento di Reverse ETL funziona come previsto. Ha ricevuto una tabella sbagliata.
 
-## Quattordicimila contatti duplicati in HubSpot e quota API esaurita in dieci minuti
+> **Idea chiave:** il Reverse ETL è sicuro solo se legge da un modello `act_` costruito per quel destinatario: una riga per chiave del tool, consensi filtrati alla fonte, solo le righe con `payload_hash` cambiato e un interruttore che ferma l'invio quando il delta supera una soglia.
 
-Questo è un caso ricostruito con numeri di esempio su quanto accade quando si collegano gli strumenti operativi esterni (CRM, piattaforme di email marketing, reti pubblicitarie) direttamente alle tabelle analitiche interne senza uno strato di attivazione progettato su misura. L'azienda usa ClickHouse + dbt e vuole sincronizzare i punteggi calcolati sui clienti verso HubSpot, Salesforce e le Conversion API (CAPI) di Meta/Google.
+## Quattordicimila duplicati e una quota esaurita in pochi minuti
 
-L'integrazione improvvisata scatena tre incidenti operativi:
-1. Nel data warehouse la tabella `dim_users` ha come chiave primaria `user_id` (dove la stessa persona aziendale può essersi registrata due volte con la stessa `email`), mentre HubSpot usa `email` come identificativo univoco del contatto: l'invio senza deduplicazione su `lower(trim(email))` genera collisioni, errori `409 Conflict` e schede duplicate per i commerciali.
-2. Il job di sincronizzazione invia a ogni giro tutti i 500.000 profili anche se nell'ultima ora solo 1.200 clienti hanno cambiato stato: 500.000 chiamate `PATCH` saturano il *rate limit* delle API di HubSpot, mandando in errore i webhook del sito web principale.
-3. Il modello SQL non controlla `has_marketing_consent = 1` né rimuove gli account disabilitati, innescando l'invio automatico di campagne commerciali a contatti disiscritti (*opt-out*).
+Il Reverse ETL chiude il cerchio dell'architettura dati: invece di lasciare punteggi e segmenti in dashboard che qualcuno deve ricordarsi di aprire, li porta dentro gli strumenti dove lavorano commerciali, customer success e marketing. L'azienda del caso usa ClickHouse e dbt e vuole sincronizzare i risultati verso HubSpot, Salesforce e le Conversion API delle piattaforme pubblicitarie.
 
-La causa del triplo disastro è dimenticare che i tool operativi SaaS hanno vincoli opposti a un database colonnare: **API lente soggette a quote strette, chiavi naturali rigide (email, P.IVA, `external_id`) e conseguenze legali immediate se parte un messaggio automatico sbagliato**.
+L'integrazione improvvisata produce tre incidenti, uno per ogni scorciatoia. Il primo riguarda la chiave: `dim_customers` è unica per `customer_id`, ma la stessa persona può aver aperto due account con la stessa email, mentre HubSpot usa l'email come identificativo del contatto. Inviare entrambe le righe genera errori `409 Conflict` e schede doppie per i commerciali.
 
-## Il layer di Activation (act_), il Diff basato su Hash e il Gate di Consenso/Volume
+Il secondo riguarda il volume. Il job invia a ogni giro tutti i `500.000` profili anche se nell'ultima ora ne sono cambiati `1.200`, e le chiamate `PATCH` saturano il limite del CRM, tanto che i webhook del sito principale iniziano a fallire. Il terzo riguarda il consenso: il modello non controlla il flag marketing e non esclude gli account da cancellare, quindi parte una campagna verso chi si era disiscritto.
 
-Il **Reverse ETL** chiude il cerchio dell'architettura dati moderna: invece di lasciare i KPI chiusi dentro le dashboard passivamente in attesa che qualcuno li legga, riporta i punteggi e i segmenti calcolati da dbt direttamente dentro gli strumenti dove lavorano i team operativi (*Operational Analytics*). Perché funzioni in sicurezza servono tre meccanismi in dbt.
+Dietro i tre incidenti c'è un'asimmetria di fondo. Un warehouse colonnare regge scansioni enormi e perdona un grafico sbagliato per mezz'ora. Un tool operativo ha invece API lente con quote strette, chiavi naturali rigide come email o partita IVA e, soprattutto, effetti irreversibili: un messaggio inviato non si richiama.
 
-Il primo meccanismo è il **modello di Activation dedicato (`models/marts/activation/act_<tool>__<entita>.sql`) con contratto rigoroso sulla chiave di sincronizzazione**. Un tool di Reverse ETL (Hightouch, Census, Airbyte Reverse, script custom) non deve mai leggere una `fct_` o una `dim_` generica: legge solo un modello `act_` costruito specificamente per quel destinatario. Il modello `act_hubspot__contacts` ha per contratto **esattamente una riga per `email_clean`** (testata con `unique` + `not_null`), espone già i nomi delle colonne identici alle proprietà interne di HubSpot (`lifecyle_stage`, `ltv_eur`, `churn_risk_tier`) e sostituisce i `NULL` con valori espliciti così da non cancellare per errore campi compilati a mano dai commerciali nel CRM.
+## Perché un tool operativo non è una dashboard
 
-Il secondo meccanismo è il **filtro di Consenso GDPR alla fonte (`WHERE is_consent_granted = 1`) e l'invio dei soli Delta tramite `payload_hash`**. Calcolando nel modello dbt una colonna `record_hash = hex(MD5(concat(ltv_eur, churn_risk_tier, ...)))` e confrontandola con lo snapshot dell'ultimo invio riuscito, il Reverse ETL trasmette via API **solo le righe il cui hash è cambiato** (1.200 record invece di 500.000), abbattendo del 99,7% il consumo di quota API.
+Conviene fissare le differenze prima di scrivere il modello, perché ognuna diventa una regola del livello di attivazione.
 
-Il terzo meccanismo è il **Circuit Breaker sul volume del Delta**. Se un bug a monte fa sì che improvvisamente il 40% dell'intero database risulti "modificato" (es. 200.000 contatti passati per errore a `churn_risk = 'HIGH'`), un controllo di guardia blocca l'invio prima di far partire 200.000 email automatiche o task commerciali sbagliati.
+| Caratteristica | Dashboard di BI | Tool operativo (CRM, ads, marketing automation) | Conseguenza nel modello |
+|---|---|---|---|
+| Chiave | Qualsiasi dimensione del grafico | Una chiave naturale rigida (email, `external_id`, partita IVA) | Una sola riga per chiave, con test `unique` |
+| Volume di scrittura | Lettura di milioni di righe | Quota API limitata per ora o per giorno | Inviare solo il delta con `payload_hash` |
+| Errore | Un numero sbagliato, correggibile | Azione esterna irreversibile | Filtro di consenso e circuit breaker |
+| Schema | Colonne a piacere | Proprietà predefinite del tool | Nomi e tipi allineati all'API del destinatario |
 
-**Una pipeline di Reverse ETL è sicura in produzione solo se legge da modelli `act_` deduplicati sulla chiave del destinatario, filtra a monte i consensi privacy, invia solo i record con `payload_hash` modificato e blocca la sincronizzazione se il delta supera la soglia di guardia.**
+Il modello `act_` esiste per assorbire queste quattro differenze in un punto solo. Un connettore di Reverse ETL come Hightouch, Census o uno script custom non deve mai leggere una `fct_` o una `dim_` generica: legge soltanto il modello costruito per il proprio destinatario, e il resto del warehouse resta libero di evolvere senza rompere il CRM.
 
-## Tre errori nell'implementazione del Reverse ETL verso CRM e Ads
-
-Il blocco SQL qui sotto mostra il modello mal progettato collegato direttamente al CRM: nessuna deduplicazione sull'email, nessun filtro sugli utenti che hanno revocato il consenso marketing e assenza di un hash di stato per filtrare i record invariati:
-
-```sql
--- ERRORE 1: la query è raggruppata per user_id anziché per email -> se due user_id condividono
--- la stessa email, il CRM riceve righe duplicate in conflitto sulla stessa chiave!
--- ERRORE 2: nessun filtro su marketing_opt_in = 1 e gdpr_deleted = 0 (violazione privacy!).
--- ERRORE 3: nessun calcolo di payload_hash -> riscrive tutti i 500.000 contatti ogni ora!
-SELECT
-    user_id,
-    email,
-    company_name,
-    total_ltv_eur,
-    churn_probability
-FROM {{ ref('dim_customers') }}
-WHERE email IS NOT NULL;
+```mermaid
+flowchart LR
+    A["dim_customers (granularità: customer_id)"] --> B["act_hubspot__contacts (una riga per email_clean)"]
+    P["stg_privacy__revocations"] --> B
+    B --> C["payload_hash per riga"]
+    C --> D{"Delta rispetto all'ultimo invio riuscito"}
+    D -->|"delta sotto soglia"| E["Sync API verso HubSpot"]
+    D -->|"delta sopra soglia"| F["Blocco e approvazione umana"]
+    E --> G["sync_state aggiornato"]
 ```
 
-### Sincronizzare sul CRM una tabella non deduplicata sulla chiave primaria del tool di destinazione
+## Il modello act_: una riga per chiave, consensi alla fonte
 
-Prendere `dim_customers` (univoca per `customer_id`) e sincronizzarla verso HubSpot, Braze o Klaviyo usando `email` come chiave di *upsert* senza prima aver consolidato a una sola riga per `lower(trim(email))` causa sovrascritture casuali (*race conditions*). Se `mario@azienda.it` ha un vecchio account inattivo (`ltv = 0 €`) e un nuovo account attivo (`ltv = 12.000 €`), ad ogni giro il connettore invia entrambi i record in ordine imprevedibile: a metà dei giri l'account da `0 €` arriva per secondo e azzera la scheda del cliente VIP dentro il CRM.
+Il modello `act_hubspot__contacts` ha per contratto esattamente una riga per `email_clean`, testata con `unique` e `not_null`. Le colonne hanno già i nomi delle proprietà HubSpot, così il connettore non deve fare mapping, e i `NULL` sono sostituiti da valori espliciti per non cancellare campi compilati a mano dai commerciali.
 
-### Non filtrare a monte nel modello dbt i consensi GDPR e gli account soppressi
-
-Delegare ai filtri manuali dentro le campagne di HubSpot o Google Ads il compito di escludere chi ha revocato il consenso privacy o ha chiesto la cancellazione dei dati è un rischio legale gravissimo. Basta che un junior marketer crei una nuova lista dimenticando il filtro sul campo custom perché partano comunicazioni illecite. Nel modello `act_`, i contatti privi di consenso per quella finalità non devono proprio essere esportati verso le piattaforme pubblicitarie (o devono viaggiare solo come evento di revoca/soppressione esplicita).
-
-### Non mettere una soglia di blocco (Circuit Breaker) sul numero massimo di record modificati
-
-In una dashboard analitica interna, se un bug mostra un numero sbagliato per mezz'ora basta correggere il modello e fare refresh; nel Reverse ETL, **scrivere sul CRM o su un motore di marketing automation scatena azioni nel mondo esterno irreversibili** (email inviate ai clienti, telefonate assegnate ai venditori, budget pubblicitario riallocato). Se un'esecuzione oraria rileva improvvisamente più del 10% di record cambiati (`delta_rows > 50.000`), la sincronizzazione deve fermarsi automaticamente in attesa di approvazione umana.
-
-## Modello dbt Activation-Ready (`act_`) con Dedup Email, Hash Diff e Circuit Breaker
-
-Per costruire un Activation Layer affidabile in dbt + ClickHouse, applicate questi quattro criteri in ordine di priorità:
-
-1. Create nella cartella `models/marts/activation/` un modello dedicato per ogni destinazione (`act_hubspot__contacts.sql`) con contratto `enforced: true` e test `unique` + `not_null` sulla chiave esterna del tool (`email_clean`).
-2. Nel modello applicate la deduplicazione deterministica (tenendo l'account attivo con LTV maggiore per la stessa email), formattate i campi secondo lo schema API del destinatario e filtrate i consensi obbligatori.
-3. Calcolate la colonna **`payload_hash`** (`cityHash64` o `MD5` di tutti gli attributi sincronizzati) così da estrarre solo i record realmente variati rispetto all'ultimo stato sincronizzato (`last_synced_state`).
-4. Prima di inviare il batch alle API esterne, eseguite la query di **Circuit Breaker** che verifica freschezza e volume del delta (`delta_pct < 10%`).
-
-Ecco il modello `act_hubspot__contacts.sql` completo seguito dalla query di estrazione Delta + Circuit Breaker in ClickHouse:
+La deduplicazione deve essere deterministica. Quando la stessa email compare su più `customer_id`, il modello tiene il profilo con LTV maggiore e, a parità, il più recente, mentre il valore di LTV esposto è la somma dei profili. Il filtro sul consenso agisce prima di ogni aggregazione: chi non ha il consenso per quella finalità non entra nel modello.
 
 ```sql
--- 1. Modello dbt Activation-Ready: models/marts/activation/act_hubspot__contacts.sql
--- Garantisce: 1 sola riga per email_clean, filtro GDPR attivo e payload_hash deterministico:
+-- models/marts/activation/act_hubspot__contacts.sql
+-- Garantisce: una riga per email_clean, consenso filtrato alla fonte, payload_hash deterministico.
 {{
     config(
         materialized = 'table',
@@ -113,26 +90,27 @@ WITH customers_valid AS (
         plan_tier,
         total_ltv_eur,
         churn_risk_tier,
-        marketing_consent_granted,
         updated_at
     FROM {{ ref('dim_customers') }}
     WHERE email != ''
       AND is_gdpr_erased = 0
       AND is_test_account = 0
+      AND marketing_consent_granted = 1
 ),
+
 deduplicated_by_email AS (
-    -- Se la stessa email compare su più customer_id, tiene il profilo con LTV maggiore e più recente:
+    -- Se la stessa email compare su più customer_id, tiene il profilo con LTV maggiore e più recente.
     SELECT
         email_clean,
         argMax(customer_id, (total_ltv_eur, updated_at)) AS primary_customer_id,
         argMax(company_name, (total_ltv_eur, updated_at)) AS hs_company_name,
         argMax(plan_tier, (total_ltv_eur, updated_at)) AS hs_plan_tier,
         sum(total_ltv_eur) AS hs_lifetime_value_eur,
-        argMax(churn_risk_tier, (total_ltv_eur, updated_at)) AS hs_churn_risk,
-        max(marketing_consent_granted) AS hs_marketing_opt_in
+        argMax(churn_risk_tier, (total_ltv_eur, updated_at)) AS hs_churn_risk
     FROM customers_valid
     GROUP BY email_clean
 )
+
 SELECT
     email_clean,
     primary_customer_id,
@@ -140,63 +118,192 @@ SELECT
     hs_plan_tier,
     hs_lifetime_value_eur,
     hs_churn_risk,
-    hs_marketing_opt_in,
-    -- Impronta digitale del record: cambia SOLO se almeno un attributo di business è cambiato!
+    -- Impronta del record: cambia solo se almeno un attributo sincronizzato è cambiato.
     hex(MD5(concat(
         toString(primary_customer_id), '|',
         hs_company_name, '|',
         hs_plan_tier, '|',
         toString(hs_lifetime_value_eur), '|',
-        hs_churn_risk, '|',
-        toString(hs_marketing_opt_in)
+        hs_churn_risk
     ))) AS payload_hash,
     now() AS dbt_computed_at
 FROM deduplicated_by_email;
+```
 
--- 2. Query di Estrazione DELTA + Gate Circuit Breaker prima della chiamata API verso HubSpot:
--- Invia solo i contatti con payload_hash cambiato rispetto a last_synced_hubspot_state
--- e blocca tutto se il delta supera il 10% del totale (protezione da bug a monte):
-WITH delta_candidates AS (
-    SELECT
-        cur.email_clean,
-        cur.hs_lifetime_value_eur,
-        cur.hs_churn_risk,
-        cur.hs_marketing_opt_in,
-        cur.payload_hash
+Il contratto sul modello rende esplicito cosa il destinatario può aspettarsi, e il test singolare qui sotto verifica che nessuna email revocata sia mai uscita.
+
+```yaml
+# models/marts/activation/_activation__models.yml
+version: 2
+
+models:
+  - name: act_hubspot__contacts
+    description: "Una riga per email_clean con consenso marketing attivo, pronta per l'upsert in HubSpot."
+    config:
+      contract:
+        enforced: true
+    columns:
+      - name: email_clean
+        data_type: String
+        tests:
+          - unique
+          - not_null
+      - name: primary_customer_id
+        data_type: String
+      - name: hs_company_name
+        data_type: String
+      - name: hs_plan_tier
+        data_type: String
+      - name: hs_lifetime_value_eur
+        data_type: Decimal(18, 2)
+      - name: hs_churn_risk
+        data_type: String
+        tests:
+          - accepted_values:
+              values: ['LOW', 'MEDIUM', 'HIGH']
+      - name: payload_hash
+        data_type: String
+        tests:
+          - not_null
+      - name: dbt_computed_at
+        data_type: DateTime
+```
+
+```sql
+-- tests/assert_act_hubspot_contacts_no_revoked_consent.sql
+-- Il test fallisce se anche una sola email revocata compare nel modello di attivazione.
+SELECT a.email_clean
+FROM {{ ref('act_hubspot__contacts') }} AS a
+INNER JOIN {{ ref('stg_privacy__revocations') }} AS r
+    ON a.email_clean = lower(trim(r.email));
+```
+
+## Payload hash: inviare solo il delta, con i numeri della quota
+
+La colonna `payload_hash` è un'impronta di tutti gli attributi che il connettore sincronizza. Il connettore la confronta con quella dell'ultimo invio riuscito, salvata in una tabella `sync_state_hubspot_contacts`, e trasmette solo le righe nuove o con hash diverso. Un contatto che non cambia non genera nessuna chiamata.
+
+Il risparmio si calcola con i numeri del caso (numeri di esempio). La base conta 500.000 contatti, nell'ultima ora ne risultano cambiati 1.200 e la quota del CRM è 250.000 chiamate al giorno. Un invio completo orario produce 500.000 chiamate a ogni giro, cioè 2 volte l'intera quota giornaliera già al primo giro. Un invio del solo delta produce 1.200 chiamate: 1.200 / 500.000 = 0,24% del volume originale, quindi una riduzione del 99,76%.
+
+Su una giornata di 24 giri, e ipotizzando lo stesso delta a ogni giro, le chiamate diventano 1.200 × 24 = 28.800 righe inviate, pari a 28.800 / 250.000 = 11,52% della quota giornaliera. Il margine residuo, 100% − 11,52% = 88,48%, è quello che lascia respirare i webhook del sito e le altre integrazioni. Con una durata di invio di circa 4 sec per giro invece di diversi minuti, il costo operativo scende insieme alla quota.
+
+```sql
+-- Estrazione del delta: solo contatti nuovi o con hash cambiato rispetto all'ultimo stato sincronizzato.
+SELECT
+    cur.email_clean,
+    cur.hs_lifetime_value_eur,
+    cur.hs_churn_risk,
+    cur.payload_hash
+FROM analytics_prod.act_hubspot__contacts AS cur
+LEFT JOIN analytics_prod.sync_state_hubspot_contacts AS prev
+    ON cur.email_clean = prev.email_clean
+WHERE prev.email_clean = ''
+   OR cur.payload_hash != prev.payload_hash;
+```
+
+In ClickHouse il `LEFT JOIN` senza corrispondenza restituisce il valore di default del tipo e non `NULL`, per questo il confronto è con la stringa vuota. È un dettaglio di dialetto che cambia da motore a motore e che un test di integrazione sul modello dovrebbe coprire.
+
+## Il circuit breaker prima della chiamata API
+
+Se un bug a monte fa risultare modificato il 40% della base, per esempio perché `churn_risk_tier` viene ricalcolato male e porta 200.000 contatti a `HIGH`, l'hash cambia per tutti e il delta diventa enorme. Il sistema lo interpreta come un aggiornamento legittimo e parte a scrivere. Il circuit breaker è un controllo di guardia che confronta il volume del delta con una soglia prima di qualsiasi chiamata esterna.
+
+Con i numeri precedenti, una soglia del 10% su 500.000 contatti equivale a 50.000 righe. Il delta normale di 1.200 righe vale 1.200 / 500.000 = 0,24% e passa. Il delta anomalo di 200.000 righe vale 200.000 / 500.000 = 40% e supera la soglia di 40 − 10 = 30 punti percentuali: il job si ferma e attende un'approvazione umana. Il valore della soglia dipende dal destinatario e dalla volatilità normale del dato, e va tarato osservando le prime settimane di sincronizzazione.
+
+```sql
+-- Gate di sicurezza da eseguire prima del batch verso HubSpot.
+WITH delta AS (
+    SELECT cur.email_clean
     FROM analytics_prod.act_hubspot__contacts AS cur
     LEFT JOIN analytics_prod.sync_state_hubspot_contacts AS prev
         ON cur.email_clean = prev.email_clean
-    WHERE prev.email_clean IS NULL
-       OR cur.payload_hash != prev.payload_hash
+    WHERE prev.email_clean = '' OR cur.payload_hash != prev.payload_hash
 )
 SELECT
     (SELECT count() FROM analytics_prod.act_hubspot__contacts) AS total_contacts,
-    count() AS changed_contacts_to_sync,
-    round(changed_contacts_to_sync * 100.0 / nullIf(total_contacts, 0), 2) AS delta_pct,
-    if(delta_pct <= 10.0, 'SAFE_TO_SYNC_API', 'CIRCUIT_BREAKER_TRIPPED_ABORT') AS sync_verdict
-FROM delta_candidates;
+    count() AS changed_contacts,
+    round(changed_contacts * 100.0 / nullIf(total_contacts, 0), 2) AS delta_pct,
+    if(delta_pct <= 10.0, 'SAFE_TO_SYNC', 'CIRCUIT_BREAKER_TRIPPED') AS sync_verdict
+FROM delta;
 ```
 
-Il risultato risolve tutti i problemi operativi e legali: grazie al `GROUP BY email_clean` con test `unique` in dbt, HubSpot non riceve mai più un contatto duplicato né un errore `409 Conflict`; grazie al confronto su `payload_hash`, ad ogni giro orario vengono inviati via API solo i **950 contatti effettivamente variati** (`0,19%` del totale) invece di 500.000, completando la sincronizzazione in **4 secondi** e consumando meno dell'1% della quota API giornaliera; e se un errore a monte dovesse alterare improvvisamente più del 10% dei profili, `sync_verdict` restituisce `'CIRCUIT_BREAKER_TRIPPED_ABORT'` fermando il job prima che parta una sola comunicazione errata.
+Nel flusso quotidiano la costruzione e i test del modello precedono il gate, così la sincronizzazione parte solo da un `act_` verde.
 
-## Reverse ETL basato su Warehouse (dbt + Batch/Micro-batch) o Event Streaming diretto (Kafka/CDP)
+```bash
+# Costruisce l'activation layer e i suoi antenati, test inclusi: se un test fallisce, il sync non parte
+dbt build --select +act_hubspot__contacts
 
-Per inviare i dati agli strumenti operativi esterni, quando conviene passare dal **Data Warehouse tramite Reverse ETL (dbt `act_` + sync ogni 15–60 minuti)** e quando conviene inviare l'evento **in tempo reale diretto dal bus di streaming (Kafka / Server-Side GTM)**?
+# Esegue solo i test sul modello di attivazione, per esempio dopo una correzione del consenso
+dbt test --select act_hubspot__contacts
+```
 
-Il criterio di scelta è netto: **usate il Reverse ETL dal Data Warehouse (modelli `act_` in dbt) per tutti gli attributi che richiedono storico profondo, join multi-sorgente o calcoli aggregati complessi (LTV cumulato, punteggio di propensione al churn, segmento RFM, stato di fatturazione ERP, riconciliazione di identità tra web e negozi fisici) dove una latenza di 15–60 minuti è perfetta, usate invece lo streaming diretto (Kafka / webhook in sub-secondo) esclusivamente per i trigger transazionali istantanei basati su un singolo evento atomico (email di reset password, codice OTP, conferma ordine immediata).**
+## Warehouse con dbt o streaming diretto: quando scegliere cosa
 
-La confusione comune consiste nel cercare di calcolare il `Lifetime Value` netto dei resi o il `Churn Score` dentro il codice Javascript del sito web o dentro un tag manager per mandarlo subito a HubSpot, finendo per inviare al CRM numeri parziali che ignorano i pagamenti bonificati nel gestionale o i resi merce. Il Data Warehouse con dbt è l'unico posto dell'azienda che vede contemporaneamente sito web, app, CRM e contabilità: per questo è il cervello naturale dell'Activation Layer.
+Un attributo va nel CRM passando dal warehouse oppure da un evento in tempo reale? La risposta dipende da quanto il dato è calcolato e da quanto è urgente. LTV cumulato, punteggio di propensione al churn, segmento RFM, stato di fatturazione dell'ERP e riconciliazione delle identità tra web e negozi richiedono storico profondo, join tra sorgenti e aggregazioni: appartengono ai modelli `act_`, con una latenza di 15-60 minuti che per un commerciale è irrilevante.
 
-Questo articolo non tratta l'hashing SHA-256 lato warehouse per il *Customer Match* pubblicitario (`hex(SHA256(lower(trim(email))))` richiesto dalle API di Google Ads e Meta Conversion API per associare le audience senza trasmettere l'email in chiaro). Ricordate che in ClickHouse potete calcolare direttamente `lower(hex(SHA256(email_clean))) AS email_sha256` dentro il modello `act_ads__audiences` per non far mai uscire i dati PII in chiaro dal warehouse.
+Lo streaming diretto, con Kafka o un tag lato server, è adatto ai trigger transazionali basati su un singolo evento atomico, come l'email di reset password, il codice OTP o la conferma d'ordine immediata. L'errore tipico è calcolare il `Lifetime Value` dentro il codice JavaScript del sito o di un tag manager per spedirlo subito al CRM. Il numero che arriva ignora i bonifici registrati nel gestionale e i resi, perché solo il warehouse vede insieme sito, app, CRM e contabilità.
 
-## Cinque domande prima di attivare una sincronizzazione Reverse ETL in produzione
+Un caso a parte è il Customer Match pubblicitario, dove le piattaforme richiedono l'email con hash SHA-256 e non in chiaro. In ClickHouse il modello `act_ads__audiences` può calcolare `lower(hex(SHA256(email_clean)))` e far uscire dal warehouse solo l'impronta, riducendo l'esposizione dei dati personali.
 
-1. Il connettore legge esclusivamente da un modello dbt dedicato nello strato **`activation` (`act_<tool>__<entita>`)** coperto da `contract: {enforced: true}` e non punta mai direttamente a una tabella `dim_` o `fct_` generica?
-2. Il modello `act_` ha un test bloccante `unique` + `not_null` esattamente sulla **chiave di identificazione usata dal tool di destinazione** (es. `email_clean`, `external_account_id`, `vat_number`)?
-3. Il modello filtra rigorosamente a monte i record cancellati per GDPR e propaga in modo esplicito i flag di consenso (`marketing_opt_in`), usando l'hash `SHA256` quando alimenta piattaforme pubblicitarie esterne?
-4. La sincronizzazione calcola un **`payload_hash`** ed esporta via API solo i record effettivamente aggiunti o modificati dall'ultimo giro, rispettando i *rate limit* del destinatario?
-5. È attivo un **Circuit Breaker** sul volume massimo di modifiche per singolo run (es. blocco automatico se varia più del 10% della base clienti) più un alert sul tasso di righe rifiutate dall'API del destinatario?
+## Tre errori nell'implementazione del Reverse ETL
 
-La metrica regina per governare l'Activation Layer è il **Sync Success Rate (`>= 99,9%` di record accettati dall'API destinataria al primo tentativo)** abbinato a **0 errori di chiave duplicata e 0 violazioni di quota API**.
+I tre errori seguenti si ripresentano quasi identici in aziende diverse. Ciascuno ha un sintomo riconoscibile in produzione e una correzione che sta interamente nel modello dbt.
 
-Di tutta la lezione sul Reverse ETL, portate con voi una sola regola: quando scrivete una tabella per una dashboard, un errore produce un grafico brutto; quando scrivete un modello `act_` per il Reverse ETL, un errore fa partire diecimila email vere ai vostri clienti. Proteggete ogni modello di attivazione con deduplicazione sulla chiave del tool, hash diff e circuit breaker.
+### Sincronizzare una tabella non deduplicata sulla chiave del tool
+
+Il sintomo è una scheda cliente che a volte mostra `12.000 €` di LTV e a volte `0 €`, e il connettore che segnala `409 Conflict` a intervalli irregolari. Sembra ragionevole perché `dim_customers` è già unica per `customer_id` e l'email viene scelta come chiave di upsert solo al momento di configurare il connettore. In realtà un vecchio account inattivo e un account nuovo con la stessa email vengono inviati in ordine imprevedibile, e quando arriva per ultimo quello da zero la scheda del cliente di valore si azzera. Si corregge consolidando a una riga per `lower(trim(email))` nel modello `act_` e proteggendo la chiave con `unique`.
+
+### Delegare il consenso ai filtri del CRM
+
+Il sintomo è una campagna partita verso un contatto disiscritto. Sembra ragionevole perché le piattaforme offrono filtri sulle liste e ogni campagna può escludere chi ha revocato. Basta che un nuovo operatore crei una lista senza quel filtro perché parta una comunicazione illecita. Si corregge applicando il filtro nel modello, in modo che chi non ha consenso per quella finalità non esca dal warehouse, oppure viaggi solo come evento esplicito di soppressione.
+
+### Sincronizzare senza una soglia di blocco sul delta
+
+Il sintomo è un'azione esterna di massa che nessuno aveva autorizzato: email inviate, task assegnati ai venditori, budget pubblicitario spostato. Sembra ragionevole perché in una dashboard un numero sbagliato per mezz'ora si corregge con un refresh. Nel Reverse ETL scrivere sul CRM produce effetti irreversibili. Si corregge con il circuit breaker: se il delta supera la soglia, per esempio 50.000 righe oppure il 10% della base, il job si ferma e attende un'approvazione umana, e un alert segnala anche il tasso di righe rifiutate dall'API.
+
+## Controllo prima di attivare un sync in produzione
+
+La metrica che governa il livello di attivazione è il Sync Success Rate, cioè la quota di record accettati dall'API al primo tentativo, che deve restare almeno al 99,9%, insieme a zero errori di chiave duplicata e zero violazioni di quota. Le cinque domande seguenti verificano le condizioni perché quel numero resti vero.
+
+1. Il connettore legge solo da un modello `act_<tool>__<entita>` con contratto `enforced: true`, o può ancora puntare a una `dim_` o `fct_` generica?
+
+<details>
+<summary>Mostra risposta</summary>
+
+Deve leggere solo da un modello `act_`. Una `dim_` o `fct_` generica cambia per ragioni che riguardano altri consumatori, e una modifica al grano o alle colonne potrebbe finire in HubSpot senza che nessuno l'abbia deciso. Il contratto `enforced: true` blocca la build se le colonne o i tipi del modello divergono da quanto dichiarato.
+
+</details>
+
+2. Una base di 800.000 contatti ha un delta orario di 2.400 righe e una soglia del 10%. Il job parte o si ferma, e dopo quante righe si fermerebbe?
+
+<details>
+<summary>Mostra risposta</summary>
+
+Il delta vale 2.400 / 800.000 = 0,3%, molto sotto il 10%, quindi il job parte. La soglia corrisponde a 800.000 × 10% = 80.000 righe: sopra quel numero il circuit breaker blocca l'invio e richiede approvazione umana.
+
+</details>
+
+3. Un contatto cambia solo il campo `dbt_computed_at` perché il modello viene ricalcolato ogni ora. Perché `dbt_computed_at` non va dentro `payload_hash`?
+
+<details>
+<summary>Mostra risposta</summary>
+
+Perché cambierebbe a ogni esecuzione e renderebbe tutte le righe diverse dallo stato precedente, annullando il risparmio del delta e facendo scattare il circuit breaker. L'hash deve coprire solo gli attributi che il destinatario riceve davvero.
+
+</details>
+
+4. Quale dei due canali usi per inviare un codice OTP e quale per un punteggio di propensione al churn, e perché?
+
+<details>
+<summary>Mostra risposta</summary>
+
+Il codice OTP passa dallo streaming diretto, perché è un evento atomico che richiede latenza sotto il secondo. Il punteggio di propensione passa dal warehouse con un modello `act_`, perché dipende da storico, join tra sorgenti e aggregazioni che solo il warehouse vede insieme, e una latenza di 15-60 minuti è accettabile.
+
+</details>
+
+5. Un revisore trova un modello `act_` che filtra il consenso solo in una `WHERE` finale, dopo il `GROUP BY` per email. Quale rischio introduce?
+
+<details>
+<summary>Mostra risposta</summary>
+
+Se il flag di consenso è aggregato con `max()` dopo il raggruppamento, un account con consenso attivo e uno revocato sulla stessa email produce una riga che appare consentita. Il filtro va applicato prima dell'aggregazione, sulle righe sorgente, in modo che il profilo revocato non contribuisca né all'attributo né all'LTV inviato.
+
+</details>

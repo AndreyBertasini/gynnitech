@@ -1,102 +1,122 @@
 ---
 title: "Progetto: costruire un data warehouse"
-description: >-
-  Progetto pratico: progettare e implementare un data warehouse da zero con modellazione dimensionale.
+description: "Progetto guidato su una catena omnicanale: matrice dei processi, grain a riga scontrino, dimensioni conformi, costo congelato e quintili di clientela in ClickHouse, con riconciliazione al centesimo."
 module: "Modulo 9: Data warehouse e modellazione analitica"
 order: 7
 category: Lab
 headerImage: /course-headers/data-warehousing-caso-studio-ginnytech-ad.webp
 headerImageAlt: "Progetto: costruire un data warehouse - immagine ufficiale della lezione su GinnyTech, creata da AD"
 difficulty: advanced
-duration: 28 min
-learningObjectives:
-  - Raccogliere le domande di business e fissare il grain a riga per item di scontrino
-  - Disegnare una fact table con misure e chiavi degenerate e quattro dimensioni conformed
-  - Validare lo schema con query su margine, categoria e quintili di clientela
+duration: "50 min"
 prerequisites:
   - data-warehousing/sql
+learningObjectives:
+  - "Raccogliere le domande di business, compilare una matrice dei processi e fissare il grain a riga di scontrino"
+  - "Disegnare in ClickHouse una fact table con misure additive congelate, dimensione degenerata e membro anonimo con chiave surrogata zero"
+  - "Validare lo schema con query su margine per categoria, quintili di clientela e riconciliazione contabile al centesimo"
 binario: "ml-tabellare"
-formato: "articolo"
-autore: "Hermes"
-controllatoDa: "Argo"
-autorizzatoDa: "Giano"
 draft: false
-dateModified: 2026-11-13
+dateModified: 2026-11-17
+formato: "didattica-v2"
 ---
 
-# Progetto: costruire un data warehouse
+Una catena italiana con 35 negozi e un e-commerce vuole sapere ogni lunedì qual è il margine netto per categoria e come si distribuisce tra i quintili di clientela. È uno scenario costruito con numeri di esempio: 28 milioni di euro di fatturato annuo, di cui 20 milioni nei negozi fisici e 8 milioni online. Il primo prototipo unisce le tabelle grezze di cassa, e-commerce ed ERP in una sola vista. Gli scontrini senza carta fedeltà spariscono, i costi di acquisto cambiano retroattivamente e la query del lunedì va in timeout dopo dieci minuti.
 
-Una catena omnicanale italiana con 35 negozi fisici e un e-commerce vuole unificare i dati delle casse, del sito web e del magazzino centrale per misurare il margine netto per prodotto e la redditività per quintile di clientela. Il primo prototipo unisce al volo le tabelle grezze dei tre sistemi: gli scontrini con reso parziale spariscono, i costi di acquisto cambiano retroattivamente quando il fornitore aggiorna il listino e la query del lunedì mattina va in timeout dopo dieci minuti. La causa non è la complessità dell'omnicanale: è aver saltato la progettazione end-to-end del data warehouse (matrice dei processi, grain atomico a riga scontrino, dimensioni conformi storicizzate e riconciliazione contabile).
+> **Idea chiave:** un data warehouse regge il confronto con il bilancio solo se fissa il grain alla riga articolo, mappa gli sconosciuti su chiavi surrogate esplicite e congela dentro la tabella dei fatti costi e sconti allocati.
 
-## Tre sistemi scollegati e dieci minuti di timeout al lunedì
+## Tre sistemi scollegati e un prototipo che perde il 38% degli scontrini
 
-Questo è un caso ricostruito con numeri di esempio che riassume l'intero percorso di architettura di un data warehouse aziendale. L'azienda incassa 28 milioni di euro l'anno: i 35 punti vendita emettono scontrini sul gestionale di cassa (POS), l'e-commerce registra gli ordini su PostgreSQL e l'ufficio acquisti aggiorna i costi standard dei prodotti su un ERP separato.
+I punti vendita emettono scontrini sul gestionale di cassa, l'e-commerce registra gli ordini su PostgreSQL e l'ufficio acquisti aggiorna i costi standard su un ERP separato. La direzione pone tre domande ogni settimana: qual è il margine netto per categoria dopo sconti e resi, come si distribuisce il margine tra i cinque quintili di clientela, quali negozi generano più riacquisti online.
 
-La direzione chiede tre risposte precise ogni settimana: qual è il margine netto reale per categoria merceologica dopo aver dedotto sconti di cassa e resi; come si distribuisce il margine tra i cinque quintili di clientela (dal top 20% dei clienti più alto-spendenti fino alla coda); e quali negozi fisici generano più riacquisti sul canale online. Nel primo tentativo, il team carica le tre basi dati grezze in un unico schema e costruisce una vista che fa un `INNER JOIN` tra testate scontrino, righe articolo, anagrafica prodotti corrente e tabella clienti:
-1. Poiché il 38% degli scontrini di cassa è pagato senza carta fedeltà (`customer_id IS NULL`), l'`INNER JOIN` con la tabella clienti scarta oltre un terzo del fatturato dei negozi fisici.
-2. Quando a marzo il fornitore aumenta del 12% il costo di acquisto di una linea di giacche, l'ERP sovrascrive il campo `unit_cost_eur`: la vista ricalcola tutte le vendite di gennaio e febbraio col nuovo costo di marzo, bruciando sulla carta 95.000 euro di margine storico.
-3. Lo sconto promozionale di 20 euro applicato sul totale dello scontrino viene sommato per ciascuno dei cinque articoli presenti nel carrello, sottraendo 100 euro invece di 20.
+Il primo tentativo carica le tre basi dati in un unico schema e costruisce una vista con `INNER JOIN` tra testate scontrino, righe, anagrafica prodotti e clienti. Produce tre difetti misurabili.
 
-La causa del fallimento è tentare di costruire i report finali direttamente sulle strutture applicative di cassa ed ERP, senza progettare uno schema dimensionale con grain atomico, chiavi surrogate per gli sconosciuti e congelamento del costo al momento della vendita.
+1. Il 38% degli scontrini di cassa è pagato senza carta fedeltà, quindi `customer_id` è nullo. L'`INNER JOIN` con la tabella clienti scarta quel 38%: 20.000.000 × 0,38 = 7.600.000 euro di fatturato dei negozi spariscono dai totali.
+2. A marzo il fornitore alza del 12% il costo di una linea di giacche, da 50 a 56 euro, e l'ERP sovrascrive `unit_cost_eur`. La vista ricalcola con il costo nuovo le vendite di gennaio e febbraio: se in quei due mesi sono state vendute 16.000 giacche, il margine storico scende di 16.000 × 6 euro = 96.000 euro, senza che sia cambiato nulla.
+3. Un buono sconto di 20 euro applicato al totale di uno scontrino da cinque articoli viene sottratto per ogni riga: 5 × 20 = 100 euro invece di 20.
 
-## Matrice bus, grain a riga scontrino e dimensioni conformi
+La causa comune è costruire i report direttamente sulle strutture applicative, senza uno schema dimensionale con grain atomico, chiavi per gli sconosciuti e congelamento del costo al momento della vendita. Il resto della lezione costruisce quello schema.
 
-L'architettura completa di un data warehouse omnicanale poggia su tre pilastri ingegneristici che collegano i requisiti del business allo storage fisico in ClickHouse.
+## Dalle domande alla matrice dei processi
 
-Il primo pilastro è la matrice bus (*Enterprise Bus Matrix*) e la fissazione del grain atomico. Si incrociano i processi aziendali sulle righe (vendite di cassa ed e-commerce, resi, movimenti di magazzino) con le dimensioni condivise sulle colonne (`dim_date`, `dim_product`, `dim_customer`, `dim_channel_store`). Per la tabella dei fatti principale `fct_sales_lines`, il grain viene fissato al livello più basso: **una riga per ogni singola linea articolo di uno scontrino o ordine emesso**. Il numero di scontrino (`receipt_number`), che non ha attributi descrittivi propri ma serve per raggruppare gli articoli dello stesso carrello, rimane dentro la fact table come dimensione degenerata (*degenerate dimension*).
+Il lavoro comincia dalle domande, non dalle tabelle. Ogni domanda del business indica un processo da misurare e le dimensioni con cui tagliare i numeri. Incrociando i processi sulle righe e le dimensioni sulle colonne ottieni la matrice dei processi (*enterprise bus matrix* nel metodo di Ralph Kimball, [The Data Warehouse Toolkit](https://www.kimballgroup.com/data-warehouse-business-intelligence-resources/books/data-warehouse-dw-toolkit/)).
 
-Il secondo pilastro è l'integrità referenziale totale tramite membri predefiniti e misure pienamente additive congelate all'evento. Nelle dimensioni non devono mai esistere chiavi orfane né `NULL` nella tabella dei fatti: ogni scontrino anonimo senza carta fedeltà riceve la chiave surrogata `customer_sk = 0` che punta a una riga esplicita `'Cliente Anonimo / Non Identificato'` in `dim_customer`. Nella tabella dei fatti si salvano quantità (`qty`), ricavo lordo di riga (`gross_line_eur`), sconto di testata allocato pro-quota (`allocated_discount_eur`), ricavo netto (`net_line_eur`) e costo totale del venduto congelato al giorno della transazione (`cogs_line_eur`), rendendo il margine `net_line_eur - cogs_line_eur` una misura additiva lungo qualsiasi asse.
+| Processo | dim_date | dim_product | dim_customer | dim_channel_store |
+|---|---|---|---|---|
+| Vendite di cassa ed e-commerce | sì | sì | sì | sì |
+| Resi | sì | sì | sì | sì |
+| Movimenti di magazzino | sì | sì | no | sì |
+| Acquisti e listini | sì | sì | no | no |
 
-Il terzo pilastro è l'ordinamento fisico colonnare allineato ai pattern di interrogazione. Su ClickHouse la tabella `fct_sales_lines` viene partizionata per mese (`toYYYYMM(sale_date)`) e ordinata per `(sale_date, channel_store_sk, product_sk, customer_sk)`, mentre l'analisi dei quintili di clientela combina l'aggregazione per cliente con la window function `ntile(5) OVER (ORDER BY margine_cliente DESC)`.
+La matrice ha due scopi. Dice in quale ordine costruire i processi, partendo da quello che risponde alle domande settimanali (le vendite). E dichiara quali dimensioni devono essere condivise: `dim_product` e `dim_date` compaiono in ogni riga, quindi marketing, finanza e logistica devono usare le stesse definizioni. Una dimensione condivisa con attributi e chiavi identici tra più processi si chiama dimensione conforme, ed è ciò che permette di confrontare numeri nati in sistemi diversi.
 
-**Un data warehouse aziendale regge il confronto col bilancio solo se fissa il grain alla riga articolo, mappa gli sconosciuti su chiavi surrogate esplicite e congela costi e sconti allocati dentro la tabella dei fatti.**
+```mermaid
+flowchart LR
+    A["POS: scontrini e righe"] --> S["Strato staging (copia fedele)"]
+    B["E-commerce: ordini PostgreSQL"] --> S
+    C["ERP: listini e costi"] --> S
+    S --> I["Strato intermediate (pulizia, allocazione, costo alla data)"]
+    I --> M["Strato marts (star schema in ClickHouse)"]
+    M --> D["Dashboard e report del lunedì"]
+```
 
-## Tre errori nell'implementazione di un data warehouse da zero
+Il percorso a tre strati è quello che si usa con dbt: staging fedele alle sorgenti, intermediate dove si integrano le entità e si calcolano allocazioni e costi, marts modellati a stella. Il grain della fact table principale è fissato al livello più basso disponibile: **una riga per ogni linea articolo di uno scontrino o di un ordine**. Il numero di scontrino non ha attributi descrittivi propri ma raggruppa le righe dello stesso carrello, e per questo resta nella fact table come dimensione degenerata.
 
-Il blocco SQL qui sotto mostra il prototipo difettoso che perde gli scontrini anonimi, usa il costo corrente del fornitore e moltiplica lo sconto di testata:
+## Integrità e misure congelate
+
+Due decisioni di progetto risolvono i difetti 1 e 2.
+
+La prima è l'integrità referenziale totale. Nelle chiavi esterne della fact table non esiste mai un `NULL` e non esistono chiavi orfane. Ogni scontrino anonimo riceve `customer_sk = 0`, che punta a una riga esplicita 'Cliente Anonimo' in `dim_customer`. La stessa riga di default esiste in ogni dimensione per i valori non classificati. Con questa regola l'`INNER JOIN` non scarta più niente e i 7.600.000 euro tornano nei totali di negozio.
+
+La seconda è congelare dentro il fatto i valori economici che appartengono all'evento: quantità, ricavo lordo, sconto allocato, ricavo netto e costo del venduto alla data della vendita. Il margine `net_line_eur - cogs_line_eur` diventa una misura additiva lungo qualsiasi asse e non dipende più dal listino di oggi.
+
+### Ripartizione dello sconto e costo alla data, con i numeri
+
+Prendi lo scontrino da cinque articoli con un buono da 20 euro.
+
+1. Le righe hanno ricavo lordo 50, 30, 10, 6 e 4 euro. Totale: 50 + 30 + 10 + 6 + 4 = 100 euro.
+2. Il tasso di sconto è 20 / 100 = 20%.
+3. Le quote sono 50 × 20% = 10 euro, 30 × 20% = 6 euro, 10 × 20% = 2 euro, 6 × 20% = 1,20 euro, 4 × 20% = 0,80 euro. Somma: 10 + 6 + 2 + 1,20 + 0,80 = 20 euro.
+4. Il netto è 100 − 20 = 80 euro, non i 100 − 100 = 0 euro del prototipo.
+
+Per il costo, ogni riga legge nello storico dei listini la versione valida alla data della vendita. Una giacca venduta il 20 febbraio ha `cogs_line_eur` calcolato con 50 euro per unità, anche se oggi il listino dice 56. Con 16.000 giacche vendute a gennaio-febbraio, il costo congelato è 16.000 × 50 = 800.000 euro e resta tale dopo qualsiasi rincaro.
+
+## Il prototipo difettoso
+
+Il blocco seguente mostra la query del prototipo, da non replicare, con i tre difetti segnati.
 
 ```sql
--- ERRORE 1: INNER JOIN su customer_id che elimina il 38% degli scontrini anonimi di cassa.
--- ERRORE 2: unit_cost_eur letto dall'anagrafica corrente (cambia il passato a ogni rincaro).
--- ERRORE 3: receipt_discount_eur di testata sottratto per ogni singola riga dello scontrino.
+-- ERRORE 1: INNER JOIN su customer_id che elimina gli scontrini anonimi.
+-- ERRORE 2: current_unit_cost_eur letto dall'anagrafica corrente.
+-- ERRORE 3: receipt_discount_eur di testata sottratto per ogni riga.
 SELECT
     p.category_name,
     sum(l.qty * l.unit_price_eur - h.receipt_discount_eur) AS ricavo_netto_sbagliato,
     sum(l.qty * p.current_unit_cost_eur) AS costo_venduto_sbagliato
 FROM raw_pos.receipt_lines AS l
-INNER JOIN raw_pos.receipt_headers AS h
-    ON l.receipt_id = h.receipt_id
-INNER JOIN raw_crm.customers AS c
-    ON h.customer_id = c.customer_id
-INNER JOIN raw_erp.products AS p
-    ON l.product_id = p.product_id
+INNER JOIN raw_pos.receipt_headers AS h ON l.receipt_id = h.receipt_id
+INNER JOIN raw_crm.customers AS c ON h.customer_id = c.customer_id
+INNER JOIN raw_erp.products AS p ON l.product_id = p.product_id
 GROUP BY p.category_name;
 ```
 
-### Scartare i fatti anonimi con INNER JOIN invece di usare la chiave surrogata zero
+### Scartare gli anonimi con un INNER JOIN
 
-Unire la tabella dei fatti con `dim_customer` tramite `INNER JOIN` sulla chiave naturale del CRM sembra normale a chi lavora su database dove ogni ordine online ha un utente registrato. Nel commercio fisico o nel web pre-login, una quota enorme delle transazioni avviene senza identificativo cliente: l'`INNER JOIN` elimina silenziosamente dal data warehouse tutti gli scontrini battuti in contanti o con carta bancaria non associata a programma fedeltà, facendo sparire milioni di euro dai totali di negozio.
+Il sintomo è un fatturato di negozio inferiore agli incassi di cassa. La join sulla chiave naturale del CRM sembra normale a chi lavora dove ogni ordine ha un utente registrato. Nel commercio fisico una quota enorme delle transazioni non ha identificativo, e l'`INNER JOIN` la elimina in silenzio. La correzione è `customer_sk = 0` con la riga di default, e una query di controllo che confronta il conteggio delle righe prima e dopo la join.
 
-### Leggere il costo unitario corrente dalla dimensione invece di congelarlo nel fatto
+### Leggere il costo corrente invece di congelarlo
 
-Calcolare il costo del venduto moltiplicando la quantità della riga storica per `p.current_unit_cost_eur` letto dalla tabella `products` odierna sembra un modo per risparmiare una colonna nella fact table. In realtà distrugge la contabilità industriale: i listini di acquisto e i costi logistici variano ogni trimestre, e leggere il costo corrente riscrive retroattivamente i margini di tutti gli anni passati a ogni aggiornamento dell'ufficio acquisti.
+Il sintomo è un margine di gennaio che cambia a marzo. Leggere `current_unit_cost_eur` risparmia una colonna nella fact table, e sembra un vantaggio. In realtà riscrive retroattivamente i margini a ogni aggiornamento del listino. La correzione è una colonna `cogs_line_eur` valorizzata al caricamento con il costo valido alla data della riga.
 
-### Non allocare gli importi di testata sulle righe prima del caricamento
+### Importi di testata senza allocazione
 
-Portare `h.receipt_discount_eur` (o le spese di spedizione dell'ordine e-commerce) dentro una query a granularità di riga articolo senza ripartirlo pro-quota è l'errore classico di mismatch di grain. Uno scontrino con quattro magliette e un buono sconto di 20 euro sul totale vede sottratti 20 euro su ciascuna delle quattro righe: lo scontrino risulta scontato di 80 euro e la commessa appare in perdita.
+Il sintomo è una commessa che appare in perdita. Portare `receipt_discount_eur` in una query a grain di riga senza ripartirlo è l'errore classico di grain non rispettato: quattro magliette con un buono da 20 euro risultano scontate di 80 euro. La correzione è la ripartizione pro-quota vista sopra, con il resto di arrotondamento assegnato alla prima riga.
 
-## Implementazione completa dello star schema e analisi per quintili in ClickHouse
+## Lo star schema in ClickHouse
 
-Per costruire e validare il data warehouse omnicanale da zero, applicate questi quattro criteri in ordine di priorità:
-
-1. Create le dimensioni conformi (`dim_customer`, `dim_product`, `dim_channel_store`) inserendo sempre la riga con chiave surrogata `0` per i valori non identificati (`'Anonimo'`, `'Non classificato'`), così che ogni fatto abbia sempre un legame valido `NOT NULL`.
-2. In fase di trasformazione (strato `intermediate` di dbt), ripartite lo sconto di testata su ciascuna riga in proporzione al peso del ricavo lordo della riga sul totale dello scontrino, e congelate nella riga del fatto il `cogs_line_eur` valido alla data della vendita.
-3. Materializzate `fct_sales_lines` con tipi numerici esatti (`Decimal(12, 2)`) e chiave di ordinamento fisico `(sale_date, channel_store_sk, product_sk)`.
-4. Eseguite le query analitiche di business (margine per categoria e segmentazione in quintili con `ntile(5)`) e verificate che la somma di `net_line_eur` coincida al centesimo con il totale delle testate scontrino.
-
-Ecco lo schema fisico e la query di validazione su margine e quintili di clientela in ClickHouse:
+Le dimensioni ricevono tutte la riga predefinita, e la fact table porta le misure congelate. Il partizionamento è mensile e la chiave di ordinamento segue i filtri dei report.
 
 ```sql
+-- Dimensione cliente con il membro anonimo.
 CREATE TABLE dim_customer
 (
     customer_sk UInt64,
@@ -107,9 +127,20 @@ CREATE TABLE dim_customer
 ENGINE = MergeTree
 ORDER BY customer_sk;
 
--- Inserimento obbligatorio del membro predefinito (customer_sk = 0) per gli scontrini anonimi.
+-- Riga predefinita obbligatoria per gli scontrini senza carta fedeltà.
 INSERT INTO dim_customer VALUES (0, 'ANON', 'Scontrino Anonimo', 1);
 
+-- Storico dei listini: una riga per ogni variazione di costo.
+CREATE TABLE dim_product_cost
+(
+    product_sk UInt64,
+    valid_from Date,
+    unit_cost_eur Decimal(12, 2)
+)
+ENGINE = MergeTree
+ORDER BY (product_sk, valid_from);
+
+-- Fact table a grain di riga articolo, con misure additive congelate.
 CREATE TABLE fct_sales_lines
 (
     sale_date Date,
@@ -128,8 +159,39 @@ CREATE TABLE fct_sales_lines
 ENGINE = MergeTree
 PARTITION BY toYYYYMM(sale_date)
 ORDER BY (sale_date, channel_store_sk, product_sk, customer_sk);
+```
 
--- Query analitica: suddivisione dei clienti identificati in 5 quintili di margine netto.
+Il caricamento dallo strato intermediate è un `INSERT ... SELECT` che fa tre cose: sostituisce i `NULL` con la chiave zero, alloca lo sconto con una window function e legge il costo alla data con `ASOF JOIN`.
+
+```sql
+-- Caricamento: chiave zero per gli anonimi, sconto allocato, costo valido alla data di vendita.
+INSERT INTO fct_sales_lines
+SELECT
+    l.sale_date,
+    l.receipt_id,
+    l.line_num,
+    l.channel_store_sk,
+    l.product_sk,
+    ifNull(l.customer_sk, 0) AS customer_sk,
+    l.qty,
+    l.gross_line_eur,
+    round(h.receipt_discount_eur * l.gross_line_eur / sum(l.gross_line_eur) OVER (PARTITION BY l.receipt_id), 2) AS allocated_discount_eur,
+    l.gross_line_eur - allocated_discount_eur AS net_line_eur,
+    l.qty * c.unit_cost_eur AS cogs_line_eur,
+    net_line_eur - cogs_line_eur AS margin_line_eur
+FROM stg_receipt_lines AS l
+INNER JOIN stg_receipt_headers AS h ON l.receipt_id = h.receipt_id
+ASOF LEFT JOIN dim_product_cost AS c
+    ON l.product_sk = c.product_sk
+   AND l.sale_date >= c.valid_from;
+```
+
+## Quintili di clientela e riconciliazione
+
+Il quintile si calcola in due passi: aggrega il margine per cliente identificato, poi assegna ciascun cliente a uno dei cinque gruppi con `ntile(5)`. Il filtro `customer_sk != 0` esclude gli anonimi dalla segmentazione, che resta comunque nei totali per categoria e negozio.
+
+```sql
+-- Margine per quintile di clientela identificata, dal più redditizio al meno.
 WITH margine_per_cliente AS (
     SELECT
         customer_sk,
@@ -159,28 +221,78 @@ SELECT
 FROM quintili
 GROUP BY quintile_profittabilita
 ORDER BY quintile_profittabilita ASC;
+
+-- Quadratura contabile: il netto delle righe deve coincidere con l'incassato delle testate.
+SELECT
+    toStartOfMonth(f.sale_date) AS mese,
+    sum(f.net_line_eur) AS netto_righe_eur,
+    any(t.incassato_eur) AS incassato_testate_eur,
+    sum(f.net_line_eur) - any(t.incassato_eur) AS scostamento_eur
+FROM fct_sales_lines AS f
+INNER JOIN (
+    SELECT toStartOfMonth(sale_date) AS mese, sum(receipt_total_eur) AS incassato_eur
+    FROM stg_receipt_headers
+    GROUP BY mese
+) AS t ON toStartOfMonth(f.sale_date) = t.mese
+GROUP BY mese
+ORDER BY mese;
 ```
 
-Il risultato risolve tutti e tre i blocchi del prototipo iniziale: grazie a `customer_sk = 0` il 100% degli scontrini di cassa resta dentro `fct_sales_lines` per i report di negozio e di categoria, mentre l'analisi dei quintili filtra esplicitamente `WHERE customer_sk != 0` rivelando che il primo quintile (il top 20% dei clienti identificati) genera il 64% del margine netto complessivo; inoltre il congelamento di `cogs_line_eur` rende i bilanci mensili immutabili ai futuri rincari dei fornitori e l'allocazione pro-quota fa quadrare gli sconti al centesimo. Progettare fin dal giorno zero la riga `customer_sk = 0` e la colonna `cogs_line_eur` costa mezz'ora di modellazione; dover ricostruire a posteriori i costi storici non storicizzati sull'ERP è spesso impossibile.
+Con numeri di esempio, il primo quintile può generare il 64% del margine dei clienti identificati. Se il margine complessivo identificato è 3.000.000 euro, il quintile 1 vale 3.000.000 × 0,64 = 1.920.000 euro e i quattro quintili restanti dividono 1.080.000 euro, in media 270.000 euro ciascuno. Il dato guida le campagne di fidelizzazione, ed è affidabile solo perché costo e sconto sono congelati e allocati.
 
-## Architettura Kimball pura a stella o approccio ibrido Corporate Information Factory
+La quadratura è il vero collaudo. Lo scostamento mensile tra somma del netto delle righe e totale incassato nelle testate deve essere zero. Se non lo è, il problema è quasi sempre un resto di arrotondamento non assegnato, un reso non caricato o una riga duplicata.
 
-Quando si avvia la costruzione del data warehouse aziendale da zero, l'architetto deve scegliere il metodo di stratificazione complessivo tra due scuole classiche: il modello dimensionale bottom-up di Ralph Kimball (basato su processi di business e data mart a stella collegati da dimensioni conformi) e l'approccio top-down di Bill Inmon (che prevede un database centrale normalizzato in terza forma normale, *Enterprise Data Warehouse*, da cui derivare i data mart).
+## Kimball, Inmon o l'approccio ibrido
 
-Il criterio di scelta è netto: **adottate l'approccio moderno ibrido in dbt — staging fedele alle sorgenti, strato intermediate normalizzato per l'integrazione e la pulizia delle entità, e strato marts modellato a stella secondo Kimball con dimensioni conformi — quando dovete consegnare valore analitico verificabile in poche settimane e iterare processo per processo, riservate invece la modellazione Data Vault o 3NF pura solo a contesti regolamentati con decine di sistemi legacy che cambiano struttura continuamente e richiedono auditabilità forense su ogni singolo caricamento.**
+Resta da scegliere come stratificare l'intero warehouse. Il modello dimensionale bottom-up di Kimball parte dai processi di business e costruisce data mart a stella collegati da dimensioni conformi. L'approccio top-down di Bill Inmon prevede un database centrale normalizzato in terza forma normale da cui derivare i mart.
 
-La confusione comune consiste nel passare dodici mesi a disegnare un modello relazionale aziendale astratto di duecento tabelle senza consegnare nemmeno un cruscotto al business, oppure nel creare "data mart" isolati per ogni reparto senza dimensioni conformi (`dim_customer` e `dim_product` diverse tra marketing e finanza). Sbagliare questa scelta porta nel primo caso alla cancellazione del progetto per assenza di risultati visibili, e nel secondo caso alla creazione di silos inconciliabili in cui ogni direzione presenta in riunione un proprio numero incompatibile con gli altri.
+Il criterio pratico è questo: se devi consegnare valore verificabile in poche settimane e iterare un processo alla volta, usa l'ibrido descritto sopra, con staging fedele, intermediate normalizzato e marts a stella con dimensioni conformi. Riserva Data Vault o 3NF pura ai contesti regolamentati con decine di sistemi legacy che cambiano struttura e richiedono tracciabilità forense di ogni caricamento.
 
-Questo articolo non tratta l'ingestione fisica dai registratori di cassa tramite code di messaggi né la gestione dei cambi valuta multi-moneta in tempo reale. Nel calcolo dell'allocazione pro-quota dello sconto di testata su righe con decimali a due cifre, eventuali centesimi di arrotondamento residui vanno sommati alla prima riga dello scontrino per garantire che la somma delle parti coincida sempre al centesimo con lo sconto totale.
+I due modi di sbagliare sono simmetrici. Il primo è passare dodici mesi a disegnare un modello aziendale astratto da duecento tabelle senza consegnare un solo cruscotto. Il secondo è creare mart isolati per reparto, con `dim_customer` diversa tra marketing e finanza, fino ad avere riunioni in cui ogni direzione porta un numero incompatibile con gli altri. Questa lezione non tratta l'ingestione dalle casse tramite code di messaggi né i cambi valuta in tempo reale.
 
-## Cinque domande prima del collaudo finale del data warehouse
+## Verifica finale del progetto
 
-1. Ogni tabella dei fatti ha un grain dichiarato formalmente e tutte le misure di testata (sconti ordine, spese di trasporto) sono state allocate pro-quota sulle singole righe?
-2. Tutte le dimensioni includono la riga predefinita con chiave surrogata `0` (o `-1`) per rappresentare i valori mancanti o gli utenti anonimi senza mai usare `NULL` nelle chiavi esterne dei fatti?
-3. I valori economici che cambiano nel tempo ma appartengono all'evento storico (costo unitario di acquisto `cogs`, aliquota IVA applicata, tasso di cambio del giorno) sono stati congelati come colonne numeriche dentro la tabella dei fatti?
-4. Avete eseguito il test di quadratura contabile verificando che `SUM(net_line_eur)` in `fct_sales_lines` coincida al centesimo con il totale incassato registrato dalle testate di cassa e dal gateway e-commerce?
-5. Le dimensioni condivise (`dim_date`, `dim_product`, `dim_customer`, `dim_channel_store`) sono uniche per tutta l'azienda così che finanza, marketing e logistica raggruppino sugli stessi identici attributi?
+1. Uno scontrino ha tre righe da 60, 30 e 10 euro e un buono di 10 euro. Quale sconto alloci sulla seconda riga e qual è il netto totale?
 
-La metrica di collaudo che decreta il successo del progetto è la riconciliazione finanziaria incrociata: lo scostamento tra il fatturato netto mensile calcolato da `fct_sales_lines` e il conto economico chiuso dall'amministrazione deve essere pari a zero, con tempi di risposta delle query sulle viste principali inferiori al secondo.
+<details>
+<summary>Mostra risposta</summary>
 
-Di tutto il progetto, un solo dettaglio tecnico distingue un'architettura industriale da un esercizio scolastico: gestire esplicitamente il membro anonimo (`customer_sk = 0`) e congelare il costo del venduto al momento della riga d'ordine. Quando anche gli scontrini senza nome e i vecchi listini sono al loro posto, il data warehouse diventa l'unica fonte di verità dell'azienda.
+Il totale lordo è 100 euro e il tasso è 10 / 100 = 10%. La seconda riga riceve 30 × 10% = 3 euro di sconto. Le quote sono 6, 3 e 1 euro, la somma è 10 euro e il netto totale è 100 − 10 = 90 euro.
+
+</details>
+
+2. Il 38% degli scontrini di un negozio da 5.000.000 euro annui non ha carta fedeltà. Quanto fatturato perde un INNER JOIN con la tabella clienti?
+
+<details>
+<summary>Mostra risposta</summary>
+
+Perde 5.000.000 × 0,38 = 1.900.000 euro. Con `customer_sk = 0` e la riga 'Cliente Anonimo' in `dim_customer` quei 1.900.000 euro restano nei totali.
+
+</details>
+
+3. Il costo di un prodotto passa da 40 a 44 euro il primo aprile. Quanto costa il venduto di 1.000 unità vendute a marzo, calcolato a marzo e riletto a maggio con la tabella dei fatti?
+
+<details>
+<summary>Mostra risposta</summary>
+
+Il costo congelato è 1.000 × 40 = 40.000 euro, in entrambe le letture. Leggendo il costo corrente della dimensione si otterrebbe 1.000 × 44 = 44.000 euro a maggio, cioè 4.000 euro di margine sparito dal passato.
+
+</details>
+
+4. Lo scostamento di marzo tra netto delle righe e incassato delle testate è di 0,03 euro. Quale causa controlli per prima?
+
+<details>
+<summary>Mostra risposta</summary>
+
+I resti di arrotondamento dell'allocazione dello sconto: tre centesimi indicano righe i cui valori arrotondati non sommano allo sconto di testata. Verifica che il resto sia assegnato alla prima riga di ogni scontrino.
+
+</details>
+
+5. Un reparto crea una propria `dim_customer` con attributi diversi da quella della finanza. Che conseguenza hai e come la eviti?
+
+<details>
+<summary>Mostra risposta</summary>
+
+Ogni direzione raggruppa su attributi diversi e porta in riunione numeri incompatibili. Si evita con dimensioni conformi, una sola `dim_customer` per tutta l'azienda dichiarata nella matrice dei processi.
+
+</details>

@@ -1,9 +1,6 @@
 ---
 title: "Pivot, ROLLUP e KPI table per il reporting"
-description: >-
-  Pivot con aggregazione condizionale e FILTER, subtotali gerarchici con
-  ROLLUP e GROUPING, e KPI table per congelare le definizioni delle metriche
-  in un unico punto.
+description: "Ruotare i canali in colonne con sumIf e colonna di quadratura, produrre subtotali con ROLLUP e grouping() in ClickHouse, e congelare numeratori e denominatori in una KPI table che si riaggrega senza medie di rapporti."
 module: "Modulo 14: SQL avanzato per l'analisi"
 order: 11
 category: Decisione
@@ -11,143 +8,212 @@ headerImage: /course-headers/advanced-sql-pivot-rollup-e-kpi-table-ginnytech-ad.
 headerImageAlt: >-
   Pivot, ROLLUP e KPI Table per Reporting - immagine ufficiale della lezione su
   GinnyTech, creata da AD
-difficulty: advanced
-duration: 18 min
+difficulty: avanzato
+duration: "40 min"
 prerequisites:
   - advanced-sql/funnel-e-sessionizzazione
 learningObjectives:
-  - Ruotare righe in colonne con aggregazione condizionale e FILTER, con colonna di controllo sul totale
-  - Generare subtotali gerarchici con ROLLUP e GROUPING e congelare le metriche in una KPI table
+  - Costruire un pivot con sumIf includendo una colonna residuale e una colonna totale che permettano la quadratura orizzontale
+  - Generare subtotali e totale generale con GROUP BY ROLLUP e distinguerli dai valori vuoti reali con grouping()
+  - Progettare una KPI table con componenti additivi e ricalcolare i rapporti a ogni livello di aggregazione
 binario: "ml-tabellare"
-formato: "articolo"
-autore: "Hermes"
-controllatoDa: "Argo"
-autorizzatoDa: "Giano"
+formato: "didattica-v2"
 draft: false
-dateModified: 2026-11-13
+dateModified: 2026-11-17
 ---
 
-# Pivot, ROLLUP e KPI table per il reporting
+Scenario costruito, con numeri di esempio: ogni lunedì un analista esporta le vendite per area e canale verso un foglio condiviso, e la direzione confronta la somma delle colonne di canale con il totale aziendale. Il totale dice 4.300 euro, la somma delle colonne dice 3.750 euro, e mancano 550 euro. Nessuna query ha dato errore. Il pivot elencava soltanto quattro canali, e due canali minori, `referral` e il traffico diretto, sono semplicemente scomparsi dalla tabella.
 
-Un team di analisi esporta ogni lunedì mattina i dati di vendita per canale e area geografica verso un foglio condiviso, ma quando la direzione confronta la somma delle colonne di canale con il totale generale aziendale trova uno scarto di 14.500 €. Il problema nasce perché la tabella pivot ha elencato esplicitamente solo i quattro canali principali (`paid_search`, `meta_ads`, `organic`, `email`), lasciando fuori `referral` e `(direct)` senza includere una colonna `other_channels` né una colonna `total_revenue` di quadratura. La causa non è il foglio di calcolo: è costruire **pivot e subtotali in SQL senza colonna di controllo, senza `GROUPING()` per distinguere i subtotali dai `NULL` reali, e senza una KPI table centralizzata**.
+> **Idea chiave:** un report che ruota o raggruppa i dati deve poter dimostrare di essere completo. Il pivot si porta dietro una colonna residuale e una colonna totale, il `ROLLUP` etichetta i subtotali con `grouping()`, e la KPI table conserva numeratori e denominatori, perché i rapporti si ricalcolano e non si sommano.
 
-## Quattordicimila euro spariti tra le colonne di una tabella pivot
+## Dove spariscono i 550 euro: i tre meccanismi del reporting
 
-Questo è un caso ricostruito con numeri di esempio su quanto accade quando si ruotano righe in colonne o si generano subtotali gerarchici senza meccanismi di quadratura.
+Il reporting aziendale ruota attorno a tre operazioni, e ciascuna ha un modo caratteristico di fallire in silenzio. Il pivot sposta valori di una dimensione dalle righe alle colonne; fallisce quando la lista di colonne è incompleta, perché il motore ignora ciò che non è elencato. Il `ROLLUP` aggiunge subtotali e totale generale alle righe di dettaglio; fallisce quando il subtotale si confonde con un valore vuoto vero. La KPI table congela le metriche in un solo posto; fallisce quando salva rapporti già calcolati, che poi qualcuno somma o media.
 
-Le tre tecniche di reporting avanzato in SQL risolvono ciascuna un problema specifico di presentazione e coerenza:
+```mermaid
+flowchart TD
+    A["Tabella degli ordini: una riga per ordine pagato"] --> B["Pivot: canali in colonne, più resto e totale"]
+    A --> C["ROLLUP: dettaglio, subtotale per area, totale"]
+    A --> D["KPI table giornaliera: sessioni, ordini, ricavi, spesa"]
+    B --> E["Controllo: somma colonne uguale al totale"]
+    C --> F["Controllo: grouping() separa subtotali e valori vuoti"]
+    D --> G["Rapporti ricalcolati dai componenti a ogni livello"]
+```
 
-| Tecnica SQL | Cosa produce | Vantaggio operativo | Errore se usata male |
-| :--- | :--- | :--- | :--- |
-| **Pivot con `sumIf` / `FILTER`** | Ruota categorie in colonne fisse | Portabile, leggibile, compatibile con ogni BI | Dimenticare la colonna `other` o `total` di controllo |
-| **`GROUP BY ROLLUP(...)`** | Genera righe di dettaglio + subtotali + totale generale | Un'unica passata invece di 3 query in `UNION ALL` | Confondere il `NULL` del subtotale con un `NULL` nei dati |
-| **`GROUPING(col)`** | Restituisce `1` se la colonna è aggregata dal subtotale | Etichetta chiaramente `'TOTALE'` vs `'Non assegnato'` | Lasciare `NULL` grezzi nei report per la direzione |
-| **KPI Table (`mart_kpi_daily`)** | Congela numeratori, denominatori e formule in un solo modello | Tutti i reparti leggono gli stessi identici numeri | Duplicare formule diverse in 10 dashboard |
+Il filo comune è la quadratura: ogni operazione produce un numero che si può confrontare con un altro ottenuto per una strada diversa. Nelle sezioni successive costruiamo i tre meccanismi su una stessa tabella di otto righe, in modo da poter fare ogni controllo a mano.
 
-Combinare queste quattro pratiche trasforma le query di reporting da fogli fragili a contratti dati verificabili.
+## La tabella di partenza e il pivot con colonna di quadratura
 
-## Aggregazione condizionale con colonna di controllo, ROLLUP e KPI Table
-
-Il primo meccanismo è il **Pivot deterministico con aggregazione condizionale e colonna di quadratura**. In ClickHouse potete usare `sumIf(revenue_eur, channel = 'meta_ads')`, mentre in PostgreSQL o DuckDB usate `SUM(revenue_eur) FILTER (WHERE channel = 'meta_ads')`. La regola d'oro è aggiungere sempre una colonna `rev_other` per tutti i valori non esplicitati e una colonna `rev_total` calcolata senza filtro: la somma orizzontale delle colonne di canale deve sempre eguagliare `rev_total`.
-
-Il secondo meccanismo è l'uso di **`GROUP BY ROLLUP(region, channel)` insieme a `grouping(region, channel)`**. `ROLLUP` produce automaticamente le righe di dettaglio `(region, channel)`, i subtotali per `region` e il totale complessivo aziendale. Poiché `ROLLUP` inserisce `NULL` (o stringa vuota) nelle colonne aggregate, la funzione `grouping(col)` restituisce `1` quando quella riga rappresenta un subtotale aggregato e `0` quando è un valore reale dei dati, permettendo di scrivere `if(grouping(channel) = 1, 'SUBTOTALE REGIONE', channel)`.
-
-Il terzo meccanismo è la **KPI Table centralizzata (`mart_kpi_daily`)**. Invece di lasciare che ogni dashboard calcoli il `ROAS`, l'`AOV` o il `Net Margin %` con filtri leggermente diversi, si crea una tabella giornaliera a granularità fissa che espone sia i **componenti atomici additivi** (`net_revenue_eur`, `ad_spend_eur`, `orders_count`) sia le **metriche derivate documentate**.
-
-**Ogni pivot in SQL deve includere una colonna residuale e una colonna totale di quadratura, ogni `ROLLUP` deve usare `grouping()` per etichettare i subtotali, e ogni metrica aziendale deve vivere in una KPI table centralizzata.**
-
-## Tre errori comuni con Pivot, ROLLUP e KPI table
-
-Il blocco SQL qui sotto mostra l'errore tipico di un pivot senza colonna residuale e di un `ROLLUP` che lascia `NULL` ambigui al posto delle etichette di subtotale:
+Gli ordini pagati di un mese, già aggregati per area e canale, sono questi. Una riga ha area vuota (ordini senza indirizzo valido) e una ha canale vuoto (traffico diretto, senza attribuzione).
 
 ```sql
--- ERRORE 1: pivot parziale senza colonna 'other' né 'total' -> i conti non tornano!
--- ERRORE 2: ROLLUP senza grouping() confonde i subtotali con i clienti senza regione!
+-- Input: ricavi pagati per area e canale (numeri di esempio)
+SELECT * FROM values(
+    'region String, channel String, revenue_eur Float64',
+    ('Nord', 'paid_search', 1200),
+    ('Nord', 'meta_ads',     800),
+    ('Nord', 'organic',      500),
+    ('Nord', 'referral',     300),
+    ('Sud',  'paid_search',  700),
+    ('Sud',  'meta_ads',     400),
+    ('Sud',  '',             250),
+    ('',     'organic',      150)
+);
+```
+
+La somma delle otto righe è 1.200 + 800 + 500 + 300 + 700 + 400 + 250 + 150 = 4.300 euro. È il numero che il pivot dovrà riprodurre. Il pivot parziale dell'apertura elenca `paid_search`, `meta_ads`, `organic` ed `email`; sommando le colonne per area si ottiene Nord 2.500 euro, Sud 1.100 euro e area vuota 150 euro, per un totale di 3.750 euro. La differenza rispetto a 4.300 è di 550 euro, che corrispondono a 300 euro di `referral` al Nord e 250 euro di traffico diretto al Sud. Il canale `email` compare con valore 0 in ogni area, ed è un'altra spia: una colonna sempre vuota è una colonna che nessuno ha guardato.
+
+La versione corretta aggiunge una colonna residuale, che raccoglie tutto ciò che non è esplicitato, e una colonna totale calcolata senza filtri.
+
+```sql
+-- Pivot con colonna residuale e totale di quadratura
 SELECT
     region,
-    channel,
-    sum(revenue_eur) AS total_rev_eur
-FROM analytics_prod.fct_orders
-GROUP BY ROLLUP (region, channel);
+    sumIf(revenue_eur, channel = 'paid_search') AS rev_paid_search_eur,
+    sumIf(revenue_eur, channel = 'meta_ads')    AS rev_meta_ads_eur,
+    sumIf(revenue_eur, channel NOT IN ('paid_search', 'meta_ads')) AS rev_other_eur,
+    sum(revenue_eur) AS rev_total_eur,
+    -- controllo orizzontale: deve valere 0 su ogni riga
+    rev_total_eur - (rev_paid_search_eur + rev_meta_ads_eur + rev_other_eur) AS check_eur
+FROM monthly_revenue
+GROUP BY region
+ORDER BY region;
 ```
 
-### Omettere la colonna residuale e il totale nel Pivot
+Sul Nord otteniamo 1.200 per `paid_search`, 800 per `meta_ads`, 500 + 300 = 800 nel residuo e 2.800 di totale, con controllo 2.800 - (1.200 + 800 + 800) = 0. Sul Sud i valori sono 700, 400, 250 e 1.350, con controllo 1.350 - 1.350 = 0. L'area vuota ha 0, 0, 150 e 150. In ClickHouse la funzione condizionale è `sumIf`; in PostgreSQL o DuckDB l'equivalente standard è `SUM(revenue_eur) FILTER (WHERE channel = 'meta_ads')`, che si legge meglio e si porta ovunque.
 
-Se elencate solo 3 o 4 valori nel `CASE WHEN` o `sumIf` senza raccogliere il resto in `other_channels` e senza affiancare `sum(revenue_eur) AS total_revenue_eur`, qualsiasi nuovo canale aggiunto dal marketing sparirà silenziosamente dal report senza generare alcun errore SQL.
+La colonna residuale ha un secondo vantaggio, meno ovvio. Quando il marketing attiva un nuovo canale, il pivot non perde il ricavo: finisce nel residuo, la colonna cresce e qualcuno se ne accorge. Con una lista chiusa e nessun residuo, il nuovo canale sparirebbe fino alla prossima riconciliazione.
 
-### Sommare o mediare percentuali già precalcolate invece dei componenti atomici
+## ROLLUP e grouping(): subtotali che non si confondono con i vuoti
 
-Se una KPI table salva solo `conversion_rate_pct` e `aov_eur` senza salvare `orders_count`, `sessions_count` e `revenue_eur`, quando un utente in BI aggrega i dati da giornaliero a mensile otterrà una media delle medie giornaliere, matematicamente errata. Salvate sempre i numeratori e i denominatori atomici additivi.
+Il `ROLLUP` produce in una sola scansione le righe di dettaglio, un subtotale per ogni livello della gerarchia e il totale generale. Con `GROUP BY ROLLUP(region, channel)` si ottengono i gruppi `(region, channel)`, `(region)` e il gruppo vuoto: quindi, con N colonne, N + 1 livelli. Il punto delicato è come il motore rappresenta la colonna aggregata. In ClickHouse, per impostazione predefinita, la colonna di un subtotale non diventa `NULL` ma assume il valore predefinito del tipo, cioè la stringa vuota. Dato che nei nostri dati esistono stringhe vuote vere, la riga "area vuota, canale organic" e il subtotale dell'area vuota hanno entrambe la chiave vuota.
 
-### Usare CUBE al posto di ROLLUP su molte dimensioni
-
-`GROUP BY CUBE(a, b, c, d)` genera tutte le $2^4 = 16$ combinazioni possibili di subtotali, moltiplicando inutilmente la dimensione del risultato. Per gerarchie naturali come `(area, paese, canale)` o `(anno, trimestre, mese)`, usate sempre `ROLLUP`, che genera solo i $N+1$ livelli gerarchici utili.
-
-## Pivot con quadratura e ROLLUP etichettato con grouping() in ClickHouse
-
-Per costruire un report direzionale completo e privo di ambiguità in ClickHouse, applicate questi quattro passi:
-
-1. Calcolate il pivot per canale includendo esplicitamente `rev_other_eur` e `rev_total_eur`.
-2. Usate `GROUP BY ROLLUP (region, channel)` per ottenere in un'unica scansione dettaglio, subtotale regionale e totale generale.
-3. Sostituite i valori aggregati con `'TOTALE GENERALE'` e `'SUBTOTALE'` usando `grouping(region)` e `grouping(channel)`.
-4. Esponete i componenti atomici (`orders_count`, `revenue_eur`) insieme al rapporto derivato (`aov_eur`) così che la tabella resti riaggregabile.
-
-Ecco la query SQL completa in ClickHouse:
+La funzione `grouping(col)` risolve l'ambiguità: vale 1 quando la colonna è stata aggregata dal subtotale e 0 quando è un valore reale.
 
 ```sql
--- Report gerarchico con ROLLUP, grouping() e Pivot con colonna di quadratura:
-WITH regional_channel_summary AS (
-    SELECT
-        if(grouping(region) = 1, 'TOTALE AZIENDA', coalesce(nullIf(region, ''), 'Non assegnata')) AS region_label,
-        if(grouping(channel) = 1, 'SUBTOTALE REGIONE', coalesce(nullIf(channel, ''), '(direct)')) AS channel_label,
-        grouping(region) AS is_grand_total,
-        grouping(channel) AS is_region_subtotal,
-        count() AS orders_count,
-        round(sum(revenue_eur), 2) AS total_revenue_eur,
-        round(sumIf(revenue_eur, channel = 'paid_search'), 2) AS rev_paid_search_eur,
-        round(sumIf(revenue_eur, channel = 'meta_ads'), 2) AS rev_meta_ads_eur,
-        round(sumIf(revenue_eur, channel NOT IN ('paid_search', 'meta_ads')), 2) AS rev_other_eur,
-        round(total_revenue_eur / nullIf(orders_count, 0), 2) AS aov_eur
-    FROM analytics_prod.fct_orders
-    WHERE status = 'paid'
-      AND order_date >= today() - 30
-    GROUP BY ROLLUP (region, channel)
-)
+-- ROLLUP con grouping() per etichettare dettaglio, subtotali e totale
 SELECT
-    region_label,
-    channel_label,
-    orders_count,
-    total_revenue_eur,
-    rev_paid_search_eur,
-    rev_meta_ads_eur,
-    rev_other_eur,
-    aov_eur
-FROM regional_channel_summary
-ORDER BY is_grand_total ASC, region_label ASC, is_region_subtotal ASC, total_revenue_eur DESC;
+    multiIf(grouping(region) = 1, 'TOTALE', region = '', 'Non assegnata', region) AS region_label,
+    multiIf(grouping(channel) = 1, 'SUBTOTALE', channel = '', '(direct)', channel) AS channel_label,
+    count() AS rows_count,
+    sum(revenue_eur) AS rev_total_eur
+FROM monthly_revenue
+GROUP BY ROLLUP (region, channel)
+-- prima il dettaglio, poi i subtotali, infine il totale generale
+ORDER BY grouping(region), region, grouping(channel), channel;
 ```
 
-In questa query `rev_paid_search_eur + rev_meta_ads_eur + rev_other_eur` eguaglia sempre al centesimo `total_revenue_eur`, mentre `grouping(region)` e `grouping(channel)` separano nettamente le righe di dettaglio dai subtotali e dal totale generale senza alcuna ambiguità.
+Il risultato su ClickHouse 26.11 ha dodici righe: otto di dettaglio, tre subtotali di area e un totale generale.
 
-Quando portate questo schema in una KPI table giornaliera (`mart_kpi_daily`) gestita da dbt, è buona norma esporre una vista dedicata per i report direzionali e una tabella base priva di righe di subtotale per gli strumenti di BI che calcolano autonomamente i totali a schermo. Se infatti collegate una tabella che contiene già le righe `SUBTOTALE REGIONE` e `TOTALE AZIENDA` a un grafico a barre o a una tabella pivot in Metabase, l'utente rischia di sommare due o tre volte gli stessi importi. Separare il modello atomico (`mart_kpi_daily`) dal modello di esportazione gerarchica (`rpt_executive_rollup`) elimina alla radice questo rischio.
+| region_label | channel_label | righe | rev_total_eur |
+| :--- | :--- | ---: | ---: |
+| Non assegnata | organic | 1 | 150 |
+| Non assegnata | SUBTOTALE | 1 | 150 |
+| Nord | meta_ads | 1 | 800 |
+| Nord | organic | 1 | 500 |
+| Nord | paid_search | 1 | 1.200 |
+| Nord | referral | 1 | 300 |
+| Nord | SUBTOTALE | 4 | 2.800 |
+| Sud | (direct) | 1 | 250 |
+| Sud | meta_ads | 1 | 400 |
+| Sud | paid_search | 1 | 700 |
+| Sud | SUBTOTALE | 3 | 1.350 |
+| TOTALE | SUBTOTALE | 8 | 4.300 |
 
-Infine, documentate sempre nello schema YAML di dbt quali colonne sono additive (`orders_count`, `total_revenue_eur`, `rev_paid_search_eur`) e quali sono rapporti non additivi (`aov_eur`, `roas`, `net_margin_pct`), così che nessun analista provi a sommare o mediare un rapporto già calcolato su intervalli temporali più ampi.
+La quadratura verticale si fa sommando i tre subtotali: 150 + 2.800 + 1.350 = 4.300 euro, uguale alla riga del totale generale. Il conteggio delle righe segue la stessa logica: 1 + 4 + 3 = 8. Se vuoi che il subtotale mostri `NULL` e non la stringa vuota, ClickHouse offre l'impostazione `group_by_use_nulls = 1`; è una buona scelta per l'export verso strumenti che distinguono i nulli, ma non elimina la necessità di `grouping()`, perché un valore mancante vero resta mancante e deve restare distinguibile da un subtotale.
 
-## Pivot e ROLLUP in SQL vs tabelle pivot nel tool di BI
+Una nota sul costo: `CUBE(region, channel)` genera tutte le combinazioni, quindi 2 elevato al numero di colonne. Sui nostri dati produce 17 righe contro le 12 del `ROLLUP`, perché aggiunge anche i subtotali per canale. Con quattro dimensioni sarebbero 16 combinazioni di raggruppamento invece di 5. Per gerarchie naturali (area, paese, canale oppure anno, trimestre, mese) il `ROLLUP` basta, e usare `CUBE` serve solo quando i subtotali per ogni singola dimensione hanno davvero un lettore.
 
-Per presentare viste multidimensionali e subtotali, potete **calcolare Pivot e `ROLLUP` direttamente in SQL/dbt** oppure **lasciare che lo faccia la tabella pivot del tool di BI**.
+## KPI table: componenti additivi e rapporti ricalcolati
 
-Il criterio di scelta è netto: **calcolate Pivot e `ROLLUP` in SQL quando dovete congelare un report finanziario o direzionale con regole di arrotondamento, etichette fisse e quadratura garantita (es. export mensile per il CFO o KPI table), lasciate invece il pivot interattivo al tool di BI per l'esplorazione libera ad hoc.**
+Una KPI table giornaliera ha una riga per giorno e contiene le grandezze elementari che servono a ricostruire ogni indicatore: sessioni, ordini, ricavi e spesa pubblicitaria. I rapporti (tasso di conversione, valore medio d'ordine, ritorno sulla spesa) si calcolano a partire da quelle grandezze e non vengono memorizzati come colonne da aggregare. La ragione è aritmetica, e si vede su due soli giorni.
 
-La confusione comune consiste nel pensare che una KPI table debba contenere solo rapporti precalcolati: al contrario, deve contenere i componenti atomici additivi così da permettere qualsiasi riaggregazione temporale corretta.
+```sql
+-- KPI table: due giorni di componenti additivi (numeri di esempio)
+SELECT * FROM values(
+    'kpi_date Date, sessions_count UInt32, orders_count UInt32, revenue_eur Float64, ad_spend_eur Float64',
+    ('2026-11-01', 100,  5,  400, 150),
+    ('2026-11-02', 900, 18, 1620, 450)
+);
+```
 
-## Cinque domande prima di pubblicare un Pivot, ROLLUP o KPI table
+Il primo giorno ha un tasso di conversione di 5 / 100 = 5 %, un valore medio d'ordine di 400 / 5 = 80 euro e un ritorno sulla spesa di 400 / 150 = 2,67. Il secondo giorno ha 18 / 900 = 2 %, 1.620 / 18 = 90 euro e 1.620 / 450 = 3,60. Chi salva queste tre colonne e le media sul periodo ottiene una conversione di (5 + 2) / 2 = 3,5 %. Il valore giusto si calcola dai componenti: gli ordini del periodo sono 5 + 18 = 23, le sessioni 100 + 900 = 1.000, quindi 23 / 1.000 = 2,3 %. Lo scarto è di 1,2 punti percentuali, e dipende dal fatto che il primo giorno, con un decimo del traffico, pesa quanto il secondo nella media semplice.
 
-1. Ogni pivot include una colonna residuale (`other`) e una colonna `total` per verificare la quadratura orizzontale?
-2. Ogni `GROUP BY ROLLUP` usa `grouping()` per distinguere i subtotali dai valori `NULL` presenti nei dati?
-3. La KPI table salva i numeratori e i denominatori atomici additivi oltre ai rapporti derivati?
-4. Le definizioni di stato (`status = 'paid'`, esclusione resi, valuta netta) sono congelate in un solo modello a monte?
-5. La somma delle righe di dettaglio quadra al centesimo con la riga `TOTALE AZIENDA` generata dal `ROLLUP`?
+```sql
+-- Riaggregazione mensile: si sommano i componenti, poi si dividono
+SELECT
+    toStartOfMonth(kpi_date) AS month,
+    sum(sessions_count) AS sessions,
+    sum(orders_count)   AS orders,
+    sum(revenue_eur)    AS revenue_eur,
+    sum(ad_spend_eur)   AS ad_spend_eur,
+    round(100 * orders / sessions, 2)   AS conversion_pct,
+    round(revenue_eur / orders, 2)      AS aov_eur,
+    round(revenue_eur / ad_spend_eur, 2) AS roas
+FROM mart_kpi_daily
+GROUP BY month;
+```
 
-La metrica di controllo del reporting è la **quadratura orizzontale e verticale**: `rev_paid_search + rev_meta_ads + rev_other - total_revenue = 0.00 €` su ogni riga. Automatizzare questo controllo insieme alla verifica che la somma delle righe di dettaglio eguagli esattamente la riga `TOTALE AZIENDA` rende qualsiasi export mensile pronto per la revisione finanziaria senza interventi manuali su fogli di calcolo.
+Sul periodo di due giorni la query restituisce 1.000 sessioni, 23 ordini, 2.020 euro di ricavi e 600 euro di spesa. Il valore medio d'ordine è 2.020 / 23 = 87,83 euro, mentre la media dei due valori giornalieri darebbe (80 + 90) / 2 = 85 euro. Il ritorno sulla spesa è 2.020 / 600 = 3,37, contro (2,67 + 3,60) / 2 = 3,13 della media semplice. Tre indicatori, tre scarti: nessuno di essi è un arrotondamento, sono tutti conseguenze di aver pesato in modo uguale giorni di dimensioni diverse.
 
-Inoltre, quando aggiungete un nuovo canale di acquisizione in produzione, vi basterà estendere una sola riga del modello `mart_kpi_daily` perché tutte le dashboard e gli export direzionali ereditino automaticamente la nuova colonna senza disallineamenti tra reparti. La combinazione di pivot con colonna residuale, `ROLLUP` con `grouping()` e KPI table centralizzata elimina definitivamente le riconciliazioni manuali del lunedì mattina, garantendo numeri coerenti tra finanza, marketing, vendite e direzione commerciale in ogni report periodico, settimanale, mensile, trimestrale o annuale dell'intera azienda italiana e dei suoi canali di vendita online e fisici.
+Per questo la KPI table distingue due famiglie di colonne e le documenta. Le colonne additive (`sessions_count`, `orders_count`, `revenue_eur`, `ad_spend_eur`) si possono sommare su qualunque dimensione e su qualunque intervallo. I rapporti non additivi (conversione, valore medio d'ordine, ritorno sulla spesa) si derivano al momento della lettura, su un livello di aggregazione qualsiasi. Nello schema del modello è utile annotare la natura di ciascuna colonna, così che chi collega uno strumento di BI non debba indovinare.
+
+## Tre errori che producono report plausibili ma sbagliati
+
+### Pivot senza residuo né totale
+
+Il sintomo è una somma delle colonne di canale inferiore al totale aziendale, spesso scoperta da qualcuno della finanza e non dall'analista. Succede perché una lista di canali scritta a mano è una fotografia di un momento, e il motore non segnala i valori che non corrispondono a nessuna colonna. Nel nostro caso mancavano 550 euro, cioè il 12,8 % del totale (550 / 4.300). Si corregge aggiungendo la colonna residuale e il totale, e trasformando il controllo `rev_total_eur - somma delle colonne = 0` in un test automatico che fallisce quando compare un canale nuovo.
+
+### Subtotali confusi con i valori vuoti
+
+Il sintomo è un report in cui la riga "area vuota" sembra il totale, oppure in cui i subtotali vengono filtrati insieme ai dati mancanti. Succede perché, di base, ClickHouse rappresenta la colonna aggregata con il valore predefinito del tipo e nei dati reali esistono stringhe vuote vere. Si evita con `grouping()` su ogni colonna del `ROLLUP`, e con etichette esplicite come `TOTALE`, `SUBTOTALE` e `Non assegnata`. Un controllo rapido: il numero di righe con `grouping(region) = 1` deve essere esattamente 1.
+
+### Rapporti salvati e poi mediati
+
+Il sintomo è un indicatore mensile che non coincide con quello ricalcolato dai dati grezzi, con scarti che crescono quando il traffico è irregolare. Come visto, la conversione scende da 3,5 % a 2,3 % non appena si pesano i giorni per il traffico. Succede perché salvare `conversion_pct` sembra comodo, e dopo qualche mese qualcuno lo media. Si corregge salvando numeratore e denominatore e calcolando il rapporto in lettura, in un'unica vista condivisa.
+
+## Un modello atomico e un modello per l'export direzionale
+
+Le righe di subtotale e totale sono utili per un report letto da una persona, ma dannose per uno strumento di BI che calcola da solo i propri totali: se carichi in un grafico una tabella che contiene già `SUBTOTALE` e `TOTALE`, il motore grafico somma tre volte lo stesso importo. La soluzione è tenere due oggetti separati: `mart_kpi_daily` come tabella atomica, senza subtotali, e `rpt_executive_rollup` come vista che applica `ROLLUP` e `grouping()` per l'export mensile alla direzione.
+
+La scelta tra calcolare pivot e subtotali in SQL oppure lasciarli allo strumento di BI segue un criterio pratico. Se il numero deve essere congelato (un export per il responsabile finanziario, con regole di arrotondamento, etichette fisse e quadratura garantita), conviene calcolarlo in SQL e metterlo sotto test. Se il lettore vuole esplorare liberamente, il pivot interattivo dello strumento di BI è più adatto, a condizione che si alimenti dalla tabella atomica. Mescolare le due cose, cioè far esplorare una tabella già raggruppata, produce il doppio conteggio descritto sopra.
+
+Le definizioni di stato appartengono a monte. Se `status = 'paid'`, l'esclusione dei resi e la valuta netta sono scritte in un solo modello, il pivot, il `ROLLUP` e la KPI table ereditano la stessa regola. Se invece ogni report le riscrive, prima o poi due dashboard mostrano due totali diversi per lo stesso mese, e la discussione che segue riguarda i filtri e non l'attività commerciale.
+
+## Verifica sulle tue query di reporting
+
+1. Un pivot per canale mostra ricavi per 9.400 euro sulla somma delle colonne e il totale aziendale è 10.000 euro. Qual è la prima verifica da fare, e quale intervento strutturale evita che il problema si ripresenti?
+
+<details>
+<summary>Mostra risposta</summary>
+
+Mancano 10.000 - 9.400 = 600 euro, pari al 6 % del totale. La prima verifica è un `GROUP BY channel` senza filtri, per confrontare l'elenco dei canali reali con le colonne del pivot e trovare quello non elencato. L'intervento strutturale è aggiungere una colonna residuale con `NOT IN` sui canali elencati e un test che fallisca quando `rev_total_eur` differisce dalla somma delle colonne.
+
+</details>
+
+2. Un `ROLLUP(region, channel)` su 3 aree e 4 canali ciascuna produce quante righe, se ogni combinazione esiste nei dati? E quante ne produrrebbe un `CUBE`?
+
+<details>
+<summary>Mostra risposta</summary>
+
+Il `ROLLUP` produce 3 x 4 = 12 righe di dettaglio, più 3 subtotali di area e 1 totale generale: 16 righe. Il `CUBE` aggiunge anche i 4 subtotali per canale, quindi 20 righe. La differenza cresce con il numero di dimensioni, ed è il motivo per cui si usa il `ROLLUP` sulle gerarchie.
+
+</details>
+
+3. Una KPI table salva `conversion_pct` per giorno. Il lunedì ha 200 sessioni e 10 ordini, il martedì 800 sessioni e 16 ordini. Che cosa mostra la media dei due tassi e che cosa mostra il ricalcolo dai componenti?
+
+<details>
+<summary>Mostra risposta</summary>
+
+I tassi giornalieri sono 10 / 200 = 5 % e 16 / 800 = 2 %, quindi la media semplice è 3,5 %. Dai componenti: ordini 10 + 16 = 26, sessioni 200 + 800 = 1.000, tasso 26 / 1.000 = 2,6 %. Il valore corretto è 2,6 %, perché il martedì pesa quattro volte il lunedì. Va quindi salvato il numeratore con il denominatore, mai il rapporto.
+
+</details>
+
+4. Come distingui, in un risultato di `ROLLUP`, il subtotale dell'area dalla riga di dettaglio di un canale con nome vuoto?
+
+<details>
+<summary>Mostra risposta</summary>
+
+Con `grouping(channel)`: vale 1 sul subtotale, perché la colonna è stata aggregata, e 0 sulla riga di dettaglio, anche se il valore del canale è la stringa vuota. Controllare il testo della colonna non basta, dato che il motore usa il valore predefinito del tipo per le colonne aggregate.
+
+</details>

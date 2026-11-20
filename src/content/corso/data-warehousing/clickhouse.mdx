@@ -1,60 +1,69 @@
 ---
 title: "ClickHouse nel data warehouse moderno"
-description: >-
-  ClickHouse come alternativa/supplemento ai data warehouse tradizionali per analytics veloci.
+description: "Costruire in ClickHouse una copia stretta e a scadenza del warehouse, con tabella denormalizzata, sorting key dalla query dominante, TTL e riconciliazione dei totali, e decidere tra denormalizzazione e dictionary."
 module: "Modulo 9: Data warehouse e modellazione analitica"
 order: 3
 category: Tecnico
 headerImage: /course-headers/data-warehousing-clickhouse-ginnytech-ad.webp
 headerImageAlt: "ClickHouse nel data warehouse moderno - immagine ufficiale della lezione su GinnyTech, creata da AD"
 difficulty: advanced
-duration: 16 min
-learningObjectives:
-  - Misurare quante righe legge la dashboard sulla copia fedele del warehouse e su una tabella larga ordinata sul tempo
-  - Progettare la copia in ClickHouse con tabella denormalizzata, sorting key dalla query dominante, TTL e riconciliazione dei totali
-  - Scegliere tra denormalizzazione e dictionary per gli attributi che cambiano nel tempo
+duration: "40 min"
 prerequisites:
   - data-warehousing/data-modeling
-formato: "articolo"
+learningObjectives:
+  - "Misurare le righe lette da una dashboard su una copia fedele del warehouse e su una tabella larga ordinata sul tempo, e calcolare le righe lette per cella mostrata"
+  - "Progettare in ClickHouse una tabella denormalizzata con sorting key dal filtro dominante, partizione mensile, TTL e riconciliazione dei totali con la fonte"
+  - "Scegliere tra denormalizzazione e dictionary per un attributo che cambia nel tempo, in base a cosa deve restituire un report rieseguito dopo mesi"
 binario: "ml-tabellare"
-autore: "Hermes"
-controllatoDa: "Argo"
-autorizzatoDa: "Giano"
 draft: false
-dateModified: 2026-10-17
+dateModified: 2026-11-17
+formato: "didattica-v2"
 ---
 
-# ClickHouse nel data warehouse moderno
+Una dashboard di vendita si ricarica ogni trenta secondi su quaranta schermi. Ogni ricarica rilancia la stessa aggregazione sulle ultime 24 ore, quindi 40 schermi × 2 ricariche al minuto × 1.440 minuti = 115.200 esecuzioni al giorno. Per togliere questo carico al warehouse si affianca ClickHouse e si copiano le tabelle così come sono. La dashboard resta lenta, perché legge otto milioni di righe per mostrarne 192. È uno scenario costruito con numeri di esempio: ottanta giorni di ordini sintetici, otto milioni di righe, diecimila prodotti, otto canali.
 
-Una dashboard di vendita si ricarica ogni trenta secondi su quaranta schermi, e ogni ricarica rilancia la stessa aggregazione sulle ultime 24 ore: 115.200 volte al giorno. Per togliere quel carico al warehouse si aggiunge ClickHouse accanto e si copiano le tabelle così come sono. La dashboard resta lenta, perché legge otto milioni di righe per mostrarne 192.
+> **Idea chiave:** ClickHouse non sostituisce il warehouse. Ne ospita una copia stretta e a scadenza, appiattita sulla domanda che la dashboard ripete, e la sua velocità dipende dalla forma della copia più che dal motore.
 
 ## Otto milioni di righe per 192 celle
 
-È un caso ricostruito: ottanta giorni di ordini, otto milioni di righe, diecimila prodotti, otto canali, tutti generati dal codice di questa pagina. I numeri non sono una misura di produzione. Sono l'output di chDB 4.4.0, cioè ClickHouse 26.9, e li ottenete rieseguendo i blocchi `sql` nell'ordine in cui compaiono.
+La copia fedele del warehouse ha una tabella dei fatti e una dei prodotti, ordinate per identificativo. La dashboard chiede ordini e fatturato per ora e per canale nelle ultime 24 ore, quindi la risposta ha 24 ore × 8 canali = 192 celle. Per produrle ClickHouse legge 8.010.000 righe (tutta la tabella dei fatti più i prodotti), unite con un join. Con una copia costruita sulla stessa domanda lo stesso risultato costa 100.864 righe lette.
 
-La copia fedele del warehouse ha una tabella dei fatti e una dei prodotti, ordinate per identificativo. La dashboard chiede gli ordini e il fatturato per ora e per canale nelle ultime 24 ore. Per rispondere ClickHouse legge 8.010.000 righe, 33 MB, cioè tutta la tabella dei fatti più i prodotti, e le unisce con un join.
+Il conto per cella rende evidente la differenza.
 
-Con una copia costruita sulla stessa domanda, la stessa risposta costa 100.864 righe e 1,3 MB. Stesso motore, stesso hardware, stesso risultato.
+1. Copia fedele: 8.010.000 righe / 192 celle = circa 41.719 righe lette per cella.
+2. Copia sulla domanda: 100.864 righe / 192 celle = circa 525 righe lette per cella.
+3. Rapporto: 8.010.000 / 100.864 = circa 79 volte meno lavoro, con lo stesso risultato.
+4. Sul giorno intero: 115.200 × 8.010.000 = 922.752.000.000 righe lette contro 115.200 × 100.864 = 11.619.532.800, cioè 923 miliardi contro 11,6 miliardi.
 
-Quando conviene aggiungere ClickHouse accanto al warehouse? Quando la stessa aggregazione sui dati recenti si ripete molte volte al giorno. È questo pattern a giustificarlo, non la dimensione totale dei dati. Se le query sono poche e pesanti, o cambiano a ogni richiesta, il posto giusto è il warehouse e una copia in più è solo un debito. La causa della lentezza non è né il motore né il warehouse: è la forma della copia, che segue le tabelle e non la domanda.
+Le misure sono di esempio e provengono da dati sintetici, quindi con i tuoi dati i numeri cambiano. Quello che resta stabile è il metodo: conta le righe lette e dividile per le celle mostrate.
+
+Quando conviene allora aggiungere ClickHouse accanto a un warehouse? Quando la stessa aggregazione sui dati recenti si ripete molte volte al giorno. Lo giustifica il pattern di accesso, non la dimensione totale dei dati. Se le query sono poche e pesanti, o cambiano a ogni richiesta, il posto giusto è il warehouse e una copia in più è solo un debito da mantenere.
 
 ## Cosa rende veloce la copia
 
 Tre idee reggono tutto il resto.
 
-La prima: la copia è una finestra, non la fonte. Il warehouse conserva la storia, la governance e i test; ClickHouse tiene gli ultimi periodi e gli aggregati che la dashboard consulta.
+La prima è che la copia è una finestra, non la fonte. Il warehouse conserva la storia, la governance e i test. ClickHouse tiene gli ultimi periodi e gli aggregati che la dashboard consulta, e se qualcosa va storto la copia si butta e si ripopola.
 
-La seconda: un join costa più di una tabella già appiattita. La documentazione di ClickHouse lo dice senza giri: i join sono intrinsecamente più costosi di una singola tabella denormalizzata, e per le query a bassa latenza la denormalizzazione è fortemente raccomandata ([minimizzare i join](https://clickhouse.com/docs/best-practices/minimize-optimize-joins)). Il motivo è meccanico: per un join standard ClickHouse costruisce una tabella hash dal lato destro prima di leggere il sinistro, e le versioni recenti anticipano i filtri ma non sempre eliminano quel costo. Il lavoro si sposta dal momento della lettura a quello del caricamento.
+La seconda è che un join costa più di una tabella già appiattita. La documentazione di ClickHouse è esplicita: i join sono intrinsecamente più costosi di una singola tabella denormalizzata, e per le query a bassa latenza la denormalizzazione è fortemente raccomandata ([minimizzare i join](https://clickhouse.com/docs/best-practices/minimize-optimize-joins)). Il motivo è meccanico. In un join standard ClickHouse costruisce una tabella hash dal lato destro prima di leggere il sinistro, e le versioni recenti anticipano i filtri ma non sempre eliminano quel costo. Denormalizzare sposta il lavoro dal momento della lettura a quello del caricamento, dove si paga una volta sola.
 
-La terza: l'ordine su disco segue la domanda ([la sorting key](/course/real-time-analytics/clickhouse-fondamenti/) è spiegata nel modulo 12).
+La terza è che l'ordine su disco segue la domanda. La sorting key e l'indice sparso sono spiegati nella [lezione sui fondamenti di ClickHouse](/course/real-time-analytics/clickhouse-fondamenti/) del modulo sul real-time. Qui basta ricordare che l'indice individua intervalli di granuli da 8.192 righe, e che un filtro sul tempo ne salta quasi tutti solo se il tempo è in testa alla chiave.
 
-**ClickHouse non sostituisce il warehouse: ne ospita una copia stretta e a scadenza, appiattita sulla domanda che la dashboard ripete.**
+| Scelta | Copia fedele | Copia sulla domanda |
+|---|---|---|
+| Forma della tabella | Fatti e prodotti separati, come nel warehouse | Una tabella larga con canale e categoria dentro |
+| Sorting key | Identificativo dell'ordine | `toStartOfHour(ts)`, canale |
+| Join a ogni lettura | Sì, hash dal lato prodotti | Nessuno |
+| Righe lette per la dashboard | 8.010.000 | 100.864 |
+
+Un criterio di decisione utile prima di costruire qualsiasi cosa è confrontare due numeri. Il primo è la frequenza con cui la stessa aggregazione si ripete sui dati recenti. Il secondo è il costo di una singola esecuzione sul warehouse, misurato in secondi di calcolo o in terabyte scansionati. Se la frequenza è alta e il costo unitario non è trascurabile, la copia si ripaga. Se la frequenza è bassa, la copia aggiunge un secondo sistema da monitorare, un secondo schema da tenere allineato e un secondo punto in cui i numeri possono divergere, senza compensare con un risparmio reale. Per questo la progettazione parte dall'elenco delle query ripetute e non dal catalogo delle tabelle.
 
 ## Tre errori nella copia
 
-Il blocco crea la copia fedele, la riempie e misura la dashboard. `OPTIMIZE … FINAL` serve solo a rendere ripetibili i conteggi delle parti; non è una pratica da produzione.
+Il blocco crea la copia fedele, la riempie e misura la dashboard. `OPTIMIZE ... FINAL` serve solo a rendere ripetibili i conteggi delle parti e non è una pratica da produzione.
 
 ```sql
+-- Copia fedele del warehouse: tabelle e chiavi come nella sorgente.
 CREATE TABLE prodotti_v1
 (
     id_prodotto UInt32,
@@ -93,44 +102,38 @@ FROM numbers(8000000);
 
 OPTIMIZE TABLE ordini_v1 FINAL;
 
--- La dashboard sulla copia fedele: 8.010.000 righe lette.
+-- La dashboard sulla copia fedele: legge l'intera tabella dei fatti.
 SELECT toStartOfHour(o.ts) AS ora, p.canale, count() AS ordini, sum(o.importo) AS fatturato
 FROM ordini_v1 AS o
 INNER JOIN prodotti_v1 AS p ON o.id_prodotto = p.id_prodotto
 WHERE o.ts >= toStartOfDay(now()) - toIntervalDay(1)
 GROUP BY ora, p.canale
 ORDER BY ora, p.canale;
-
--- Correggere un importo con un UPDATE: la riga 12345 sta in una parte sola, da 8 milioni di righe.
-SELECT count() AS parti, sum(rows) AS righe_nella_parte FROM system.parts WHERE active AND table = 'ordini_v1';
-
-ALTER TABLE ordini_v1 UPDATE importo = 0 WHERE id_ordine = 12345 SETTINGS mutations_sync = 1;
 ```
 
 ### Lo schema a stella copiato com'è
 
-Sembra ragionevole: le tabelle sono già modellate, testate e documentate, e il caricamento è un copia-incolla. Ma la chiave è quella del warehouse, l'identificativo. L'identificativo cresce con il tempo, ma l'indice non lo sa: il filtro della dashboard è sul tempo e nessun granulo si salta. Il join ricostruisce a ogni ricarica un'unione che avrebbe potuto essere fatta una volta sola, all'ingresso.
+Il sintomo è una query lenta nonostante un motore veloce e un warehouse ben modellato. L'idea sembra ragionevole: le tabelle sono già testate e documentate, il caricamento è un copia-incolla. Ma la chiave è quella del warehouse, l'identificativo. L'identificativo cresce con il tempo, ma l'indice sparso non lo sa: il filtro della dashboard è sul tempo e nessun granulo si salta. Il join ricostruisce a ogni ricarica un'unione che si poteva fare una volta sola, all'ingresso. La correzione è una tabella nuova con il tempo in chiave e gli attributi già dentro.
 
 ### Tutto lo storico, per sicurezza
 
-Si copia tutto per ogni evenienza: se un giorno servisse, c'è. Ma lo storico c'è già nel warehouse, che esiste per quello. Nella copia ogni mese in più è spazio da fondere, scansionare e ripopolare, senza che nessuna dashboard lo legga.
+Il sintomo è una copia che cresce ogni mese senza che la dashboard ne tragga vantaggio. Si copia tutto per ogni evenienza, ma lo storico c'è già nel warehouse, che esiste per quello. Nella copia ogni mese in più è spazio da fondere, scansionare e ripopolare, senza che nessuna dashboard lo legga. La correzione è un `TTL` coerente con la finestra più lunga che la dashboard consulta.
 
 ### ClickHouse trattato come un OLTP
 
-Una correzione arriva dal warehouse e la si applica con `UPDATE`, come si farebbe su un database transazionale. In ClickHouse è una mutation: riscrive, in ogni parte che contiene le righe toccate, la colonna modificata per intero: cambiare un solo importo vuol dire riscrivere quella colonna per una parte da 8 milioni di righe. La documentazione la descrive come un'operazione pesante di I/O da usare con parsimonia, e per le correzioni suggerisce altri motori, come `ReplacingMergeTree`, che il modulo 12 tratta nella [lezione sul CDC](/course/real-time-analytics/cdc-pattern/).
+Il sintomo è una correzione di una riga che occupa il disco per minuti. Una modifica arriva dal warehouse e la si applica con `ALTER TABLE ... UPDATE`, come su un database transazionale. In ClickHouse è una mutation: riscrive per intero la colonna modificata in ogni parte che contiene le righe toccate. Cambiare un solo importo in una parte da 8 milioni di righe vuol dire riscrivere quella colonna per 8 milioni di righe. La documentazione la descrive come un'operazione pesante da usare con parsimonia. Per le correzioni esistono altri strumenti, come `ReplacingMergeTree`, trattato nella [lezione sul CDC](/course/real-time-analytics/cdc-pattern/).
 
 ## La copia con la forma della domanda
 
-I criteri, in ordine di priorità:
+I criteri, in ordine di priorità, sono quattro.
 
-1. Partite dalla domanda. Scrivete la query che la dashboard ripete e tenete nella copia solo le colonne che usa.
-2. Appiattite le dimensioni dentro la tabella, quando cambiano di rado e la relazione è uno a molti. La documentazione indica questi casi per la denormalizzazione.
-3. Mettete in testa alla chiave i filtri della domanda, partizionate per mese e fate scadere i dati con un `TTL`. La chiave può essere un'espressione: con `toStartOfHour(ts)` il filtro su `ts` salta comunque i granuli, perché la funzione è monotona. Con `ttl_only_drop_parts = 1` una parte sparisce quando tutte le sue righe sono scadute: con partizioni mensili e 90 giorni di TTL, la ritenzione effettiva può arrivare a circa 120 giorni.
-4. Caricate in sola aggiunta dal warehouse e riconciliate i totali su finestre chiuse.
-
-La copia corretta, caricata dalla copia fedele come farebbe un export:
+1. Parti dalla domanda: scrivi la query che la dashboard ripete e tieni nella copia solo le colonne che usa.
+2. Appiattisci le dimensioni dentro la tabella quando cambiano di rado e la relazione è uno a molti, come nel caso di canale e categoria di un prodotto.
+3. Metti in testa alla chiave i filtri della domanda, partiziona per mese e fai scadere i dati con un `TTL`. La chiave può essere un'espressione: con `toStartOfHour(ts)` il filtro su `ts` salta comunque i granuli, perché la funzione è monotona. Con `ttl_only_drop_parts = 1` una parte sparisce quando tutte le sue righe sono scadute, quindi con partizioni mensili e 90 giorni di TTL la ritenzione effettiva può arrivare a circa 120 giorni.
+4. Carica in sola aggiunta dal warehouse e riconcilia i totali su finestre chiuse.
 
 ```sql
+-- La copia corretta: tabella larga, tempo in chiave, scadenza a 90 giorni.
 CREATE TABLE ordini_larghi
 (
     ts DateTime,
@@ -146,6 +149,7 @@ ORDER BY (toStartOfHour(ts), canale)
 TTL ts + INTERVAL 90 DAY
 SETTINGS ttl_only_drop_parts = 1;
 
+-- Il join si paga una volta sola, al caricamento.
 INSERT INTO ordini_larghi
 SELECT o.ts, o.id_ordine, o.id_cliente, p.canale, p.categoria, o.importo
 FROM ordini_v1 AS o
@@ -153,7 +157,7 @@ INNER JOIN prodotti_v1 AS p ON o.id_prodotto = p.id_prodotto;
 
 OPTIMIZE TABLE ordini_larghi FINAL;
 
--- La stessa dashboard: 100.864 righe lette, nessun join.
+-- La stessa dashboard, senza join.
 SELECT toStartOfHour(ts) AS ora, canale, count() AS ordini, sum(importo) AS fatturato
 FROM ordini_larghi
 WHERE ts >= toStartOfDay(now()) - toIntervalDay(1)
@@ -164,24 +168,20 @@ ORDER BY ora, canale;
 SELECT
     (SELECT sum(importo) FROM ordini_larghi WHERE ts >= toStartOfDay(now()) - toIntervalDay(1))
   - (SELECT sum(importo) FROM ordini_v1 WHERE ts >= toStartOfDay(now()) - toIntervalDay(1)) AS scostamento;
-
--- La scadenza non è immediata: si applica durante i merge, a intervalli di almeno 14.400 secondi.
-SELECT name, value FROM system.merge_tree_settings WHERE name = 'merge_with_ttl_timeout';
 ```
 
-Da 8.010.000 righe a 100.864: due ordini di grandezza, sulla stessa domanda e con lo stesso risultato. La riconciliazione dà zero.
+La copia è reversibile finché il warehouse resta la fonte: si butta e si ripopola a costo basso. La sorting key invece non si cambia su una tabella esistente, quindi serve una tabella nuova e una ricarica. Il `TTL` cancella, e un dato scaduto si recupera solo dal warehouse. La scadenza non è nemmeno immediata, perché si applica durante i merge a intervalli di almeno 14.400 secondi, cioè quattro ore, secondo il valore predefinito di `merge_with_ttl_timeout`.
 
-La copia è reversibile finché il warehouse resta la fonte: si butta e si ripopola, a costo basso. La sorting key no: non si cambia su una tabella esistente, quindi serve una tabella nuova e una ricarica. Il `TTL` cancella: un dato scaduto si recupera solo dal warehouse.
-
-Le correzioni che arrivano dopo il caricamento non si applicano con un `UPDATE`. Si ricarica la partizione interessata: `ALTER TABLE … DROP PARTITION` toglie parti intere senza riscrivere nulla, e si reinserisce dal warehouse la finestra corretta. La partizione mensile è quindi, oltre che l'unità di scadenza, quella di correzione. Se le correzioni sono frequenti e puntuali, un mese è troppo grosso: è il segnale per passare a un motore di tabella pensato per questo.
+Le correzioni che arrivano dopo il caricamento non si applicano con un `UPDATE`. Si ricarica la partizione interessata: `ALTER TABLE ... DROP PARTITION` toglie parti intere senza riscrivere nulla, e si reinserisce dal warehouse la finestra corretta. La partizione mensile è quindi l'unità di scadenza e anche quella di correzione. Se le correzioni sono frequenti e puntuali, un mese è troppo grosso, ed è il segnale per passare a un motore di tabella pensato per aggiornamenti.
 
 ## Quando una dimensione cambia
 
-La categoria di un prodotto cambia: gli articoli passano da un reparto a un altro. Due strumenti, e danno risposte diverse. La denormalizzazione scrive la categoria dentro ogni ordine al momento del caricamento. Il dictionary tiene la dimensione in memoria e la risolve a ogni lettura con `dictGet`.
+La categoria di un prodotto cambia: gli articoli passano da un reparto a un altro. Due strumenti danno risposte diverse. La denormalizzazione scrive la categoria dentro ogni ordine al momento del caricamento. Il dictionary tiene la dimensione in memoria e la risolve a ogni lettura con `dictGet`.
 
-Il criterio: **denormalizzate se l'attributo deve restare quello al momento dell'evento, dictionary se deve riflettere il valore corrente.**
+Il criterio è questo: denormalizza se l'attributo deve restare quello al momento dell'evento, usa un dictionary se deve riflettere il valore corrente.
 
 ```sql
+-- Dictionary: la categoria viene risolta al momento della lettura.
 CREATE DICTIONARY prodotti_dict
 (
     id_prodotto UInt32,
@@ -207,20 +207,44 @@ SELECT 'dopo' AS quando,
 
 La confusione comune è credere che il dictionary conservi la storia. Non la conserva: dopo il ricaricamento la categoria vecchia sparisce dal passato, e il fatturato storico di `cat-7`, che nella tabella larga resta invariato, nel dictionary va a zero. Nessuno vede un errore. Cambiano i report di mesi fa, e a ogni confronto con il warehouse qualcuno cerca un bug che non c'è.
 
-Un test pratico: un report del mese scorso, rieseguito oggi, deve dare lo stesso numero? Se sì, denormalizzate. Se deve seguire l'anagrafica di oggi, usate il dictionary.
+Un test pratico: un report del mese scorso, rieseguito oggi, deve dare lo stesso numero? Se sì, denormalizza. Se deve seguire l'anagrafica di oggi, usa il dictionary. Vale anche il contrario: per una dimensione che deve riflettere sempre il valore corrente, la denormalizzazione costringe a riscrivere la storia con una mutation su tutta la tabella. Il dictionary regge bene i lookup su piccole dimensioni, ma la documentazione avverte di non usare `dictGet` in un `WHERE` su gran parte delle righe, perché lì non ci sono indici.
 
-Vale anche il contrario. Per una dimensione che deve riflettere sempre il valore corrente, la denormalizzazione costringe a riscrivere la storia con una mutation su tutta la tabella. Il dictionary regge bene i lookup su piccole dimensioni, ma la documentazione avverte di non usare `dictGet` in un `WHERE` su gran parte delle righe: lì non ci sono indici.
+Questa lezione non confronta prezzi né latenze dei warehouse commerciali, perché ClickHouse qui gira da solo. Non copre il trasporto dal warehouse, che sia un export, un CDC o un modello dbt, e i dati sono sintetici.
 
-Questo articolo non confronta prezzi né latenze dei warehouse commerciali: non ho misure su di essi, e ClickHouse qui gira da solo. Non copre il trasporto dal warehouse, che sia un export, un CDC o un modello `dbt`. I dati sono sintetici: con dati reali i numeri cambiano.
+## Controllo prima di mettere la copia in produzione
 
-## Prima di andare in produzione
+1. La dashboard esegue 80 ricariche l'ora su 12 schermi per 24 ore. Quante esecuzioni al giorno sono e perché contano per decidere la copia?
 
-1. Qual è la query che la dashboard ripete, e quante volte al giorno?
-2. Quante righe legge quella query, rispetto alle celle che mostra?
-3. Quali dimensioni sono appiattite nella tabella e quali vengono risolte alla lettura?
-4. Dopo quanto tempo scade la copia, e dove si recupera un dato scaduto?
-5. Di quanto differiscono i totali della copia da quelli del warehouse, su una finestra chiusa?
+<details>
+<summary>Mostra risposta</summary>
 
-La metrica che separa chi ottimizza da chi tira a indovinare è doppia: le righe lette per ogni cella mostrata, e lo scostamento dei totali dalla fonte. La prima misura il lavoro, la seconda la fiducia. Il tempo di risposta, da solo, cambia con il carico della giornata.
+Sono 80 × 12 × 24 = 23.040 esecuzioni al giorno se le 80 ricariche sono per schermo, oppure 80 × 24 = 1.920 se sono complessive. In entrambi i casi la stessa aggregazione si ripete migliaia di volte sui dati recenti, che è il pattern in cui una copia dedicata ripaga il suo mantenimento.
 
-Di tutto l'articolo, una scelta pesa ordini di grandezza più del resto: costruire la copia sulla domanda e non sulle tabelle. Nelle prove sono 8.010.000 righe lette contro 100.864.
+</details>
+
+2. Una query legge 2.400.000 righe per mostrare 48 celle. Quante righe legge per cella e cosa controlli?
+
+<details>
+<summary>Mostra risposta</summary>
+
+Legge 2.400.000 / 48 = 50.000 righe per cella. Controlli se il filtro temporale è in testa alla sorting key e se un join sta ricostruendo attributi che potevano essere denormalizzati.
+
+</details>
+
+3. Con partizioni mensili e TTL di 60 giorni e `ttl_only_drop_parts = 1`, quanto può durare al massimo un dato?
+
+<details>
+<summary>Mostra risposta</summary>
+
+Una parte viene eliminata solo quando tutte le sue righe sono scadute, quindi il dato più recente di un mese tiene in vita l'intero mese. La ritenzione effettiva può arrivare a circa 60 + 30 = 90 giorni, più il ritardo dei merge.
+
+</details>
+
+4. Un report del trimestre scorso, rieseguito oggi, deve dare lo stesso fatturato per categoria. Usi denormalizzazione o dictionary?
+
+<details>
+<summary>Mostra risposta</summary>
+
+Denormalizzazione. La categoria scritta nella riga al momento del caricamento resta quella dell'evento. Un dictionary applicherebbe la categoria corrente a tutto il passato e il report cambierebbe senza alcun errore visibile.
+
+</details>

@@ -1,63 +1,86 @@
 ---
 title: "ClickHouse: database colonnare e MergeTree"
 description: >-
-  Introduzione a ClickHouse: architettura column-oriented, motore di storage e ottimizzazione per analytics real-time.
+  Calcolare quanti granuli legge una query su MergeTree, scegliere ORDER BY e PARTITION BY dalla query dominante e decidere tra indice di salto e projection leggendo EXPLAIN.
 module: "Modulo 12: Real-time analytics con ClickHouse"
 order: 2
 category: Tecnico
 headerImage: /course-headers/real-time-analytics-clickhouse-fondamenti-ginnytech-ad.webp
 headerImageAlt: >-
   ClickHouse fondamenti - immagine ufficiale della lezione su GinnyTech, creata da AD
-difficulty: advanced
-duration: 16 min
+difficulty: avanzato
+duration: 40 min
 prerequisites:
   - real-time-analytics/streaming
 learningObjectives:
-  - Spiegare come l'indice primario sparso scarta granuli e perché dipende dall'ordine fisico
-  - Scegliere la sorting key dai filtri della query dominante e partizionare solo per il ciclo di vita
-  - Misurare le righe lette con EXPLAIN indexes = 1 e decidere tra indice di salto e projection
-formato: "articolo"
+  - Calcolare con l'aritmetica dei granuli (8.192 righe ciascuno) quante righe legge una query e confrontarle con quelle restituite
+  - Scegliere ORDER BY, PARTITION BY e tipi di colonna a partire dai filtri della query dominante
+  - Verificare con EXPLAIN indexes = 1 e system.parts se un indice di salto o una projection riduce davvero le righe lette
 binario: "ml-tabellare"
-autore: "Hermes"
-controllatoDa: "Argo"
-autorizzatoDa: "Giano"
+formato: "didattica-v2"
 draft: false
-dateModified: 2026-10-16
+dateModified: 2026-11-17
 ---
 
-# ClickHouse: database colonnare e MergeTree
+La scheda di un cliente impiega quasi un secondo a caricarsi. La tabella sta in ClickHouse, scelto proprio perché legge in fretta, e la query ha il filtro giusto: `WHERE id_cliente = 42`. Nessun errore, nessun avviso nei log. Eppure per restituire 4.967 righe il motore ne legge cinque milioni.
 
-Aprire la scheda di un cliente richiede cinque milioni di righe lette per trovarne 4.967. La tabella sta in ClickHouse, scelto perché legge in fretta, e la query ha il filtro giusto. Nessun errore, nessun avviso: solo un lavoro cento volte più grande del necessario.
+## Cinque milioni di righe per trovarne 4.967
 
-## Cinque milioni di righe per 4.967
+Il caso è ricostruito con numeri di esempio: cinque milioni di eventi web, mille clienti, centosedici giorni di storia, tutti generati dal codice che trovi più sotto. Non sono misure di produzione. Sono l'output di chDB, il motore ClickHouse in-process per Python, e li ottieni rieseguendo i blocchi `sql` nell'ordine in cui compaiono.
 
-È un caso ricostruito: cinque milioni di eventi web, mille clienti, centosedici giorni, tutti generati dal codice di questa pagina. I numeri non sono una misura di produzione. Sono l'output di chDB 4.4.0, cioè ClickHouse 26.9, e li ottenete rieseguendo i blocchi `sql` nell'ordine in cui compaiono.
+La tabella è quella che nasce il primo giorno di ogni progetto: `ORDER BY ts`, una partizione per giorno, stringhe dove capita. La scheda cliente seleziona 4.967 righe, cioè lo 0,1% del totale, ma ClickHouse ne legge 5.000.000 e scarica 45 MB di colonne. Il lavoro è mille volte più grande del risultato.
 
-La tabella è quella che nasce il primo giorno di un progetto: `ORDER BY ts`, una partizione per giorno, stringhe dove capita. La scheda cliente esegue `WHERE id_cliente = 42`, che seleziona 4.967 righe. Per trovarle ClickHouse ne legge 5.000.000, cioè 45 MB di colonne per un risultato che ne vale lo 0,1%.
+La reazione tipica è aggiungere nodi, e funziona finché la tabella cresce meno della macchina. Con un altro ordine delle righe sul disco la stessa query, sullo stesso hardware, legge 49.152 righe e 372 KB.
 
-La risposta di riflesso è aggiungere nodi. Funziona finché la tabella cresce meno della macchina. Con un altro ordine su disco la stessa query legge 49.152 righe e 372 KB, sullo stesso hardware.
+> **Idea chiave:** l'indice primario di ClickHouse non cerca righe, scarta blocchi di 8.192 righe, e li scarta bene solo se l'ordine fisico dei dati segue i filtri delle tue query.
 
-Il motore non è lento. Fa ciò che gli avete chiesto: righe ordinate per tempo, interrogate per cliente. La causa non è la potenza del cluster. È l'ordine in cui le righe stanno sul disco.
+Il motore non è lento. Esegue quello che gli è stato chiesto: righe ordinate per tempo, interrogate per cliente. Il problema non è la potenza del cluster ma l'ordine in cui le righe stanno su disco, e quell'ordine lo decidi tu nel `CREATE TABLE`, una volta sola.
 
-## Cosa legge una query
+## Come MergeTree salva e legge una colonna
 
-Tre cose, in questa sequenza.
+Per capire perché l'ordine pesa tanto serve il modello fisico, che si riduce a tre fatti.
 
-La prima: ClickHouse salva ogni colonna in un file separato. Una query che usa due colonne su sei apre due file. Per questo il costo di `SELECT *` cresce con le colonne della tabella, non con quelle che vi servono.
+Il primo: ogni colonna vive in un file separato. Una query che usa due colonne su sei apre due file e ignora gli altri quattro. Per questo `SELECT *` costa in proporzione alle colonne della tabella e non a quelle che ti servono davvero.
 
-La seconda: dentro ogni parte le righe sono ordinate secondo la chiave `ORDER BY`, e ogni colonna è divisa in granuli di 8.192 righe, valore di default. L'indice primario ha una voce per granulo, il valore della chiave della prima riga. È un indice sparso: non punta alle righe, punta ai blocchi ([indici primari](https://clickhouse.com/docs/primary-indexes)).
+Il secondo: ogni `INSERT` crea una parte, cioè una cartella immutabile in cui le righe sono ordinate secondo la chiave `ORDER BY`. Dentro la parte ogni colonna è divisa in granuli da 8.192 righe, valore di default. L'indice primario ha una sola voce per granulo: il valore della chiave della prima riga. È un indice sparso, non punta alle righe ma ai blocchi ([indici primari nella documentazione](https://clickhouse.com/docs/primary-indexes)).
 
-La terza: la query cerca il valore con una ricerca binaria tra le voci e scarta i granuli che non possono contenerlo. Gli altri li legge per intero. Quanti se ne scartano dipende da una cosa sola, cioè da quanto il filtro coincide con l'ordine.
+Il terzo: la query fa una ricerca binaria tra le voci dell'indice e scarta i granuli che non possono contenere il valore cercato. Quelli che restano vengono letti per intero. Quanti se ne scartano dipende da una sola cosa, cioè da quanto il filtro coincide con l'ordine fisico.
 
-**L'indice primario non cerca righe: scarta granuli, e li scarta bene solo se l'ordine fisico segue i filtri.**
+```mermaid
+flowchart LR
+    Q["Query: WHERE id_cliente = 42"] --> I["Indice primario (1 voce per granulo)"]
+    I -->|"ricerca binaria"| S["Granuli candidati"]
+    S --> L["Lettura delle sole colonne richieste"]
+    L --> R["Righe filtrate e aggregate"]
+    P["Partizione e min-max"] -->|"scarta parti intere"| I
+```
 
-In una tabella ordinata per tempo, mille clienti sono mescolati e ognuno compare in ogni blocco. Nessun granulo si può escludere. In una tabella ordinata per cliente le sue righe stanno una accanto all'altra: qui in sei granuli su 612, perché la tabella ha quattro parti.
+Con `ORDER BY ts` i mille clienti sono mescolati: ognuno compare in ogni blocco, quindi nessun granulo può essere escluso. Con `ORDER BY (id_cliente, ts)` le righe di un cliente stanno una accanto all'altra e occupano pochi granuli consecutivi.
 
-## Tre errori che si trovano ovunque
+## Il conto dei granuli, passo per passo
+
+Prima di toccare codice conviene saper prevedere il risultato con una calcolatrice. Il calcolo è corto e vale per qualunque tabella MergeTree.
+
+Partiamo dalla tabella con `ORDER BY ts`. Contiamo i granuli: 5.000.000 righe ÷ 8.192 righe per granulo = 610,4, quindi 611 granuli. In pratica sono 612, perché la tabella è composta da 4 parti e ogni parte arrotonda per eccesso il proprio ultimo granulo. Il filtro su `id_cliente` non coincide con l'ordine, quindi tutti i 612 granuli sono candidati: 612 × 8.192 ≈ 5.000.000 righe lette.
+
+Passiamo alla tabella con `ORDER BY (id_cliente, ts)`. Il cliente 42 ha 4.967 righe. Dentro ogni parte le sue righe sono contigue, quindi occupano al più 2 granuli per parte quando attraversano un confine. Su 4 parti il massimo teorico è 8 granuli, e il motore ne legge 6: 6 × 8.192 = 49.152 righe.
+
+Ora i rapporti, che sono il vero risultato dell'esempio:
+
+- Righe lette rispetto a quelle restituite, tabella v1: 5.000.000 ÷ 4.967 = 1.006,6 righe lette per ogni riga utile.
+- Stesso rapporto, tabella v2: 49.152 ÷ 4.967 = 9,9 righe lette per ogni riga utile.
+- Riduzione del lavoro: 5.000.000 ÷ 49.152 = 101,7 volte in meno sulle righe, e 45.000.000 ÷ 372.216 = 120,9 volte in meno sui byte.
+
+Il rapporto 9,9 non scende mai a 1, perché si legge sempre il granulo intero anche quando contiene poche righe utili. Le 49.152 righe sono l'ordine di grandezza giusto: la query è passata da centinaia di migliaia di blocchi a una manciata.
+
+Un controllo sui byte conferma il modello della prima sezione: nella v1 la query legge due colonne, `id_cliente` (4 byte più 1 byte di maschera per il `Nullable`) e `durata_ms` (4 byte), cioè 9 byte per riga. E infatti 5.000.000 × 9 byte = 45.000.000 byte, esattamente i 45 MB misurati.
+
+## Tre errori di schema che passano ogni test
 
 Questo è lo schema che esce da un tutorial e da una scadenza. Il blocco crea la tabella, la riempie con i dati sintetici e misura la scheda cliente.
 
 ```sql
+-- Schema di partenza: ordinato per tempo, partizione giornaliera, tipi larghi.
 CREATE TABLE eventi_web_v1
 (
     ts DateTime,
@@ -71,6 +94,7 @@ ENGINE = MergeTree
 PARTITION BY toDate(ts)
 ORDER BY ts;
 
+-- Cinque milioni di eventi sintetici, uno ogni due secondi.
 INSERT INTO eventi_web_v1
 SELECT
     toDateTime('2026-01-01 00:00:00') + number * 2,
@@ -90,34 +114,35 @@ SELECT count(), avg(durata_ms) FROM eventi_web_v1 WHERE id_cliente = 42;
 
 ### L'ordine parte dal tempo
 
-Sembra ragionevole. Gli eventi arrivano in ordine cronologico, i grafici sono sul tempo, `ORDER BY ts` è la prima chiave che viene in mente. Non lo è perché ogni filtro che non sia il tempo, cliente, campagna o pagina, non guadagna nulla.
+Sintomo: la query per cliente, per campagna o per pagina legge l'intera tabella, e il tempo cresce in modo lineare con le righe. Succede perché gli eventi arrivano in ordine cronologico, i grafici sono sul tempo e `ORDER BY ts` è la prima chiave che viene in mente. Ogni filtro che non sia il tempo non guadagna nulla.
 
-Questo è l'errore peggiore, perché non dà sintomi finché la tabella è piccola. Su diecimila righe la differenza non si vede, e quando si vede la tabella ha già un anno di storia.
+È l'errore peggiore perché tace finché la tabella è piccola: su diecimila righe la differenza non si vede, e quando si vede la tabella ha già un anno di storia. La correzione è partire dall'elenco dei filtri della query dominante e metterli in testa alla chiave.
 
-### Una partizione al giorno per velocità
+### Una partizione al giorno per andare più veloce
 
-Si partiziona sul tempo perché le query filtrano sul tempo. Qui nascono 116 partizioni per cinque milioni di righe, e ClickHouse non fonde parti di partizioni diverse. La documentazione è chiara su questo punto: la partizione serve a gestire i dati, per cancellare un mese o spostarlo su storage più economico, non ad accelerare le query. Sempre secondo la documentazione, la cardinalità ottimale della chiave di partizione sta sotto i 100–1.000 valori.
+Sintomo: centinaia di partizioni, tante cartelle da aprire, merge che non possono unire parti di partizioni diverse. Qui nascono 116 partizioni per cinque milioni di righe. Si partiziona sul tempo perché le query filtrano sul tempo, ma la documentazione è chiara: la partizione serve a gestire i dati, per cancellare un mese o spostarlo su storage più economico, non ad accelerare le query. La cardinalità ottimale della chiave di partizione sta sotto i 100–1.000 valori.
 
-Una partizione al giorno non rende più veloci le query sul cliente. Rende più numerose le parti da aprire.
+La correzione è partizionare per mese e solo se hai davvero una scadenza da applicare con `TTL` o `DROP PARTITION`. Altrimenti anche una sola partizione va bene.
 
 ### Tipi larghi per abitudine
 
-`stato String` con cinque valori, `id_cliente Nullable(UInt32)` perché «potrebbe mancare». La si scambia per prudenza. La documentazione consiglia `LowCardinality` sotto i 10.000 valori distinti ed evita `Nullable` quando basta un valore di default: la colonna `Nullable` ne crea una seconda, di tipo `UInt8`, da leggere ogni volta.
+Sintomo: la tabella occupa il doppio dello spazio necessario. `stato String` con cinque valori distinti, `id_cliente Nullable(UInt32)` perché «potrebbe mancare». La si scambia per prudenza, ma `LowCardinality` conviene sotto i 10.000 valori distinti e `Nullable` aggiunge una seconda colonna `UInt8` da leggere a ogni query.
 
-Non è il difetto che rallenta la scheda. È quello che gonfia lo spazio: 95,21 MiB per questa tabella contro 48,29 della versione corretta. Non so dirvi quanto pesi ciascuna delle tre scelte da sola, perché l'esperimento le cambia insieme.
+Questo difetto non spiega il rallentamento della scheda, gonfia lo spazio: 95,21 MiB per la v1 contro 48,29 MiB della versione corretta. L'esperimento cambia tipi, chiave e partizione insieme, quindi non separa il peso di ciascuna scelta. Per isolarlo basta ricreare la tabella cambiando una sola cosa per volta.
 
-## L'ordine giusto, la partizione giusta
+## La tabella ricostruita: ordine, partizione e tipi giusti
 
 I criteri, in ordine di priorità:
 
-1. Elencate i filtri della query dominante, quella che parte più volte al giorno. Quelle colonne aprono la chiave.
+1. Elenca i filtri della query dominante, quella che parte più volte al giorno. Quelle colonne aprono la chiave.
 2. Tra le colonne di filtro, prima quelle con meno valori distinti: la documentazione consiglia la cardinalità crescente, per l'indice e per la compressione. La regola cede alla query dominante, perché un filtro su una colonna in coda è meno efficace di uno in testa ([scelta della chiave](https://clickhouse.com/docs/best-practices/choosing-a-primary-key)).
-3. Partizionate solo per il ciclo di vita dei dati: un mese, e una scadenza con `TTL` oppure `DROP PARTITION`.
-4. Tipi stretti: `LowCardinality` per le stringhe con pochi valori, nessun `Nullable` senza una ragione.
+3. Partiziona solo per il ciclo di vita dei dati, un mese alla volta.
+4. Usa tipi stretti: `LowCardinality` per le stringhe con pochi valori, nessun `Nullable` senza una ragione.
 
 Lo schema corretto, con la copia dei dati dalla tabella sbagliata e la stessa misura:
 
 ```sql
+-- Schema corretto: la chiave parte dal filtro della scheda cliente.
 CREATE TABLE eventi_web_v2
 (
     ts DateTime,
@@ -149,17 +174,17 @@ GROUP BY table
 ORDER BY table;
 ```
 
-Da 5.000.000 righe a 49.152: due ordini di grandezza, sulla stessa query e con lo stesso risultato. La tabella occupa inoltre la metà dello spazio.
+Il risultato è quello previsto dal conto dei granuli: da 5.000.000 righe a 49.152, due ordini di grandezza sulla stessa query e con lo stesso risultato. Lo spazio su disco scende da 95,21 a 48,29 MiB, quindi del 49%, perché 48,29 ÷ 95,21 = 0,507.
 
-Questa correzione non si fa sul posto. ClickHouse non permette di modificare la chiave primaria di una tabella esistente: si crea la tabella nuova, si copia con `INSERT … SELECT`, come nel blocco qui sopra, e si scambiano i nomi con `EXCHANGE TABLES`, che è atomico. Costa tempo e spazio doppio durante la copia, e se le scritture continuano dovete decidere come non perderle. La chiave si sceglie prima del primo milione di righe, non dopo il miliardo.
+La correzione non si fa sul posto. ClickHouse non permette di modificare la chiave primaria di una tabella esistente: si crea la tabella nuova, si copia con `INSERT … SELECT` come nel blocco qui sopra e si scambiano i nomi con `EXCHANGE TABLES`, che è atomico. Costa tempo e spazio doppio durante la copia, e se le scritture continuano devi decidere come non perderle. La chiave si sceglie prima del primo milione di righe, non dopo il miliardo.
 
-## Quando un solo ordine non basta
+## La seconda domanda: indice di salto o projection
 
-La scheda cliente ora è veloce. Poi arriva la seconda domanda: tutti gli eventi di una campagna. `id_campagna` non è in testa alla chiave, e le campagne sono mescolate in ogni granulo.
+La scheda cliente ora è veloce. Poi arriva la seconda domanda: tutti gli eventi di una campagna. `id_campagna` non è in testa alla chiave e le campagne sono mescolate in ogni granulo, quindi la query torna a leggere tutto.
 
-Gli strumenti sono due. L'indice di salto (data skipping index) tiene un riassunto di ogni blocco di granuli e scarta quelli che non possono contenere il valore. La projection tiene una seconda copia della tabella con un altro ordine, scelta in automatico dal motore.
+Gli strumenti sono due. L'indice di salto (data skipping index) tiene un riassunto di ogni blocco di granuli e scarta quelli che non possono contenere il valore. La projection tiene una seconda copia della tabella con un altro ordine, scelta in automatico dal motore quando conviene.
 
-Il criterio: **indice di salto se i valori della colonna sono già raggruppati dall'ordine fisico, projection se non lo sono.**
+Il criterio: **indice di salto se i valori della colonna sono già raggruppati dall'ordine fisico, projection se non lo sono.** Per controllare, non servono ipotesi: basta confrontare i granuli letti prima e dopo.
 
 ```sql
 -- Senza indici: 5.000.000 righe lette.
@@ -185,20 +210,69 @@ FROM system.projection_parts
 WHERE active AND table = 'eventi_web_v2';
 ```
 
-La confusione comune è credere che un indice secondario di ClickHouse funzioni come un B-tree, cioè trovi le righe. Qui l'indice ha controllato tutti i 612 granuli e non ne ha scartato uno, perché ogni granulo contiene righe di tutte le campagne. Si paga in scrittura e in spazio, senza guadagnare in lettura, e lo si scopre quando la tabella ha già un miliardo di righe. La documentazione dice la stessa cosa: con poca correlazione tra la colonna filtrata e la chiave di ordinamento, l'indice non salta nulla.
+L'indice di salto ha controllato tutti i 612 granuli e non ne ha scartato nessuno, perché ogni granulo contiene righe di tutte le cinquanta campagne. Si paga in scrittura e in spazio senza guadagnare in lettura, e lo si scopre quando la tabella ha già un miliardo di righe. Con poca correlazione tra la colonna filtrata e la chiave di ordinamento l'indice non salta nulla.
 
-La projection non è gratis. Qui pesa più della tabella che la contiene, perché ordinata per campagna si comprime peggio.
+La projection riporta le righe lette da 5.000.000 a 139.264: 17 granuli × 8.192 righe = 139.264. È una riduzione di 5.000.000 ÷ 139.264 = 35,9 volte. Ha però un prezzo: 54,83 MiB, più della tabella che la contiene (48,29 MiB), perché ordinata per campagna si comprime peggio.
 
-Questo articolo non copre replica, sharding e chiavi con più di due colonne. Il dataset è sintetico e uniforme: con clienti reali un cliente grande può occupare da solo centinaia di granuli. Una terza strada, la materialized view verso una seconda tabella, ha la sua lezione nel modulo.
+Il dataset è sintetico e uniforme, e questo semplifica i numeri. Con clienti reali un cliente grande può occupare da solo centinaia di granuli, e la distribuzione dei valori cambia i conti. Una terza strada, la materialized view verso una seconda tabella, ha la sua lezione nel modulo.
 
-## Prima di andare in produzione
+## Misurare il lavoro e non i millisecondi
 
-1. Quale query parte più spesso, e i suoi filtri aprono `ORDER BY`?
-2. Quante partizioni ha la tabella dopo un mese di dati, e per cosa servono?
-3. Quante righe legge quella query rispetto a quelle che restituisce?
-4. Quali colonne `String` hanno meno di 10.000 valori distinti, e quali `Nullable` contengono dei nulli?
-5. Qualcuno ha ricreato la tabella con `INSERT … SELECT` su una copia dei dati reali, e quanto ci ha messo?
+I millisecondi dipendono dal carico del server in quel momento. Il lavoro no. Per questo la metrica che separa chi ottimizza da chi tira a indovinare è il rapporto tra righe lette e righe restituite, cioè `read_rows` e `result_rows` in `system.query_log`.
 
-La metrica che separa chi ottimizza da chi tira a indovinare è il rapporto tra righe lette e righe restituite, cioè `read_rows` ed `result_rows` in `system.query_log`. Chi guarda solo i millisecondi misura la macchina di oggi. Chi guarda il rapporto misura il lavoro, e il lavoro non cambia quando cambia il carico del server.
+La tabella riassume le tre configurazioni dell'esempio, con i numeri letti nelle sezioni precedenti.
 
-Di tutto l'articolo, una scelta pesa ordini di grandezza più del resto: la chiave `ORDER BY`. Tipi e partizioni hanno dimezzato lo spazio. La chiave ha tolto due ordini di grandezza alle righe lette.
+| Configurazione | Righe lette | Granuli letti | Spazio su disco |
+|---|---:|---:|---:|
+| v1, filtro su cliente | 5.000.000 | 612 su 612 | 95,21 MiB |
+| v2, filtro su cliente | 49.152 | 6 su 612 | 48,29 MiB |
+| v2 con projection, filtro su campagna | 139.264 | 17 su 612 | 48,29 MiB + 54,83 MiB |
+
+Una query lenta si diagnostica in tre mosse: leggi il rapporto, lancia `EXPLAIN indexes = 1` per vedere quali granuli sopravvivono a ogni indice, poi confronta i filtri con le colonne di testa della chiave. Se il rapporto è alto e nessun indice scarta granuli, il problema è nell'ordine, e nessun parametro del server lo risolve.
+
+## Verifica sulle tue tabelle
+
+1. Una tabella di 20 milioni di righe ha `ORDER BY ts` e la query dominante filtra per `tenant_id`. Quanti granuli ti aspetti di leggere e perché?
+
+<details>
+<summary>Mostra risposta</summary>
+
+20.000.000 ÷ 8.192 ≈ 2.442 granuli, e con il filtro su `tenant_id` fuori dalla chiave tutti sono candidati. L'indice primario non può scartare nulla perché i tenant sono mescolati in ogni blocco. Serve una chiave che parta da `tenant_id`.
+
+</details>
+
+2. Dopo la correzione la query legge 49.152 righe e ne restituisce 4.967. Perché il rapporto non scende sotto 9,9, e come lo spieghi a un collega?
+
+<details>
+<summary>Mostra risposta</summary>
+
+Il motore legge sempre granuli interi da 8.192 righe, quindi legge righe che poi il filtro scarta. 6 granuli × 8.192 = 49.152 righe, mentre le righe utili sono 4.967. Il rapporto 49.152 ÷ 4.967 = 9,9 è il costo dell'arrotondamento al granulo, ed è normale.
+
+</details>
+
+3. Una tabella ha una partizione per ora e dopo un mese conta 720 partizioni. Che cosa cambia se la passi a una partizione per mese?
+
+<details>
+<summary>Mostra risposta</summary>
+
+Le partizioni scendono da 720 a 1, quindi meno parti da aprire e più merge possibili tra parti della stessa partizione. Le query non diventano più veloci per effetto della partizione. Perdi la possibilità di scadere i dati ora per ora, che raramente serve.
+
+</details>
+
+4. Una colonna `stato String` ha 5 valori distinti su 5 milioni di righe. Quale tipo usi e quale controllo fai prima di cambiarlo?
+
+<details>
+<summary>Mostra risposta</summary>
+
+`LowCardinality(String)`, perché 5 valori sono molto sotto la soglia indicativa di 10.000. Prima verifica con `SELECT uniqExact(stato)` che la cardinalità resti bassa nei dati reali, poi confronta lo spazio su disco con `system.parts` dopo la copia.
+
+</details>
+
+5. Un indice `set(100)` su `id_campagna` non riduce le righe lette. Quale controllo lo conferma e quale alternativa provi?
+
+<details>
+<summary>Mostra risposta</summary>
+
+`EXPLAIN indexes = 1` mostra la sezione `Skip` con 612 granuli su 612: l'indice non scarta nulla perché le campagne sono mescolate in ogni granulo. L'alternativa è una projection ordinata per `id_campagna`, che nell'esempio scende a 17 granuli, al costo di una copia della tabella.
+
+</details>
