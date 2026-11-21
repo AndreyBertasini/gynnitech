@@ -1,9 +1,6 @@
 ---
 title: "Coorti, attribuzione e percorsi in SQL"
-description: >-
-  Coorti stabili, retention con denominatore fisso e modelli di attribuzione
-  (last-click, lineare, time decay) con crediti che quadrano col ricavo, più
-  percorsi di conversione.
+description: "Calcolare in ClickHouse crediti di attribuzione last click, lineare e time decay con funzioni di finestra, verificare che quadrino al centesimo con il ricavo, ricostruire i percorsi di conversione e fissare il canale di acquisizione di una coorte."
 module: "Modulo 14: SQL avanzato per l'analisi"
 order: 9
 category: Decisione
@@ -12,150 +9,232 @@ headerImageAlt: >-
   Analisi di Coorte e Retention in SQL - immagine ufficiale della lezione su
   GinnyTech, creata da AD
 difficulty: advanced
-duration: 18 min
+duration: "45 min"
 prerequisites:
   - advanced-sql/date-spine-e-metriche-temporali
 learningObjectives:
-  - Assegnare utenti a coorti stabili e calcolare la retention con denominatore fisso alla nascita
-  - Implementare modelli di attribuzione last-click, lineare e time decay con crediti che quadrano col ricavo
+  - "Calcolare posizione, numero di tocchi e peso time decay di ogni touchpoint con row_number, count e sum su finestra partizionata per ordine"
+  - "Confrontare last click, lineare e time decay e verificare con un test a zero righe che i crediti di ogni ordine sommino al ricavo"
+  - "Ricostruire il percorso di conversione di ogni ordine con groupArray ordinato e assegnare a ogni cliente una coorte stabile con il canale del primo tocco"
 binario: "ml-tabellare"
-formato: "articolo"
-autore: "Hermes"
-controllatoDa: "Argo"
-autorizzatoDa: "Giano"
 draft: false
-dateModified: 2026-11-13
+dateModified: 2026-11-17
+formato: "didattica-v2"
 ---
 
-# Coorti, attribuzione e percorsi in SQL
+Scenario costruito con numeri di esempio: un team marketing somma le conversioni dichiarate da Meta Ads, Google Ads e dal proprio modello di attribuzione multi-touch, e ottiene 185.000 euro di fatturato attribuito ai canali. Nello stesso mese l'ERP ha incassato 112.000 euro. La differenza è di 73.000 euro, pari al 65% dell'incassato: ogni piattaforma si assegna il 100% di un ordine quando l'utente ha toccato il suo annuncio, e lo stesso ordine viene contato più volte. Anche il modello interno cade nello stesso errore se assegna l'intero ricavo a ogni touchpoint della sessione.
 
-Un team marketing confronta il rendimento dei canali di acquisizione sommando le conversioni dichiarate da Meta Ads, Google Ads e dal modello interno di attribuzione multi-touch: il fatturato attribuito ai canali somma a 185.000 € mentre il fatturato reale incassato nell'ERP nello stesso mese è di 112.000 €. La causa non è solo il doppio conteggio tra piattaforme pubblicitarie: è un modello di attribuzione in SQL che assegna `100%` del ricavo dell'ordine a ogni touchpoint della sessione invece di ripartire i crediti in modo che **la somma dei crediti per ordine quadri al centesimo con il ricavo reale**.
+> **Idea chiave:** un modello di attribuzione è corretto quando, per ogni ordine, la somma dei crediti assegnati ai canali è uguale al ricavo dell'ordine; i modelli differiscono solo nel modo di dividere quel ricavo, mai nella quantità da dividere.
 
-## Centoottantacinquemila euro attribuiti a fronte di centododicimila incassati
+## Dati di partenza: ordini e touchpoint
 
-Questo è un caso ricostruito con numeri di esempio su quanto accade quando si calcolano percorsi di conversione e attribuzione multi-touch in SQL senza vincolare la somma dei pesi a `1.00` per ciascuna conversione.
-
-Ogni modello di attribuzione risponde a una domanda diversa sul percorso dell'utente prima dell'acquisto:
-
-| Modello di attribuzione | Regola di ripartizione del credito | Quando usarlo | Rischio se implementato male |
-| :--- | :--- | :--- | :--- |
-| **First-Touch** | `100%` al primo touchpoint nella finestra | Valutare quali canali generano nuova domanda e scoperta | Ignora i canali che chiudono la vendita |
-| **Last-Touch (non diretto)** | `100%` all'ultimo touchpoint utile | Ottimizzare campagne a risposta diretta | Sottostima l'intero funnel superiore (SEO, social) |
-| **Lineare** | `1 / N` uguale per ciascuno degli `N` touchpoint | Dare visibilità equilibrata a tutto il percorso | Premia canali passivi che generano molti clic a basso valore |
-| **Time Decay** | Peso crescente esponenzialmente verso la conversione | Cicli B2B lunghi dove l'ultimo contatto pesa di più | Somma dei pesi diversa da `1.0` se non normalizzata |
-
-Qualunque modello scegliate, vale una legge contabile ferrea: per ogni `order_id`, la somma dei crediti distribuiti tra tutti i touchpoint deve essere esattamente uguale al valore netto dell'ordine.
-
-## Attribuzione Last-Touch, Lineare e Time Decay con normalizzazione a 1.00
-
-Il primo meccanismo è la **finestra di lookback esplicita prima della conversione**. Un clic su un annuncio avvenuto otto mesi fa non dovrebbe ricevere credito per un acquisto impulsivo di oggi. In SQL si uniscono i touchpoint del cliente (`user_id` o `resolved_user_id`) agli ordini imponendo `touch_at BETWEEN order_at - INTERVAL 30 DAY AND order_at`, scartando tutti i contatti successivi all'acquisto o troppo lontani nel tempo.
-
-Il secondo meccanismo è il **calcolo dei pesi normalizzati per ordine**. Nel modello lineare con `N = count() OVER (PARTITION BY order_id)` touchpoint nella finestra, ogni contatto riceve `revenue_eur / N`. Nel modello Time Decay, ogni contatto riceve un peso grezzo `exp(-lambda * days_before_order)` (ad esempio con dimezzamento ogni 7 giorni: `pow(0.5, days_before_order / 7.0)`), e poi si divide quel peso per la somma dei pesi di quell'ordine: `raw_weight / sum(raw_weight) OVER (PARTITION BY order_id)`. Questa normalizzazione garantisce matematicamente che i crediti sommino al 100% dell'ordine.
-
-Il terzo meccanismo è l'**aggregazione dei percorsi di conversione (`arrayStringConcat` o `groupArray`)**. Ordinando i touchpoint per `(touch_at ASC, event_id ASC)` e collassando i canali consecutivi identici (`Meta -> Meta -> Google` diventa `Meta -> Google`), potete identificare le sequenze di canali più redditizie e capire quali combinazioni funzionano in sinergia invece di valutare ogni canale in isolamento.
-
-**Un modello di attribuzione in SQL è affidabile solo quando delimita una finestra di lookback esplicita e normalizza i pesi di ogni ordine affinché la somma dei crediti quadri al centesimo con il ricavo netto.**
-
-## Tre errori comuni nell'attribuzione multi-touch in SQL
-
-Il blocco SQL qui sotto mostra l'errore tipico di chi unisce tutti i touchpoint agli ordini e somma `revenue_eur` senza dividere per il numero di contatti o senza normalizzare i pesi:
+Per vedere ogni passaggio usiamo quattro ordini, per un ricavo totale di 360 euro, e nove touchpoint ordinati nel tempo. Il cliente 1 compie due acquisti (ordini 1 e 4), e questo ci servirà per la coorte. Le date dei tocchi sono scelte in modo che la distanza dall'acquisto sia di 0, 2 o 4 giorni.
 
 ```sql
--- ERRORE 1: unire i touchpoint agli ordini e sommare o.revenue_eur per canale!
--- Se un ordine da 100€ ha avuto 4 touchpoint, viene contato per 400€ totali!
--- ERRORE 2: nessuna finestra di lookback -> un clic di 2 anni fa riceve credito!
-SELECT
-    t.channel,
-    sum(o.revenue_eur) AS inflated_attributed_revenue_eur
-FROM analytics_prod.fct_orders AS o
-INNER JOIN analytics_prod.fct_touchpoints AS t
-    ON o.user_id = t.user_id
-   AND t.occurred_at <= o.order_at
-GROUP BY t.channel;
+-- Ordini (1 riga per ordine) e tocchi pubblicitari (1 riga per tocco prima dell'acquisto)
+CREATE TABLE orders (order_id UInt32, customer_id UInt32, order_date Date, revenue_eur Decimal(10,2)) ENGINE = MergeTree ORDER BY order_id;
+INSERT INTO orders VALUES (1, 1, '2026-10-05', 120.00), (2, 2, '2026-10-02', 80.00), (3, 3, '2026-10-10', 100.00), (4, 1, '2026-10-14', 60.00);
+
+CREATE TABLE touchpoints (order_id UInt32, touch_date Date, channel String) ENGINE = MergeTree ORDER BY (order_id, touch_date);
+INSERT INTO touchpoints VALUES
+(1, '2026-10-01', 'Meta'), (1, '2026-10-03', 'Google'), (1, '2026-10-05', 'Email'),
+(2, '2026-10-02', 'Google'),
+(3, '2026-10-06', 'Meta'), (3, '2026-10-08', 'Meta'), (3, '2026-10-10', 'Google'),
+(4, '2026-10-12', 'Email'), (4, '2026-10-14', 'Google');
 ```
 
-### Sommare il ricavo intero dell'ordine su ogni riga dopo la JOIN con i touchpoint
+Il grain della tabella `touchpoints` è una riga per tocco, mentre quello di `orders` è una riga per ordine. Unire le due tabelle moltiplica le righe di `orders` per il numero di tocchi, ed è proprio la fonte del doppio conteggio: i crediti devono nascere da una divisione del ricavo, non da una somma di righe duplicate.
 
-Fare `INNER JOIN` tra ordini e touchpoint moltiplica la riga dell'ordine per `N` volte. Sommare `o.revenue_eur` senza dividere per `N` o senza applicare pesi normalizzati a `1.00` gonfia il fatturato attribuito proporzionalmente alla lunghezza media del percorso utente.
+```mermaid
+flowchart LR
+    A["Ordine (ricavo 120 euro)"] --> B["Tocchi dell'ordine"]
+    B --> C["Last click: 100% all'ultimo"]
+    B --> D["Lineare: ricavo diviso per il numero di tocchi"]
+    B --> E["Time decay: peso 0,5 elevato alla distanza in giorni diviso 2"]
+    C --> F["Somma dei crediti = ricavo"]
+    D --> F
+    E --> F
+```
 
-### Includere touchpoint successivi all'acquisto o privi di finestra temporale
+## Posizione e peso di ogni tocco con le funzioni di finestra
 
-Dimenticare `t.occurred_at <= o.order_at` attribuisce la conversione a un'email di conferma ordine o a un clic avvenuto giorni dopo l'acquisto. Allo stesso modo, omettere il limite inferiore (`>= o.order_at - INTERVAL 30 DAY`) sporca l'attribuzione con campagne obsolete che non hanno più alcuna relazione causale con la decisione corrente.
-
-### Non escludere il traffico diretto interno o i redirect di pagamento
-
-Se il gateway di pagamento (`paypal.com` o `stripe.com`) compare come referrer al rientro dal checkout, un modello Last-Touch ingenuo attribuirà il 100% delle vendite a PayPal. I domini di pagamento e i redirect tecnici vanno filtrati prima di costruire la tabella `fct_touchpoints`.
-
-## Attribuzione Last-Touch, Lineare e Time Decay con quadratura in ClickHouse
-
-Per implementare un modello multi-touch verificabile in ClickHouse, applicate questi quattro passi:
-
-1. Unite ordini pagati e touchpoint validi nella finestra di lookback di 30 giorni (`touch_at BETWEEN order_at - INTERVAL 30 DAY AND order_at`).
-2. Calcolate per ciascun `(order_id, touchpoint)` il rango temporale (`row_number` crescente e decrescente) e il peso grezzo Time Decay `pow(0.5, dateDiff('hour', touch_at, order_at) / 168.0)`.
-3. Normalizzate ogni peso dividendo per `sum(raw_weight) OVER (PARTITION BY order_id)`.
-4. Aggregate per canale e verificate che la somma dei ricavi attribuiti di ciascun modello quadri esattamente con il ricavo totale degli ordini con almeno un touchpoint.
-
-Ecco la query SQL completa in ClickHouse:
+Le tre regole di attribuzione richiedono tre informazioni su ogni tocco: la sua posizione nel percorso, il numero totale di tocchi dell'ordine e la sua distanza in giorni dall'acquisto. Le prime due vengono da `row_number()` e `count()` con `PARTITION BY order_id`; la terza da `dateDiff`. Il peso time decay è `pow(0.5, giorni / 2)`: un tocco al momento dell'acquisto pesa 1, uno di 2 giorni prima pesa 0,5, uno di 4 giorni prima 0,25. Dividendo il peso del tocco per la somma dei pesi dello stesso ordine si ottiene la quota di ricavo.
 
 ```sql
--- Attribuzione Multi-Touch (Last-Touch, Lineare, Time Decay) con quadratura garantita al centesimo:
-WITH order_touchpoints AS (
+-- Righe intermedie: posizione, numero di tocchi, distanza, peso e quota time decay
+SELECT
+    t.order_id AS order_id, t.channel AS channel, t.touch_date AS touch_date,
+    row_number() OVER (PARTITION BY t.order_id ORDER BY t.touch_date) AS pos,
+    count() OVER (PARTITION BY t.order_id) AS touches,
+    dateDiff('day', t.touch_date, o.order_date) AS days_before,
+    pow(0.5, days_before / 2) AS w,
+    round(w / sum(w) OVER (PARTITION BY t.order_id), 4) AS share,
+    o.revenue_eur AS revenue_eur
+FROM touchpoints AS t INNER JOIN orders AS o ON t.order_id = o.order_id
+ORDER BY order_id, pos;
+```
+
+Le nove righe restituite, in forma abbreviata per gli ordini 1, 3 e 4, sono queste.
+
+| Ordine | Canale | Posizione | Tocchi | Giorni prima | Peso | Quota |
+| ---: | :--- | ---: | ---: | ---: | ---: | ---: |
+| 1 | Meta | 1 | 3 | 4 | 0,25 | 0,1429 |
+| 1 | Google | 2 | 3 | 2 | 0,50 | 0,2857 |
+| 1 | Email | 3 | 3 | 0 | 1,00 | 0,5714 |
+| 3 | Meta | 1 | 3 | 4 | 0,25 | 0,1429 |
+| 3 | Meta | 2 | 3 | 2 | 0,50 | 0,2857 |
+| 3 | Google | 3 | 3 | 0 | 1,00 | 0,5714 |
+| 4 | Email | 1 | 2 | 2 | 0,50 | 0,3333 |
+| 4 | Google | 2 | 2 | 0 | 1,00 | 0,6667 |
+
+Esempio numerico svolto per l'ordine 1: i pesi sono 0,25 + 0,50 + 1,00 = 1,75, quindi la quota di Meta è 0,25 / 1,75 = 0,1429, quella di Google 0,50 / 1,75 = 0,2857 e quella di Email 1,00 / 1,75 = 0,5714. Moltiplicate per il ricavo di 120 euro danno 17,14 euro, 34,29 euro e 68,57 euro, che sommati fanno 120,00 euro.
+
+## Last click, lineare e time decay a confronto
+
+Con le tre colonne di supporto, i tre modelli si calcolano in un solo passaggio. Il last click assegna l'intero ricavo al tocco con posizione 1 contando dalla fine, e per questo la finestra ordina in modo decrescente. Il modello lineare divide il ricavo per il numero di tocchi. Il time decay moltiplica il ricavo per la quota calcolata sopra. I ricavi sono convertiti in `Float64`: perché lo facciamo lo spiega la sezione successiva.
+
+```sql
+-- Crediti per canale con tre modelli di attribuzione
+WITH credited AS (
     SELECT
-        o.order_id,
-        o.revenue_eur,
-        t.channel,
-        t.occurred_at AS touch_at,
-        o.order_at,
-        row_number() OVER (PARTITION BY o.order_id ORDER BY t.occurred_at DESC, t.event_id DESC) AS rn_desc,
-        count() OVER (PARTITION BY o.order_id) AS touch_count,
-        pow(0.5, dateDiff('hour', t.occurred_at, o.order_at) / 168.0) AS raw_decay_weight
-    FROM analytics_prod.fct_orders AS o
-    INNER JOIN analytics_prod.fct_touchpoints AS t
-        ON o.user_id = t.user_id
-       AND t.occurred_at BETWEEN o.order_at - INTERVAL 30 DAY AND o.order_at
-    WHERE o.status = 'paid'
-      AND o.order_at >= today() - 30
-),
-weighted_touches AS (
-    SELECT
-        order_id,
-        revenue_eur,
-        channel,
-        if(rn_desc = 1, 1.0, 0.0) AS weight_last_touch,
-        1.0 / touch_count AS weight_linear,
-        raw_decay_weight / sum(raw_decay_weight) OVER (PARTITION BY order_id) AS weight_time_decay
-    FROM order_touchpoints
+        t.order_id AS order_id, t.channel AS channel, toFloat64(o.revenue_eur) AS revenue_eur,
+        row_number() OVER (PARTITION BY t.order_id ORDER BY t.touch_date DESC) AS pos_from_end,
+        count() OVER (PARTITION BY t.order_id) AS touches,
+        pow(0.5, dateDiff('day', t.touch_date, o.order_date) / 2) AS w,
+        w / sum(w) OVER (PARTITION BY t.order_id) AS decay_share
+    FROM touchpoints AS t INNER JOIN orders AS o ON t.order_id = o.order_id
 )
 SELECT
     channel,
-    round(sum(revenue_eur * weight_last_touch), 2) AS rev_last_touch_eur,
-    round(sum(revenue_eur * weight_linear), 2) AS rev_linear_eur,
-    round(sum(revenue_eur * weight_time_decay), 2) AS rev_time_decay_eur
-FROM weighted_touches
+    round(sumIf(revenue_eur, pos_from_end = 1), 2) AS last_click_eur,
+    round(sum(revenue_eur / touches), 2) AS linear_eur,
+    round(sum(revenue_eur * decay_share), 2) AS time_decay_eur
+FROM credited
 GROUP BY channel
-ORDER BY rev_time_decay_eur DESC;
+ORDER BY channel;
 ```
 
-In questa query tutti e tre i modelli (`rev_last_touch_eur`, `rev_linear_eur`, `rev_time_decay_eur`) condividono la stessa identica base di ordini e garantiscono che la somma verticale di ciascuna colonna eguagli esattamente il fatturato totale degli ordini attribuiti. Affiancando i tre modelli nella stessa tabella, il team marketing vede subito quali canali fungono da apripista (più alti nel lineare e nel time decay rispetto al last-touch) e quali fungono da finalizzatori.
+| Canale | Last click | Lineare | Time decay |
+| :--- | ---: | ---: | ---: |
+| Email | 120,00 | 70,00 | 88,57 |
+| Google | 240,00 | 183,33 | 211,43 |
+| Meta | 0,00 | 106,67 | 60,00 |
+| Totale | 360,00 | 360,00 | 360,00 |
 
-Per completare l'analisi in produzione, conviene affiancare a questa tabella una seconda vista sui **percorsi di conversione aggregati** (`arrayStringConcat(groupArray(channel), ' -> ')` ordinato per `occurred_at`), così da individuare le sequenze ricorrenti che precedono gli ordini ad alto scontrino. Inoltre, ricordate di gestire esplicitamente gli ordini che non hanno alcun touchpoint nella finestra di 30 giorni tramite una `LEFT JOIN` invece di una `INNER JOIN` quando dovete riconciliare il totale dei ricavi aziendali con il CFO: in quel modo il 100% del fatturato trova collocazione tra canali attribuiti e quota `(direct / unattributed)`.
+Ogni colonna somma a 360 euro, cioè al ricavo reale dei quattro ordini: è il segno che la divisione è corretta. Le differenze tra colonne sono invece informazione. Meta apre due percorsi ma non chiude mai un acquisto, quindi per il last click vale 0 euro; il modello lineare gli assegna 106,67 euro, di cui 40 dall'ordine 1 e 66,67 dall'ordine 3 (100 / 3 per due tocchi); il time decay lo porta a 60 euro, perché i suoi tocchi sono lontani dall'acquisto. Chi decidesse il budget con il solo last click spegnerebbe Meta, e nessuna delle tre colonne dice se le vendite sparirebbero davvero: per quello servirebbe un esperimento con gruppo di controllo.
 
-Infine, salvate i pesi per `(order_id, touchpoint_id)` in un modello intermedio `int_order_attribution` prima di aggregare per canale: questo vi permette di unire il margine lordo o il costo del venduto (`COGS`) a livello di singolo ordine e calcolare il **ROAS sul margine netto** per ciascun modello di attribuzione.
+## Il test di quadratura sui crediti
 
-## Modelli di attribuzione in SQL vs piattaforme di attribuzione proprietarie
+Il controllo che trasforma una tabella di attribuzione in un dato affidabile è un test a zero righe: per ogni ordine, il ricavo meno la somma dei crediti deve essere nullo entro un centesimo. La query restituisce solo gli ordini che violano la regola.
 
-Per misurare il contributo dei canali di marketing, potete **implementare i modelli trasparenti in SQL/dbt nel data warehouse** oppure **affidarvi a una piattaforma black-box esterna**.
+```sql
+-- Test a zero righe: i crediti di ogni ordine devono sommare al ricavo dell'ordine
+WITH credited AS (
+    SELECT
+        t.order_id AS order_id, toFloat64(o.revenue_eur) AS revenue_eur,
+        pow(0.5, dateDiff('day', t.touch_date, o.order_date) / 2) AS w,
+        revenue_eur * w / sum(w) OVER (PARTITION BY t.order_id) AS credit_eur
+    FROM touchpoints AS t INNER JOIN orders AS o ON t.order_id = o.order_id
+)
+SELECT order_id, any(revenue_eur) AS order_revenue_eur, round(sum(credit_eur), 2) AS credited_eur
+FROM credited
+GROUP BY order_id
+HAVING abs(order_revenue_eur - sum(credit_eur)) > 0.01;
+```
 
-Il criterio di scelta è netto: **costruite i modelli di attribuzione in SQL/dbt quando volete pieno controllo sulla finestra di lookback, sui margini netti dell'ERP (non sul lordo del carrello) e sulla quadratura contabile al 100%, riservando eventuali test di incrementalità geografica o holdout sperimentali a esperimenti dedicati.**
+Sui dati dell'esempio la query restituisce zero righe. Il test ha una storia istruttiva: con i ricavi in `Decimal(10,2)` il modello lineare dava 106,66 euro a Meta, perché la divisione tronca 100 / 3 a 33,33, e la somma dei tre canali risultava 359,99 euro invece di 360,00. Un centesimo mancante, che nessun occhio nota in una tabella e che un test con soglia a 0,01 euro rileva solo se la tolleranza è stretta. La soluzione adottata qui è calcolare in virgola mobile e arrotondare solo in uscita; in un libro contabile si preferisce assegnare il residuo di arrotondamento al credito più grande dell'ordine, così i centesimi sommano esattamente.
 
-La confusione comune consiste nel credere che un modello multi-touch in SQL misuri la *causalità incrementale*: l'attribuzione ripartisce un credito osservato tra touchpoint correlati, ma solo un esperimento con gruppo di controllo misura l'effetto causale reale di una campagna.
+## Percorsi di conversione
 
-## Cinque domande prima di pubblicare un modello di attribuzione
+Oltre alla quota per canale, spesso serve sapere quali sequenze di tocchi portano a un acquisto. Per costruire il percorso di ogni ordine si raccolgono le coppie data e canale con `groupArray`, si ordinano per data con `arraySort` e si uniscono in una stringa. L'ordine dentro `groupArray` non è garantito, per cui l'ordinamento esplicito è indispensabile. Il raggruppamento per percorso avviene in una query esterna: farlo nella stessa query dei tocchi ripeterebbe il ricavo per ogni tocco, cioè lo stesso fan-out di prima.
 
-1. La somma dei crediti distribuiti per ogni `order_id` è normalizzata a `1.00` e quadra al centesimo con il ricavo netto?
-2. Avete definito una finestra di lookback esplicita (es. 30 giorni) e verificato che `touch_at <= order_at`?
-3. I domini dei gateway di pagamento e i redirect tecnici interni sono stati esclusi dai touchpoint validi?
-4. Avete confrontato almeno due modelli (es. Last-Touch e Time Decay) per individuare i canali di scoperta sottostimati?
-5. Gli ordini privi di qualsiasi touchpoint tracciato (`(unattributed / direct)`) sono mostrati esplicitamente invece di essere nascosti?
+```sql
+-- Percorsi di conversione: una riga per ordine, poi raggruppamento per sequenza
+SELECT
+    path,
+    count() AS orders,
+    sum(revenue_eur) AS revenue_eur
+FROM (
+    SELECT
+        t.order_id AS order_id,
+        arrayStringConcat(arrayMap(x -> x.2, arraySort(x -> x.1, groupArray((t.touch_date, t.channel)))), ' > ') AS path,
+        any(o.revenue_eur) AS revenue_eur
+    FROM touchpoints AS t INNER JOIN orders AS o ON t.order_id = o.order_id
+    GROUP BY t.order_id
+)
+GROUP BY path
+ORDER BY revenue_eur DESC, path;
+```
 
-La metrica di controllo dell'attribuzione è il **Revenue Attribution Reconciliation Delta**: la differenza tra `sum(attributed_revenue)` e `sum(net_order_revenue)` deve essere esattamente **`0.00 €`**. Aggiungere questo test automatico in dbt impedisce che modifiche ai pesi o alle finestre di lookback introducano discrepanze contabili silenziose tra i report marketing, le chiusure mensili e il bilancio aziendale consolidato di gruppo e controllo.
+Il risultato elenca quattro percorsi, ciascuno con un ordine: `Meta > Google > Email` con 120 euro, `Meta > Meta > Google` con 100 euro, `Google` con 80 euro ed `Email > Google` con 60 euro. La somma è 360 euro, ancora la quadratura. In un caso reale i percorsi frequenti sono centinaia e si raggruppano per lunghezza o per primo e ultimo canale, ma il metodo è identico. Si noti anche che due tocchi consecutivi dello stesso canale, come `Meta > Meta`, sono un segnale da valutare: il lineare li premia due volte, il last click per nulla.
+
+## La coorte stabile e il canale di acquisizione
+
+Per collegare l'attribuzione alle coorti serve un'assegnazione che non cambi con il filtro. La coorte di un cliente è il mese del suo primo ordine e il canale di acquisizione è il canale del primo tocco di quell'ordine, ottenuto con `argMin` ordinato per data ordine e data tocco. Il cliente 1 ha due ordini: il secondo, chiuso da Google, non cambia il suo canale di acquisizione, che resta Meta.
+
+```sql
+-- Coorte stabile: mese del primo ordine e canale del primo tocco di quell'ordine
+WITH first_touch AS (
+    SELECT
+        o.customer_id AS customer_id,
+        toStartOfMonth(min(o.order_date)) AS cohort_month,
+        argMin(t.channel, (o.order_date, t.touch_date)) AS acquisition_channel
+    FROM orders AS o INNER JOIN touchpoints AS t ON o.order_id = t.order_id
+    GROUP BY o.customer_id
+)
+SELECT * FROM first_touch ORDER BY customer_id;
+```
+
+Le tre righe assegnano il cliente 1 a ottobre con canale Meta, il cliente 2 a ottobre con Google e il cliente 3 a ottobre con Meta. Da qui la matrice di retention per canale di acquisizione si costruisce come nella lezione sulla matrice di coorte: la coorte è `(cohort_month, acquisition_channel)`, il denominatore è la sua dimensione a M0 e le celle future sono escluse. Il vantaggio è confrontare la tenuta di clienti nati da canali diversi, non solo da mesi diversi.
+
+## Tre errori da riconoscere
+
+### Il ricavo assegnato per intero a ogni tocco
+
+Sintomo: il fatturato attribuito supera quello incassato, come nei 185.000 euro contro 112.000 euro. Succede perché la join tra ordini e tocchi ripete il ricavo su ogni riga e una somma per canale lo conta una volta per tocco. Si corregge dividendo il ricavo per una quota normalizzata dentro una finestra partizionata per ordine, e confermando con il test a zero righe che i crediti sommano al ricavo.
+
+### Pesi non normalizzati
+
+Sintomo: i crediti time decay di un ordine sommano a più o meno del ricavo, per esempio 210 euro su 120 euro. Succede quando si moltiplica il ricavo per il solo peso `pow(0.5, giorni / 2)` senza dividere per la somma dei pesi dell'ordine. Si corregge con `w / sum(w) OVER (PARTITION BY order_id)`, che garantisce quote con somma 1.
+
+### Coorte che cambia con il filtro
+
+Sintomo: lo stesso cliente appare con canali di acquisizione diversi in report diversi. Succede quando il primo tocco è calcolato dopo un filtro sulle date, e un cliente storico viene scambiato per nuovo. Si corregge calcolando coorte e canale sull'intera storia e filtrando le coorti solo nel risultato.
+
+## Verifica prima di pubblicare il modello
+
+1. Un ordine da 120 euro ha tre tocchi con pesi 0,25, 0,50 e 1,00. Quanto vale il credito del tocco più recente?
+
+<details>
+<summary>Mostra risposta</summary>
+
+La somma dei pesi è 1,75, quindi la quota del tocco più recente è 1,00 / 1,75 = 0,5714 e il credito è 120 × 0,5714 = 68,57 euro.
+
+</details>
+
+2. Con il last click Meta ottiene 0 euro e con il lineare 106,67 euro. Che cosa puoi concludere sulla decisione di spegnere Meta?
+
+<details>
+<summary>Mostra risposta</summary>
+
+Nulla di definitivo: i due modelli sono regole di ripartizione dello stesso ricavo, non misure di causalità. Il confronto indica che Meta compare spesso all'inizio dei percorsi; per sapere se le vendite scomparirebbero serve un test con gruppo di controllo o un'analisi incrementale.
+
+</details>
+
+3. Un test di quadratura restituisce l'ordine 3 con ricavo 100 euro e crediti 133,33 euro. Quale errore cerchi per primo?
+
+<details>
+<summary>Mostra risposta</summary>
+
+Cerchi un doppio conteggio: i crediti superano il ricavo di 33,33 euro, cioè un terzo, e il percorso ha 3 tocchi. È probabile che un tocco sia duplicato nella tabella dei touchpoint, oppure che la quota non sia normalizzata sulla partizione dell'ordine.
+
+</details>
+
+4. Perché i percorsi si raggruppano in una query esterna e non nella query che costruisce la stringa del percorso?
+
+<details>
+<summary>Mostra risposta</summary>
+
+Nella query interna c'è una riga per tocco, e il ricavo dell'ordine verrebbe sommato una volta per tocco. Con una riga per ordine nella query interna, il raggruppamento esterno somma ogni ricavo una sola volta e la somma torna a 360 euro.
+
+</details>
