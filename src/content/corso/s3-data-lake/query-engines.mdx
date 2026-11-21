@@ -1,158 +1,227 @@
 ---
 title: "Query engine su S3: Athena, Presto e Trino"
 description: >-
-  Usare query engines SQL per interrogare direttamente i dati su data lake senza ETL.
+  Interrogare un data lake su S3 con Athena e Trino: calcolare i byte scansionati e il costo per query, convertire il JSON in Parquet partizionato e fissare il punto in cui conviene un cluster dedicato.
 module: "Modulo 10: Data lake e lakehouse su S3"
 order: 3
 category: Tecnico
 headerImage: /course-headers/s3-data-lake-query-engines-ginnytech-ad-v3.webp
 headerImageAlt: "Query engine su S3: Athena, Presto e Trino - immagine ufficiale della lezione su GinnyTech, creata da AD"
-difficulty: advanced
-duration: 22 min
+difficulty: avanzato
+duration: 40 min
 prerequisites:
   - s3-data-lake/partitioning-strategy
 learningObjectives:
-  - Confrontare Athena, Redshift Spectrum e Trino su gestione, costo e concorrenza
-  - Ridurre i GB scansionati con partition pruning, Parquet e compressione
-  - Fissare la soglia di costo o concorrenza oltre la quale cambiare motore
+  - Calcolare byte scansionati e costo di una query Athena a partire da partizioni, colonne lette e formato dei file
+  - Convertire una tabella JSON in Parquet partizionato con una CTAS e registrare le partizioni con la Partition Projection
+  - Configurare un workgroup con limite di byte per query e leggere le statistiche di un'esecuzione con boto3
+  - Stimare il punto di pareggio tra Athena a consumo e un cluster Trino o ClickHouse dedicato
 binario: "ml-tabellare"
-formato: "articolo"
-autore: "Hermes"
-controllatoDa: "Argo"
-autorizzatoDa: "Giano"
+formato: "didattica-v2"
 draft: false
-dateModified: 2026-11-13
+dateModified: 2026-11-17
 ---
 
-# Query engine su S3: Athena, Presto e Trino
+Una dashboard aziendale usata da 60 persone è collegata ad Amazon Athena sopra una tabella da 4 TB di log in JSON non compresso. Ogni volta che qualcuno cambia un filtro, lo strumento di BI esegue `SELECT *`. A fine mese la fattura di sola scansione è di 14.000 USD e il lunedì mattina le query restano in coda. Questo è uno scenario costruito con numeri di esempio: il prezzo di listino non è il colpevole, il guasto sta nell'abbinare un motore a consumo, che fattura i byte letti, a file orientati alle righe e a una dashboard che rilancia la stessa scansione centinaia di volte.
 
-Un'azienda collega una dashboard aziendale consultata da 60 utenti a Amazon Athena sopra una tabella S3 di 4 TB salvata in JSON non compresso, dove i grafici eseguono `SELECT *` ogni volta che qualcuno cambia un filtro. Alla fine del mese arriva una fattura AWS da 14.000 dollari solo per la voce Athena ($5 per terabyte scansionato) e negli orari di punta le query restano in coda per quaranta secondi per superamento dei limiti di concorrenza serverless. La causa non è il prezzo di listino del cloud: è usare un motore *pay-per-scan* su dati non colonnari per servire dashboard ad alta concorrenza senza proiezione di colonne né limiti di scansione (*Workgroup limits*).
+## Quattordicimila dollari per rileggere sempre gli stessi dati
 
-## Quattordicimila dollari di fattura mensile a cinque dollari per terabyte scansionato
+I log applicativi e gli eventi di vendita di un anno occupano 4 TB in JSON su S3. Athena fattura circa 5 USD per ogni TB letto, quindi una scansione completa costa 4 × 5 = 20 USD. La dashboard produce 700 esecuzioni al mese: 60 utenti che la aprono e la aggiornano circa 35 volte ciascuno non sono 700, ma il ragionamento del team era quello di una media prudente per il report principale. Con questi numeri la spesa è 700 × 20 = 14.000 USD, per interrogare ogni volta gli stessi dati.
 
-Questo è un caso ricostruito con numeri di esempio su quanto accade quando si interroga direttamente S3 senza allineare il formato fisico dei file e il modello economico del query engine al tipo di carico di lavoro. L'azienda archivia su S3 un anno di log applicativi ed eventi di vendita (4 TB totali in JSON).
+Nessuna query contiene un filtro sulla chiave di partizione, e il formato JSON per riga obbliga a leggere tutte le 80 colonne anche se il grafico ne usa tre. Il lunedì alle 09:30, quando 25 utenti lanciano i report insieme, le query superano la quota di esecuzioni attive per l'account e regione e finiscono in coda.
 
-Il team attiva Amazon Athena (basato su Trino/Presto serverless, tariffato a **5 dollari per ogni TB letto da S3**) e vi punta direttamente lo strumento di Business Intelligence aziendale:
-1. Lo strumento di BI genera query del tipo `SELECT * FROM raw_logs WHERE event_date >= ...` per popolare le viste: poiché il formato è JSON per riga e la query chiede tutte le 80 colonne senza un filtro di partizione S3, ogni singola esecuzione scansiona tutti i 4 TB spendendo **20 dollari a query**.
-2. Con 60 utenti che aprono e aggiornano la dashboard 35 volte al mese (700 esecuzioni totali), la spesa schizza a $700 \times 20\$ = 14.000\$$ al mese per interrogare sempre gli stessi dati.
-3. Alle 09:30 del lunedì mattina, quando 25 utenti lanciano i report contemporaneamente, le query superano la quota di query attive del workgroup e vanno in coda (*Queuing*).
+I rimedi sono due e indipendenti. Il primo riguarda i dati: Parquet compresso, partizionato per data e letto per sole colonne, riduce di oltre il 99% i byte. Il secondo riguarda il motore: un carico ripetitivo ad alta concorrenza ha un costo diverso su un motore a consumo e su uno dedicato, e conviene calcolare dove si incrociano.
 
-La causa dell'esplosione dei costi e della coda è duplice: interrogare file orientati alle righe invece che Parquet partizionato (che riduce di oltre il 95% i byte letti) e usare un motore serverless a consumo per un carico ripetitivo ad alta concorrenza.
+> **Idea chiave:** su S3 non si paga la complessità della query, si pagano i byte che escono dal bucket, quindi ogni scelta di formato, partizione e colonne va giudicata dai gigabyte scansionati.
 
-## Architettura MPP Disaggregata, Projection/Predicate Pushdown e modello di costo
+## Un motore MPP separato dallo storage
 
-I query engine federati per data lake (**Trino**, **Presto**, **Amazon Athena**, **ClickHouse S3 engine**, **Redshift Spectrum**) separano completamente i nodi di calcolo dallo storage su S3 attraverso tre meccanismi chiave ([Sethi et al., 2019](https://doi.org/10.1145/3299869.3314043)).
+Athena, Trino, Presto e Redshift Spectrum seguono lo stesso schema: i nodi di calcolo sono separati dallo storage, che resta su S3. Athena è Trino gestito da AWS in modalità serverless; Presto e Trino sono lo stesso progetto prima e dopo la separazione della comunità. Quando arriva una query, il coordinatore interroga il catalogo (AWS Glue Data Catalog o Hive Metastore) per sapere in quali prefissi risiedono le partizioni richieste, divide i file in porzioni chiamate split e le assegna ai worker, che scaricano i byte da S3 in parallelo direttamente in memoria.
 
-Il primo meccanismo è l'esecuzione **MPP (*Massively Parallel Processing*) coordinata coi metadati del Catalogo**. Quando inviate una query SQL, il nodo *Coordinator* interroga il catalogo (es. AWS Glue Data Catalog o Hive Metastore) per scoprire in quali prefissi S3 risiedono le partizioni richieste dal `WHERE`, genera una lista di porzioni di file chiamate **splits** e le distribuisce a decine di nodi *Worker* stateless che scaricano i byte da S3 in parallelo direttamente in RAM senza salvarli su dischi locali.
-
-Il secondo meccanismo è l'accoppiata **Column Projection + Predicate Pushdown sui file Parquet**. Poiché Athena (e la rete S3) costa ed è limitata dai **gigabyte trasferiti**, leggere un file Parquet compresso con Zstandard attiva tre riduzioni moltiplicative:
-$$\text{Byte Letti} = \text{Totale} \times f_{\text{partizioni}} \times f_{\text{colonne}} \times f_{\text{compressione}} \times f_{\text{row-groups}}$$
-Se una tabella da 4 TB (4.000 GB) in JSON viene convertita in Parquet compresso `zstd` (scendendo a 600 GB), partizionata per mese (leggendo 1 mese su 12 $\rightarrow 50\text{ GB}$) e la query seleziona solo 4 colonne su 80 ($5\%$ dei byte $\rightarrow 2,5\text{ GB}$), il volume scansionato crolla da **4.000 GB a 2,5 GB** (riduzione del **99,93%**): la stessa query costa ora **0,0125 dollari** (un centesimo di dollaro) invece di 20 dollari e risponde in 1,2 secondi.
-
-Il terzo meccanismo è la **governance dei costi tramite Workgroup e soglie di cutoff**. In Athena ogni team o applicazione va isolato in un *Workgroup* dedicato con una guardia rigida `BytesScannedCutoffPerQuery` (es. bloccare qualsiasi query che tenti di leggere più di 50 GB), così che un utente che dimentica la clausola `WHERE dt = ...` venga fermato istantaneamente a costo zero.
-
-**Interrogare un data lake su S3 è veloce ed economico solo se si combinano partizionamento, formato Parquet compresso e selezione esplicita delle sole colonne necessarie, passando a un motore dedicato quando la concorrenza o le scansioni mensili superano la soglia di pareggio.**
-
-## Tre errori che moltiplicano per cento i costi e i tempi su Athena e Trino
-
-Il blocco SQL qui sotto mostra la query tipica che brucia il budget aziendale su S3: `SELECT *` su una tabella non partizionata, join con l'ordine delle tabelle invertito senza statistiche e assenza di proiezione colonnare:
-
-```sql
--- ERRORE 1: SELECT * su formato Parquet/JSON scarica tutte le 80 colonne da S3 pagando il 100% del file!
--- ERRORE 2: nessun filtro sulla chiave di partizione (dt), scansionando l'intero anno storico.
--- ERRORE 3: usare LIMIT 10 pensando di spendere poco dopo aver messo un ORDER BY globale!
-SELECT *
-FROM glue_catalog.raw_events_unpartitioned
-ORDER BY occurred_at DESC
-LIMIT 10;
+```mermaid
+flowchart LR
+    U["Utente o BI"] --> CO["Coordinator"]
+    CO --> CA["Catalogo Glue (partizioni, schema)"]
+    CO --> W1["Worker 1"]
+    CO --> W2["Worker 2"]
+    CO --> W3["Worker N"]
+    W1 --> S3["Bucket S3 (Parquet)"]
+    W2 --> S3
+    W3 --> S3
 ```
 
-### Scrivere SELECT * invece di elencare le sole colonne necessarie
+Con Parquet entrano in gioco due ottimizzazioni che riducono i byte trasferiti. La proiezione di colonna legge solo le colonne indicate nel `SELECT` e nei filtri, perché in Parquet ogni colonna è un blocco fisico distinto. Il predicate pushdown confronta i filtri con le statistiche min/max dei Row Group e salta i blocchi che non possono contenere righe valide.
 
-Usare `SELECT *` su un database tradizionale a righe (PostgreSQL) non cambia quasi nulla nel costo di I/O perché la pagina disco contiene comunque l'intera riga; usare `SELECT *` su S3 in formato Parquet con Athena o Trino è un suicidio economico e prestazionale. In Parquet ogni colonna è salvata in blocchi fisicamente contigui e separati: chiedere `SELECT *` su una tabella da 80 colonne quando al report ne servono solo 3 moltiplica per 25 i gigabyte scaricati da S3, la durata della query e l'importo della fattura.
+Il terzo meccanismo è la governance dei costi. In Athena ogni team o applicazione va isolato in un workgroup con un tetto di byte per singola query: chi dimentica il filtro sulla partizione viene fermato prima di pagare l'intera scansione.
 
-### Credere che LIMIT 10 riduca i dati scansionati in presenza di ORDER BY o GROUP BY
+## Il modello di costo come prodotto di fattori
 
-Aggiungere `LIMIT 10` in fondo a una query con `ORDER BY occurred_at DESC` o `GROUP BY` illudendosi di fare un test veloce ed economico su Athena è una trappola classica. Per sapere quali sono i 10 eventi più recenti dell'intera tabella non partizionata, il motore deve prima **leggere e scaricare il 100% dei file da S3**, ordinarli e solo alla fine restituire le prime 10 righe: pagherete l'intera scansione di 4 TB anche se a schermo vedete solo 10 righe.
+I byte letti sono il prodotto del volume della tabella per quattro riduzioni indipendenti: la frazione di partizioni che il filtro seleziona, la frazione di colonne richieste, il rapporto di compressione del formato e la frazione di Row Group non scartati. Esempio numerico svolto, con 1 TB pari a 1.000 GB per semplicità:
 
-### Non registrare le nuove partizioni o usare MSCK REPAIR TABLE a ogni query
+1. Formato: i 4 TB di JSON (4.000 GB) convertiti in Parquet compresso con `zstd` scendono a 600 GB, circa il 15% del volume originale.
+2. Partizioni: con partizione mensile e un filtro su un solo mese si leggono 600 / 12 = 50 GB.
+3. Colonne: il grafico usa 4 colonne su 80, quindi il 5% dei byte, 50 × 0,05 = 2,5 GB.
+4. Costo: 2,5 / 1.000 × 5 = 0,0125 USD per query, contro i 20 USD iniziali.
+5. Riduzione: 2,5 / 4.000 = 0,0625% dei byte originali, quindi una riduzione del 99,94%.
 
-Quando nuovi file vengono depositati su S3 in prefissi `dt=2026-11-13/`, il catalogo Glue non li vede finché la partizione non viene registrata. Lanciare `MSCK REPAIR TABLE` su una tabella con cinque anni di storico scansiona ricorsivamente tutte le migliaia di prefissi su S3 impiegando minuti: per tabelle con schema stabile su Athena conviene abilitare la **Partition Projection** nelle proprietà della tabella (così Athena calcola matematicamente il percorso `dt=${date}` a costo zero senza interrogare il catalogo né fare `LIST` su S3) o usare **Apache Iceberg**.
+Con 700 esecuzioni al mese la spesa diventa 700 × 0,0125 = 8,75 USD invece di 14.000 USD. Va ricordato che Athena arrotonda ogni query a un minimo fatturabile di 10 MB, quindi per query minuscole il costo ha un pavimento, e che i valori di compressione e frazione di colonne dipendono dai dati reali: il 15% è un ordine di grandezza tipico per log testuali, non una garanzia.
 
-## Conversione CTAS in Parquet, proiezione stretta delle colonne e audit dei costi
+## Convertire il JSON e registrare le partizioni
 
-Per abbattere di oltre il 95% i tempi di risposta e la spesa delle query su S3 (sia con Athena/Trino sia con ClickHouse), applicate questi quattro criteri in ordine di priorità:
-
-1. Convertite i dati grezzi in tabelle **Parquet compresse con Zstandard (`zstd`)** partizionate per data e ordinate internamente tramite un job `CREATE TABLE AS SELECT` (CTAS) o `INSERT INTO FUNCTION s3`.
-2. Nelle query analitiche elencate **solo le 3–5 colonne strettamente indispensabili** e includete **sempre** il filtro esplicito sulla colonna di partizione (`WHERE dt >= ... AND dt <= ...`).
-3. Nelle query con `JOIN` in Trino/Athena, se le statistiche CBO non sono aggiornate, posizionate sempre la **tabella più grande a sinistra** e la tabella più piccola a destra (così che la tabella piccola venga caricata nella hash table in memoria distribuita in *broadcast* ai worker).
-4. Impostate un tetto massimo di byte per singola query (`max_bytes_before_external_group_by` / `BytesScannedCutoffPerQuery`) e monitorate le query più pesanti.
-
-Ecco l'esempio pratico di trasformazione e query ottimizzata su S3 che riduce la scansione da terabyte a pochi megabyte:
+La conversione è una operazione una tantum per i dati storici e una operazione giornaliera per i dati nuovi. Su Athena si esegue con una CTAS. Il blocco seguente legge una tabella esterna sul JSON grezzo e scrive Parquet `zstd` partizionato per data:
 
 ```sql
--- 1. Conversione una-tantum da JSON grezzo a Parquet ZSTD partizionato e ordinato su S3:
-INSERT INTO FUNCTION s3(
-    'https://s3.eu-central-1.amazonaws.com/acme-lake-prod/curated/events_opt/dt=2026-11-13/part_01.parquet',
-    'Parquet'
-)
-SETTINGS output_format_parquet_compression_method = 'zstd'
+-- Athena: conversione da JSON grezzo a Parquet ZSTD partizionato per data
+CREATE TABLE acme_lake.events_opt
+WITH (
+    format = 'PARQUET',
+    write_compression = 'ZSTD',
+    external_location = 's3://acme-lake-prod/curated/events_opt/',
+    partitioned_by = ARRAY['dt']
+) AS
 SELECT
-    toDate(occurred_at) AS dt,
     tenant_id,
     event_type,
     user_id,
-    amount_eur
-FROM s3(
-    'https://s3.eu-central-1.amazonaws.com/acme-lake-prod/raw/events_json/2026/11/13/*.json.gz',
-    'JSONEachRow'
-)
-ORDER BY tenant_id, event_type;
+    amount_eur,
+    CAST(date(occurred_at) AS varchar) AS dt   -- la colonna di partizione va per ultima
+FROM acme_lake.raw_events_json
+WHERE occurred_at >= TIMESTAMP '2026-01-01 00:00:00';
+```
 
--- 2. Query analitica ottimizzata:
--- - Partition pruning sul prefisso dt=2026-11-13
--- - Proiezione delle sole 3 colonne necessarie (tenant_id, event_type, amount_eur)
--- - Join con tabella grande a sinistra e anagrafica piccola a destra:
-SELECT
-    e.tenant_id,
-    t.plan_tier,
-    e.event_type,
-    count() AS eventi_totali,
-    sum(e.amount_eur) AS ricavo_eur
-FROM s3(
-    'https://s3.eu-central-1.amazonaws.com/acme-lake-prod/curated/events_opt/dt=2026-11-13/*.parquet',
-    'Parquet'
-) AS e
-INNER JOIN s3(
-    'https://s3.eu-central-1.amazonaws.com/acme-lake-prod/curated/dim_tenants/latest.parquet',
-    'Parquet'
-) AS t
-    ON e.tenant_id = t.tenant_id
-WHERE e.tenant_id = 'acme-it'
+Una volta che la tabella ha migliaia di prefissi `dt=...`, la registrazione delle partizioni diventa un problema a sé. `MSCK REPAIR TABLE` scandisce ricorsivamente tutti i prefissi e su cinque anni di storico richiede minuti. La Partition Projection elimina la necessità: Athena calcola i percorsi dalle proprietà della tabella, senza interrogare il catalogo né fare `LIST`:
+
+```sql
+-- Athena: tabella con Partition Projection su dt, nessun MSCK REPAIR necessario
+CREATE EXTERNAL TABLE acme_lake.events_curated (
+    tenant_id   string,
+    event_type  string,
+    user_id     string,
+    amount_eur  double
+)
+PARTITIONED BY (dt string)
+STORED AS PARQUET
+LOCATION 's3://acme-lake-prod/curated/events_opt/'
+TBLPROPERTIES (
+    'projection.enabled'           = 'true',
+    'projection.dt.type'           = 'date',
+    'projection.dt.format'         = 'yyyy-MM-dd',
+    'projection.dt.range'          = '2025-01-01,NOW',
+    'storage.location.template'    = 's3://acme-lake-prod/curated/events_opt/dt=${dt}/'
+);
+```
+
+La query ottimizzata sulla tabella proietta solo le colonne necessarie e filtra sulla partizione. Se il join è con una dimensione piccola, conviene mettere la tabella grande a sinistra e quella piccola a destra, così che la piccola venga replicata sui worker:
+
+```sql
+-- Query con pruning su dt, tre colonne proiettate e join con dimensione piccola a destra
+SELECT e.tenant_id, t.plan_tier, e.event_type,
+       count(*)        AS eventi_totali,
+       sum(e.amount_eur) AS ricavo_eur
+FROM acme_lake.events_curated AS e
+JOIN acme_lake.dim_tenants AS t ON e.tenant_id = t.tenant_id
+WHERE e.dt = '2026-11-13'
+  AND e.tenant_id = 'acme-it'
 GROUP BY e.tenant_id, t.plan_tier, e.event_type
 ORDER BY ricavo_eur DESC;
 ```
 
-Il confronto prima/dopo certifica il risultato: la query iniziale con `SELECT *` sul JSON non partizionato leggeva **4.000 GB** impiegando 140 secondi e costando **20 dollari** a esecuzione; la query riscritta sopra la partizione giornaliera Parquet `zstd` con proiezione delle sole tre colonne `tenant_id`, `event_type` e `amount_eur` legge **18 MB** (`0,018 GB`), risponde in **0,4 secondi** e su un motore a consumo costa meno di **un decimillesimo di dollaro**. Scrivere i nomi delle tre colonne invece di `*` e filtrare `dt` richiede dieci secondi; lasciare `SELECT *` dentro una dashboard automatica brucia migliaia di euro al mese senza alcun valore aggiunto.
+## Workgroup, limiti e misura dei byte per query
 
-## Motore Serverless Pay-Per-Query (Athena) o Cluster Dedicato (Trino / ClickHouse)
+Il tetto di byte per query si imposta a livello di workgroup. Il comando seguente crea un workgroup dedicato alla BI con un limite di 50 GB per esecuzione (50 × 1024 × 1024 × 1024 = 53.687.091.200 byte):
 
-Quando l'azienda cresce, bisogna decidere quale motore SQL posizionare sopra il data lake S3 scegliendo tra **Athena serverless (a consumo per TB letto)**, **Trino su cluster dedicato** e **ClickHouse (con tabelle calde o cache S3)**.
+```bash
+# Workgroup per la BI: blocca ogni query che tenti di leggere più di 50 GB
+aws athena create-work-group \
+  --name dashboard-bi \
+  --configuration "ResultConfiguration={OutputLocation=s3://acme-athena-results/dashboard-bi/},EnforceWorkGroupConfiguration=true,PublishCloudWatchMetricsEnabled=true,BytesScannedCutoffPerQuery=53687091200"
+```
 
-Il criterio di scelta è netto: **usate Amazon Athena serverless per esplorazione ad-hoc saltuaria, ispezioni dei data engineer sulla zona Raw/Curated e carichi di lavoro intermittenti dove il volume totale scansionato nel mese resta sotto i 50–100 TB ($< 250\text{–}500\text{ \$/mese}$), passate invece a Trino dedicato quando avete bisogno di federare query ad alto volume tra S3 e decine di database esterni con centinaia di terabyte scansionati al giorno, o caricate i mart aggregati in ClickHouse quando dovete servire dashboard interattive con oltre 20 utenti concorrenti e latenza richiesta inferiore al secondo.**
+La misura del costo reale di ogni esecuzione si legge dalle statistiche. Lo script Python calcola i byte scansionati, il tempo in coda e il costo stimato, applicando il minimo fatturabile di 10 MB:
 
-La confusione comune consiste nell'usare Athena serverless come backend diretto di una dashboard cliente-finale che fa 50.000 query al giorno, oppure nell'accendere un cluster Trino da 8 nodi H24 ($4.000/mese) per un team di tre analisti che lancia venti query esplorative alla settimana. Sbagliare questa scelta o fa esplodere la bolletta variabile a consumo, o immobilizza budget fisso per server che restano inattivi il 95% del tempo.
+```python
+# Legge le statistiche di una esecuzione Athena e stima il costo (5 USD per TB)
+import boto3
 
-Questo articolo non tratta l'accelerazione tramite viste materializzate su Glue/Athena né le tabelle esterne di Snowflake/BigQuery Omni. Ricordate sempre di calcolare la **soglia di pareggio (*break-even point*)**: se un cluster ClickHouse o Trino dedicato costa \$1.500/mese, a \$5/TB su Athena il punto di pareggio puro sul costo è a **300 TB scansionati al mese** (circa 10 TB al giorno), ma il limite di latenza e concorrenza sulle dashboard scatta molto prima.
+athena = boto3.client("athena", region_name="eu-central-1")
 
-## Cinque domande prima di collegare un query engine o una BI al data lake S3
+def query_cost(query_execution_id: str) -> dict:
+    stats = athena.get_query_execution(QueryExecutionId=query_execution_id)[
+        "QueryExecution"]["Statistics"]
+    scanned = stats["DataScannedInBytes"]
+    billed = max(scanned, 10 * 1024**2)          # minimo di 10 MB per query
+    return {
+        "mb_scansionati": round(scanned / 1024**2, 2),
+        "ms_in_coda": stats.get("QueryQueueTimeInMillis", 0),
+        "ms_totali": stats["TotalExecutionTimeInMillis"],
+        "costo_usd": round(billed / 1024**4 * 5, 6),
+    }
+```
 
-1. Tutte le tabelle interrogate dagli utenti sono in formato **Parquet** (o Iceberg/Delta) compresso con `zstd`/`snappy` e partizionate per data con file da 100–500 MB?
-2. Nelle query delle dashboard e dei report è stato eliminato ogni `SELECT *`, selezionando esplicitamente solo le colonne necessarie e includendo sempre il filtro `WHERE` sulla chiave di partizione?
-3. Se usate Athena, avete configurato un Workgroup dedicato con limite per singola query (`BytesScannedCutoffPerQuery`, es. 20 GB o 50 GB) e allarme sul budget giornaliero?
-4. Per le tabelle partizionate su S3 ad accesso frequente, avete attivato Iceberg o la *Partition Projection* per azzerare la latenza di lookup sul catalogo e l'uso di `MSCK REPAIR TABLE`?
-5. Avete fissato una soglia chiara di volume scansionato mensile (es. $> 200\text{ TB/mese}$) o di concorrenza ($> 15$ query simultanee con SLA $< 2\text{ s}$) oltre la quale spostare i mart delle dashboard in ClickHouse?
+Le due metriche da tenere sotto controllo per ogni dashboard sono i MB scansionati per query e il tempo in coda: una query ben progettata su Parquet partizionato legge decine o centinaia di MB e attende in coda un tempo vicino a zero.
 
-La metrica regina per governare un query engine su S3 è il **Data Scanned per Query (MB)** incrociato con il **tempo di coda (*Queue Time*)**: una query analitica ben progettata su Parquet partizionato scansiona poche decine o centinaia di megabyte e ha un tempo di attesa in coda vicino allo zero.
+## Athena, Trino o ClickHouse: dove sta il pareggio
 
-Di tutta la lezione sui query engine per data lake, ricordate una sola legge economica: su S3 non pagate per quanto è complicata la formula matematica nella `SELECT`, pagate per quanti gigabyte tirate fuori dal bucket. Tagliate le partizioni col `WHERE`, tagliate le colonne evitando `SELECT *` e comprimerete insieme tempi e fatture.
+La scelta del motore dipende dal profilo di carico. Il confronto seguente riassume i tre casi tipici:
+
+| Motore | Modello di costo | Punto di forza | Limite |
+|---|---|---|---|
+| Athena serverless | Circa 5 USD per TB letto | Esplorazione saltuaria, nessun cluster da gestire | Costo variabile e quota di concorrenza |
+| Trino su cluster dedicato | Costo fisso mensile dei nodi | Federazione tra S3 e molti database, volumi alti | Si paga anche da fermo, richiede gestione |
+| ClickHouse con mart aggregati | Costo fisso del cluster | Latenza sotto il secondo con molti utenti concorrenti | I dati vanno caricati e mantenuti |
+
+Il punto di pareggio sul solo costo si calcola. Un cluster dedicato da 1.500 USD al mese, a 5 USD per TB su Athena, equivale a 1.500 / 5 = 300 TB scansionati al mese, cioè circa 10 TB al giorno. Un cluster Trino da 8 nodi sempre acceso a 4.000 USD al mese corrisponde a 4.000 / 5 = 800 TB mensili. Sotto queste soglie, Athena costa meno; sopra, conviene il cluster. Un team di tre analisti con venti query esplorative a settimana resta lontanissimo dal pareggio e un cluster fisso resterebbe inattivo per quasi tutto il tempo.
+
+Il limite di latenza e concorrenza scatta però prima di quello economico. Una dashboard rivolta ai clienti con decine di migliaia di query al giorno e un obiettivo di risposta sotto i 2 secondi va servita da mart aggregati in un motore pensato per la bassa latenza, anche se i terabyte scansionati sarebbero pochi.
+
+## Tre errori che moltiplicano costi e tempi
+
+### Scrivere SELECT * su una tabella colonnare
+
+Il sintomo è un costo per query proporzionale al numero di colonne della tabella. Su un database a righe come PostgreSQL l'effetto è modesto perché la pagina contiene comunque la riga intera, e per questo l'abitudine resta. In Parquet ogni colonna è un blocco separato: leggere 80 colonne quando il report ne usa 3 moltiplica i byte per 80 / 3, circa 27 volte. La correzione è elencare solo le colonne necessarie e farlo rispettare nei modelli della BI.
+
+### Credere che LIMIT riduca i dati scansionati
+
+Il sintomo è una query di prova con `LIMIT 10` che costa quanto una scansione completa. Sembra una precauzione sensata, ma con un `ORDER BY occurred_at DESC` il motore deve leggere tutti i file per sapere quali sono le dieci righe più recenti. La correzione è filtrare sulla chiave di partizione, per esempio `WHERE dt >= DATE '2026-11-10'`, perché è il filtro, non il `LIMIT`, a ridurre i byte.
+
+### Registrare le partizioni a ogni esecuzione
+
+Il sintomo è una pipeline che lancia `MSCK REPAIR TABLE` prima di ogni query e impiega minuti. La causa è che il comando elenca ricorsivamente tutti i prefissi su S3, e con cinque anni di storico sono migliaia. La correzione è la Partition Projection per schemi stabili, oppure un formato di tabella come Iceberg che tiene l'elenco dei file nei propri metadati.
+
+## Controllo prima di collegare una dashboard al lake
+
+1. Una query scansiona 600 GB a 5 USD per TB: quanto costa, e quanto costa dopo aver selezionato 4 colonne su 80 e un mese su 12?
+
+<details>
+<summary>Mostra risposta</summary>
+
+Prima: 600 / 1.000 × 5 = 3 USD. Dopo: 600 × (4 / 80) × (1 / 12) = 600 × 0,05 × 0,0833 = 2,5 GB, quindi 2,5 / 1.000 × 5 = 0,0125 USD. La riduzione è di 240 volte.
+
+</details>
+
+2. Perché una query con `LIMIT 10` e `ORDER BY` globale può costare quanto una scansione completa?
+
+<details>
+<summary>Mostra risposta</summary>
+
+Per sapere quali sono le prime dieci righe in ordine, il motore deve leggere tutte le righe della tabella o delle partizioni selezionate. Il `LIMIT` interviene dopo l'ordinamento, quindi non riduce i byte scansionati. Il filtro sulla partizione sì.
+
+</details>
+
+3. Un cluster dedicato costa 2.500 USD al mese: a partire da quanti TB scansionati al mese Athena a 5 USD per TB costa di più?
+
+<details>
+<summary>Mostra risposta</summary>
+
+2.500 / 5 = 500 TB al mese, cioè circa 16,7 TB al giorno. Sotto questa soglia Athena costa meno. Se però la concorrenza o la latenza richieste non sono sostenibili sul motore serverless, il cambio può convenire prima.
+
+</details>
+
+4. A che serve la Partition Projection e quando non è adatta?
+
+<details>
+<summary>Mostra risposta</summary>
+
+Permette ad Athena di calcolare i percorsi delle partizioni da una regola (per esempio un intervallo di date) senza leggere il catalogo e senza `MSCK REPAIR TABLE`. Funziona quando lo schema dei prefissi è regolare e prevedibile. Non è adatta a partizioni con valori irregolari o non enumerabili, dove un catalogo esplicito o Iceberg sono più indicati.
+
+</details>
