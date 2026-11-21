@@ -1,166 +1,209 @@
 ---
 title: "Apache Iceberg e table format per data lake"
 description: >-
-  Table format moderni: Iceberg, Delta Lake, Hudi per portare ACID e time travel sui data lake.
+  Come Apache Iceberg porta transazioni, cancellazioni riga per riga e time travel su file Parquet in S3: albero di metadati, hidden partitioning, MERGE, scelta tra copy-on-write e merge-on-read e manutenzione con i conti sui file.
 module: "Modulo 10: Data lake e lakehouse su S3"
 order: 5
 category: Tecnico
 headerImage: /course-headers/s3-data-lake-iceberg-ginnytech-ad-v3.webp
 headerImageAlt: "Apache Iceberg e table format per data lake - immagine ufficiale della lezione su GinnyTech, creata da AD"
 difficulty: advanced
-duration: 22 min
+duration: 38 min
 prerequisites:
   - s3-data-lake/data-lifecycle
 learningObjectives:
-  - Creare una tabella Iceberg con metadata, schema e partizionamento nel catalogo
-  - Leggere uno snapshot passato con il time travel
-  - Pianificare compattazione e pulizia degli snapshot obsoleti
+  - Descrivere il percorso catalogo, metadata.json, manifest list, manifest, file dati e spiegare perché lo swap del puntatore rende atomica una scrittura
+  - Creare una tabella Iceberg con hidden partitioning e scrivere un MERGE INTO che gestisce upsert e cancellazione GDPR
+  - Leggere uno snapshot passato con il time travel e ispezionare i file con le tabelle di metadati
+  - Dimensionare compattazione e scadenza degli snapshot calcolando il numero di file prima e dopo
 binario: "ml-tabellare"
-formato: "articolo"
-autore: "Hermes"
-controllatoDa: "Argo"
-autorizzatoDa: "Giano"
+formato: "didattica-v2"
 draft: false
-dateModified: 2026-11-13
+dateModified: 2026-11-17
 ---
 
-# Apache Iceberg e table format per data lake
+Un job ETL sovrascrive la partizione di novembre di una tabella Parquet su S3 mentre il direttore finanziario aggiorna la sua dashboard. Il caso è ricostruito con numeri di esempio, ma il guasto è reale e prevedibile: a metà dell'operazione il job ha cancellato i vecchi file e ne ha scritto solo un terzo dei nuovi, e per dodici minuti il fatturato in dashboard è dimezzato. Nella stessa settimana arriva una richiesta di cancellazione GDPR per un cliente, e il team deve cercare a mano i 400 file Parquet dove compare e riscriverli.
 
-Un job ETL sta sovrascrivendo una partizione mensile di file Parquet tradizionali su S3 mentre la dashboard del direttore finanziario interroga la stessa tabella: a metà dell'operazione il job ha già cancellato la Hälfte dei file vecchi e scritto solo un terzo dei nuovi, per cui la dashboard mostra un fatturato dimezzato per dodici minuti; inoltre, per cancellare un singolo cliente che ha esercitato il diritto all'oblio GDPR, il team deve riscrivere a mano 400 file Parquet sparsi in tre anni di cartelle. La causa non è un limite di Parquet: è usare una collezione nuda di file stile Hive invece di un **Open Table Format transazionale come Apache Iceberg**.
+## Fatturato dimezzato per dodici minuti e quattrocento file da riscrivere
 
-## Fatturato dimezzato durante la scrittura e 400 file da riscrivere per il GDPR
+Con il modello Hive una tabella è, per definizione, tutto ciò che si trova dentro una cartella S3. Non c'è nessun elenco ufficiale dei file che la compongono: il motore di query lo ricostruisce ogni volta con un `LIST` sul prefisso. Questo produce tre limiti strutturali.
 
-Questo è un caso ricostruito con numeri di esempio su quanto accade quando si gestiscono tabelle su S3 usando il vecchio modello Hive (dove "una tabella è tutto ciò che si trova dentro una directory S3"). L'azienda conserva tre anni di ordini su `s3://acme-lake/curated/orders/`.
+Il primo è l'assenza di transazioni su più oggetti. Mentre il job sostituisce i file, una query lanciata da Athena, Trino o ClickHouse vede una cartella a metà, e restituisce numeri diversi a ogni esecuzione. Il secondo è l'assenza di una vera `DELETE`: per eliminare un cliente bisogna individuare i file che lo contengono e riscriverli per intero. Il terzo è l'impossibilità di cambiare partizionamento senza riscrivere tutto. Dopo un anno il volume giornaliero decuplica, il team vuole passare dalla partizione mensile a quella giornaliera, e in Hive questo significa rileggere e riscrivere tre anni di terabyte.
 
-Senza uno strato di metadati transazionali sopra i file Parquet emergono tre limiti strutturali:
-1. Quando il job di ricalcolo aggiorna il mese corrente cancellando i vecchi file Parquet e caricando i nuovi, S3 non offre transazioni multi-oggetto: qualsiasi query lanciata da Athena, Trino o ClickHouse durante quei dieci minuti vede una cartella incompleta (metà file vecchi, metà file nuovi o zero file), restituendo numeri casuali e irripetibili (*dirty reads*).
-2. Un cliente invia una richiesta formale di cancellazione dati (GDPR Art. 17): poiché in una tabella Parquet nuda non esiste l'istruzione `DELETE FROM orders WHERE customer_id = 42`, un ingegnere deve scrivere uno script che individua i 400 file Parquet in cui compare quel cliente e li riscrive da zero.
-3. Dopo un anno il volume giornaliero decuplica e il team vorrebbe passare dal partizionamento mensile (`month(occurred_at)`) al partizionamento giornaliero (`day(occurred_at)`), ma farlo in Hive richiede di riscrivere fisicamente tutti i terabyte dei tre anni precedenti.
+> **Idea chiave:** Iceberg sostituisce la scansione delle directory con un elenco di file versionato e immutabile; ogni scrittura prepara nuovi file e nuovi metadati e li rende visibili con un solo cambio di puntatore nel catalogo.
 
-La causa di questi tre blocchi è affidare al file system S3 il compito di definire quali file appartengono alla tabella anziché delegarlo a un albero immutabile di metadati versionati (**Apache Iceberg**).
+La causa dei tre guasti non è Parquet, che resta il formato dei dati. È l'affidare al file system il compito di dire quali file appartengono alla tabella.
 
-## Albero di Snapshot ACID, Hidden Partitioning e Time Travel
+## L'albero di metadati e lo swap atomico
 
-Apache Iceberg trasforma un normale bucket S3 in un data warehouse transazionale completo (architettura **Lakehouse**) introducendo una gerarchia a tre livelli di metadati immutabili sopra i file Parquet ([Apache Iceberg Spec](https://iceberg.apache.org/spec/)).
+Iceberg aggiunge sopra i file Parquet una gerarchia di metadati, descritta nella specifica ufficiale (https://iceberg.apache.org/spec/). Il motore non fa mai `LIST` sulle directory: chiede al catalogo l'indirizzo del file `metadata.json` corrente e da lì scende fino ai file dati.
 
-Il primo meccanismo è l'**isolamento ACID tramite albero di Snapshot (`Catalog -> metadata.json -> Manifest List -> Manifest File -> Data Files`)**. In Iceberg i motori di query non fanno mai `LIST` sulle directory S3 per scoprire quali file leggere: chiedono al Catalogo l'indirizzo dell'attuale file `vN.metadata.json`. Ogni scrittura (`INSERT`, `MERGE`, `DELETE`, `COMPACT`) prepara in background i nuovi file Parquet e i nuovi manifesti, e solo all'ultimo millisecondo esegue uno **swap atomico del puntatore nel catalogo** da `s1` a `s2`. Le query iniziate prima dello swap continuano a leggere indisturbate lo snapshot `s1`; le query iniziate un millisecondo dopo vedono istantaneamente l'intero snapshot `s2`. Non esistono mai stati intermedi corrotti.
-
-Il secondo meccanismo è l'**Hidden Partitioning e la Partition Evolution senza riscrittura**. Nelle tabelle Hive tradizionali dovevate creare una colonna artificiale `dt_str` e ricordarvi di aggiungerla in ogni `WHERE`; in Iceberg dichiarate `PARTITIONED BY (day(occurred_at))` e gli utenti scrivono semplicemente `WHERE occurred_at >= TIMESTAMP '2026-11-01 00:00:00'`. È Iceberg a tradurre automaticamente il filtro sul timestamp nel taglio dei *Manifest Files* tramite le statistiche `min/max` salvate per ogni file e colonna. Inoltre potete cambiare in qualsiasi momento la strategia di partizione con un `ALTER TABLE` di soli metadati: i vecchi file restano partizionati per mese, i nuovi vengono partizionati per giorno e Iceberg li interroga insieme in modo trasparente.
-
-Il terzo meccanismo è il **Time Travel (`FOR VERSION AS OF` / `FOR TIMESTAMP AS OF`) abbinato alla manutenzione programmata (`OPTIMIZE` ed `expire_snapshots`)**. Poiché ogni modifica crea un nuovo snapshot lasciando intatti i file Parquet dello snapshot precedente, potete interrogare la tabella esattamente com'era ieri alle 18:00 o annullare un rilascio errato con un rollback istantaneo di metadati.
-
-**Apache Iceberg porta le garanzie ACID e gli aggiornamenti riga-per-riga su S3 sostituendo la scansione delle directory fisiche con un albero immutabile di manifesti e snapshot atomici.**
-
-## Tre errori nella gestione operativa delle tabelle Apache Iceberg
-
-Il blocco SQL qui sotto mostra i tre errori classici di chi adotta Iceberg senza comprenderne il ciclo di vita dei metadati: non eseguire mai la compattazione né la scadenza degli snapshot, cancellare file a mano con `aws s3 rm` corrompendo i manifesti, ed eseguire `DELETE`/`UPDATE` riga per riga invece di `MERGE INTO` a lotti:
-
-```sql
--- ERRORE 1: eseguire migliaia di piccoli INSERT/DELETE frequenti senza mai lanciare
--- OPTIMIZE (compattazione) né VACUUM / expire_snapshots!
--- Risultato: decine di migliaia di manifest e delete files rallentano il planning delle query,
--- mentre i vecchi snapshot non scaduti moltiplicano per 10 la bolletta S3.
-
--- ERRORE 2: dopo aver cancellato a mano un file su S3 con "aws s3 rm" fuori da Iceberg,
--- qualsiasi query sulla tabella fallisce perché il Manifest File punta ancora all'oggetto rimosso:
-SELECT
-    country_code,
-    count() AS ordini,
-    sum(amount_eur) AS ricavo_eur
-FROM iceberg_s3(
-    'https://s3.eu-central-1.amazonaws.com/acme-lake-prod/curated/orders_iceberg/'
-)
-WHERE occurred_at >= '2026-11-01 00:00:00'
-GROUP BY country_code;
+```mermaid
+flowchart TD
+    CAT["Catalogo<br/>Glue, REST, Nessie"] -->|"puntatore corrente"| MD["metadata.json<br/>schema, partizioni, snapshot"]
+    MD --> ML["Manifest list<br/>uno per snapshot"]
+    ML --> MF1["Manifest file A<br/>statistiche min/max"]
+    ML --> MF2["Manifest file B"]
+    MF1 --> D1["data-001.parquet"]
+    MF1 --> D2["data-002.parquet"]
+    MF2 --> D3["data-003.parquet"]
 ```
 
-### Non schedulare mai la compattazione (OPTIMIZE) e la pulizia degli snapshot (VACUUM)
+Ogni scrittura (`INSERT`, `MERGE`, `DELETE`, compattazione) crea in background nuovi file dati e nuovi manifest. Solo all'ultimo istante il catalogo sostituisce con un'operazione atomica il puntatore da `metadata.json` della versione `s1` a quello della versione `s2`. Le query iniziate prima leggono `s1` fino alla fine; quelle iniziate dopo vedono tutta `s2`. Non esiste uno stato intermedio. Se due scrittori tentano il commit insieme, il secondo fallisce con una `CommitFailedException` e riprova su base aggiornata: è la concorrenza ottimistica.
 
-Creare una tabella Iceberg con aggiornamenti continui (`INSERT` e `MERGE` ogni 5 minuti) e dimenticarsi di schedulare i job di manutenzione porta a un degrado progressivo sia delle prestazioni sia dei costi. Poiché Iceberg conserva tutti gli snapshot passati per consentire il Time Travel, senza una pulizia periodica (`expire_snapshots` / `VACUUM`) i file Parquet sostituiti mesi fa non vengono mai rimossi da S3; contemporaneamente, l'accumularsi di migliaia di piccoli *data files* e *positional/equality delete files* rallenta la lettura dei manifesti da parte dei query engine.
+I manifest contengono per ogni file dati i valori minimo e massimo delle colonne. Un filtro su `occurred_at` consente al planner di scartare interi file senza aprirli, e questo è il motivo per cui Iceberg non ha bisogno di colonne di partizione artificiali.
 
-### Cancellare o spostare file Parquet direttamente da S3 con aws s3 rm / mv
+## Creare la tabella con hidden partitioning
 
-Trattare la cartella S3 di una tabella Iceberg come una normale directory Hive ed eliminare manualmente un file con `aws s3 rm` rompe l'integrità referenziale della tabella. In Iceberg la verità risiede nei *Manifest Files*: se cancellate un file Parquet direttamente dal bucket senza passare per un'istruzione SQL `DELETE` o per la procedura `expire_snapshots`, il manifesto continua a elencare quel file come parte dello snapshot attivo e tutte le query falliranno con `FileNotFoundException` (`NoSuchKey`).
+Nelle tabelle Hive bisognava creare una colonna stringa come `dt` e ricordarsi di inserirla in ogni `WHERE`. Se l'analista dimenticava il filtro, la query scansionava l'intera tabella. In Iceberg si dichiara una trasformazione della colonna reale, e gli utenti filtrano sul timestamp come farebbero normalmente.
 
-### Usare Iceberg per aggiornamenti OLTP ad altissima frequenza (singola riga al secondo)
-
-Eseguire un'istruzione `UPDATE` o `DELETE` separata per ogni singolo evento in arrivo (es. 50 transazioni singole al secondo) intasa il catalogo e genera una tempesta di conflitti di concorrenza ottimistica (*CommitFailedException*). Iceberg è progettato per carichi analitici a lotti o micro-batch (da 1 a 15 minuti): le modifiche vanno sempre raggruppate in un unico `MERGE INTO` periodico.
-
-## Creazione tabella Iceberg, MERGE/Time Travel e manutenzione automatica
-
-Per creare e gestire tabelle Apache Iceberg veloci, riproducibili ed economiche sul vostro data lake S3 (interrogabili da Athena, Trino, Spark e ClickHouse), applicate questi quattro criteri in ordine di priorità:
-
-1. Create la tabella nel catalogo specificando `table_type = 'ICEBERG'`, compressione `ZSTD` e **Hidden Partitioning** (`day(occurred_at)` o `month(occurred_at)`) senza creare colonne stringa duplicate per le date.
-2. Eseguite gli aggiornamenti e le cancellazioni GDPR accorpandoli in un comando `MERGE INTO` batch/micro-batch.
-3. Usate `FOR TIMESTAMP AS OF` o `FOR VERSION AS OF` per riprodurre esattamente i report passati o fare audit dopo un caricamento sospetto.
-4. Schedulate ogni giorno (o settimana) i due comandi di manutenzione: **`OPTIMIZE ... REWRITE DATA USING BIN_PACK`** (per fondere i piccoli file e applicare i delete files in file Parquet puliti da 256 MB) seguito da **`VACUUM`** / `expire_snapshots` (es. mantenendo 7 giorni di Time Travel).
-
-Ecco il ciclo operativo completo di una tabella Iceberg (creazione con Hidden Partitioning, `MERGE INTO`, query in Time Travel su Athena/Trino e lettura diretta da ClickHouse):
+Questa istruzione, nel dialetto di Athena, crea nel Glue Catalog una tabella partizionata per giorno con compressione Zstandard.
 
 ```sql
--- 1. Creazione tabella Apache Iceberg nel catalogo con Hidden Partitioning sul giorno:
+-- Athena: tabella Iceberg con partizione nascosta sul giorno
 CREATE TABLE lakehouse.sales_orders (
-    order_id BIGINT,
-    customer_id BIGINT,
-    country_code STRING,
-    status STRING,
-    amount_eur DECIMAL(12, 2),
-    occurred_at TIMESTAMP
+    order_id      bigint,
+    customer_id   bigint,
+    country_code  string,
+    status        string,
+    amount_eur    decimal(12, 2),
+    occurred_at   timestamp
 )
 PARTITIONED BY (day(occurred_at))
-LOCATION 's3://acme-lake-prod/curated/sales_orders/'
+LOCATION 's3://acme-lake-prod-curated/sales_orders/'
 TBLPROPERTIES (
     'table_type' = 'ICEBERG',
     'format' = 'parquet',
-    'write_compression' = 'zstd',
-    'optimize_rewrite_delete_file_threshold' = '2'
+    'write_compression' = 'zstd'
 );
-
--- 2. Upsert e cancellazione GDPR atomica tramite MERGE INTO:
-MERGE INTO lakehouse.sales_orders AS target
-USING staging.orders_delta AS source
-    ON target.order_id = source.order_id
-WHEN MATCHED AND source.op = 'DELETE_GDPR' THEN DELETE
-WHEN MATCHED THEN UPDATE SET
-    status = source.status,
-    amount_eur = source.amount_eur
-WHEN NOT MATCHED THEN INSERT (
-    order_id, customer_id, country_code, status, amount_eur, occurred_at
-) VALUES (
-    source.order_id, source.customer_id, source.country_code, source.status, source.amount_eur, source.occurred_at
-);
-
--- 3. Time Travel: interroga lo snapshot esatto di ieri prima del MERGE e compatta i file:
-SELECT status, count() AS ordini, sum(amount_eur) AS totale_eur
-FROM lakehouse.sales_orders FOR TIMESTAMP AS OF (current_timestamp - INTERVAL '1' DAY)
-WHERE occurred_at >= TIMESTAMP '2026-11-01 00:00:00'
-GROUP BY status;
-
--- 4. Manutenzione giornaliera: bin-packing dei file piccoli + pulizia snapshot > 7 giorni:
-OPTIMIZE lakehouse.sales_orders REWRITE DATA USING BIN_PACK
-WHERE occurred_at >= current_timestamp - INTERVAL '7' DAY;
 ```
 
-Il risultato risolve tutti i problemi delle tabelle Hive tradizionali: durante l'esecuzione del `MERGE INTO`, la dashboard del direttore finanziario continua a leggere lo snapshot precedente senza vedere alcun calo temporaneo; la cancellazione GDPR di un cliente avviene con una singola riga `WHEN MATCHED ... DELETE` in pochi secondi senza dover riscrivere a mano 400 file; e il comando `OPTIMIZE ... BIN_PACK` mantiene i file Parquet compatti e veloci. Adottare Iceberg per lo strato `curated` elimina alla radice le letture sporche e gli script fragili di sovrascrittura delle cartelle S3.
+Cambiare idea sul partizionamento diventa un'operazione di soli metadati. Con `ALTER TABLE ... ADD PARTITION FIELD` (in Spark) i file esistenti restano partizionati per mese e quelli nuovi per giorno; il motore interroga entrambi in modo trasparente. Per questo la scelta iniziale non è irreversibile come in Hive.
 
-## Scelta della strategia di scrittura Iceberg: Copy-on-Write (CoW) o Merge-on-Read (MoR)
+## MERGE, cancellazione GDPR e time travel
 
-In Apache Iceberg (versione v2), gli aggiornamenti (`UPDATE` / `MERGE`) e le cancellazioni (`DELETE`) possono essere eseguiti secondo due modalità fisiche: **Copy-on-Write (CoW)** (che riscrive immediatamente un nuovo file Parquet senza le righe cancellate) oppure **Merge-on-Read (MoR)** (che non tocca il file Parquet originale ma scrive un piccolo *Delete File* separato con le posizioni delle righe rimosse, applicandolo al volo durante la `SELECT` fino alla successiva compattazione `OPTIMIZE`).
+Con la tabella transazionale diventa possibile scrivere in un'unica istruzione gli aggiornamenti e le cancellazioni. Il `MERGE INTO` confronta la tabella con una tabella di staging che contiene le variazioni e una colonna `op` che dice che cosa fare.
 
-Il criterio di scelta è netto: **usate `Copy-on-Write (CoW)` per le tabelle interrogate intensivamente dalle dashboard e dagli analisti dove gli aggiornamenti avvengono a lotti poco frequenti (es. ogni ora o una volta a notte) così da garantire sempre la massima velocità di lettura senza overhead di unione, usate invece `Merge-on-Read (MoR)` quando avete micro-batch molto frequenti (ogni 1–5 minuti) o cancellazioni sparse su molti file dove riscrivere centinaia di megabyte di Parquet ad ogni minuto sarebbe troppo lento, avendo cura di eseguire `OPTIMIZE` ogni poche ore.**
+```sql
+-- Athena: upsert e cancellazione GDPR in un unico commit atomico
+MERGE INTO lakehouse.sales_orders AS t
+USING staging.orders_changes AS s
+    ON t.order_id = s.order_id
+WHEN MATCHED AND s.op = 'DELETE_GDPR' THEN DELETE
+WHEN MATCHED THEN UPDATE SET
+    status = s.status,
+    amount_eur = s.amount_eur
+WHEN NOT MATCHED THEN INSERT
+    (order_id, customer_id, country_code, status, amount_eur, occurred_at)
+    VALUES (s.order_id, s.customer_id, s.country_code, s.status, s.amount_eur, s.occurred_at);
 
-La confusione comune consiste nell'attivare `Merge-on-Read` per velocizzare le scritture streaming dimenticandosi di schedulare il job `OPTIMIZE` che fonde i *delete files* nei *data files*: dopo qualche giorno i motori di query devono applicare migliaia di file di cancellazione in RAM a ogni `SELECT`, degradando pesantemente i tempi di lettura. Sbagliare questa scelta sposta semplicemente il costo dalla scrittura alla lettura senza governarlo.
+-- Time travel: lo stato esatto della tabella di ieri, prima del MERGE
+SELECT status, count(*) AS ordini, sum(amount_eur) AS totale_eur
+FROM lakehouse.sales_orders FOR TIMESTAMP AS OF (current_timestamp - interval '1' day)
+WHERE occurred_at >= TIMESTAMP '2026-11-01 00:00:00'
+GROUP BY status;
+```
 
-Questo articolo si concentra su Apache Iceberg; nella lezione successiva su **Delta Lake** confronteremo la struttura del `_delta_log` basata su file JSON/Parquet ordinati rispetto al catalogo a puntatore atomico di Iceberg. Ricordate che ClickHouse supporta nativamente la lettura delle tabelle Iceberg su S3 tramite la funzione tabella `iceberg('s3://...')` e il table engine `Iceberg`.
+Durante il `MERGE` la dashboard continua a leggere lo snapshot precedente, quindi non vede nessun calo temporaneo. La cancellazione del cliente è una riga `WHEN MATCHED ... DELETE`, e il time travel permette di riprodurre un report passato o di verificare che cosa ha cambiato un caricamento sospetto. C'è una conseguenza da ricordare: finché lo snapshot vecchio non scade, i byte del cliente cancellato esistono ancora nei file storici. La scadenza degli snapshot fa parte dell'adempimento GDPR, non è un dettaglio di manutenzione.
 
-## Cinque domande prima di mettere in produzione una tabella Apache Iceberg
+## La manutenzione ha un costo che si calcola
 
-1. La tabella è registrata in un catalogo transazionale (AWS Glue Catalog, REST Catalog, Nessie) che gestisce lo swap atomico del puntatore `metadata.json`?
-2. Avete usato l'**Hidden Partitioning** (`day(ts)`, `month(ts)`, `bucket(16, id)`) evitando di aggiungere colonne stringa ridondanti per il partizionamento?
-3. Gli aggiornamenti e le cancellazioni sono raggruppati in comandi `MERGE INTO` a lotti (almeno ogni 5–15 minuti) invece di lanciare singole transazioni riga-per-riga?
-4. È schedulato in produzione un job automatico giornaliero di **`OPTIMIZE ... REWRITE DATA USING BIN_PACK`** per compattare i piccoli file e riassorbire i *delete files*?
-5. È schedulato un job di scadenza degli snapshot (**`VACUUM`** / `expire_snapshots` e `remove_orphan_files`) con una finestra di Time Travel definita (es. 7 giorni) per non pagare in eterno i file Parquet obsoleti?
+Ogni commit crea file. Un micro-batch ogni cinque minuti che scrive un file per partizione produce, in un giorno, centinaia di file piccoli, e i manifest crescono con loro. Svolgiamo il conto con numeri di esempio: ogni commit aggiunge un file da 4 MB e la lettura di un file costa circa 30 ms di latenza iniziale.
 
-La metrica di salute tecnica di una tabella Iceberg è il **rapporto tra Delete Files attivi e Data Files** insieme al **numero medio di file per partizione**: dopo il giro giornaliero di `OPTIMIZE`, il numero di *delete files* sulle partizioni chiuse deve tornare a **zero** e la dimensione media dei *data files* deve attestarsi intorno ai **256 MB**.
+1. I commit giornalieri sono 24 × 60 / 5 = 288, e i dati del giorno sono 288 × 4 = 1.152 MB, circa 1,1 GB.
+2. Senza compattazione, una query sul giorno apre 288 file. La latenza cumulata è 288 × 0,03 = 8,64 secondi, che con 16 lettori in parallelo diventano circa 0,54 secondi.
+3. Dopo una compattazione verso file da 256 MB servono 1.152 / 256 = 4,5, cioè 5 file. La latenza cumulata scende a 5 × 0,03 = 0,15 secondi.
+4. La riduzione del numero di file è (288 − 5) / 288 = 98,3%.
+5. La compattazione però riscrive i dati: finché gli snapshot precedenti non scadono, il giorno occupa 2 × 1.152 = 2.304 MB. Con 7 giorni di time travel l'eccedenza è 7 × 1.152 = 8.064 MB, circa 7,9 GB, cioè 7,9 × 0,023 = 0,18 euro al mese.
+6. Se invece gli snapshot non scadono mai, in un anno si accumulano 365 × 1,125 = circa 411 GB di file obsoleti, pari a 411 × 0,023 = 9,45 euro al mese per dati che nessuna query dovrebbe più leggere.
 
-Di tutto il funzionamento di Apache Iceberg, custodite un solo concetto fondamentale: in un Lakehouse moderno una tabella non è più una cartella di file su S3, ma uno snapshot immutabile puntato dal catalogo. Non toccate mai i file da dietro le quinte del catalogo e programmate sempre `OPTIMIZE` e `VACUUM`.
+Il costo in euro è basso; il costo vero è nel tempo di pianificazione delle query, che dipende dal numero di file e di manifest. I tre comandi seguenti, eseguiti con Spark, sono il ciclo di manutenzione: compattare, far scadere gli snapshot e rimuovere i file orfani rimasti da scritture fallite.
+
+```sql
+-- Spark SQL su catalogo Glue: compattazione verso file da 256 MB
+CALL glue.system.rewrite_data_files(
+    table => 'lakehouse.sales_orders',
+    options => map('target-file-size-bytes', '268435456', 'delete-file-threshold', '2')
+);
+
+-- Scadenza snapshot: conserva almeno 10 versioni e tutto ciò che è più recente di 7 giorni
+CALL glue.system.expire_snapshots(
+    table => 'lakehouse.sales_orders',
+    older_than => TIMESTAMP '2026-11-14 00:00:00',
+    retain_last => 10
+);
+
+-- Rimozione dei file non referenziati da nessun snapshot
+CALL glue.system.remove_orphan_files(table => 'lakehouse.sales_orders');
+```
+
+Su Athena gli equivalenti sono `OPTIMIZE lakehouse.sales_orders REWRITE DATA USING BIN_PACK` e `VACUUM lakehouse.sales_orders`. Per controllare il risultato si interrogano le tabelle di metadati, per esempio `SELECT count(*) AS file, avg(file_size_in_bytes) / 1048576 AS mb_medi FROM "sales_orders$files"`: dopo la compattazione la dimensione media deve avvicinarsi a 256 MB.
+
+## Copy-on-write o merge-on-read
+
+Nella versione 2 del formato, aggiornamenti e cancellazioni possono essere eseguiti in due modi. Con **copy-on-write** il motore riscrive subito i file Parquet interessati, escludendo le righe rimosse: la scrittura è più lenta ma la lettura è pulita. Con **merge-on-read** il file originale non si tocca e viene scritto un piccolo file di cancellazione con le posizioni delle righe eliminate; il motore lo applica al volo a ogni lettura finché una compattazione non lo assorbe.
+
+La regola di scelta dipende dalla frequenza delle modifiche. Le tabelle interrogate intensamente da dashboard e analisti, con modifiche a lotti ogni ora o una volta a notte, vanno in copy-on-write: la lettura resta veloce. Le tabelle con micro-batch ogni uno-cinque minuti, o con cancellazioni sparse su molti file, vanno in merge-on-read, perché riscrivere centinaia di megabyte a ogni minuto sarebbe troppo lento. In quel caso la compattazione periodica non è facoltativa.
+
+```sql
+-- Spark SQL: modalità di scrittura per tabella (copy-on-write è il valore predefinito)
+ALTER TABLE glue.lakehouse.sales_orders SET TBLPROPERTIES (
+    'write.delete.mode' = 'merge-on-read',
+    'write.update.mode' = 'merge-on-read',
+    'write.merge.mode'  = 'merge-on-read'
+);
+```
+
+Il motore più usato conta: Athena, per esempio, gestisce le modifiche con file di cancellazione e quindi vive già in uno scenario merge-on-read, mentre Spark consente di scegliere. Prima di fissare la proprietà conviene controllare che cosa il motore di scrittura supporta.
+
+## Tre errori nella gestione delle tabelle Iceberg
+
+### Non pianificare mai compattazione e scadenza degli snapshot
+
+Il sintomo è un planning delle query sempre più lento e una bolletta S3 che cresce più dei dati. Succede perché la tabella funziona subito e la manutenzione non produce errori visibili. La correzione è schedulare ogni giorno la compattazione e ogni settimana la scadenza degli snapshot, con una finestra di time travel dichiarata, per esempio 7 giorni.
+
+### Cancellare o spostare file direttamente su S3
+
+Il sintomo è una query che fallisce con `NoSuchKey` o `FileNotFoundException`. Succede perché il manifest continua a elencare il file come parte dello snapshot attivo, e chi ha lanciato `aws s3 rm` ha agito fuori dal catalogo. La correzione è usare solo istruzioni SQL e procedure Iceberg per modificare la tabella; un file mancante si ripristina da una versione del bucket, non si dichiara perso.
+
+### Usare Iceberg per scritture riga per riga ad alta frequenza
+
+Il sintomo è una serie di `CommitFailedException` e un catalogo intasato. Succede perché 50 transazioni al secondo, ciascuna con un commit, producono 50 conflitti di concorrenza ottimistica al secondo. Iceberg è progettato per carichi analitici a lotti o micro-batch da uno a quindici minuti: si raggruppano le modifiche in un solo `MERGE INTO` periodico, con le scritture singole assorbite a monte da uno stream.
+
+## Controllo prima di mettere in produzione una tabella
+
+1. Un job scrive un file da 3 MB ogni 2 minuti nella stessa partizione. Quanti file produce in un giorno e quanti ne servono dopo una compattazione a 256 MB?
+
+<details>
+<summary>Mostra risposta</summary>
+
+In un giorno i commit sono 24 × 60 / 2 = 720, quindi 720 file e 720 × 3 = 2.160 MB di dati. A 256 MB per file bastano 2.160 / 256 = 8,4, cioè 9 file: una riduzione di (720 − 9) / 720 = 98,8%.
+
+</details>
+
+2. Hai attivato merge-on-read per accelerare le scritture e dopo una settimana le letture sono molto più lente. Che cosa controlli?
+
+<details>
+<summary>Mostra risposta</summary>
+
+Controlli quanti file di cancellazione si sono accumulati, per esempio con la tabella di metadati `$files`. Senza compattazione il motore deve applicare migliaia di file di cancellazione a ogni `SELECT`. Pianifichi `rewrite_data_files` con soglia sui file di cancellazione, in modo che dopo ogni giro i file di cancellazione delle partizioni chiuse tornino a zero.
+
+</details>
+
+3. Un cliente chiede la cancellazione dei suoi dati e hai eseguito il `MERGE` con `DELETE`. Perché i suoi dati possono essere ancora su S3 e che cosa serve per eliminarli?
+
+<details>
+<summary>Mostra risposta</summary>
+
+Gli snapshot precedenti puntano ancora ai file originali, per consentire il time travel. Finché non scadono con `expire_snapshots` o `VACUUM` e finché i file non vengono rimossi, i byte esistono. Per rispettare la richiesta nei tempi dichiarati, la finestra di retention degli snapshot deve essere più breve del termine di cancellazione, oppure si devono far scadere subito gli snapshot interessati.
+
+</details>
+
+4. Un collega ha eliminato a mano un file Parquet dalla cartella della tabella con `aws s3 rm`. Come ripristini la tabella?
+
+<details>
+<summary>Mostra risposta</summary>
+
+Se il bucket ha il versioning attivo, ripristini il file rimuovendo il delete marker o copiando la versione precedente nello stesso percorso: il manifest tornerà valido. Se non c'è versioning, devi tornare a uno snapshot che non referenzia quel file con un rollback e ricaricare i dati mancanti dalla zona raw.
+
+</details>

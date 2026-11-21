@@ -1,9 +1,6 @@
 ---
 title: "Window functions: ranking e deduplicazione"
-description: >-
-  ROW_NUMBER, RANK, DENSE_RANK e NTILE: eleggere una riga per gruppo con
-  ordinamento deterministico, deduplicare senza gonfiare i conteggi e
-  classificare con spareggio stabile.
+description: "Eleggere una riga per chiave con row_number e QUALIFY in ClickHouse, con priorità di stato e spareggio univoco, e scegliere tra rank, dense_rank e ntile per classifiche e fasce senza gonfiare i conteggi."
 module: "Modulo 14: SQL avanzato per l'analisi"
 order: 3
 category: Decisione
@@ -11,152 +8,188 @@ headerImage: /course-headers/advanced-sql-ranking-e-deduplicazione-ginnytech-ad.
 headerImageAlt: >-
   ROW_NUMBER, RANK e deduplicazione per gruppo - immagine ufficiale della
   lezione su GinnyTech, creata da AD
-difficulty: advanced
-duration: 18 min
+difficulty: avanzato
+duration: "40 min"
 prerequisites:
   - advanced-sql/window-functions-avanzate
 learningObjectives:
-  - Deduplicare con ROW_NUMBER su partizione e ordinamento con priorità di stato e spareggio univoco
-  - Distinguere ROW_NUMBER, RANK, DENSE_RANK e NTILE per eleggere righe, classifiche e fasce
+  - Deduplicare un flusso di eventi con row_number e QUALIFY usando un ORDER BY con priorità di stato e chiave di spareggio univoca
+  - Distinguere row_number, rank, dense_rank e ntile leggendo i valori prodotti su una classifica con pari merito
+  - Verificare una deduplicazione con un controllo di conteggio sulle chiavi e confrontarla con argMax
 binario: "ml-tabellare"
-formato: "articolo"
-autore: "Hermes"
-controllatoDa: "Argo"
-autorizzatoDa: "Giano"
+formato: "didattica-v2"
 draft: false
-dateModified: 2026-11-13
+dateModified: 2026-11-17
 ---
 
-# Window functions: ranking e deduplicazione
+Scenario costruito, con numeri di esempio: un gateway di pagamento ritenta l'invio dei webhook in caso di timeout, e nella tabella grezza degli eventi l'ordine A100 compare tre volte con lo stesso istante `2026-11-03 10:00:00`, una volta come `pending` e due come `paid`. L'analista tiene una riga per ordine con `row_number() OVER (PARTITION BY order_id ORDER BY updated_at DESC) = 1`. Poiché l'istante è identico, il motore sceglie la riga che legge per prima: oggi l'ordine risulta pagato, dopo un riavvio del job risulta in attesa, e il fatturato del giorno oscilla senza che nessun cliente abbia pagato niente.
 
-Un team riceve eventi di aggiornamento stato ordine da un webhook che ritenta l'invio in caso di timeout: nella tabella grezza compaiono tre righe per lo stesso `order_id` con lo stesso timestamp `updated_at`, una con stato `'pending'` e due con stato `'paid'`. L'analista deduplica usando `ROW_NUMBER() OVER (PARTITION BY order_id ORDER BY updated_at DESC) = 1`, ma siccome `updated_at` è identico tra le righe, il database sceglie a caso quale riga tenere: un giorno l'ordine risulta `'paid'`, il giorno dopo al rieseguirsi della query risulta `'pending'`. La causa non è il webhook: è un **ordinamento non deterministico privo di priorità di stato e chiave di spareggio univoca**.
+> **Idea chiave:** deduplicare significa scegliere una riga per chiave secondo una regola che dia sempre la stessa risposta. L'`ORDER BY` della finestra deve quindi finire con una chiave univoca, e deve esprimere la priorità di business tra gli stati, altrimenti il risultato dipende dall'ordine fisico di lettura.
 
-## Tre righe con lo stesso timestamp che cambiano risultato a ogni esecuzione
+## Otto righe, quattro ordini: la tabella da deduplicare
 
-Questo è un caso ricostruito con numeri di esempio su quanto accade quando si deduplica o si stila una classifica senza definire una regola di spareggio (*tie-breaker*).
-
-Le quattro funzioni di ranking in SQL hanno comportamenti precisi e non intercambiabili:
-
-| Funzione | Comportamento sui pari merito | Uso corretto |
-| :--- | :--- | :--- |
-| `ROW_NUMBER()` | Assegna sempre numeri univoci (`1, 2, 3, 4`) | **Deduplicazione** (eleggere esattamente 1 riga per gruppo) |
-| `RANK()` | Stesso rango ai pari merito, poi salta (`1, 2, 2, 4`) | Classifiche competitive (top 10 con gestione ex aequo) |
-| `DENSE_RANK()` | Stesso rango ai pari merito, senza salti (`1, 2, 2, 3`) | Fasce di classifica continue (es. primi 3 livelli di prezzo) |
-| `NTILE(n)` | Divide le righe in `n` secchi di uguale dimensione | Quartili, decili, segmentazione in fasce percentili |
-
-Scegliere la funzione sbagliata o dimenticare lo spareggio nell'`ORDER BY` rende instabili sia i modelli incrementali di dbt sia le classifiche esposte in dashboard. Quando un modello incrementale viene rieseguito su una finestra di lookback, un ordinamento non deterministico può eleggere una riga diversa rispetto al giorno precedente, generando oscillazioni fantasma nei report storici di fatturato e conversione. Costruire ogni `OVER (PARTITION BY ... ORDER BY ...)` con una gerarchia esplicita di priorità e una chiave tecnica univoca finale garantisce che la stessa query produca sempre lo stesso identico risultato su qualsiasi motore SQL.
-
-## ROW_NUMBER deterministico, RANK/DENSE_RANK e NTILE
-
-Il primo meccanismo è la **deduplicazione deterministica con `ROW_NUMBER()`**. Per eleggere una sola riga per `order_id`, la clausola `ORDER BY` dentro `OVER (PARTITION BY order_id ORDER BY ...)` deve contenere tre livelli: il timestamp di aggiornamento (`updated_at DESC`), una gerarchia esplicita di priorità di stato (`CASE status WHEN 'paid' THEN 1 WHEN 'pending' THEN 2 ELSE 3 END ASC`) e una chiave univoca tecnica finale (`event_id DESC`). In questo modo, anche a parità di millisecondo, il risultato è matematicamente identico a ogni esecuzione.
-
-Il secondo meccanismo è la **distinzione tra `RANK()` e `DENSE_RANK()`**. Se due prodotti hanno esattamente lo stesso fatturato al secondo posto, `RANK()` assegna `1, 2, 2, 4`, mentre `DENSE_RANK()` assegna `1, 2, 2, 3`. Usate `RANK()` quando volete rispettare la posizione reale in graduatoria (dopo due secondi posti, il successivo è quarto), e `DENSE_RANK()` quando volete raggruppare i primi `N` livelli distinti di valore.
-
-Il terzo meccanismo è la **segmentazione in fasce con `NTILE(n)`**. `NTILE(4)` divide i clienti ordinati per spesa in 4 quartili di numerosità quasi identica. Attenzione però: se due clienti hanno esattamente la stessa spesa al confine tra il quartile 1 e il quartile 2, `NTILE` li separa arbitrariamente a meno di non includere un criterio di spareggio stabile nell'`ORDER BY`.
-
-**Deduplicate sempre con `ROW_NUMBER()` abbinato a priorità di stato e chiave univoca di spareggio; usate `RANK()` o `DENSE_RANK()` solo quando volete preservare i pari merito.**
-
-## Tre errori comuni con ranking e deduplicazione
-
-Il blocco SQL qui sotto mostra una deduplicazione non deterministica priva di spareggio e un filtro `RANK() <= 3` usato al posto di `ROW_NUMBER()` per deduplicare:
+Per vedere ogni passaggio usiamo una tabella di otto eventi relativi a quattro ordini. Due ordini hanno duplicati identici (A100 e A103), uno ha una transizione legittima da pagato a rimborsato (A101) e uno è pulito (A102).
 
 ```sql
--- ERRORE 1: ORDER BY updated_at DESC senza spareggio univoco -> risultato casuale sui pari merito!
--- ERRORE 2: usare RANK() = 1 per deduplicare -> se ci sono 2 righe identiche, restano entrambe!
-SELECT *
-FROM (
-    SELECT
-        order_id,
-        status,
-        updated_at,
-        rank() OVER (PARTITION BY order_id ORDER BY updated_at DESC) AS rnk
-    FROM raw_erp.order_events
-)
-WHERE rnk = 1;
+-- Input: eventi di stato ordine dal webhook, con ritentativi duplicati (numeri di esempio)
+SELECT * FROM values(
+    'event_id UInt32, order_id String, customer_id String, status String, updated_at DateTime, amount_eur Float64',
+    (1, 'A100', 'C1', 'pending',  '2026-11-03 10:00:00',  90),
+    (2, 'A100', 'C1', 'paid',     '2026-11-03 10:00:00',  90),
+    (3, 'A100', 'C1', 'paid',     '2026-11-03 10:00:00',  90),
+    (4, 'A101', 'C2', 'paid',     '2026-11-03 11:00:00', 150),
+    (5, 'A101', 'C2', 'refunded', '2026-11-04 09:00:00', 150),
+    (6, 'A102', 'C1', 'paid',     '2026-11-03 12:30:00',  60),
+    (7, 'A103', 'C3', 'paid',     '2026-11-04 08:00:00', 210),
+    (8, 'A103', 'C3', 'paid',     '2026-11-04 08:00:00', 210)
+);
 ```
 
-### Deduplicare usando RANK() = 1 invece di ROW_NUMBER() = 1
+Le righe sono 8 e gli ordini distinti 4, quindi ci aspettiamo 4 righe dopo la deduplicazione, con 4 righe in eccesso da eliminare. Questo confronto tra `count()` e `uniqExact(order_id)` è anche il controllo finale: dopo la pulizia lo scarto deve valere 0.
 
-Se due righe duplicate di un evento hanno lo stesso `updated_at`, `RANK()` assegna `1` a entrambe le righe. Il filtro `WHERE rnk = 1` le lascia passare tutt'e due, fallendo l'obiettivo stesso della deduplicazione e lasciando duplicati nel modello a valle.
+Se sommiamo i soli eventi `paid` senza deduplicare otteniamo 90 + 90 + 150 + 60 + 210 + 210 = 810 euro. Gli ordini effettivamente pagati e non rimborsati sono A100 (90 euro), A102 (60 euro) e A103 (210 euro), cioè 360 euro. Lo scarto di 450 euro nasce da due fonti: 90 + 210 = 300 euro di ritentativi duplicati, più 150 euro dell'ordine A101, che compare come pagato ma poi è stato rimborsato.
 
-### Omettere la chiave univoca di spareggio nell'ORDER BY della finestra
+## Le quattro funzioni di ranking e che cosa fanno sui pari merito
 
-Scrivere `ORDER BY updated_at DESC` su dati provenienti da batch o webhook che possono condividere lo stesso timestamp al secondo lascia al motore la libertà di scegliere una riga diversa a seconda di come legge i blocchi da disco. Aggiungere sempre `, event_id DESC` (o `_ingested_at DESC, event_id DESC`) garantisce riproducibilità totale.
+`row_number()` assegna numeri tutti diversi, anche a righe uguali sul criterio di ordinamento: è la funzione della deduplicazione, perché garantisce una sola riga con valore 1 per partizione. `rank()` assegna lo stesso numero ai pari merito e poi salta: con due secondi posti la sequenza è 1, 2, 2, 4. `dense_rank()` assegna lo stesso numero ai pari merito senza saltare: 1, 2, 2, 3. `ntile(n)` non numera le posizioni ma divide le righe ordinate in `n` gruppi di dimensione quasi uguale.
 
-### Usare SELECT DISTINCT * per nascondere duplicati parziali
+```mermaid
+flowchart TD
+    A["Righe ordinate nella partizione"] --> B{"Serve una sola riga per chiave?"}
+    B -- "Sì" --> C["row_number() = 1 con spareggio univoco"]
+    B -- "No, serve una classifica" --> D{"I pari merito devono saltare posizioni?"}
+    D -- "Sì: posizione reale" --> E["rank()"]
+    D -- "No: livelli continui" --> F["dense_rank()"]
+    B -- "No, servono fasce" --> G["ntile(n) con spareggio stabile"]
+```
 
-Applicare `DISTINCT` su tutte le colonne funziona solo se le righe sono identiche bit per bit. Appena cambia un timestamp di ingestione o un campo `status`, `DISTINCT` mantiene entrambe le righe e maschera il problema fino al momento della quadratura contabile.
+La differenza tra `rank()` e `row_number()` è proprio quella che rompe le deduplicazioni. Sull'ordine A100 la query con `rank()` e l'ordinamento per sola data assegna rango 1 a tutte e tre le righe, perché hanno lo stesso `updated_at`. Filtrando `rnk = 1` passano tutte e tre, e la tabella finale ha 3 righe per A100 e 2 per A103 (7 righe in tutto, con A101 e A102 a una riga ciascuna) invece di 4.
 
-## Deduplicazione deterministica e Classifica Top-N in ClickHouse
+## Deduplicazione deterministica con row_number e QUALIFY
 
-Per applicare ranking e deduplicazione in modo sicuro in ClickHouse, seguite questi quattro passi:
-
-1. Definite la chiave di partizione (`PARTITION BY order_id`).
-2. Costruite l'`ORDER BY` con timestamp decrescente, priorità di stato esplicita e chiave univoca di spareggio.
-3. Filtrate `row_number() = 1` tramite `QUALIFY` o CTE esterna.
-4. Verificate con `count() = uniqExact(order_id)` che non restino duplicati.
-
-Ecco la query SQL completa in ClickHouse che deduplica gli eventi ordine e calcola la classifica dei migliori clienti per fascia quartile:
+La regola che usiamo ha tre livelli. Prima l'istante più recente, perché l'ultimo stato prevale su quelli precedenti. Poi, a parità di istante, una priorità di business esplicita: `paid` prima di `refunded`, `refunded` prima di `pending`, ogni altro stato dopo. Infine una chiave tecnica univoca, `event_id DESC`, che rende impossibile qualunque pari merito residuo.
 
 ```sql
--- 1. Deduplicazione deterministica con priorità di stato e spareggio su event_id:
-WITH deduplicated_orders AS (
-    SELECT
-        order_id,
-        customer_id,
-        status,
-        amount_eur,
-        updated_at,
-        event_id
-    FROM raw_erp.order_events
-    QUALIFY row_number() OVER (
-        PARTITION BY order_id
-        ORDER BY
-            updated_at DESC,
-            multiIf(status = 'paid', 1, status = 'refunded', 2, status = 'pending', 3, 4) ASC,
-            event_id DESC
-    ) = 1
-),
--- 2. Classifica clienti e segmentazione in quartili di spesa:
-customer_totals AS (
-    SELECT
-        customer_id,
-        sum(amount_eur) AS total_spent_eur
-    FROM deduplicated_orders
-    WHERE status = 'paid'
-    GROUP BY customer_id
-)
+-- Deduplicazione: una riga per order_id, regola deterministica
+SELECT
+    order_id, customer_id, status, updated_at, amount_eur, event_id
+FROM order_events
+QUALIFY row_number() OVER (
+    PARTITION BY order_id
+    ORDER BY
+        updated_at DESC,
+        multiIf(status = 'paid', 1, status = 'refunded', 2, status = 'pending', 3, 4) ASC,
+        event_id DESC
+) = 1
+ORDER BY order_id;
+```
+
+`QUALIFY` filtra sul risultato di una window function senza dover scrivere una subquery. Il risultato, eseguito su ClickHouse 26.11, ha quattro righe.
+
+Le righe restituite sono A100 con stato `paid` ed evento 3, A101 `refunded` con evento 5, A102 `paid` con evento 6 e A103 `paid` con evento 8.
+
+Seguiamo le due partizioni critiche. Per A100 le tre righe hanno lo stesso istante, quindi decide la priorità di stato: le due `paid` valgono 1, la `pending` vale 3. Tra le due `paid` decide `event_id DESC`: vince l'evento 3. Per A101 l'istante decide da solo, perché il rimborso del 4 novembre è successivo al pagamento del 3 novembre, e vince l'evento 5 con stato `refunded`. Il controllo finale conferma il lavoro: 4 righe e 4 ordini distinti, scarto 0. Ora il fatturato pagato è 90 + 60 + 210 = 360 euro, il valore atteso, perché A101 è uscito dal conteggio quando il suo ultimo stato è diventato `refunded`.
+
+Nota sulla priorità: l'ordine tra stati dipende dal significato di business. Mettere `paid` prima di `pending` a parità di istante è ragionevole per un ritentativo; per transizioni con istanti diversi, come il rimborso, è l'istante a comandare. Se due stati contraddittori hanno lo stesso istante (un pagato e un rimborsato nello stesso secondo) serve una decisione esplicita con il team di prodotto, da scrivere nel modello e non lasciare al caso.
+
+## Classifiche e fasce: rank, dense_rank e ntile su una tabella con pari merito
+
+Una volta puliti gli ordini si passa alle classifiche di clienti. Prendiamo otto clienti con la spesa complessiva, tre dei quali hanno valori ripetuti: C2 e C4 con 150 euro, C7 e C8 con 60 euro.
+
+```sql
+-- Classifica clienti: posizione reale, livelli continui e quartili di spesa
 SELECT
     customer_id,
     total_spent_eur,
-    rank() OVER (ORDER BY total_spent_eur DESC) AS spend_rank,
+    rank()       OVER (ORDER BY total_spent_eur DESC) AS spend_rank,
     dense_rank() OVER (ORDER BY total_spent_eur DESC) AS spend_dense_rank,
-    ntile(4) OVER (ORDER BY total_spent_eur DESC, customer_id ASC) AS spend_quartile
+    ntile(4)     OVER (ORDER BY total_spent_eur DESC) AS spend_quartile
 FROM customer_totals
-ORDER BY spend_rank ASC, customer_id ASC
-LIMIT 20;
+ORDER BY spend_rank, customer_id;
 ```
 
-In questo modo `deduplicated_orders` elegge sempre esattamente una riga per `order_id` privilegiando `'paid'` a parità di istante, mentre `customer_totals` calcola `rank`, `dense_rank` e `ntile(4)` su importi già puliti e senza gonfiaggi. Separare la fase di deduplicazione dalla fase di aggregazione e ranking è fondamentale: se applicaste `ntile(4)` o `sum(amount_eur)` prima di aver risolto i duplicati dei webhook, un singolo ordine ritentato tre volte dal gateway di pagamento verrebbe contato tre volte, spingendo artificialmente il cliente nel quartile superiore e falsando le soglie di segmentazione per tutti gli altri clienti.
+| customer_id | total_spent_eur | spend_rank | spend_dense_rank | spend_quartile |
+| :--- | ---: | ---: | ---: | ---: |
+| C3 | 300 | 1 | 1 | 1 |
+| C1 | 210 | 2 | 2 | 1 |
+| C2 | 150 | 3 | 3 | 2 |
+| C4 | 150 | 3 | 3 | 2 |
+| C5 | 100 | 5 | 4 | 3 |
+| C6 | 80 | 6 | 5 | 3 |
+| C7 | 60 | 7 | 6 | 4 |
+| C8 | 60 | 7 | 6 | 4 |
 
-Un ulteriore vantaggio di questo schema è la facilità di audit: in caso di contestazione su un numero in dashboard, potete ispezionare direttamente la CTE `deduplicated_orders` rimuovendo temporaneamente il filtro `= 1` e osservando esattamente quali righe candidate esistevano per quell'`order_id`, quale priorità di stato è stata applicata e quale `event_id` ha vinto lo spareggio. Questo trasforma la deduplicazione da operazione opaca a processo completamente trasparente e verificabile dal team dati e dall'amministrazione.
+Dopo i due clienti a pari merito in terza posizione, `rank()` salta direttamente a 5, mentre `dense_rank()` prosegue con 4. Se il business chiede "i clienti nelle prime tre posizioni", la risposta con `rank() <= 3` è C3, C1, C2 e C4, cioè 4 clienti; con `dense_rank() <= 3` sono gli stessi 4, ma con `dense_rank() <= 4` entra anche C5. Va dichiarato nella specifica quale delle due semantiche serve, perché cambiano la cardinalità del risultato.
 
-Quando lavorate su tabelle storiche molto grandi, ricordate infine di applicare sempre il filtro temporale sulla partizione (`WHERE event_date >= ...`) prima della window function `ROW_NUMBER()`, così da non costringere il motore a partizionare e ordinare anni di dati immutabili a ogni esecuzione incrementale.
+`ntile(4)` divide 8 righe in 4 gruppi da 2: i primi due clienti nel quartile 1, i successivi due nel 2 e così via. Nel nostro caso i confini cadono tra valori diversi (210 e 150, 150 e 100, 80 e 60), quindi il risultato è stabile. Se il confine tagliasse un pari merito, per esempio tra C2 e C4, il motore li assegnerebbe a quartili diversi in modo arbitrario, e due esecuzioni potrebbero scambiarli. Aggiungere `customer_id` in coda all'`ORDER BY` della finestra rende l'assegnazione ripetibile, a patto che si accetti che due clienti con la stessa spesa finiscano in fasce diverse.
 
-## ROW_NUMBER() + QUALIFY vs argMax() in ClickHouse
+## Tre errori di deduplicazione e classifica
 
-In ClickHouse, per prendere l'ultimo valore di una colonna per gruppo esistono due strade: **`ROW_NUMBER() OVER (...) = 1`** oppure la funzione aggregata **`argMax(colonna, timestamp)`**.
+### Deduplicare con rank invece che con row_number
 
-Il criterio di scelta è netto: **usate `ROW_NUMBER() OVER (PARTITION BY ... ORDER BY ...) = 1` quando dovete mantenere l'intera riga coerente con tutte le sue colonne originali e restare portabili in SQL standard/dbt, usate invece `argMax(col, (updated_at, event_id))` o `ReplacingMergeTree` quando avete bisogno della massima velocità di aggregazione nativa in ClickHouse su miliardi di righe.**
+Il sintomo è una tabella "deduplicata" che contiene ancora più righe per la stessa chiave, e un conteggio degli ordini maggiore di quello atteso: nel nostro esempio 7 righe contro 4. Succede perché `rank()` assegna 1 a tutti i pari merito, e `WHERE rnk = 1` li lascia passare. Si evita usando `row_number()` per ogni deduplicazione e riservando `rank()` alle classifiche. Il controllo è quello già visto: `count()` uguale a `uniqExact(chiave)`.
 
-La confusione comune consiste nell'usare `argMax` su colonne diverse con criteri diversi, mescolando valori provenienti da righe differenti dello stesso ordine: se usate `argMax`, usate sempre la stessa tupla di ordinamento `(updated_at, event_id)` su tutte le colonne. Inoltre, ricordate che `ReplacingMergeTree` in ClickHouse deduplica solo durante i merge in background: per avere garanzia matematica di 1 riga per chiave in lettura immediata dovete sempre aggiungere `FINAL` oppure applicare `ROW_NUMBER() OVER (...) = 1` nella query di staging. Non affidatevi mai a deduplicazioni asincrone non deterministiche per i report finanziari o per i modelli dbt di produzione.
+### Ordinare solo per timestamp senza chiave di spareggio
 
-## Cinque domande prima di chiudere una query di ranking o deduplicazione
+Il sintomo è un modello incrementale che cambia valore a ogni esecuzione, con oscillazioni nel fatturato giornaliero. Succede perché lo stesso istante compare su più righe (tipico dei ritentativi e dei batch) e l'ordine fisico non è garantito. Si evita chiudendo sempre l'`ORDER BY` con una chiave univoca come `event_id DESC` e, quando serve, con una priorità di stato esplicita. Il costo è una riga di codice, il beneficio è un risultato riproducibile.
 
-1. Avete usato `ROW_NUMBER()` (e mai `RANK()`) per garantire esattamente 1 riga per chiave di partizione?
-2. L'`ORDER BY` dentro `OVER (...)` include una chiave univoca finale (`event_id DESC`) per eliminare qualsiasi ambiguità sui pari merito?
-3. In presenza di più stati possibili nello stesso istante, avete esplicitato una priorità di business (`paid` prima di `pending`)?
-4. Avete verificato dopo la deduplicazione che `count(*) = count(DISTINCT key)`?
-5. Per le classifiche esposte al business, avete chiarito se in caso di pari merito i numeri successivi devono saltare (`RANK`) o restare continui (`DENSE_RANK`)?
+### Aggregare prima di deduplicare
 
-La metrica di verifica della deduplicazione è il **Duplicate Key Rate**, che dopo il filtro `rn = 1` deve essere rigorosamente **`0.00%`**. Nei modelli `stg_` di dbt, affiancate sempre alla deduplicazione un test `unique` e `not_null` sulla chiave primaria per intercettare immediatamente eventuali regressioni dei webhook a monte prima che raggiungano i marts, i modelli di attribuzione e le dashboard aziendali.
+Il sintomo è un cliente nel quartile sbagliato o un totale gonfiato. Con le righe grezze, C1 vale 90 + 90 + 60 = 240 euro, mentre il valore corretto è 90 + 60 = 150 euro, e C3 passa da 210 a 420 euro. Succede perché `sum()` e `ntile()` lavorano su ciò che ricevono: se un ordine ritentato tre volte entra tre volte, il cliente sale artificialmente in classifica e sposta le soglie di tutti gli altri. Si evita separando le fasi: prima la deduplicazione, poi l'aggregazione, poi il ranking.
+
+## row_number con QUALIFY contro argMax e ReplacingMergeTree
+
+In ClickHouse per prendere l'ultimo valore per chiave esistono due strade. `row_number() ... QUALIFY = 1` conserva l'intera riga coerente e funziona in modo molto simile in altri motori, quindi il modello è portabile. `argMax(colonna, criterio)` è un'aggregazione, più rapida su miliardi di righe, ma restituisce una colonna alla volta.
+
+```sql
+-- Equivalente con argMax: la stessa tupla di ordinamento su ogni colonna
+SELECT
+    order_id,
+    argMax(status,   (updated_at, -multiIf(status = 'paid', 1, status = 'refunded', 2, status = 'pending', 3, 4), event_id)) AS status,
+    argMax(event_id, (updated_at, -multiIf(status = 'paid', 1, status = 'refunded', 2, status = 'pending', 3, 4), event_id)) AS event_id
+FROM order_events
+GROUP BY order_id
+ORDER BY order_id;
+```
+
+Sul nostro input restituisce A100 paid con evento 3, A101 refunded con evento 5, A102 paid con evento 6 e A103 paid con evento 8, lo stesso risultato della finestra. Il segno meno davanti alla priorità serve perché `argMax` cerca il massimo e noi vogliamo la priorità numericamente più bassa. L'errore tipico è usare criteri diversi su colonne diverse, prendendo lo stato da una riga e l'importo da un'altra: tieni sempre la stessa tupla.
+
+Un'avvertenza su `ReplacingMergeTree`: deduplica soltanto durante i merge in background, quindi una lettura immediata può restituire ancora righe duplicate. Per un report finanziario si applica `FINAL` oppure la finestra nella query di staging, senza affidarsi a una pulizia asincrona. Sulle tabelle grandi, infine, filtra prima per intervallo di date: la finestra deve ordinare solo ciò che serve.
+
+## Verifica sulle tue query di ranking
+
+1. Dopo aver deduplicato una tabella di 12.000 eventi ottieni 9.500 righe, ma gli ordini distinti sono 9.400. Che cosa è andato storto e come lo trovi?
+
+<details>
+<summary>Mostra risposta</summary>
+
+Restano 9.500 - 9.400 = 100 righe in eccesso, quindi per 100 chiavi hai più di una riga. Le cause tipiche sono l'uso di `rank()` al posto di `row_number()` oppure una finestra con una chiave di partizione diversa dalla chiave logica. Per trovarle raggruppi per chiave, con `HAVING count() > 1`, e guardi le righe di quelle chiavi.
+
+</details>
+
+2. Quattro clienti hanno spesa 500, 300, 300 e 100 euro. Quali valori producono `rank()` e `dense_rank()`, e quanti clienti restituisce `rank() <= 3` rispetto a `dense_rank() <= 3`?
+
+<details>
+<summary>Mostra risposta</summary>
+
+`rank()` dà 1, 2, 2, 4 e `dense_rank()` dà 1, 2, 2, 3. Il filtro `rank() <= 3` restituisce 3 clienti (500, 300, 300), perché il cliente da 100 euro ha rango 4. Il filtro `dense_rank() <= 3` ne restituisce 4, perché il cliente da 100 euro ha rango 3. La scelta dipende dalla domanda: posizioni reali oppure livelli distinti di spesa.
+
+</details>
+
+3. Un ordine ha due eventi con lo stesso istante, uno `paid` da 80 euro e uno `refunded` da 80 euro. La tua regola mette `paid` prima di `refunded`. Che numero finisce nel fatturato e perché è una decisione da non lasciare al codice?
+
+<details>
+<summary>Mostra risposta</summary>
+
+L'ordine risulta pagato e porta 80 euro nel fatturato. Ma un pagamento e un rimborso nello stesso secondo sono quasi certamente una sequenza reale in cui il rimborso è successivo, e il risultato giusto potrebbe essere 0 euro. La priorità di stato è una regola di business: va concordata con chi conosce il processo di pagamento e documentata nel modello, per esempio con un timestamp di ingestione più preciso da usare come criterio.
+
+</details>
+
+4. Hai 10 clienti ordinati per spesa e applichi `ntile(4)`. Quante righe ha ciascun quartile?
+
+<details>
+<summary>Mostra risposta</summary>
+
+Dieci righe non si dividono in quattro gruppi uguali: 10 = 4 x 2 + 2, quindi i primi due quartili ricevono 3 righe e gli altri due ne ricevono 2, per un totale di 3 + 3 + 2 + 2 = 10. Il motore distribuisce l'avanzo sui primi gruppi, ed è un altro motivo per non interpretare i quartili come percentili esatti quando i numeri sono piccoli.
+
+</details>
