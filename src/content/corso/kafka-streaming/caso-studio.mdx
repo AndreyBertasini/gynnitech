@@ -1,108 +1,141 @@
 ---
 title: "Progetto: pipeline Kafka end-to-end"
 description: >-
-  Costruire una pipeline completa con Kafka, producer, consumer e Kafka Streams.
+  Progetto guidato su una pipeline di logistica: topic co-partizionati su shipment_id, join su tempo di business, sink ClickHouse idempotente con Dead Letter Queue e calcolo di disco, duplicati e SLA per corriere.
 module: "Modulo 11: Kafka e streaming di eventi"
 order: 9
 category: Lab
 headerImage: /course-headers/kafka-streaming-caso-studio-ginnytech-ad.webp
 headerImageAlt: "Progetto: pipeline Kafka end-to-end - immagine ufficiale della lezione su GinnyTech, creata da AD"
-difficulty: advanced
-duration: 28 min
+difficulty: avanzato
+duration: 55 min
 prerequisites:
   - kafka-streaming/cheat-sheet
 learningObjectives:
-  - Costruire una pipeline end-to-end con producer, join Kafka Streams e monitoraggio del lag
-  - Scegliere chiave, partizioni e finestra di join per preservare l'ordine degli eventi
-  - Documentare owner, retention e runbook per difendere il rilascio in review
+  - Costruire una pipeline end-to-end con topic co-partizionati, producer con chiave shipment_id e sink ClickHouse con Dead Letter Queue
+  - Scegliere chiave, partizioni e finestra di join per preservare l'ordine degli eventi di una spedizione che dura giorni
+  - Calcolare disco, duplicati e costo dei retry, e documentare owner, retention e runbook per difendere il rilascio in review
 binario: "ml-tabellare"
-formato: "articolo"
-autore: "Hermes"
-controllatoDa: "Argo"
-autorizzatoDa: "Giano"
+formato: "didattica-v2"
 draft: false
-dateModified: 2026-11-13
+dateModified: 2026-11-17
 ---
 
-# Progetto: pipeline Kafka end-to-end
-
-Un operatore logistico B2B italiano vuole unire in tempo reale i flussi delle spedizioni create dal magazzino (`shipments.created.v1`) e delle conferme di consegna trasmesse dai palmari dei corrieri (`deliveries.confirmed.v1`) per calcolare i tempi di consegna per corriere e avvisare i clienti dei ritardi. Nel primo prototipo i due topic hanno un numero diverso di partizioni, i palmari inviano eventi duplicati quando escono dalle zone senza campo e i messaggi con codice di avviamento postale errato bloccano l'intero consumer di ClickHouse. La causa non è l'instabilità della rete mobile: è aver costruito la pipeline senza co-partizionamento su `shipment_id`, senza finestra di join su event-time e senza isolamento Dead Letter Queue.
+Un operatore logistico B2B italiano vuole unire in tempo reale due flussi: le spedizioni create dal magazzino, su `shipments.created.v1`, e le conferme di consegna trasmesse dai palmari dei corrieri, su `deliveries.confirmed.v1`. L'obiettivo è calcolare i tempi di consegna per corriere e avvisare i clienti dei ritardi. Nel primo prototipo i due topic hanno un numero diverso di partizioni, i palmari rinviano più volte lo stesso pacchetto quando escono da una zona senza campo, e un messaggio con un peso scritto come testo blocca il consumer di ClickHouse per tutta Italia. È un caso ricostruito con numeri di esempio, e la causa non è la rete mobile: è una pipeline progettata senza chiave condivisa, senza tempo di business nel join e senza un posto dove isolare i dati sporchi.
 
 ## Partizioni disallineate, palmari senza campo e consumer bloccati
 
-Questo è un caso ricostruito con numeri di esempio che guida la realizzazione passo-passo di una pipeline Kafka end-to-end pronta per il collaudo aziendale. L'azienda gestisce 180.000 spedizioni al giorno affidate a 15 corrieri regionali e vuole monitorare in tempo reale su ClickHouse il rispetto delle SLA di consegna (consegna entro 24 ore per i clienti express).
+L'azienda del caso gestisce 180.000 spedizioni al giorno affidate a 15 corrieri regionali e vuole monitorare su ClickHouse il rispetto dell'SLA di consegna entro 24 ore per i clienti express. Il primo tentativo fallisce su tre fronti contemporaneamente.
 
-Il primo tentativo assemblato senza architettura end-to-end fallisce su tre fronti:
-1. Il topic `shipments.created.v1` viene creato con 6 partizioni e chiave `warehouse_id`, mentre `deliveries.confirmed.v1` ha 12 partizioni e chiave `driver_id`: quando la topologia di stream processing tenta di unire la creazione della spedizione con la relativa consegna su `shipment_id`, i due eventi risiedono su nodi diversi e l'85% delle consegne non trova la spedizione di partenza.
-2. I palmari dei corrieri in zone montane accumulano fino a 40 minuti di ritardo prima di trasmettere la firma del destinatario e spesso inviano due o tre volte lo stesso pacchetto JSON: una finestra di join troppo stretta (5 minuti sul tempo di arrivo) scarta le consegne avvenute in montagna, mentre i retry duplicano le provvigioni riconosciute al corriere.
-3. Un aggiornamento del software di un magazzino periferico invia per errore la stringa `'N/A'` nel campo numerico `weight_kg`: il connettore verso ClickHouse va in crash sull'offset malformato e ferma il caricamento di tutta Italia.
+Il primo riguarda le chiavi. `shipments.created.v1` è stato creato con 6 partizioni e chiave `warehouse_id`, mentre `deliveries.confirmed.v1` ha 12 partizioni e chiave `driver_id`. Quando la topologia tenta di unire creazione e consegna sulla stessa spedizione, i due eventi stanno su partizioni, e quindi su task, diversi: la maggior parte delle consegne non trova la spedizione di partenza.
 
-La causa del triplo fallimento è non aver progettato insieme la chiave di partizionamento condivisa, il contratto dello schema con DLQ e la deduplicazione idempotente a valle.
+Il secondo riguarda il tempo. I palmari in zone montane accumulano fino a 40 minuti di ritardo prima di trasmettere la firma del destinatario, e spesso inviano due o tre volte lo stesso pacchetto JSON. Una finestra di join stretta, basata sul tempo di arrivo, scarta le consegne montane, mentre i retry duplicano le provvigioni dei corrieri. Il terzo riguarda i dati: un aggiornamento di un magazzino periferico scrive la stringa `'N/A'` nel campo numerico `weight_kg`, e il consumer verso ClickHouse si ferma sul messaggio malformato.
 
-## Architettura end-to-end: Co-partizionamento, Stream-Stream Join e Sink Idempotente
+> **Idea chiave:** una pipeline end-to-end regge il collaudo solo se chiave di partizionamento, tempo di business e gestione degli errori sono progettati insieme fin dal producer, perché ciascuno dei tre problemi si ripercuote sugli altri due.
 
-Per superare la revisione architetturale, la pipeline end-to-end viene divisa in quattro blocchi coordinati da contratti rigorosi.
+## Architettura in quattro blocchi con contratti espliciti
 
-Il primo blocco è il **contratto dei topic e il co-partizionamento nativo**. Sia `shipments.created.v1` sia `deliveries.confirmed.v1` vengono creati con esattamente **12 partizioni**, `replication.factor=3`, `min.insync.replicas=2`, retention di 14 giorni (`1209600000` ms) e usano fin dal producer la stessa identica chiave di partizionamento: **`key = shipment_id`**. In questo modo la creazione della spedizione `SHP-99412` e la sua conferma di consegna dal palmare atterrano matematicamente sulla stessa partizione (es. partizione 7) senza bisogno di un costoso step di ripartizionamento intermedio.
+La pipeline si divide in quattro blocchi, ciascuno con un contratto verificabile.
 
-Il secondo blocco è il **Join Stateful in Kafka Streams (o Materialized View SQL) su Event Time**. La topologia mantiene la tabella di stato delle spedizioni aperte in uno State Store RocksDB locale (con `num.standby.replicas=1` e `exactly_once_v2`) indicizzato per `shipment_id`: quando arriva l'evento `DeliveryConfirmed` (anche a distanza di 24 o 48 ore), la topologia recupera istantaneamente dal disco locale l'istante di partenza `dispatched_at` e la categoria `service_level`, calcola la durata reale `delivery_hours = (delivered_at - dispatched_at)` e pubblica l'evento arricchito sul topic `shipments.completed.v1`.
+Il primo è il contratto dei topic. `shipments.created.v1`, `deliveries.confirmed.v1` e `shipments.completed.v1` hanno tutti 12 partizioni, `replication.factor=3`, `min.insync.replicas=2` e retention di 14 giorni, cioè 1.209.600.000 ms. I producer usano la stessa chiave in entrambi i flussi, `shipment_id`.
 
-Il terzo e quarto blocco sono l'**ingestione protetta da DLQ in ClickHouse** e il **monitoraggio con runbook**. ClickHouse legge `shipments.completed.v1` a blocchi di `65536` righe con `kafka_handle_error_mode = 'stream'`, dirottando qualsiasi record malformato in `shipments_dlq` e scrivendo i record validi nella tabella `ReplacingMergeTree(ingested_at)` ordinata per `(carrier_id, toDate(delivered_at), shipment_id)`, seguita da un rollup al minuto per le dashboard operative e il controllo del lag.
+Il secondo blocco è il join stateful, eseguito in Kafka Streams. La topologia tiene le spedizioni aperte in una tabella di stato su RocksDB, indicizzata per `shipment_id`, con `num.standby.replicas=1` e garanzia `exactly_once_v2` perché lettura e scrittura avvengono entrambe dentro Kafka. Quando arriva `DeliveryConfirmed`, anche 24 o 48 ore dopo la partenza, la topologia recupera `dispatched_at` e `service_level`, calcola `delivery_hours` e pubblica l'evento arricchito su `shipments.completed.v1`.
 
-**Una pipeline Kafka end-to-end supera il collaudo solo se allinea chiave e numero di partizioni fin dai producer, unisce gli eventi sul timestamp di origine preservando lo stato su disco e scarica i risultati in ClickHouse con protezione DLQ e deduplicazione per entità.**
+Il terzo e il quarto blocco sono l'ingestione protetta in ClickHouse e il monitoraggio. ClickHouse legge `shipments.completed.v1` a blocchi di 65.536 righe con `kafka_handle_error_mode = 'stream'`, dirotta i record malformati in una tabella `shipments_dlq` e scrive i validi in una tabella `ReplacingMergeTree`. Un controllo sul lag e sulla coda degli errori chiude il disegno.
 
-## Tre errori che compromettono il progetto durante il collaudo
-
-Il blocco SQL qui sotto mostra cosa accade nel database analitico quando i topic non sono co-partizionati, i retry dei palmari non vengono deduplicati e manca la gestione errori in ingresso:
-
-```sql
--- ERRORE 1: ingestione senza DLQ e senza deduplicazione su shipment_id.
--- Ogni retry inviato dal palmare del corriere crea una seconda riga di consegna completata!
-CREATE TABLE logistics.shipments_completed_bad
-(
-    shipment_id String,
-    carrier_id String,
-    dispatched_at Nullable(DateTime),
-    delivered_at DateTime,
-    delivery_hours Nullable(Float32),
-    payout_eur Decimal(10, 2)
-)
-ENGINE = MergeTree
-ORDER BY delivered_at;
-
--- Query di verifica che smaschera i join falliti (dispatched_at IS NULL) e i pagamenti doppi ai corrieri:
-SELECT
-    countIf(dispatched_at IS NULL) AS consegne_orfane_senza_partenza,
-    count() - uniqExact(shipment_id) AS consegne_pagate_due_volte_per_retry,
-    sum(payout_eur) AS costo_corrieri_gonfiato_eur
-FROM logistics.shipments_completed_bad;
+```mermaid
+flowchart LR
+    W["Magazzino (producer)"] -->|"key=shipment_id"| T1["shipments.created.v1 (12 partizioni)"]
+    D["Palmari corrieri (producer)"] -->|"key=shipment_id"| T2["deliveries.confirmed.v1 (12 partizioni)"]
+    T1 --> KS["Kafka Streams: join con stato RocksDB"]
+    T2 --> KS
+    KS --> T3["shipments.completed.v1"]
+    T3 --> CH["ClickHouse (Kafka engine)"]
+    CH --> OK["fct_shipments_completed"]
+    CH -.->|"_error non vuoto"| DLQ["shipments_dlq"]
 ```
 
-### Creare i due topic da unire con chiavi o numero di partizioni differenti
+## Co-partizionamento: la chiave decide dove vivono gli eventi
 
-Partizionare `shipments.created.v1` per `warehouse_id` (6 partizioni) e `deliveries.confirmed.v1` per `driver_id` (12 partizioni) costringe il motore di streaming a riscrivere l'intero traffico su due topic interni di ripartizionamento prima di poter eseguire il join su `shipment_id`. Oltre a raddoppiare il traffico di rete e lo spazio disco sul cluster Kafka, se uno sviluppatore dimentica lo step di ripartizionamento esplicito il join non trova le chiavi corrispondenti e produce migliaia di record con `dispatched_at = NULL`.
+Un join tra due topic funziona solo se gli eventi con la stessa chiave stanno sulla stessa partizione di due topic con lo stesso numero di partizioni, perché Kafka Streams assegna a ogni task la partizione numero $n$ di entrambi. Questa condizione si chiama co-partizionamento e ha due parti: stessa chiave di business e stesso numero di partizioni, con lo stesso partizionatore.
 
-### Usare una finestra di join di pochi minuti per processi fisici che durano giorni
+Se le due condizioni non valgono, Kafka Streams deve riscrivere uno dei due flussi su un topic interno di ripartizionamento, con chiave corretta, prima del join. Funziona, ma raddoppia il traffico di rete e lo spazio disco di quel flusso. Se lo sviluppatore dimentica il ripartizionamento, il join non trova le chiavi corrispondenti e produce record con `dispatched_at` nullo.
 
-Configurare `JoinWindows.ofTimeDifferenceWithNoGrace(Duration.ofMinutes(15))` tra la creazione della spedizione e la consegna del pacco copia ciecamente gli esempi didattici pensati per il clickstream pubblicitario (dove l'impression e il clic avvengono a pochi secondi di distanza). Nella logistica o nel B2B un pacco viene consegnato 24 o 48 ore dopo la partenza dal magazzino: una finestra di 15 minuti scarta il 99,9% degli abbinamenti, motivo per cui le spedizioni aperte vanno tenute in una `KTable` persistente su RocksDB finché non arriva la conferma di consegna.
+La chiave `shipment_id` va scelta anche per un'altra ragione: la sua cardinalità è altissima (180.000 valori al giorno), quindi distribuisce uniformemente il traffico sulle 12 partizioni. La chiave `warehouse_id`, con pochi magazzini grandi, avrebbe prodotto partizioni calde. Una conferma di consegna e la sua creazione, per `SHP-99412`, finiscono ora nella stessa partizione, per esempio la 7, e vengono lette dallo stesso task.
 
-### Non documentare owner, retention e procedura di recupero della Dead Letter Queue
+## Tempo di business e stato: perché la finestra di join non basta
 
-Presentare in code review il codice dei producer e delle tabelle ClickHouse senza specificare chi è il team responsabile del topic, quale sia la retention necessaria per il replay e come vengano rielaborati i messaggi finiti nella tabella `dlq` lascia il sistema ingestibile al primo imprevisto. Se un messaggio finisce in `shipments_dlq` il sabato mattina e non esiste una query di ispezione né un runbook di correzione, quei pacchi restano invisibili nei report di consegna.
+Il secondo errore del prototipo riguarda il confronto temporale. Una finestra di join tra stream (`JoinWindows`) accoppia due eventi se arrivano a distanza di pochi minuti, ed è il disegno giusto per il clickstream, dove impressione e click distano secondi. Una spedizione dura invece 24 o 48 ore tra creazione e consegna, e una finestra di 15 minuti scarta praticamente ogni abbinamento.
 
-## Implementazione completa: Ingestione protetta, Rollup SLA per corriere e Audit DLQ
+Per processi fisici lunghi si usa un join stream-tabella: le spedizioni aperte stanno in una `KTable` persistente, e ogni conferma di consegna la interroga per chiave, qualunque sia la distanza nel tempo. Lo stato è piccolo: con 180.000 spedizioni al giorno e due giorni di spedizioni aperte, la tabella contiene 360.000 record. A 200 byte ciascuno sono 360.000 × 200 byte = 72 MB, abbondantemente gestibili da RocksDB su disco locale.
 
-Per completare il progetto e verificare tutti gli obiettivi del laboratorio in ClickHouse, applicate questi quattro passi:
+Per i ritardi dei palmari conta poi quale timestamp si usa. Il tempo di arrivo sul broker è sbagliato per questo scopo, perché una firma trasmessa dopo 40 minuti sembra una consegna avvenuta 40 minuti dopo. Si usa `delivered_at`, generato dal palmare all'origine, e `delivery_hours = delivered_at − dispatched_at` si calcola quindi con i tempi di business.
 
-1. Configurate i topic `shipments.created.v1`, `deliveries.confirmed.v1` e `shipments.completed.v1` con 12 partizioni, chiave `shipment_id`, `RF=3`, `min.insync.replicas=2` e retention di 14 giorni.
-2. Create in ClickHouse la coda `ENGINE = Kafka` sul topic `shipments.completed.v1` con `kafka_handle_error_mode = 'stream'` e smistate il flusso con due Materialized Views: i messaggi validi (`_error = ''`) verso la tabella `ReplacingMergeTree` ordinata su `(carrier_id, toDate(delivered_at), shipment_id)` e i messaggi corrotti (`_error != ''`) verso `shipments_dlq`.
-3. Aggiungete una vista di rollup o una query deduplicata che calcola per ciascun corriere il tasso di consegne puntuali entro le 24 ore (`on_time_sla_pct`), il 95° percentile dei tempi di consegna e il costo netto delle provvigioni senza duplicati.
-4. Eseguite il controllo di salute sul lag di ingestione e sulla coda DLQ.
+## Dimensionamento, duplicati e SLA con i numeri del caso
 
-Ecco l'implementazione SQL completa pronta per il collaudo finale del progetto:
+Tre calcoli servono per la revisione del progetto: lo spazio disco dei topic, il costo dei duplicati e il valore dell'SLA di un corriere.
+
+Per il disco, ogni evento pesa circa 500 byte e passa attraverso tre topic. Il volume giornaliero è 3 topic × 180.000 eventi × 500 byte = 270 MB. Con retention di 14 giorni diventa 270 MB × 14 = 3.780 MB, circa 3,8 GB per replica, e con replication factor 3 si arriva a 3,78 GB × 3 = 11,3 GB sul cluster. Sono numeri piccoli, e dicono che la retention lunga costa poco: la ristrettezza di disco non è mai un buon motivo per tagliarla.
+
+Per i duplicati, ipotizziamo che il 6% delle consegne sia inviato tre volte dal palmare. Le consegne ripetute sono 180.000 × 0,06 = 10.800, ciascuna con due copie in più, quindi 10.800 × 2 = 21.600 righe duplicate. Con una provvigione media di 4,20 euro per consegna il sovrapagamento è 21.600 × 4,20 euro = 90.720 euro al giorno, se la tabella non deduplica. Con la chiave `shipment_id` e un motore che tiene una sola riga per chiave il costo scende a 0 euro.
+
+Per l'SLA, un corriere con 12.000 consegne e 11.160 entro 24 ore ha un tasso di puntualità pari a 11.160 ÷ 12.000 = 93,0%. Il calcolo cambia solo se i duplicati entrano nel conteggio: con 12.000 + 800 righe doppie il denominatore sale a 12.800 e il tasso apparente diventa 11.160 ÷ 12.800 = 87,2%, un calo di 5,8 punti percentuali dovuto interamente ai retry.
+
+## Tre errori che compromettono il collaudo
+
+### Topic con chiavi o partizioni diverse
+
+Il sintomo è un numero alto di record con `dispatched_at` nullo dopo il join. Succede perché partizionare per `warehouse_id` e per `driver_id` sembra naturale per chi produce ciascun flusso, ma il join richiede la stessa chiave. Si corregge con `shipment_id` su entrambi i topic e lo stesso numero di partizioni, controllando con `--describe` prima di scrivere la topologia.
+
+### Finestra di join di pochi minuti per processi di giorni
+
+Il sintomo è un abbinamento quasi nullo tra creazione e consegna. La finestra di 15 minuti nasce da esempi didattici sul clickstream, e per la logistica scarta il 99,9% degli abbinamenti. La correzione è una tabella di stato persistente, con retention dello stato adeguata alla durata massima di una spedizione.
+
+### Rilascio senza owner, retention e runbook per la DLQ
+
+Il sintomo si manifesta un sabato mattina, quando un messaggio finisce in `shipments_dlq` e nessuno sa a chi spetti. Un progetto presentato in review solo con codice, senza team responsabile, giorni di retention e procedura di recupero, lascia i pacchi dei record scartati invisibili nei report. Si risolve compilando la scheda di ownership: nome del topic, subject dello schema, team owner, canale di allerta, retention e la query per ispezionare e riprocessare la tabella degli errori.
+
+## Implementazione: topic, producer e ingestione protetta in ClickHouse
+
+I topic si creano con lo stesso comando e gli stessi valori, in un ciclo, per evitare differenze tra uno e l'altro.
+
+```bash
+# Tre topic co-partizionati: stesse partizioni, stessa chiave di business, stessa retention
+for t in shipments.created.v1 deliveries.confirmed.v1 shipments.completed.v1; do
+  kafka-topics.sh --bootstrap-server kafka-1:9092 --create --topic "$t" \
+    --partitions 12 --replication-factor 3 \
+    --config min.insync.replicas=2 --config retention.ms=1209600000
+done
+
+# Controllo: le tre descrizioni devono mostrare PartitionCount: 12
+kafka-topics.sh --bootstrap-server kafka-1:9092 --describe --topic deliveries.confirmed.v1
+```
+
+Il producer dei palmari usa `shipment_id` come chiave e un'idempotenza attiva, così un retry di rete non duplica il messaggio lato Kafka. I duplicati inviati dal palmare stesso, a livello applicativo, restano e si eliminano più a valle.
+
+```python
+# Producer dei palmari: stessa chiave del flusso delle spedizioni create
+import json
+from confluent_kafka import Producer
+
+producer = Producer({
+    "bootstrap.servers": "kafka-1:9092",
+    "acks": "all",
+    "enable.idempotence": True,
+    "compression.type": "zstd",
+})
+
+evento = {"shipment_id": "SHP-99412", "carrier_id": "CR-07",
+          "delivered_at": "2026-11-10T09:41:12.000Z"}
+producer.produce("deliveries.confirmed.v1", key=evento["shipment_id"],
+                 value=json.dumps(evento))
+producer.flush()
+```
+
+In ClickHouse la coda Kafka legge `shipments.completed.v1`, e due Materialized View smistano i record: quelli validi verso la tabella principale, quelli con `_error` non vuoto verso la DLQ.
 
 ```sql
--- 1. Coda Kafka Engine per gli eventi di spedizione completata e arricchita da Kafka Streams
+-- ClickHouse: coda Kafka con gestione errori in streaming
 CREATE TABLE logistics.kafka_shipments_completed_q
 (
     shipment_id String,
@@ -120,19 +153,16 @@ SETTINGS
     kafka_group_name = 'cg-ch-logistics-completed-v1',
     kafka_format = 'JSONEachRow',
     kafka_max_block_size = 65536,
-    kafka_flush_interval_ms = 2000,
     kafka_handle_error_mode = 'stream';
 
--- 2. Tabella principale idempotente su shipment_id (neutralizza i retry dei palmari dei corrieri)
+-- Tabella finale: una riga per shipment_id dopo i merge, con le coordinate Kafka
 CREATE TABLE logistics.fct_shipments_completed
 (
     carrier_id LowCardinality(String),
     delivered_date Date,
     shipment_id String,
-    service_level LowCardinality(String),
     dispatched_at DateTime64(3, 'UTC'),
     delivered_at DateTime64(3, 'UTC'),
-    weight_kg Float32,
     payout_eur Decimal(10, 2),
     kafka_partition UInt32,
     kafka_offset UInt64,
@@ -142,23 +172,15 @@ ENGINE = ReplacingMergeTree(ingested_at)
 PARTITION BY toYYYYMM(delivered_date)
 ORDER BY (carrier_id, delivered_date, shipment_id);
 
-CREATE MATERIALIZED VIEW logistics.mv_shipments_completed_valid
-TO logistics.fct_shipments_completed
-AS SELECT
-    carrier_id,
-    toDate(delivered_at) AS delivered_date,
-    shipment_id,
-    service_level,
-    dispatched_at,
-    delivered_at,
-    weight_kg,
-    payout_eur,
-    _partition AS kafka_partition,
-    _offset AS kafka_offset
+CREATE MATERIALIZED VIEW logistics.mv_shipments_valid
+TO logistics.fct_shipments_completed AS
+SELECT carrier_id, toDate(delivered_at) AS delivered_date, shipment_id,
+       dispatched_at, delivered_at, payout_eur,
+       _partition AS kafka_partition, _offset AS kafka_offset
 FROM logistics.kafka_shipments_completed_q
-WHERE _error = '';
+WHERE length(_error) = 0;
 
--- 3. Tabella e Materialized View Dead Letter Queue per isolare eventuali record con weight_kg invalido
+-- Dead Letter Queue: ogni record malformato resta ispezionabile
 CREATE TABLE logistics.shipments_dlq
 (
     failed_at DateTime DEFAULT now(),
@@ -171,62 +193,82 @@ ENGINE = MergeTree
 ORDER BY (failed_at, kafka_partition, kafka_offset);
 
 CREATE MATERIALIZED VIEW logistics.mv_shipments_dlq
-TO logistics.shipments_dlq
-AS SELECT
-    now() AS failed_at,
-    _partition AS kafka_partition,
-    _offset AS kafka_offset,
-    _error AS error_reason,
-    _raw_message AS raw_json
+TO logistics.shipments_dlq AS
+SELECT now() AS failed_at, _partition AS kafka_partition, _offset AS kafka_offset,
+       _error AS error_reason, _raw_message AS raw_json
 FROM logistics.kafka_shipments_completed_q
-WHERE _error != '';
+WHERE length(_error) > 0;
 
--- 4. Query analitica di controllo SLA corrieri (deduplicata per shipment_id con argMax):
+-- Controllo SLA per corriere, deduplicato per shipment_id con argMax
 WITH spedizioni_uniche AS (
-    SELECT
-        carrier_id,
-        shipment_id,
-        argMax(service_level, ingested_at) AS service_level,
-        argMax(dispatched_at, ingested_at) AS dispatched_at,
-        argMax(delivered_at, ingested_at) AS delivered_at,
-        argMax(payout_eur, ingested_at) AS payout_eur,
-        max(ingested_at) AS last_ingest
+    SELECT carrier_id, shipment_id,
+           argMax(dispatched_at, ingested_at) AS dispatched_at,
+           argMax(delivered_at, ingested_at) AS delivered_at,
+           argMax(payout_eur, ingested_at) AS payout_eur
     FROM logistics.fct_shipments_completed
     WHERE delivered_date >= today() - 7
     GROUP BY carrier_id, shipment_id
 )
-SELECT
-    carrier_id,
-    count() AS spedizioni_consegnate_uniche,
-    round(countIf(dateDiff('minute', dispatched_at, delivered_at) <= 1440) * 100.0 / count(), 2) AS on_time_24h_sla_pct,
-    round(quantile(0.95)(dateDiff('minute', dispatched_at, delivered_at) / 60.0), 1) AS p95_delivery_hours,
-    sum(payout_eur) AS provvigioni_dovute_eur,
-    dateDiff('second', max(last_ingest), now()) AS freshness_lag_sec
+SELECT carrier_id,
+       count() AS consegne_uniche,
+       round(countIf(dateDiff('minute', dispatched_at, delivered_at) <= 1440) * 100.0 / count(), 2) AS on_time_24h_pct,
+       sum(payout_eur) AS provvigioni_dovute_eur
 FROM spedizioni_uniche
 GROUP BY carrier_id
-ORDER BY on_time_24h_sla_pct ASC;
+ORDER BY on_time_24h_pct ASC;
 ```
 
-Il risultato supera tutte le prove di collaudo: poiché entrambi i topic di origine usano `shipment_id` su 12 partizioni e le spedizioni aperte risiedono nella `KTable` RocksDB, il 100% delle consegne trova il proprio timestamp `dispatched_at` anche quando il palmare trasmette dalla montagna con 40 minuti di ritardo; i pacchetti JSON inviati tre volte dallo stesso palmare vengono fusi da `GROUP BY carrier_id, shipment_id` con `argMax`, pagando ogni consegna una sola volta al centesimo; e quando il magazzino periferico invia `'weight_kg': 'N/A'`, il record finisce in `logistics.shipments_dlq` senza fermare il resto d'Italia. Allineare le chiavi di partizione e attivare la vista DLQ prima del lancio richiede meno di un'ora; dover fermare la fatturazione dei corrieri perché non si riesce a distinguere una consegna vera da un retry di rete blocca le operazioni.
+Con questo disegno il record con `'N/A'` nel peso finisce in `shipments_dlq` senza fermare il resto, i pacchetti inviati tre volte collassano in un'unica riga per `shipment_id` e ogni consegna è pagata una volta sola.
 
-## Unione dei flussi a monte in Kafka Streams o a valle dentro ClickHouse
+## Join a monte in Kafka Streams o a valle in ClickHouse
 
-Nel disegnare l'architettura di questo progetto (unire `shipments.created` e `deliveries.confirmed`), il team deve scegliere dove eseguire fisicamente il join: **a monte dentro Kafka Streams** pubblicando il topic unito `shipments.completed.v1`, oppure **a valle direttamente dentro ClickHouse** ingerendo i due topic separatamente.
+L'architettura lascia una scelta: eseguire il join dentro Kafka Streams, pubblicando il topic unito, oppure ingerire i due topic separati in ClickHouse e unirli lì. Il criterio è chi legge l'evento unito. Se `ShipmentCompleted` serve in tempo reale ad altri servizi sul bus Kafka, per esempio il servizio notifiche che invia un buono di scuse quando `delivery_hours > 24` o il gestionale che sblocca il pagamento al corriere, il join va a monte. Se l'evento unito serve solo a dashboard e reportistica, basta scrivere entrambi gli eventi nella stessa tabella per `shipment_id` e calcolare `min(dispatched_at)` e `max(delivered_at)` in ClickHouse.
 
-Il criterio di scelta è netto: **eseguite il join a monte in Kafka Streams quando l'evento unito `ShipmentCompleted` (completo di durata e rispetto SLA) serve in tempo reale anche ad altri microservizi operativi su Kafka (es. il servizio notifiche che invia un buono sconto automatico di scuse al cliente se `delivery_hours > 24`, o il gestionale che sblocca il pagamento al corriere), eseguite invece l'unione direttamente in ClickHouse (scrivendo entrambi gli eventi nella stessa tabella per `shipment_id` e calcolando `min(dispatched_at)` e `max(delivered_at)`) quando il risultato serve esclusivamente per le dashboard analitiche e la reportistica interna.**
+Due errori speculari ricorrono. Costruire una topologia Streams quando nessuno oltre a ClickHouse legge l'uscita aggiunge un componente applicativo senza beneficio. Fare il join solo in ClickHouse quando dieci microservizi hanno bisogno dell'evento arricchito li obbliga a interrogare il warehouse, che diventa un message broker improprio.
 
-La confusione comune consiste nel costruire una topologia Java Kafka Streams quando nessun altro microservizio legge il topic di uscita oltre a ClickHouse, oppure nel fare il join solo dentro ClickHouse per poi dover interrogare ClickHouse da dieci microservizi transazionali che avevano bisogno dell'evento arricchito sul bus Kafka. Sbagliare questa scelta o introduce un componente applicativo superfluo, o trasforma il data warehouse in un message broker improprio.
+## Controllo finale del collaudo
 
-Questo progetto chiude il modulo su Apache Kafka. Nella documentazione di rilascio che accompagna il codice (file `README.md` o catalogo DataHub/Backstage), ricordate di compilare sempre la scheda di ownership: nome del topic, schema subject, team owner, canale di allerta, giorni di retention e query SQL per svuotare e riprocessare la tabella `shipments_dlq`.
+1. Tutti i topic che partecipano al join hanno la stessa chiave `shipment_id` e lo stesso numero di partizioni?
 
-## Cinque domande di revisione finale del progetto Kafka end-to-end
+<details>
+<summary>Mostra risposta</summary>
 
-1. Tutti i topic che partecipano al join condividono esattamente la stessa chiave di business (`shipment_id`) e lo stesso numero di partizioni (`12`), eliminando i ripartizionamenti di rete inutili?
-2. Il calcolo della durata di consegna usa i timestamp di business generati all'origine (`delivered_at - dispatched_at`) anziché i timestamp di ricezione del broker?
-3. Avete testato l'invio di un messaggio con lo stesso `shipment_id` ripetuto tre volte verificando che `provvigioni_dovute_eur` in ClickHouse non aumenti di un solo centesimo?
-4. Avete iniettato un messaggio JSON malformato nel topic di test verificando che atterri in `logistics.shipments_dlq` mentre i messaggi validi successivi continuano a fluire nella tabella principale senza ritardi?
-5. Sono documentati nel runbook del progetto il team responsabile (*owner*), la retention di 14 giorni, le soglie di allerta sul lag e il comando esatto `kafka-consumer-groups.sh --reset-offsets` per eseguire un replay di emergenza?
+Sì: tutti e tre i topic sono a 12 partizioni e i producer usano `shipment_id` come chiave. Si verifica con `kafka-topics.sh --describe` su ciascuno prima di avviare la topologia.
 
-La metrica di collaudo conclusiva del progetto è la quadratura completa del flusso: **100% delle consegne valide abbinate alla propria spedizione di origine**, **0 euro di sovrafatturazione sui retry dei palmari** e **tempo di attraversamento da Kafka alla query ClickHouse inferiore a 3 secondi**.
+</details>
 
-Di tutto questo laboratorio end-to-end, portate nel vostro lavoro quotidiano una sola regola: un'architettura di streaming non si giudica quando tutti i messaggi sono perfetti, ma da cosa succede quando un palmare perde la linea, invia due volte lo stesso ordine e un magazzino spedisce un campo sporco. Se avete progettato chiave, idempotenza e Dead Letter Queue, il sistema non perde un colpo.
+2. Un palmare invia 3 volte la stessa consegna da 4,20 euro. Quanto viene pagato in una tabella senza deduplicazione e in una con `ReplacingMergeTree` su `shipment_id`?
+
+<details>
+<summary>Mostra risposta</summary>
+
+Senza deduplicazione 3 × 4,20 euro = 12,60 euro, con 8,40 euro di troppo. Con la tabella che tiene una riga per chiave e la query con `argMax` il totale è 4,20 euro.
+
+</details>
+
+3. Il topic riceve 180.000 eventi al giorno da 500 byte, con retention 14 giorni e RF=3. Quanto disco serve per topic?
+
+<details>
+<summary>Mostra risposta</summary>
+
+180.000 × 500 byte = 90 MB al giorno, × 14 = 1.260 MB, × 3 = 3.780 MB, cioè circa 3,8 GB per topic sul cluster.
+
+</details>
+
+4. Come verifichi che la DLQ funzioni davvero?
+
+<details>
+<summary>Mostra risposta</summary>
+
+Si pubblica sul topic di test un messaggio con `weight_kg` pari a `"N/A"` e si controlla che compaia in `logistics.shipments_dlq` mentre i messaggi validi successivi continuano a entrare in `fct_shipments_completed` senza ritardo.
+
+</details>
+
+5. Cosa deve contenere il runbook perché un replay di emergenza sia possibile?
+
+<details>
+<summary>Mostra risposta</summary>
+
+Team owner, retention di 14 giorni, soglie di allarme sul lag e il comando esatto `kafka-consumer-groups.sh --reset-offsets` per il gruppo coinvolto, insieme alla query per riprocessare le righe della DLQ.
+
+</details>
