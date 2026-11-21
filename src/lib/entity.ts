@@ -1,6 +1,8 @@
 import {
   CLICKHOUSE_CERTIFICATE_URL,
+  CONFLUENT_CERTIFICATE_URL,
   GITHUB_PROFILE_URL,
+  LINKEDIN_CERTIFICATIONS_URL,
   LINKEDIN_URL,
   SITE_AUTHOR,
   SITE_DESCRIPTION,
@@ -32,6 +34,33 @@ export const PERSON_CREDENTIALS = [
       url: 'https://clickhouse.com',
     },
   },
+  {
+    '@type': 'EducationalOccupationalCredential' as const,
+    name: 'Confluent Data Streaming Engineer',
+    credentialCategory: 'Certification',
+    description:
+      'Certificazione Confluent su Apache Kafka, Kafka Connect, Kafka Streams, Schema Registry e Apache Flink per pipeline di data streaming in produzione.',
+    url: CONFLUENT_CERTIFICATE_URL,
+    dateCreated: '2026-01',
+    recognizedBy: {
+      '@type': 'Organization' as const,
+      name: 'Confluent',
+      url: 'https://www.confluent.io',
+    },
+  },
+  {
+    '@type': 'EducationalOccupationalCredential' as const,
+    name: 'Azure Databricks Platform Architect',
+    credentialCategory: 'Accreditation',
+    description: 'Accreditamento Databricks sulla progettazione della piattaforma Azure Databricks, valido fino al 2027.',
+    url: LINKEDIN_CERTIFICATIONS_URL,
+    dateCreated: '2025-01',
+    recognizedBy: {
+      '@type': 'Organization' as const,
+      name: 'Databricks',
+      url: 'https://www.databricks.com',
+    },
+  },
 ] as const;
 
 /** Profili pubblici che attestano l'identità dell'autore. Aggiungere qui nuovi profili. */
@@ -48,6 +77,7 @@ export const PERSON_TOPICS: readonly { name: string; href: string }[] = [
   { name: 'Analytics Engineering (dbt)', href: '/course/analytics-engineering/' },
   { name: 'Apache Kafka', href: '/course/kafka-streaming/' },
   { name: 'ClickHouse', href: '/course/real-time-analytics/' },
+  { name: 'Real-time Analytics', href: '/course/real-time-analytics/' },
   { name: 'SQL', href: '/course/advanced-sql/' },
   { name: 'Marketing Data Science', href: '/course/marketing-data-science/' },
   { name: "Agentic AI per l'analisi dati", href: '/course/agentic-ai-data-workflows/' },
