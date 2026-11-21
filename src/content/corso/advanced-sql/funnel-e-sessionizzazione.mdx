@@ -1,9 +1,7 @@
 ---
 title: "Funnel in SQL: passi in sequenza e finestre di conversione"
 description: >-
-  Sessionizzazione con LAG e soglia di inattività, funnel stretti e laschi con
-  denominatore dichiarato e conversioni con finestra di attribuzione
-  esplicita.
+  Costruire un funnel a tre passi in ClickHouse con windowFunnel, imporre l'ordine cronologico per utente, dichiarare la finestra di conversione e il denominatore e escludere dalla lettura gli utenti con finestra non ancora maturata, con tabelle di ingresso e livelli per utente verificati.
 module: "Modulo 14: SQL avanzato per l'analisi"
 order: 10
 category: Decisione
@@ -11,91 +9,123 @@ headerImage: /course-headers/advanced-sql-funnel-e-sessionizzazione-ginnytech-ad
 headerImageAlt: >-
   Funnel, Sessionizzazione e Percorsi Utente - immagine ufficiale della lezione
   su GinnyTech, creata da AD
-difficulty: advanced
-duration: 18 min
+difficulty: avanzato
+duration: 35 min
 prerequisites:
   - advanced-sql/coorti-e-retention
 learningObjectives:
-  - Sessionizzare eventi con LAG, soglia di inattività e somma cumulata del flag di apertura
-  - Calcolare funnel stretti e conversioni con finestra di attribuzione e denominatore dichiarato
+  - Costruire un funnel ordinato a tre passi con windowFunnel e leggere il livello massimo raggiunto da ogni utente
+  - Calcolare tassi di passaggio e conversione complessiva dichiarando finestra di conversione e denominatore
+  - Escludere dal denominatore gli utenti la cui finestra non è ancora matura e misurare l'effetto sul tasso
 binario: "ml-tabellare"
-formato: "articolo"
-autore: "Hermes"
-controllatoDa: "Argo"
-autorizzatoDa: "Giano"
+formato: "didattica-v2"
 draft: false
-dateModified: 2026-11-13
+dateModified: 2026-11-17
 ---
 
-# Funnel in SQL: passi in sequenza e finestre di conversione
+Scenario costruito, con numeri di esempio: un prodotto SaaS misura l'onboarding in tre passi, `signup_started`, `workspace_created` e `first_report_exported`. Il team conta gli utenti distinti per ciascun evento nel mese: 1.000 allo step 1, 620 allo step 2 e 710 allo step 3. Il tasso di passaggio tra secondo e terzo passo risulta 710 / 620 = 114,5%, un valore impossibile per un funnel. Nessun conteggio è sbagliato: il difetto è aver contato tre insiemi di utenti indipendenti e averli letti come tre tappe dello stesso percorso.
 
-Un team di prodotto costruisce un funnel a tre passi (`signup_started -> workspace_created -> first_report_exported`) contando semplicemente quanti utenti distinti hanno generato ciascun evento nel mese corrente: risultano 1.000 utenti allo step 1, 620 allo step 2 e 710 allo step 3, con un assurdo tasso di passaggio del 114% tra il secondo e il terzo passo. La causa non è un errore di conteggio di ClickHouse: è calcolare un **funnel non sequenziale** che conta gli eventi in modo indipendente senza imporre l'ordine cronologico (`t1 < t2 < t3`) né dichiarare una finestra di conversione comune.
+> **Idea chiave:** un funnel non è tre conteggi affiancati ma una catena per utente; un utente avanza allo step successivo solo se l'evento arriva dopo il precedente e dentro una finestra dichiarata.
 
-## Settecentodieci utenti allo step tre partendo da seicentoventi allo step due
+La lezione parte da dieci utenti per poter verificare a mano ogni numero, poi mostra come la stessa logica scala su milioni di eventi con una sola funzione aggregata.
 
-Questo è un caso ricostruito con numeri di esempio su quanto accade quando si costruisce un funnel con semplici `COUNT(DISTINCT user_id)` per evento invece di tracciare la sequenza temporale per ciascun utente.
+## Contare eventi non è seguire un percorso
 
-Esistono tre modi principali di definire un funnel in SQL, ciascuno con regole e numeri diversi:
-
-| Tipo di funnel | Vincolo temporale | Denominatore | Quando usarlo |
-| :--- | :--- | :--- | :--- |
-| **Funnel lasco (non ordinato)** | Nessun ordine imposto tra gli step | Utenti nello step 1 | Da evitare per analisi di flusso reali |
-| **Funnel ordinato a finestra aperta** | `t_step1 <= t_step2 <= t_step3` | Utenti che hanno raggiunto lo step 1 | Onboarding SaaS multi-giorno |
-| **Funnel stretto a finestra chiusa** | Ordine stretto entro `N` giorni/ore dallo step 1 | Utenti con step 1 maturato da almeno `N` giorni | E-commerce, attivazione rapida, confronti settimanali stabili |
-
-Dichiarare esplicitamente se il funnel è **ordinato**, qual è la **finestra massima di conversione** e qual è il **denominatore** impedisce che i tassi di conversione oscillino o superino il 100%.
-
-## Ordine temporale stretto, finestra di conversione e windowFunnel in ClickHouse
-
-Il primo meccanismo è l'**imposizione dell'ordine temporale per utente (`t_step1 < t_step2 < t_step3`)**. In SQL standard, per un funnel a 3 o 4 passi, si calcola per ogni utente il timestamp del primo `step_1` (`minIf(occurred_at, event_name = 'step_1')`), poi il primo `step_2` **successivo** a `step_1`, e infine il primo `step_3` **successivo** a `step_2`. Solo chi rispetta la catena cronologica completa avanza al passo successivo.
-
-Il secondo meccanismo è la **finestra di conversione esplicita e maturità della coorte**. Se un utente si iscrive oggi alle 14:00 e la finestra di conversione del funnel è di 7 giorni, quell'utente non ha ancora avuto 7 giorni di tempo per completare lo step 3. Nei confronti settimanali, bisogna includere nel denominatore solo gli utenti il cui `step_1` è avvenuto almeno 7 giorni fa (`step1_at <= now() - INTERVAL 7 DAY`), altrimenti l'ultima settimana sembrerà sempre avere una conversione crollata.
-
-Il terzo meccanismo è la funzione nativa **`windowFunnel(window_seconds)(timestamp, cond1, cond2, cond3)` di ClickHouse**. In una sola espressione aggregata per `user_id`, `windowFunnel` verifica automaticamente che le condizioni si verifichino nell'ordine esatto dichiarato e che l'intero percorso si completi entro `window_seconds` (es. `604800` secondi = 7 giorni), restituendo il livello massimo raggiunto (`0, 1, 2, 3`) per ciascun utente.
-
-**Un funnel in SQL è valido solo quando impone l'ordine cronologico dei passi per singolo utente, fissa una finestra massima di conversione e verifica che gli utenti al denominatore abbiano maturato l'intera finestra.**
-
-## Tre errori comuni nei funnel in SQL
-
-Il blocco SQL qui sotto mostra l'errore classico del funnel calcolato con `countIf` indipendenti che permette agli utenti vecchi di completare lo step 3 senza aver fatto lo step 1 nel periodo:
+I dati sono 23 eventi di dieci utenti nella tabella `fct_product_events`. Alcuni utenti completano il percorso in giorni diversi, uno lo percorre in ordine invertito, altri si fermano a metà.
 
 ```sql
--- ERRORE 1: conta utenti distinti per evento senza verificare che step 2 avvenga DOPO step 1!
--- ERRORE 2: un utente iscritto 3 mesi fa che esporta un report oggi entra allo step 3 ma non allo step 1!
-SELECT
-    uniqExactIf(user_id, event_name = 'signup_started') AS step_1_users,
-    uniqExactIf(user_id, event_name = 'workspace_created') AS step_2_users,
-    uniqExactIf(user_id, event_name = 'first_report_exported') AS step_3_users
-FROM analytics_prod.fct_product_events
-WHERE event_date >= today() - 30;
+-- Eventi di onboarding di 10 utenti (numeri di esempio)
+CREATE TABLE fct_product_events
+(
+    user_id String,
+    event_name String,
+    occurred_at DateTime
+) ENGINE = Memory;
+
+INSERT INTO fct_product_events VALUES
+('u1', 'signup_started', '2026-11-01 09:00:00'), ('u1', 'workspace_created', '2026-11-01 09:10:00'),
+('u1', 'first_report_exported', '2026-11-02 10:00:00'),
+('u2', 'signup_started', '2026-11-01 10:00:00'), ('u2', 'workspace_created', '2026-11-01 10:30:00'),
+('u3', 'signup_started', '2026-11-02 08:00:00'), ('u3', 'workspace_created', '2026-11-02 08:05:00'),
+('u3', 'first_report_exported', '2026-11-12 08:00:00'),
+('u4', 'first_report_exported', '2026-11-03 11:00:00'), ('u4', 'signup_started', '2026-11-03 11:30:00'),
+('u4', 'workspace_created', '2026-11-03 11:40:00'),
+('u5', 'signup_started', '2026-11-04 12:00:00'),
+('u6', 'signup_started', '2026-11-05 12:00:00'), ('u6', 'workspace_created', '2026-11-06 12:00:00'),
+('u6', 'first_report_exported', '2026-11-07 12:00:00'),
+('u7', 'signup_started', '2026-11-17 12:00:00'), ('u7', 'workspace_created', '2026-11-17 12:20:00'),
+('u8', 'signup_started', '2026-11-18 09:00:00'),
+('u9', 'signup_started', '2026-11-08 09:00:00'), ('u9', 'workspace_created', '2026-11-08 09:30:00'),
+('u9', 'first_report_exported', '2026-11-09 09:00:00'),
+('u10', 'signup_started', '2026-11-09 09:00:00'), ('u10', 'workspace_created', '2026-11-09 10:00:00');
 ```
 
-### Contare ogni evento separatamente senza legare la sequenza per utente
-
-Quando usate `uniqExactIf` separati sulla stessa tabella, uno stesso utente può aver fatto `first_report_exported` oggi dopo essersi iscritto due mesi fa: entra nel conteggio dello step 3 ma non in quello dello step 1, rendendo possibile che `step_3_users > step_2_users`.
-
-### Includere nel denominatore gli utenti che non hanno ancora maturato la finestra
-
-Se misurate la conversione a 7 giorni su tutti gli iscritti degli ultimi 30 giorni includendo chi si è iscritto ieri, state mescolando utenti con 30 giorni di vita e utenti con 24 ore di vita. Il tasso di conversione dell'ultima settimana risulterà artificialmente più basso del 30–50% e genererà falsi allarmi.
-
-### Dimenticare di dichiarare se gli step devono essere consecutivi o possono avere eventi intermedi
-
-In un e-commerce, un utente può vedere il prodotto, aprire le FAQ, tornare sul carrello e poi pagare. Se usate una modalità troppo restrittiva che vieta qualsiasi evento intermedio, perderete l'80% delle conversioni reali; nella maggior parte dei funnel di prodotto serve l'ordine cronologico stretto dei passi chiave (`strict_order`), non l'adiacenza fisica immediata.
-
-## Funnel ordinato a finestra di 7 giorni con windowFunnel e CTE in ClickHouse
-
-Per costruire un funnel rigoroso e veloce in ClickHouse, applicate questi quattro passi:
-
-1. Isolate gli utenti il cui primo `step_1` è avvenuto all'interno del periodo di analisi ma **almeno 7 giorni fa** (finestra maturata).
-2. Calcolate per ogni utente il livello massimo raggiunto entro `604800` secondi (7 giorni) usando `windowFunnel(604800)(occurred_at, event_name = 'signup_started', event_name = 'workspace_created', event_name = 'first_report_exported')`.
-3. Aggregate i livelli raggiunti (`>= 1`, `>= 2`, `>= 3`) per ottenere i volumi reali di ogni step.
-4. Calcolate sia il tasso di conversione cumulativo rispetto allo step 1 sia il tasso di passaggio step-by-step.
-
-Ecco la query SQL completa in ClickHouse:
+Il funnel lasco conta, per ogni evento, gli utenti distinti che l'hanno generato almeno una volta.
 
 ```sql
--- Funnel ordinato a 3 step con finestra di conversione di 7 giorni e coorte maturata:
-WITH user_funnel_levels AS (
+-- Funnel lasco: tre conteggi indipendenti, nessun ordine, nessuna finestra
+SELECT
+    countIf(event_name = 'signup_started') AS step1,
+    countIf(event_name = 'workspace_created') AS step2,
+    countIf(event_name = 'first_report_exported') AS step3
+FROM (SELECT DISTINCT user_id, event_name FROM fct_product_events);
+```
+
+Il risultato è 10, 8 e 5. Questa volta i volumi sono monotoni, ma il 5 nasconde due difetti: l'utente `u4` ha esportato il report prima di iscriversi, e l'utente `u3` l'ha esportato dieci giorni dopo l'iscrizione. Il funnel lasco li conta entrambi come convertiti. Per scegliere che cosa contare serve distinguere tre definizioni.
+
+| Tipo di funnel | Vincolo | Denominatore | Quando usarlo |
+| :--- | :--- | :--- | :--- |
+| Lasco | Nessun ordine | Utenti con l'evento 1 | Stima grossolana, mai per decisioni di flusso |
+| Ordinato a finestra aperta | `t1 < t2 < t3` | Utenti con lo step 1 | Onboarding con tempi lunghi e variabili |
+| Ordinato a finestra chiusa | Ordine e conclusione entro N giorni da `t1` | Utenti con finestra maturata | Confronti tra coorti e settimane |
+
+## windowFunnel: l'ordine e la finestra in una funzione
+
+ClickHouse offre `windowFunnel(finestra_in_secondi)(tempo, condizione1, condizione2, ...)`. Per ogni utente la funzione cerca la catena più lunga di eventi che soddisfano le condizioni nell'ordine dato, con ogni evento successivo entro la finestra dal primo, e restituisce il livello raggiunto: 0 se nemmeno il primo passo è presente, poi 1, 2, 3. Gli eventi intermedi non elencati vengono tollerati, esattamente ciò che serve nei funnel di prodotto, dove tra due passi l'utente compie altre azioni.
+
+```sql
+-- Livello massimo raggiunto per utente con finestra di 7 giorni (604800 secondi)
+SELECT
+    user_id,
+    windowFunnel(604800)(
+        occurred_at,
+        event_name = 'signup_started',
+        event_name = 'workspace_created',
+        event_name = 'first_report_exported'
+    ) AS level
+FROM fct_product_events
+GROUP BY user_id
+ORDER BY toUInt32(replaceOne(user_id, 'u', ''));
+```
+
+```text
+user  level
+u1    3
+u2    2
+u3    2
+u4    2
+u5    1
+u6    3
+u7    2
+u8    1
+u9    3
+u10   2
+```
+
+Leggi i casi uno per uno. `u1` completa i tre passi in 25 ore: livello 3. `u3` raggiunge il secondo passo ma esporta dopo dieci giorni, fuori dalla finestra di sette: livello 2. `u4` ha l'esportazione prima dell'iscrizione: la catena parte da `signup_started`, trova `workspace_created` ma non un'esportazione successiva, quindi livello 2. `u6` impiega due giorni per ciascun passo ma resta dentro i sette giorni complessivi: livello 3.
+
+## Dai livelli ai tassi di conversione
+
+Il livello per utente è un dato intermedio. Il funnel si ottiene contando gli utenti con livello almeno pari allo step.
+
+```sql
+-- Volumi per step: un utente a livello 3 conta anche negli step 1 e 2
+SELECT
+    countIf(level >= 1) AS step1,
+    countIf(level >= 2) AS step2,
+    countIf(level >= 3) AS step3
+FROM
+(
     SELECT
         user_id,
         windowFunnel(604800)(
@@ -103,46 +133,104 @@ WITH user_funnel_levels AS (
             event_name = 'signup_started',
             event_name = 'workspace_created',
             event_name = 'first_report_exported'
-        ) AS max_step_reached
-    FROM analytics_prod.fct_product_events
-    WHERE event_date >= today() - 37
-      AND occurred_at <= now() - INTERVAL 7 DAY
-      AND event_name IN ('signup_started', 'workspace_created', 'first_report_exported')
+        ) AS level
+    FROM fct_product_events
     GROUP BY user_id
-    HAVING max_step_reached >= 1
-)
-SELECT
-    count() AS step_1_signup_started,
-    countIf(max_step_reached >= 2) AS step_2_workspace_created,
-    countIf(max_step_reached >= 3) AS step_3_first_report_exported,
-    round(step_2_workspace_created * 100.0 / nullIf(step_1_signup_started, 0), 2) AS pct_step1_to_step2,
-    round(step_3_first_report_exported * 100.0 / nullIf(step_2_workspace_created, 0), 2) AS pct_step2_to_step3,
-    round(step_3_first_report_exported * 100.0 / nullIf(step_1_signup_started, 0), 2) AS pct_overall_conversion
-FROM user_funnel_levels;
+);
 ```
 
-Grazie a `windowFunnel(604800)` e al filtro `HAVING max_step_reached >= 1`, nessun utente può apparire allo step 3 senza aver prima completato lo step 1 e lo step 2 nell'ordine esatto e entro 7 giorni. La colonna `pct_overall_conversion` è garantita monotona decrescente (`step_1 >= step_2 >= step_3`).
+Il risultato è 10, 8 e 3, contro il 10, 8 e 5 del funnel lasco. Il tasso step 1 → step 2 è 8 / 10 = 80%; il tasso step 2 → step 3 è 3 / 8 = 37,5%; la conversione complessiva è 3 / 10 = 30%. I due utenti che il funnel lasco contava in più, `u3` e `u4`, uscivano uno dalla finestra e l'altro dall'ordine: la sovrastima dello step finale era di 2 utenti su 3, cioè il 67%.
 
-Per rendere il funnel ancora più azionabile per il team di prodotto, potete estendere questa stessa query segmentando per canale di acquisizione (`entry_channel`), dispositivo o piano tariffario, oppure calcolando il **tempo mediano di attraversamento** tra `step_1` e `step_2` e tra `step_2` e `step_3`. Sapere non solo quanti utenti si fermano tra la creazione del workspace e l'esportazione del primo report, ma anche che chi converte ci mette in media 4 ore mentre chi supera le 48 ore quasi non converte più, orienta direttamente le campagne di email onboarding e i trigger in-app.
+Un controllo che non richiede dati esterni è la monotonia: `step1 >= step2 >= step3` deve valere sempre, per costruzione, con `windowFunnel`. Se vedi un tasso sopra il 100% hai quasi certamente un conteggio non sequenziale, come quello del caso d'apertura.
 
-Quando portate questo modello in dbt, ricordate di parametrizzare la finestra di conversione (ad esempio `7` giorni per il self-serve e `30` giorni per il B2B enterprise) e di esporre nella documentazione del modello la data minima e massima di `step_1` inclusa nel denominatore. In questo modo qualsiasi stakeholder che legge la dashboard sa immediatamente che i numeri dell'ultima settimana non sono inquinati da utenti che devono ancora completare la propria finestra di attivazione.
+## La finestra cambia la risposta
 
-Infine, verificate sempre su un campione di 10 utenti convertiti che i timestamp reali degli eventi rispettino l'ordine atteso, soprattutto quando gli eventi provengono sia dal frontend sia da webhook server-side che possono avere qualche secondo di ritardo.
+La finestra non è un dettaglio tecnico: è una definizione di business. Rilancia la stessa query con 86.400 secondi, un solo giorno. I livelli cambiano: `u1`, che esporta 25 ore dopo l'iscrizione, scende al livello 2; resta al livello 3 solo `u9`, che esporta esattamente dopo 24 ore. I volumi diventano 10, 8 e 1, e la conversione complessiva da 30% scende a 10%. Con una finestra di 14 giorni salirebbe a 4 utenti su 10, perché rientrerebbe anche `u3` (10 giorni).
 
-## windowFunnel() nativo in ClickHouse vs catena di CTE con MIN()
+Per questo ogni numero di funnel andrebbe scritto con la sua finestra, per esempio "conversione a 7 giorni: 30%". Una cifra senza finestra è un'opinione, perché due team con finestre diverse possono analizzare lo stesso prodotto e riportare conversioni lontane.
 
-Per calcolare funnel ordinati, potete usare **`windowFunnel()` di ClickHouse** oppure **una catena di CTE con `MIN(occurred_at)` e `LEFT JOIN` temporali**.
+La scelta della finestra segue il comportamento reale: guarda la distribuzione dei tempi tra il primo e l'ultimo passo degli utenti convertiti e scegli un valore che ne catturi la gran parte, per esempio il 90° percentile. In un e-commerce può bastare un'ora, in un prodotto B2B con prova gratuita servono settimane.
 
-Il criterio di scelta è netto: **usate `windowFunnel()` in ClickHouse quando lavorate direttamente su miliardi di eventi perché esegue tutto in un'unica scansione in memoria con velocità superiore di ordini di grandezza, usate invece le CTE esplicite con `MIN()` in modelli dbt che devono restare portabili su PostgreSQL, BigQuery o Snowflake.**
+## Il denominatore: utenti con finestra non matura
 
-La confusione comune consiste nel pensare che `windowFunnel` imponga l'adiacenza stretta: per default verifica l'ordine temporale tollerando eventi intermedi non elencati, esattamente ciò che serve nei funnel web e SaaS.
+Il dato più ingannevole è la lettura del funnel sugli utenti più recenti. Oggi è il 20 novembre 2026 e la finestra è di 7 giorni. L'utente `u7` si è iscritto il 17 novembre e `u8` il 18: non hanno ancora avuto sette giorni per esportare il report. Contarli al denominatore trasforma un "non ancora" in un "mai".
 
-## Cinque domande prima di pubblicare un funnel in dashboard
+```sql
+-- Solo utenti con iscrizione di almeno 7 giorni prima di data_lettura (20 novembre 2026)
+SELECT
+    countIf(level >= 1) AS step1,
+    countIf(level >= 2) AS step2,
+    countIf(level >= 3) AS step3
+FROM
+(
+    SELECT
+        user_id,
+        minIf(occurred_at, event_name = 'signup_started') AS signup_at,
+        windowFunnel(604800)(
+            occurred_at,
+            event_name = 'signup_started',
+            event_name = 'workspace_created',
+            event_name = 'first_report_exported'
+        ) AS level
+    FROM fct_product_events
+    GROUP BY user_id
+    HAVING signup_at > toDateTime(0)
+       AND signup_at <= toDateTime('2026-11-20 00:00:00') - INTERVAL 7 DAY
+);
+```
 
-1. Il funnel impone l'ordine cronologico (`t1 <= t2 <= t3`) a livello di singolo utente?
-2. È dichiarata esplicitamente la finestra massima di conversione (es. 7 giorni o 1 sessione)?
-3. Gli utenti al denominatore dello step 1 hanno tutti maturato interamente la finestra di conversione?
-4. I volumi risultano rigorosamente monotoni decrescenti (`step_1 >= step_2 >= step_3`)?
-5. Avete riportato sia la conversione complessiva (`step_N / step_1`) sia i tassi di passaggio tra step adiacenti?
+Restano 8 utenti allo step 1, 7 allo step 2 e 3 allo step 3. La conversione complessiva sale da 3 / 10 = 30% a 3 / 8 = 37,5%: sette punti e mezzo di differenza provocati solo da due utenti che non avevano ancora avuto il tempo di convertire. Il passaggio da 8 a 7 allo step 2 mostra che `u8` usciva già dal conteggio; `u7` era uno dei due casi che avrebbero potuto ancora arrivare allo step 3.
 
-La metrica di controllo di qualsiasi funnel ordinato è la **monotonicità dei volumi**: `step_1 >= step_2 >= ... >= step_N` deve essere sempre vera senza eccezioni. Verificare questa proprietà automaticamente a ogni esecuzione della pipeline garantisce che nessun utente possa saltare passaggi o comparire allo step finale senza aver maturato lo step iniziale.
+Il funnel settimanale di una dashboard che include sempre l'ultima settimana mostra quindi un calo apparente ogni lunedì: gli utenti del periodo corrente pesano sul denominatore e non hanno ancora convertito. La regola operativa è mostrare le settimane con finestra completa come dati definitivi e marcare l'ultima come provvisoria.
+
+## Errori che producono tassi impossibili
+
+### Conteggi indipendenti presentati come funnel
+
+Sintomo: tassi di passaggio sopra il 100% o volumi non monotoni. Succede perché `count(DISTINCT user_id)` per ciascun evento è facile da scrivere e dà tre numeri plausibili. Correzione: calcola il livello per utente con `windowFunnel` oppure con la catena dei `minIf` ordinati, e conta dopo.
+
+### Finestra implicita
+
+Sintomo: due dashboard dello stesso funnel riportano conversioni diverse. Succede perché uno dei due calcoli usa tutta la storia dell'utente, l'altro sette giorni. Correzione: scrivi la finestra nel nome della metrica e nella documentazione del modello, e passala come parametro unico.
+
+### Coorte recente nel denominatore
+
+Sintomo: la conversione dell'ultima settimana è sempre la più bassa e si recupera da sola la settimana dopo. Succede perché gli utenti non hanno finito la finestra. Correzione: includi nel denominatore solo gli utenti con `signup_at <= data_lettura - finestra`, come nella query precedente, o presenta la settimana come provvisoria.
+
+## Controllo prima di pubblicare un funnel
+
+1. Un funnel mostra 1.000, 620 e 710 utenti. Che cosa indica il passaggio da 620 a 710?
+
+<details>
+<summary>Mostra risposta</summary>
+
+Indica conteggi indipendenti. Un funnel sequenziale ha volumi monotoni decrescenti, quindi 710 allo step 3 con 620 allo step 2 significa che molti utenti sono contati senza aver superato il passo precedente, per esempio perché l'evento è arrivato prima o da un altro percorso.
+
+</details>
+
+2. Con 10 utenti allo step 1, 8 allo step 2 e 3 allo step 3, calcola i tassi di passaggio e la conversione complessiva.
+
+<details>
+<summary>Mostra risposta</summary>
+
+Step 1 → 2: 8 / 10 = 80%. Step 2 → 3: 3 / 8 = 37,5%. Complessiva: 3 / 10 = 30%. Il prodotto dei due tassi, 0,8 × 0,375, dà lo stesso 0,30.
+
+</details>
+
+3. Perché togliere dal denominatore gli utenti iscritti da meno di 7 giorni cambia la conversione da 30% a 37,5%?
+
+<details>
+<summary>Mostra risposta</summary>
+
+Perché quegli utenti, 2 su 10, non hanno ancora avuto l'intera finestra per completare l'esportazione e nel conteggio compaiono come non convertiti. Rimossi, il rapporto diventa 3 / 8 = 37,5%, che confronta solo utenti con la stessa opportunità di convertire.
+
+</details>
+
+4. Quale finestra scegli e come la giustifichi per un prodotto con prova gratuita di 14 giorni?
+
+<details>
+<summary>Mostra risposta</summary>
+
+Una finestra almeno pari alla prova, 14 giorni, oppure il 90° percentile osservato dei tempi di conversione, se più basso. La scelta va dichiarata accanto alla metrica, perché con 1 giorno la stessa tabella darebbe 10% invece del 30% a 7 giorni.
+
+</details>
