@@ -1,9 +1,7 @@
 ---
 title: "Ordine logico di esecuzione: come pensa una query"
 description: >-
-  L'ordine logico di esecuzione di una query: dove cade la window function
-  nella pipeline dopo WHERE, GROUP BY e HAVING, e come prevedere quali righe
-  vede ogni calcolo analitico.
+  Ricostruire l'ordine logico di esecuzione di una query ClickHouse, capire dove cade la window function dopo WHERE, GROUP BY e HAVING e prevedere quali righe vede ogni calcolo prima di eseguirlo.
 module: "Modulo 14: SQL avanzato per l'analisi"
 order: 1
 category: Decisione
@@ -11,147 +9,261 @@ headerImage: /course-headers/advanced-sql-indice-window-functions-ginnytech-ad.w
 headerImageAlt: >-
   Indice - Mini-serie sulle Window Functions - immagine ufficiale della lezione su
   GinnyTech, creata da AD
-difficulty: advanced
-duration: 18 min
+difficulty: avanzato
+duration: 30 min
 prerequisites:
   - infrastructure-ops/caso-studio
 learningObjectives:
-  - Ricostruire l'ordine logico di esecuzione di una query e la posizione della window function nella pipeline
-  - Prevedere quali righe vede ogni calcolo analitico dopo WHERE, GROUP BY e HAVING
+  - Elencare le sei fasi dell'ordine logico di una query e collocare la window function dopo WHERE, GROUP BY e HAVING
+  - Prevedere a mano il denominatore di una quota percentuale e correggere una query che lo restringe con un filtro di segmento
+  - Scegliere tra CTE nominate e QUALIFY per filtrare il risultato di una window function
 binario: "ml-tabellare"
-formato: "articolo"
-autore: "Hermes"
-controllatoDa: "Argo"
-autorizzatoDa: "Giano"
+formato: "didattica-v2"
 draft: false
-dateModified: 2026-11-13
+dateModified: 2026-11-17
 ---
 
-# Ordine logico di esecuzione: come pensa una query
+Scenario costruito, con numeri di esempio: in una dashboard di ottobre il reparto Elettronica risulta pesare il 100% del fatturato aziendale. Il responsabile del reparto è contento per cinque minuti, poi qualcuno confronta il dato con il bilancio, dove Elettronica vale poco più della metà dei ricavi. La query dell'analista è sintatticamente perfetta, gira senza errori e restituisce quote che sommano esattamente a 100. Il numero è sbagliato perché il filtro `WHERE category = 'Elettronica'` è stato scritto nella stessa `SELECT` che calcola il denominatore con `sum(revenue_eur) OVER ()`.
 
-Un analista scrive una query per calcolare la quota percentuale di ogni ordine sul totale mensile dell'azienda, ma aggiunge `WHERE category = 'Elettronica'` nella stessa `SELECT` convinto che la window function `SUM(amount) OVER ()` calcoli comunque il totale complessivo di tutte le categorie. Il risultato mostra invece quote che sommano al 100% della sola categoria Elettronica, gonfiando il peso reale del reparto dal 18% al 100%. La causa non è un bug del motore SQL: è ignorare l'**ordine logico di esecuzione della query**, dove `FROM` e `WHERE` filtrano le righe molto prima che `SELECT` e le window function entrino in azione.
+> **Idea chiave:** una window function non vede mai le righe che `WHERE` ha già scartato, e un `WHERE` non può mai filtrare il risultato di una window function; prima di scrivere `OVER`, chiediti quali righe sono sopravvissute.
 
-## Perché una query valida sintatticamente restituisce numeri sbagliati
+Questa lezione apre la mini-serie sulle window functions del modulo. Ti dà la mappa mentale che serve per tutte le altre: l'ordine in cui il motore valuta le clausole, che non coincide con l'ordine in cui le scrivi.
 
-Questo è un caso ricostruito con numeri di esempio su quanto accade quando si legge una query SQL dall'alto verso il basso (`SELECT ... FROM ... WHERE`) invece che nell'ordine in cui il motore la valuta.
+## Il denominatore che si restringe senza avvisare
 
-Quando scrivete una `SELECT`, il motore SQL non parte dalla prima riga del file. La pipeline logica di esecuzione segue una sequenza fissa e non negoziabile:
+Il caso d'apertura si riproduce con otto ordini. La tabella `fct_orders` ha una riga per ordine pagato, con categoria e importo.
 
-| Fase | Clausola SQL | Cosa entra e cosa esce | Impatto sulle Window Functions |
-| :--- | :--- | :--- | :--- |
-| 1 | `FROM` / `JOIN` | Unisce le tabelle e genera il set iniziale | Una join moltiplicativa gonfia le righe prima di ogni calcolo |
-| 2 | `WHERE` | Scarta le righe che non soddisfano il filtro | Le righe scartate **non esistono** per `OVER (...)` |
-| 3 | `GROUP BY` | Raggruppa le righe per chiave | Dopo `GROUP BY`, `OVER (...)` vede solo i gruppi, non le righe grezze |
-| 4 | `HAVING` | Filtra i gruppi aggregati | Ulteriore taglio prima della proiezione finale |
-| 5 | `SELECT` + `OVER()` | Calcola espressioni e window functions | Vede esattamente le righe sopravvissute alle fasi 1–4 |
-| 6 | `QUALIFY` / `ORDER BY` / `LIMIT` | Filtra risultati window, ordina e taglia | `QUALIFY` filtra dopo `OVER()`, `LIMIT` taglia alla fine |
+| order_id | category | revenue_eur |
+| ---: | :--- | ---: |
+| 1 | Elettronica | 400 |
+| 2 | Elettronica | 300 |
+| 3 | Casa | 200 |
+| 4 | Casa | 150 |
+| 5 | Libri | 50 |
+| 6 | Elettronica | 100 |
+| 7 | Casa | 250 |
+| 8 | Libri | 100 |
 
-Capire questa sequenza risolve alla radice il 90% dei bug analitici silenziosi: nessuna window function può vedere ciò che `WHERE` ha già eliminato, e nessun `WHERE` può filtrare il risultato di una window function calcolata nella fase 5. Ogni volta che una dashboard mostra percentuali che sommano sempre al 100% dentro un filtro di reparto, o totali cumulativi che ripartono da zero invece di includere i mesi precedenti, il colpevole è quasi sempre un filtro applicato nella fase sbagliata della pipeline logica. Tracciare mentalmente il flusso dalla `FROM` fino a `QUALIFY` e `LIMIT` trasforma il debugging SQL da tentativi casuali a diagnosi deterministica.
-
-## La pipeline logica: FROM, WHERE, GROUP BY, HAVING, SELECT (Window) e QUALIFY
-
-Il primo principio è che **la clausola `WHERE` opera sempre prima di qualsiasi window function**. Se filtrate `WHERE status = 'paid'` e `WHERE channel = 'Meta'`, il denominatore di `SUM(revenue) OVER ()` sarà esclusivamente il fatturato pagato su Meta, non il fatturato aziendale totale. Se vi serve sia il totale aziendale sia il dettaglio di un solo canale, dovete calcolare la window function in una CTE precedente al filtro oppure usare un'espressione condizionale prima di filtrare.
-
-Il secondo principio riguarda l'interazione tra **`GROUP BY` e `OVER (...)`**. Quando una query contiene sia `GROUP BY` sia una window function, la `GROUP BY` viene eseguita per prima (fase 3): tutte le funzioni di aggregazione standard (`SUM(revenue)`, `COUNT(*)`) collassano le righe nel gruppo, e solo successivamente la window function (`RANK() OVER (ORDER BY SUM(revenue) DESC)`) opera sui gruppi già formati. È per questo motivo che `RANK() OVER (ORDER BY SUM(revenue) DESC)` è sintatticamente valida, mentre `SUM(RANK() OVER (...))` genera errore: non potete aggregare nella fase 3 ciò che nasce nella fase 5.
-
-Il terzo principio è il ruolo di **`QUALIFY`** (supportato nativamente in ClickHouse, BigQuery, Snowflake e DuckDB). Poiché `WHERE` gira alla fase 2 e `HAVING` alla fase 4, nessuno dei due può filtrare un `ROW_NUMBER() = 1`. O avvolgete la query in una CTE e filtrate all'esterno con `WHERE rn = 1`, oppure usate `QUALIFY row_number() OVER (...) = 1` nella fase 6.
-
-**Prevedete il risultato di una query analitica solo quando tracciate mentalmente quali righe sopravvivono a `FROM`, `WHERE`, `GROUP BY` e `HAVING` prima che `SELECT` esegua le window functions.**
-
-## Tre errori di ordine logico che falsano i report SQL
-
-Il blocco SQL qui sotto mostra l'errore tipico di chi applica `WHERE` nella stessa query in cui vorrebbe calcolare la quota sul totale aziendale:
+Per riprodurre i numeri, crea la tabella con gli stessi otto ordini.
 
 ```sql
--- ERRORE: il filtro WHERE category = 'Elettronica' viene eseguito PRIMA della window function.
--- Di conseguenza total_company_revenue è in realtà solo il totale di Elettronica (100%).
+-- Tabella di esempio con gli otto ordini della tabella precedente
+CREATE TABLE fct_orders
+(
+    order_id UInt32,
+    category String,
+    revenue_eur Decimal(10, 2),
+    status String
+) ENGINE = Memory;
+
+INSERT INTO fct_orders VALUES
+(1, 'Elettronica', 400, 'paid'), (2, 'Elettronica', 300, 'paid'), (3, 'Casa', 200, 'paid'),
+(4, 'Casa', 150, 'paid'), (5, 'Libri', 50, 'paid'), (6, 'Elettronica', 100, 'paid'),
+(7, 'Casa', 250, 'paid'), (8, 'Libri', 100, 'paid');
+```
+
+Il fatturato totale è 400 + 300 + 200 + 150 + 50 + 100 + 250 + 100 = 1.550 euro, di cui 800 euro in Elettronica. Il peso vero del reparto è quindi 800 / 1.550 = 51,6%. La query dell'analista, invece, produce questo.
+
+```sql
+-- Query sbagliata: WHERE gira prima di OVER, quindi il totale "aziendale" è il totale di Elettronica
 SELECT
     order_id,
     category,
     revenue_eur,
-    sum(revenue_eur) OVER () AS total_company_revenue,
-    round(revenue_eur * 100.0 / sum(revenue_eur) OVER (), 2) AS share_pct
-FROM analytics_prod.fct_orders
-WHERE order_date >= '2026-10-01'
-  AND category = 'Elettronica';
+    sum(revenue_eur) OVER () AS total_company_eur,
+    round(revenue_eur * 100 / sum(revenue_eur) OVER (), 1) AS share_pct
+FROM fct_orders
+WHERE category = 'Elettronica'
+ORDER BY order_id;
 ```
 
-### Filtrare con WHERE prima di calcolare il denominatore globale
+```text
+order_id  category     revenue_eur  total_company_eur  share_pct
+1         Elettronica  400          800                50
+2         Elettronica  300          800                37.5
+6         Elettronica  100          800                12.5
+```
 
-Inserire il filtro di segmento nella stessa `SELECT` che calcola `SUM(...) OVER ()` trasforma qualsiasi quota percentuale rispetto al totale aziendale in una quota interna al segmento filtrato. Il motore esegue `WHERE` nella fase 2 e passa alla fase 5 solo le righe sopravvissute: la window function non ha memoria delle righe scartate.
+Le tre quote sommano a 100, e proprio questa quadratura perfetta dovrebbe insospettire: un reparto che pesa il 100% dell'azienda non esiste. Il denominatore è 800 e non 1.550, perché alla fase in cui `sum() OVER ()` viene calcolata le cinque righe di Casa e Libri non esistono più.
 
-### Usare alias definiti nella SELECT dentro WHERE o GROUP BY
+## Le sei fasi, nell'ordine in cui il motore le valuta
 
-Scrivere `SELECT revenue_eur * 0.22 AS iva FROM orders WHERE iva > 10` fallisce nella maggior parte dei dialetti SQL standard perché `WHERE` (fase 2) viene valutato prima che `SELECT` (fase 5) crei l'alias `iva`. Anche quando un motore permissivo lo accetta per comodità sintattica, affidarsi a questa scorciatoia nasconde il fatto che `WHERE` non può comunque filtrare espressioni basate su window functions.
+Leggere una `SELECT` dall'alto verso il basso è comodo per scriverla e fuorviante per prevederla. Il motore ragiona in una sequenza logica fissa, e ogni fase riceve in ingresso solo l'uscita della precedente. Il diagramma la riassume.
 
-### Applicare LIMIT prima di aver ordinato o deduplicato correttamente
+```mermaid
+flowchart LR
+    A["1. FROM e JOIN<br/>(8 righe)"] --> B["2. WHERE<br/>(righe filtrate)"]
+    B --> C["3. GROUP BY<br/>(gruppi)"]
+    C --> D["4. HAVING<br/>(gruppi filtrati)"]
+    D --> E["5. SELECT e OVER<br/>(window function)"]
+    E --> F["6. QUALIFY, ORDER BY, LIMIT"]
+```
 
-Eseguire `SELECT * FROM events LIMIT 100` senza `ORDER BY` restituisce 100 righe arbitrarie dipendenti dall'ordine fisico dei blocchi su disco. Ancora peggio, mettere `LIMIT 1` per prendere "l'ultimo evento" senza `ORDER BY occurred_at DESC` o senza `QUALIFY row_number() OVER (...) = 1` restituisce un record casuale che cambia tra un'esecuzione e l'altra.
+Ogni freccia è un passaggio di consegne: la fase successiva non può recuperare ciò che quella precedente ha eliminato. Per questo l'ordine non è una convenzione di stile ma una proprietà del linguaggio.
 
-## Pipeline corretta a due stadi per quote globali e filtri post-window in ClickHouse
+Due conseguenze discendono direttamente dal disegno. La prima: `OVER (...)` sta alla fase 5, quindi lavora solo su ciò che è sopravvissuto alle fasi 1-4. La seconda: `WHERE` e `HAVING` stanno prima della fase 5, quindi non possono riferirsi al risultato di una window function. Per filtrare su `row_number() = 1` serve un'altra strada, che vediamo più avanti.
 
-Per scrivere query analitiche prevedibili e prive di distorsioni da ordine logico, applicate questi quattro criteri:
+Un dettaglio per ClickHouse: il motore è più permissivo di altri sugli alias. Puoi scrivere `HAVING category_eur > 200` usando l'alias definito nella `SELECT`, ed è comodo. Non confondere però la comodità sintattica con l'ordine logico: l'alias viene risolto, ma il filtro agisce sempre alla fase 4 sui gruppi, mai sulle window function.
 
-1. Eseguite i filtri di perimetro comuni (es. finestra temporale, `status = 'paid'`) nella prima CTE.
-2. Calcolate nella stessa CTE le metriche di contesto globale (`SUM(...) OVER ()`) **prima** di applicare i filtri di segmento o di reparto.
-3. Applicate i filtri di segmento (`category = 'Elettronica'`) nella CTE successiva o nella `SELECT` finale.
-4. Usate `QUALIFY` (o una CTE esterna) per filtrare il risultato delle window functions.
+| Fase | Clausola | Cosa vede | Effetto su `OVER` |
+| :--- | :--- | :--- | :--- |
+| 1 | `FROM`, `JOIN` | Tutte le righe delle tabelle | Una join uno-a-molti gonfia le righe prima di ogni calcolo |
+| 2 | `WHERE` | Righe singole | Le righe scartate non esistono più per la finestra |
+| 3 | `GROUP BY` | Righe filtrate | Dopo il raggruppamento resta una riga per gruppo |
+| 4 | `HAVING` | Gruppi | Taglia i gruppi prima della proiezione |
+| 5 | `SELECT`, `OVER` | Righe o gruppi sopravvissuti | Qui si calcolano le window function |
+| 6 | `QUALIFY`, `ORDER BY`, `LIMIT` | Risultato finale | `QUALIFY` filtra dopo `OVER` |
 
-Ecco l'implementazione SQL corretta in ClickHouse che calcola la quota reale di ogni prodotto sia sulla propria categoria sia sul fatturato totale aziendale, estraendo poi i primi 3 prodotti della categoria selezionata:
+## Calcolare la quota giusta, riga per riga
+
+Riprendiamo il calcolo con la query corretta, cioè quella che lascia tutte le righe alla finestra e filtra solo dopo. Per prima cosa guarda la fase 5 senza alcun filtro: ogni riga porta con sé il totale aziendale, 1.550 euro.
 
 ```sql
--- Pipeline corretta: il totale aziendale viene calcolato PRIMA del filtro di categoria.
-WITH base_orders AS (
-    SELECT
-        product_id,
-        category,
-        sum(revenue_eur) AS product_revenue_eur
-    FROM analytics_prod.fct_orders
-    WHERE order_date >= '2026-10-01'
-      AND status = 'paid'
-    GROUP BY product_id, category
-),
-with_shares AS (
-    SELECT
-        product_id,
-        category,
-        product_revenue_eur,
-        sum(product_revenue_eur) OVER () AS company_total_eur,
-        sum(product_revenue_eur) OVER (PARTITION BY category) AS category_total_eur,
-        round(product_revenue_eur * 100.0 / nullIf(company_total_eur, 0), 2) AS share_of_company_pct,
-        round(product_revenue_eur * 100.0 / nullIf(category_total_eur, 0), 2) AS share_of_category_pct,
-        row_number() OVER (PARTITION BY category ORDER BY product_revenue_eur DESC, product_id ASC) AS rank_in_category
-    FROM base_orders
-)
+-- Calcolo della quota sul totale aziendale con tutte le 8 righe visibili alla finestra
 SELECT
-    product_id,
+    order_id,
     category,
-    product_revenue_eur,
-    share_of_company_pct,
-    share_of_category_pct,
-    rank_in_category
-FROM with_shares
-WHERE category = 'Elettronica'
-  AND rank_in_category <= 3
-ORDER BY rank_in_category ASC;
+    revenue_eur,
+    sum(revenue_eur) OVER () AS total_company_eur,
+    round(revenue_eur * 100 / sum(revenue_eur) OVER (), 1) AS share_pct
+FROM fct_orders
+ORDER BY order_id;
 ```
 
-Separando `base_orders` (aggregazione + filtri comuni), `with_shares` (calcolo dei denominatori globali e di categoria) e la `SELECT` finale (filtro `category = 'Elettronica'` e `rank_in_category <= 3`), ogni prodotto mostra esattamente il proprio peso reale sull'azienda e sulla categoria senza alcuna ambiguità. Questo schema a tre stadi è identico a ciò che conviene adottare nei modelli intermedi di dbt: invece di comprimere filtri, aggregazioni e window functions in un'unica `SELECT` opaca, ogni CTE rappresenta una trasformazione atomica verificabile singolarmente. Se un domani il management chiede di includere anche gli ordini rimborsati nel denominatore aziendale ma non nella classifica di reparto, basterà modificare una sola riga nella CTE corrispondente senza riscrivere l'intera query.
+```text
+order_id  category     revenue_eur  total_company_eur  share_pct
+1         Elettronica  400          1550               25.8
+2         Elettronica  300          1550               19.4
+3         Casa         200          1550               12.9
+4         Casa         150          1550               9.7
+5         Libri        50           1550               3.2
+6         Elettronica  100          1550               6.5
+7         Casa         250          1550               16.1
+8         Libri        100          1550               6.5
+```
 
-## Quando usare CTE esplicite vs QUALIFY
+Ora il calcolo a mano. L'ordine 1 pesa 400 / 1.550 = 25,8%; l'ordine 2 pesa 300 / 1.550 = 19,4%; l'ordine 6 pesa 100 / 1.550 = 6,5%. Sommando le tre quote di Elettronica si ottiene 25,8 + 19,4 + 6,5 = 51,7%, che differisce di un decimo dal 51,6% esatto solo per l'arrotondamento di ogni singola riga. Il confronto con la versione sbagliata è netto: l'ordine 1 passa dal 50% al 25,8%, perché il denominatore sale da 800 a 1.550 euro, cioè quasi il doppio.
 
-Per filtrare il risultato di una window function (`row_number() = 1`, `rank <= 5`), potete scegliere tra **una CTE esterna con `WHERE`** oppure **la clausola `QUALIFY`** direttamente nella query.
+Per mostrare solo Elettronica senza toccare il denominatore, il filtro si sposta fuori, in una CTE che calcola prima e filtra dopo.
 
-Il criterio di scelta è netto: **usate `QUALIFY` per query rapide di esplorazione o deduplicazione singola su motori che lo supportano nativamente (ClickHouse, DuckDB, BigQuery, Snowflake), usate invece CTE esplicite e nominate quando la query ha più livelli di calcolo (es. denominatori globali prima di filtri locali) o deve restare portabile su PostgreSQL e altri motori tradizionali.**
+```sql
+-- Prima calcola (fase 5 nella CTE), poi filtra il segmento nella SELECT esterna
+WITH shares AS (
+    SELECT
+        order_id,
+        category,
+        revenue_eur,
+        sum(revenue_eur) OVER () AS total_company_eur,
+        round(revenue_eur * 100 / sum(revenue_eur) OVER (), 1) AS share_pct
+    FROM fct_orders
+)
+SELECT *
+FROM shares
+WHERE category = 'Elettronica'
+ORDER BY order_id;
+```
 
-La confusione comune consiste nell'impilare sottoquery annidate anonime (`SELECT * FROM (SELECT * FROM (...))`) che rendono illeggibile l'ordine logico: le CTE nominate dall'alto verso il basso rispecchiano esattamente il flusso dei dati.
+La differenza con la query sbagliata sta tutta nella posizione del filtro, e il costo è una CTE in più.
 
-## Cinque domande prima di eseguire una query analitica complessa
+Il risultato mostra le stesse tre righe di Elettronica, con quote 25,8, 19,4 e 6,5 e un denominatore di 1.550 euro. Il filtro di segmento ora agisce su una tabella già calcolata, e la finestra ha visto tutte e otto le righe.
 
-1. Avete verificato quali filtri nel `WHERE` tagliano le righe **prima** che le window functions calcolino totali o medie mobili?
-2. Se la query combina `GROUP BY` e `OVER (...)`, è chiaro che la window function sta operando sui **gruppi già aggregati** e non sulle righe originali?
-3. I denominatori globali (`share_of_company_pct`) sono calcolati in una CTE precedente rispetto ai filtri di segmento?
-4. Ogni ordinamento dentro `OVER (ORDER BY ...)` include una chiave di spareggio univoca (`product_id ASC`) per evitare risultati non deterministici?
-5. Avete verificato su un piccolo campione di righe che la somma delle quote parziali quadri esattamente con il totale non filtrato?
+## GROUP BY e OVER nella stessa query
 
-La metrica di controllo più semplice è la **quadratura dei totali**: la somma di `share_of_company_pct` su tutte le categorie deve restituire esattamente `100.00%`, mai `100.00%` per ciascuna categoria filtrata. Per consolidare questo approccio, applicate la separazione tra filtri globali e filtri di segmento anche nei vostri modelli `stg_` e `int_` di dbt, così che nessuna dashboard erediti denominatori distorti.
+Quando una query contiene sia `GROUP BY` sia una window function, la fase 3 viene prima della 5. Le aggregazioni collassano le righe in gruppi, e la finestra lavora poi sui gruppi. È per questo che `rank() OVER (ORDER BY sum(revenue_eur) DESC)` è valida: il `sum` esiste già quando la finestra parte. Al contrario, annidare una window function dentro un aggregato, come `sum(rank() OVER (...))`, non ha senso logico, perché l'aggregato appartiene alla fase 3 e la finestra alla 5.
+
+```sql
+-- GROUP BY (fase 3) crea 3 gruppi, poi OVER (fase 5) li classifica e calcola la quota
+SELECT
+    category,
+    sum(revenue_eur) AS category_eur,
+    rank() OVER (ORDER BY sum(revenue_eur) DESC) AS rnk,
+    round(sum(revenue_eur) * 100 / sum(sum(revenue_eur)) OVER (), 1) AS share_pct
+FROM fct_orders
+GROUP BY category
+ORDER BY rnk;
+```
+
+```text
+category     category_eur  rnk  share_pct
+Elettronica  800           1    51.6
+Casa         600           2    38.7
+Libri        150           3    9.7
+```
+
+La finestra qui vede tre righe, non otto. Leggi il risultato come una tabella di sintesi, non come un elenco di ordini.
+
+Il totale 800 + 600 + 150 = 1.550 euro quadra con il conto iniziale, e le tre quote sommano 51,6 + 38,7 + 9,7 = 100,0%. Il controllo di quadratura funziona anche come test: se la somma delle quote di tutte le categorie non fa 100, un filtro è finito nella fase sbagliata.
+
+## Tre trappole di ordine che falsano i report
+
+### Il filtro di segmento che restringe il denominatore
+
+Il sintomo è quello del caso d'apertura: quote che sommano sempre a 100 dentro ogni filtro di reparto, o cumulati che ripartono da zero a ogni mese filtrato. Succede perché scrivere `WHERE` e `OVER` nella stessa `SELECT` sembra naturale, e il risultato è plausibile a occhio. La correzione è calcolare le metriche di contesto in una CTE senza il filtro di segmento e applicarlo solo nella `SELECT` finale.
+
+### L'alias usato come se esistesse già
+
+Scrivere `WHERE iva > 10` dopo aver definito `revenue_eur * 0.22 AS iva` fallisce in molti dialetti, perché `WHERE` gira prima che la `SELECT` crei l'alias. ClickHouse lo tollera, e proprio per questo la query funziona in sviluppo e si rompe quando la porti su PostgreSQL. Il sintomo è un errore di colonna sconosciuta dopo una migrazione; la correzione è ripetere l'espressione nel `WHERE` oppure spostarla in una CTE.
+
+### LIMIT senza un ordine che lo renda deterministico
+
+`LIMIT 1` per prendere l'ultimo evento, senza `ORDER BY` e senza una chiave di spareggio, restituisce una riga che dipende dall'ordine fisico dei blocchi e cambia tra un'esecuzione e l'altra. Il sintomo è un dato che ballerebbe tra due refresh consecutivi della stessa dashboard. La correzione è ordinare per tempo decrescente e aggiungere un identificativo univoco come ultima chiave, oppure usare `QUALIFY row_number() OVER (...) = 1`.
+
+## CTE nominate o QUALIFY
+
+Per filtrare il risultato di una window function hai due strade. `QUALIFY` è una clausola della fase 6 e la trovi in ClickHouse, DuckDB, BigQuery e Snowflake: scrivi la condizione direttamente accanto alla finestra, senza sottoquery.
+
+```sql
+-- QUALIFY filtra dopo OVER: l'ordine più grande di ogni categoria, spareggio su order_id
+SELECT category, order_id, revenue_eur
+FROM fct_orders
+QUALIFY row_number() OVER (PARTITION BY category ORDER BY revenue_eur DESC, order_id) = 1
+ORDER BY category;
+```
+
+Il risultato sono tre righe: l'ordine 7 per Casa (250 euro), l'ordine 1 per Elettronica (400 euro) e l'ordine 8 per Libri (100 euro). Il criterio di scelta è pratico. Usa `QUALIFY` per deduplicazioni e classifiche semplici, dove la query ha un solo livello di calcolo. Usa CTE nominate quando servono più livelli, come nel caso del denominatore globale calcolato prima del filtro di segmento, o quando la query deve restare portabile su motori che non supportano `QUALIFY`. Evita invece le sottoquery anonime annidate: una CTE con un nome racconta lo stadio della pipeline, tre `SELECT * FROM (...)` impilate no.
+
+## Dove si colloca questa lezione nel modulo
+
+Questa è la lezione di orientamento: i meccanismi che spiega tornano in tutte le altre. Il modulo procede in questo ordine di dipendenza. Prima vengono le basi: la logica insiemistica delle join, poi ranking e deduplicazione con `row_number`. Seguono le funzioni sequenziali (`lag`, `lead`, cumulati), le aggregazioni su finestra con la matrice di coorte e le funzioni di bordo con `first_value`, `last_value` e `ntile`. Poi arrivano gli esercizi di sessionizzazione, la date spine con le metriche temporali, i percorsi e le coorti, il funnel, e infine pivot, anomalie e il caso di studio.
+
+Un criterio di navigazione utile: quando una query ti restituisce un numero plausibile ma diverso da quello atteso, risali alla fase in cui è nato il problema. Se è un denominatore sbagliato, rileggi questa lezione. Se è un valore di bordo che sembra la riga corrente, vai a quella sui frame. Se è un confronto con il periodo precedente spostato, ti serve la date spine.
+
+Il modulo è pensato per essere percorso in ordine la prima volta e consultato a salti le volte successive. Ogni lezione parte da un guasto concreto, mostra la tabella di ingresso, le righe intermedie e il risultato, così puoi verificare a mano ogni passaggio.
+
+## Controllo prima di eseguire una query analitica
+
+1. Una query calcola `sum(revenue_eur) OVER ()` e ha `WHERE category = 'Casa'` nella stessa `SELECT`. A quale totale si riferisce il denominatore?
+
+<details>
+<summary>Mostra risposta</summary>
+
+Al totale della sola categoria Casa. `WHERE` è alla fase 2 e la finestra alla fase 5, quindi le righe di Elettronica e Libri non esistono più quando `OVER` calcola. Con i dati della lezione il denominatore sarebbe 600 euro invece di 1.550.
+
+</details>
+
+2. Perché `HAVING category_eur > 200` non può filtrare un `rank() OVER (...)` calcolato nella stessa query?
+
+<details>
+<summary>Mostra risposta</summary>
+
+Perché `HAVING` appartiene alla fase 4 e `rank() OVER` alla fase 5: quando il filtro agisce, il rango non è ancora stato calcolato. Per filtrare sul rango serve `QUALIFY` oppure una CTE esterna con `WHERE rnk <= N`.
+
+</details>
+
+3. La somma delle quote per categoria dà 100% in ogni singola query filtrata per reparto. Che cosa indica?
+
+<details>
+<summary>Mostra risposta</summary>
+
+Indica che il filtro di reparto è nella stessa `SELECT` della finestra e restringe il denominatore. La quadratura corretta è la somma delle quote di tutte le categorie su un denominatore unico: 51,6 + 38,7 + 9,7 = 100,0% sui 1.550 euro aziendali.
+
+</details>
+
+4. In quale caso sceglieresti `QUALIFY` e in quale una CTE nominata?
+
+<details>
+<summary>Mostra risposta</summary>
+
+`QUALIFY` per una deduplicazione o una classifica con un solo livello di calcolo, su un motore che lo supporta. CTE nominata quando devi calcolare denominatori globali prima dei filtri di segmento, quando la query ha più stadi o quando deve restare portabile su PostgreSQL.
+
+</details>

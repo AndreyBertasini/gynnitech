@@ -1,8 +1,6 @@
 ---
 title: "Test, refactoring e pattern SQL riusabili"
-description: >-
-  Test di integrità e statistici per query SQL, refactoring in CTE con grain
-  dichiarato e pattern riusabili centralizzati in modelli intermedi testati.
+description: "Scheda di riferimento del modulo: come dichiarare il grain di ogni CTE, pre-aggregare le tabelle 1:N prima della join e scrivere test ClickHouse che restituiscono zero righe, con la mappa dei pattern nelle altre lezioni."
 module: "Modulo 14: SQL avanzato per l'analisi"
 order: 13
 category: Tecnico
@@ -11,149 +9,191 @@ headerImageAlt: >-
   Cheat Sheet - Window Functions per Analytics - immagine ufficiale della
   lezione su GinnyTech, creata da AD
 difficulty: advanced
-duration: 22 min
+duration: "30 min"
 prerequisites:
   - advanced-sql/anomalie-pareto-e-segmentazione
 learningObjectives:
-  - Scrivere test di integrità su chiavi, nulli e relazioni che restituiscono zero righe a ogni esecuzione
-  - Refactoring di query in CTE con grain dichiarato e pattern riusabili centralizzati in un modello testato
+  - "Individuare un fan-out causato da una LEFT JOIN verso una tabella 1:N e correggerlo pre-aggregando al grain della tabella padre"
+  - "Scrivere test SQL che restituiscono zero righe su dati sani per unicità, importi non validi, orfani e quadratura dei totali"
+  - "Scegliere nel modulo la lezione che spiega il pattern necessario a una query da rifattorizzare"
 binario: "ml-tabellare"
-formato: "articolo"
-autore: "Hermes"
-controllatoDa: "Argo"
-autorizzatoDa: "Giano"
 draft: false
-dateModified: 2026-11-13
+dateModified: 2026-11-17
+formato: "didattica-v2"
 ---
 
-# Test, refactoring e pattern SQL riusabili
+Scenario costruito con numeri di esempio: una query di 280 righe, scritta mesi fa, contiene cinque subquery annidate e nessun commento sul livello di dettaglio delle tabelle. Il fatturato di ottobre risulta più alto del previsto, ma nessuno osa toccare il codice. Quando uno sviluppatore aggiunge una `LEFT JOIN` verso la tabella dei coupon per esporre il codice sconto, un ordine con due coupon compare due volte e il suo ricavo viene contato due volte. Nell'estratto che useremo, 360 euro di ricavi diventano 480 euro, un aumento del 33% generato da una sola riga.
 
-Una query di 280 righe scritta mesi fa con cinque subquery annidate produce un fatturato mensile più alto del 12% rispetto al mese precedente, ma nessuno nel team osa toccarla perché non ha commenti sul *grain* (granularità) delle tabelle né test automatici di integrità. Quando un nuovo sviluppatore aggiunge una `LEFT JOIN` verso la tabella delle promozioni per estrarre il codice sconto, duplica silenziosamente gli ordini che hanno usato due coupon nello stesso carrello. La causa non è SQL: è mantenere **query monolitiche prive di CTE con grain dichiarato e prive di test di integrità che restituiscono zero righe quando i dati sono sani**.
+> **Idea chiave:** ogni passaggio di una query ha un grain, cioè la risposta alla domanda "che cosa rappresenta una riga"; dichiararlo in un commento, portare tutte le tabelle allo stesso grain prima della join e proteggerlo con test che restituiscono zero righe evita quasi tutti gli errori silenziosi.
 
-## Fatturato gonfiato del 12% per una LEFT JOIN su coupon multipli
+## Quattro difese per una query di produzione
 
-Questo è un caso ricostruito con numeri di esempio su quanto accade quando una query SQL complessa non dichiara il proprio livello di granularità e non esegue test automatici di unicità e riconciliazione.
+La qualità di una query analitica non dipende da quanto sia raffinata ma da quanto sia verificabile. Le difese seguenti si applicano in sequenza e ognuna intercetta una famiglia diversa di errori.
 
-Ogni query di produzione dovrebbe rispettare quattro livelli di controllo e modularità:
-
-| Livello di controllo | Cosa verifica | Regola operativa | Output atteso |
+| Difesa | Che cosa verifica | Come si scrive | Esito atteso |
 | :--- | :--- | :--- | :--- |
-| **Test di unicità e `not_null`** | Nessun duplicato sulla chiave primaria del modello | `GROUP BY pk HAVING count() > 1` | `0` righe restituite |
-| **Test di integrità referenziale** | Nessun record orfano verso la tabella padre | `LEFT JOIN` + `WHERE parent.id IS NULL` | `0` righe restituite |
-| **Test di quadratura / invarianti** | Conservazione dei totali dopo JOIN o deduplica | `abs(sum_after - sum_before) > 0.01` | `0` righe restituite |
-| **Refactoring in CTE con grain** | Ogni CTE dichiara esplicitamente 1 riga = cosa | Commento `-- Grain: 1 row per order_id` | Leggibilità e zero fan-out |
+| Grain dichiarato | Una riga rappresenta sempre la stessa entità | Commento `-- Grain: 1 row per order_id` su ogni CTE | Leggibilità e debug rapido |
+| Pre-aggregazione | Le tabelle 1:N non moltiplicano le righe della tabella padre | `GROUP BY` sulla chiave padre prima della join | Nessun fan-out |
+| Test a zero righe | Chiavi uniche, importi validi, nessun orfano | Query che restituisce solo le righe che violano la regola | 0 righe |
+| Test di quadratura | Il totale non cambia dopo join e trasformazioni | Confronto tra la somma prima e dopo | 0 righe |
 
-Adottare la convenzione **"zero righe = test superato"** rende ogni controllo SQL immediatamente integrabile in dbt, in CI/CD o in uno script di monitoraggio schedulato.
+La convenzione "zero righe significa test superato" ha un vantaggio pratico: la stessa query serve da test automatico in una pipeline e da report diagnostico quando fallisce, perché mostra già le chiavi colpevoli. Un test che stampa solo un conteggio obbliga qualcuno a leggere il numero e a decidere se è normale.
 
-## Test SQL a zero righe, refactoring in CTE con grain e pattern riusabili
+## Il fan-out con i numeri
 
-Il primo meccanismo è il **test di integrità a zero righe**. Invece di scrivere query di controllo che stampano `COUNT(*)` costringendo un umano a leggere il numero, si scrive una query che restituisce **solo le righe violate**. Se la query restituisce `0` righe, il test passa; se restituisce `>= 1` righe, la pipeline si ferma e mostra esattamente gli ID incriminati.
-
-Il secondo meccanismo è il **refactoring in CTE sequenziali con grain dichiarato**. Ogni subquery annidata va estratta in una CTE nominata in modo esplicito (`orders_dedup`, `coupons_agg_by_order`, `orders_enriched`), dichiarando in un commento la granularità esatta (`-- Grain: 1 row per order_id`). Prima di fare qualsiasi `LEFT JOIN`, si aggrega sempre la tabella figlia (`coupons_agg_by_order`) allo stesso grain della tabella padre, eliminando matematicamente ogni rischio di duplicazione (fan-out).
-
-Il terzo meccanismo è la **centralizzazione dei pattern riusabili in modelli intermedi dbt**. Se tre dashboard diverse hanno bisogno della deduplica degli ordini o della sessionizzazione degli eventi, copiare e incollare la stessa CTE in tre file crea divergenze inevitabili. Il pattern va estratto una sola volta in un modello `int_orders_dedup` testato, e tutte le query a valle leggono da lì.
-
-**Dichiarate il grain di ogni CTE, aggregate le tabelle figlie prima della JOIN e scrivete test SQL che restituiscono zero righe quando i dati rispettano i vincoli.**
-
-## Tre errori comuni nel refactoring e nei test SQL
-
-Il blocco SQL qui sotto mostra l'errore tipico di una query monolitica che esegue una `LEFT JOIN` diretta verso una tabella `1:N` senza pre-aggregare, generando duplicati silenziosi:
+Per vedere il problema servono due tabelle piccole. `fct_orders` contiene 5 ordini, di cui 4 pagati e uno annullato; `fct_order_coupons` ha 4 righe: un coupon sull'ordine 1, due sull'ordine 3 e un coupon che riferisce un ordine 9 inesistente.
 
 ```sql
--- ERRORE 1: LEFT JOIN diretta su order_coupons (1 ordine -> N coupon) duplica o.revenue_eur!
--- ERRORE 2: nessuna CTE nominata né grain dichiarato -> impossibile fare debug!
-SELECT
-    o.order_id,
-    o.revenue_eur,
-    c.coupon_code
-FROM analytics_prod.fct_orders AS o
-LEFT JOIN analytics_prod.fct_order_coupons AS c
-    ON o.order_id = c.order_id;
+-- Ordini (1 riga per order_id) e coupon applicati (0 o più righe per ordine)
+CREATE TABLE fct_orders (order_id UInt32, customer_id UInt32, order_date Date, revenue_eur Decimal(10,2), status String) ENGINE = MergeTree ORDER BY order_id;
+INSERT INTO fct_orders VALUES
+(1, 10, '2026-10-02', 100.00, 'paid'), (2, 11, '2026-10-03', 80.00, 'paid'), (3, 12, '2026-10-05', 120.00, 'paid'),
+(4, 10, '2026-10-09', 60.00, 'paid'), (5, 13, '2026-10-12', 40.00, 'cancelled');
+
+CREATE TABLE fct_order_coupons (order_id UInt32, coupon_code String, discount_eur Decimal(10,2)) ENGINE = MergeTree ORDER BY order_id;
+INSERT INTO fct_order_coupons VALUES (1, 'WELCOME10', 10.00), (3, 'SPRING5', 5.00), (3, 'VIP15', 15.00), (9, 'GHOST', 5.00);
 ```
 
-### Fare JOIN prima di aggregare le tabelle con relazione 1:N
-
-Unire `fct_orders` (`1` riga per ordine) con `fct_order_coupons` (`N` righe per ordine) moltiplica `o.revenue_eur` per `N`. La regola ferrea è: **prima** aggregate `fct_order_coupons` per `order_id` (es. `groupArray(coupon_code)` o `sum(discount_eur)`), **poi** eseguite la `LEFT JOIN`.
-
-### Scrivere test che controllano solo se la tabella non è vuota
-
-Verificare `COUNT(*) > 0` non intercetta duplicati, valori negativi assurdi né rotture di quadratura. I test utili verificano invarianti specifici di business: `revenue_eur < 0` dove non ammesso, `shipped_at < ordered_at`, o duplicati sulla chiave primaria.
-
-### Copiare e incollare la stessa logica di deduplica o window function in 10 query diverse
-
-Duplicare blocchi SQL identici in più dashboard garantisce che alla prima modifica di regola di business (es. nuovo stato `'partially_refunded'`) almeno metà delle query resti disallineata. Centralizzate la logica una volta sola in un modello intermedio o in una macro dbt.
-
-## Suite di test a zero righe e refactoring sicuro in ClickHouse
-
-Per trasformare una query fragile in un modello robusto e verificato in ClickHouse, applicate questi quattro passi:
-
-1. Dichiarate il grain di partenza (`1 row per order_id`) e pre-aggregate ogni tabella `1:N` in una CTE dedicata prima della `JOIN`.
-2. Costruite la CTE finale unendo solo tabelle già portate allo stesso grain.
-3. Eseguite una suite di test che restituisce **zero righe** per unicità, integrità e invarianti temporali.
-4. Centralizzate il modello pulito come vista o tabella intermedia riusabile.
-
-Ecco l'implementazione SQL completa in ClickHouse:
+La query ingenua somma i ricavi dopo aver unito le due tabelle. Funziona finché ogni ordine ha al massimo un coupon.
 
 ```sql
--- Refactoring sicuro con pre-aggregazione 1:N e suite di test a zero righe:
+-- ERRORE: la join 1:N duplica il ricavo dell'ordine 3, che ha due coupon
+SELECT sum(o.revenue_eur) AS revenue_eur, count() AS rows_n
+FROM fct_orders AS o
+LEFT JOIN fct_order_coupons AS c ON o.order_id = c.order_id
+WHERE o.status = 'paid';
+```
+
+Il risultato è 480 euro su 5 righe. Il valore corretto è la somma dei ricavi pagati: 100 + 80 + 120 + 60 = 360 euro su 4 ordini. La differenza di 120 euro è esattamente il ricavo dell'ordine 3, contato due volte perché la join produce una riga per coupon. Il rapporto 480 / 360 = 1,33 dà l'aumento del 33% citato all'inizio.
+
+Il numero sbagliato, inoltre, è plausibile: 480 euro non sembrano assurdi a chi non conosce il valore corretto.
+
+Questo errore non genera mai un messaggio: la query gira, il numero è plausibile e si nota soltanto confrontandolo con un'altra fonte.
+
+## Refactoring in CTE con grain dichiarato
+
+La cura è pre-aggregare la tabella figlia al grain della tabella padre. Ogni CTE porta un commento con il proprio grain, in modo che chi legge dall'alto verso il basso sappia sempre che cosa rappresenta una riga.
+
+```sql
+-- Join sicura: la tabella dei coupon viene portata a 1 riga per ordine prima della join
 WITH coupons_by_order AS (
     -- Grain: 1 row per order_id
-    SELECT
-        order_id,
-        count() AS coupons_applied_count,
-        sum(discount_eur) AS total_coupon_discount_eur,
-        arrayStringConcat(groupArray(coupon_code), ', ') AS coupon_codes_list
-    FROM analytics_prod.fct_order_coupons
+    SELECT order_id, count() AS coupons_applied, sum(discount_eur) AS discount_eur
+    FROM fct_order_coupons
     GROUP BY order_id
 ),
 orders_enriched AS (
     -- Grain: 1 row per order_id
-    SELECT
-        o.order_id,
-        o.customer_id,
-        o.order_date,
-        o.revenue_eur,
-        coalesce(c.coupons_applied_count, 0) AS coupons_applied_count,
-        coalesce(c.total_coupon_discount_eur, 0.00) AS total_coupon_discount_eur,
-        coalesce(c.coupon_codes_list, '') AS coupon_codes_list
-    FROM analytics_prod.fct_orders AS o
-    LEFT JOIN coupons_by_order AS c
-        ON o.order_id = c.order_id
+    SELECT o.order_id, o.revenue_eur,
+           ifNull(c.coupons_applied, 0) AS coupons_applied,
+           ifNull(c.discount_eur, 0) AS discount_eur
+    FROM fct_orders AS o
+    LEFT JOIN coupons_by_order AS c ON o.order_id = c.order_id
     WHERE o.status = 'paid'
 )
--- Test di integrità a zero righe: restituisce solo eventuali violazioni di unicità o importo!
-SELECT
-    order_id,
-    'DUPLICATE_OR_INVALID_REVENUE' AS test_failure_reason,
-    count() AS row_count,
-    min(revenue_eur) AS min_rev
-FROM orders_enriched
-GROUP BY order_id
-HAVING row_count > 1 OR min_rev < 0;
+SELECT sum(revenue_eur) AS revenue_eur, sum(discount_eur) AS discount_eur, count() AS orders
+FROM orders_enriched;
 ```
 
-In questa query `coupons_by_order` riduce la cardinalità `1:N` a `1:1` prima della `LEFT JOIN`, rendendo impossibile qualsiasi fan-out su `revenue_eur`, mentre il blocco finale verifica in un colpo solo l'unicità di `order_id` e l'assenza di ricavi negativi restituendo `0` righe su dati sani.
+L'output è 360 euro di ricavi, 30 euro di sconti e 4 ordini. Lo sconto totale si controlla a mano: 10 sull'ordine 1 più 5 e 15 sull'ordine 3 fa 30 euro, e il coupon sull'ordine inesistente 9 non entra perché la `LEFT JOIN` parte dagli ordini. Il coupon orfano non altera il calcolo, ma resta un segnale: indica un dato incoerente a monte, e per questo servono i test.
 
-Per rendere questo approccio scalabile su tutto il progetto analytics, organizzate i test a zero righe in tre categorie eseguite a ogni pull request e a ogni run notturno: test di schema (`unique`, `not_null`, `accepted_values`), test di relazione tra tabelle padre e figlie, e test di quadratura finanziaria che confrontano i totali prima e dopo le trasformazioni critiche. Quando un test fallisce e restituisce righe, la query stessa funge da report diagnostico immediato perché espone già gli `order_id` o i `customer_id` anomali da ispezionare.
+La stessa struttura risolve il problema delle subquery annidate: ogni subquery diventa una CTE con un nome parlante (`coupons_by_order`, `orders_enriched`), e la query finale si legge come una sequenza di passaggi.
 
-Infine, ricordate che ogni CTE ben nominata con il proprio *grain* dichiarato funge da documentazione vivente per chi erediterà il codice tra sei mesi: un collega può leggere la sequenza dall'alto verso il basso e capire in trenta secondi dove entra il dato grezzo, dove avviene l'aggregazione `1:N` e dove viene garantita l'unicità finale. Questa disciplina trasforma l'SQL analitico da script fragili in vera ingegneria del software.
+## Test a zero righe
 
-## Test SQL a zero righe in dbt vs controlli manuali in BI
+I test si scrivono con le stesse tabelle e girano in pochi millisecondi anche su milioni di righe, perché usano aggregazioni semplici.
 
-Per garantire la qualità dei dati nel tempo, potete **integrare test SQL a zero righe nella pipeline dbt/CI** oppure **controllare i grafici manualmente in BI dopo il rilascio**.
+Un test utile non controlla che la tabella non sia vuota, ma verifica una regola di business e restituisce le righe che la violano. Il primo blocco raccoglie tre test in una sola query con `UNION ALL`: unicità della chiave, importi negativi, coupon senza ordine.
 
-Il criterio di scelta è netto: **automatizzate sempre i test di unicità, integrità referenziale e quadratura in dbt (`dbt test`) o in CI prima che i dati raggiungano le dashboard, perché un errore di fan-out o un duplicato non deve mai essere scoperto dal direttore finanziario durante una riunione.**
+```sql
+-- Suite di test: ogni riga restituita è una violazione, zero righe significa dati sani
+SELECT 'DUPLICATE_ORDER_ID' AS test, order_id AS key
+FROM fct_orders GROUP BY order_id HAVING count() > 1
+UNION ALL
+SELECT 'NEGATIVE_REVENUE', order_id FROM fct_orders WHERE revenue_eur < 0
+UNION ALL
+SELECT 'ORPHAN_COUPON', order_id FROM fct_order_coupons
+WHERE order_id NOT IN (SELECT order_id FROM fct_orders);
+```
 
-La confusione comune consiste nel pensare che i test rallentino lo sviluppo: in realtà, una suite di 5 test a zero righe richiede pochi secondi di esecuzione e risparmia ore di debug quando cambia una tabella sorgente.
+Sui dati dell'esempio la query restituisce una sola riga, `ORPHAN_COUPON` con chiave 9, cioè il coupon `GHOST`. Il test di quadratura confronta invece la somma dei ricavi prima e dopo la join e fallisce quando i totali divergono.
 
-## Cinque domande prima di promuovere una query SQL in produzione
+```sql
+-- Test di quadratura: i ricavi non devono cambiare dopo la join con i coupon
+SELECT 'FANOUT_REVENUE' AS test, abs(a.before_eur - b.after_eur) AS delta_eur
+FROM (SELECT sum(revenue_eur) AS before_eur FROM fct_orders WHERE status = 'paid') AS a,
+     (SELECT sum(o.revenue_eur) AS after_eur
+      FROM fct_orders AS o
+      LEFT JOIN fct_order_coupons AS c ON o.order_id = c.order_id
+      WHERE o.status = 'paid') AS b
+WHERE abs(a.before_eur - b.after_eur) > 0.01;
+```
 
-1. Ogni CTE della query dichiara esplicitamente il proprio *grain* (`1 row per ...`)?
-2. Tutte le tabelle con relazione `1:N` sono state pre-aggregate al grain padre **prima** della `LEFT JOIN`?
-3. Esiste un test automatico a zero righe che verifica l'unicità della chiave primaria finale?
-4. Esiste un test di quadratura che confronta il totale dei ricavi prima e dopo le `JOIN`?
-5. La logica condivisa (deduplica, sessionizzazione, attribuzione) è centralizzata in un solo modello riusabile?
+Eseguito sulla query ingenua, il test restituisce `FANOUT_REVENUE` con scarto di 120 euro. Applicato al modello corretto, che non contiene la join diretta, non restituisce nulla. La soglia di 0,01 euro assorbe gli arrotondamenti, ma niente di più.
 
-La metrica di controllo della qualità SQL è il **Test Failure Row Count**: ogni test di integrità, unicità e quadratura deve restituire esattamente **`0` righe** ad ogni esecuzione della pipeline.
+## Dove trovare ogni pattern nel modulo
 
-Integrare questo standard nel flusso di lavoro quotidiano significa che nessuna modifica a una query o a una tabella sorgente può rompere silenziosamente un KPI esposto in dashboard. Ogni volta che introducete una nuova trasformazione o un nuovo join, la prima domanda non è "il risultato sembra plausibile?", ma "quale test a zero righe dimostra matematicamente che il *grain* è preservato e che i totali quadrano?". Quando tutto il team adotta questa disciplina, i numeri aziendali smettono di essere oggetto di discussione in riunione e diventano una base affidabile, verificabile e condivisa per decidere in modo rapido.
+Questa scheda indica quale lezione approfondisce ciascun pattern che ti serve per rifattorizzare una query. Le lezioni sono elencate nell'ordine del modulo, e restano fuori quelle di contorno, come la sessionizzazione, i funnel e le date spine, che non intervengono nei test di questa scheda.
+
+La mappa non sostituisce la lettura: serve per decidere in pochi secondi dove cercare.
+
+| Ordine | Lezione | Pattern che puoi riusare |
+| ---: | :--- | :--- |
+| 1 | [Ordine logico di esecuzione](/course/advanced-sql/indice-window-functions/) | Dove un filtro agisce prima o dopo l'aggregazione |
+| 2 | [Join avanzate e logica insiemistica](/course/advanced-sql/window-functions-avanzate/) | Semi-join e anti-join per orfani e test di integrità |
+| 3 | [Ranking e deduplicazione](/course/advanced-sql/ranking-e-deduplicazione/) | `row_number` per scegliere una riga per chiave |
+| 4 | [LAG, LEAD e totali cumulativi](/course/advanced-sql/lag-lead-e-analisi-sequenziale/) | Confronti con la riga precedente e somme progressive |
+| 5 | [Matrice di coorte](/course/advanced-sql/aggregazioni-su-finestra/) | Denominatore fisso con una finestra |
+| 9 | [Coorti, attribuzione e percorsi](/course/advanced-sql/coorti-e-retention/) | Crediti che quadrano con il ricavo |
+| 11 | [Pivot, ROLLUP e KPI table](/course/advanced-sql/pivot-rollup-e-kpi-table/) | Totali e sottototali per il reporting |
+| 12 | [Anomalie, Pareto e RFM](/course/advanced-sql/anomalie-pareto-e-segmentazione/) | Z-score, curva cumulata e controllo |
+| 14 | [Caso studio](/course/advanced-sql/caso-studio/) | Deduplica, quarantena e riconciliazione |
+
+Quando una query da rifattorizzare ti sembra illeggibile, di solito il problema è uno solo, e la tabella ti dice dove cercarlo: un risultato che raddoppia è un fan-out e si risolve con la pre-aggregazione di questa scheda, un conteggio che cambia dopo una deduplica va verificato con il ranking, un totale che non quadra con un'altra fonte si cerca con la riconciliazione del caso studio.
+
+## Tre errori da evitare
+
+Gli errori seguenti sono i più frequenti nelle query ereditate da altri team.
+
+Il primo si riconosce con il test di quadratura della scheda, gli altri due con una revisione del codice e dei test già presenti.
+
+### Aggregare dopo la join invece che prima
+
+Sintomo: ricavi che salgono di colpo quando si aggiunge una colonna descrittiva. Succede perché una tabella con più righe per chiave moltiplica la tabella padre, e la somma successiva conta più volte lo stesso importo. Si corregge portando la tabella figlia al grain del padre con un `GROUP BY` e usando funzioni di aggregazione (`count`, `sum`, `groupArray`) per riassumerne il contenuto.
+
+### Test che controllano solo che la tabella non sia vuota
+
+Sintomo: la pipeline è verde e i numeri sono sbagliati. Succede perché un controllo su `count() > 0` passa anche con duplicati, importi negativi o orfani. Si corregge scrivendo invarianti di business, come chiave unica, ricavo non negativo, data di spedizione non anteriore alla data d'ordine, totale invariato dopo la join.
+
+### La stessa logica copiata in dieci query
+
+Sintomo: due dashboard mostrano valori diversi per lo stesso indicatore. Succede perché una regola, per esempio la deduplica o l'esclusione degli ordini di prova, è stata copiata e poi modificata in una sola delle copie. Si corregge spostandola in un modello intermedio testato, oppure in una vista, da cui tutte le query leggono.
+
+## Controllo prima di promuovere una query
+
+1. In una query una `LEFT JOIN` verso una tabella con più righe per ordine fa passare il ricavo da 360 a 480 euro. Come lo verifichi e come lo correggi?
+
+<details>
+<summary>Mostra risposta</summary>
+
+Confronti la somma dei ricavi prima e dopo la join: 480 - 360 = 120 euro di scarto segnalano un fan-out. Lo correggi aggregando la tabella dei coupon per `order_id` in una CTE a 1 riga per ordine e unendo quella CTE agli ordini.
+
+</details>
+
+2. Un test restituisce 3 righe. È un fallimento o un risultato da leggere?
+
+<details>
+<summary>Mostra risposta</summary>
+
+È un fallimento, perché ogni riga restituita è una violazione della regola. La query mostra già le chiavi da ispezionare, quindi il passo successivo è analizzare quelle 3 righe, non rieseguire il test.
+
+</details>
+
+3. Perché il coupon `GHOST` con ordine 9 non cambia il totale dei ricavi ma il test lo segnala comunque?
+
+<details>
+<summary>Mostra risposta</summary>
+
+La `LEFT JOIN` parte dagli ordini, quindi un coupon senza ordine non produce righe e non altera le somme. Rimane però un dato incoerente a monte, forse un ordine perso, e solo un test di integrità referenziale lo rende visibile.
+
+</details>

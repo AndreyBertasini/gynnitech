@@ -1,183 +1,220 @@
 ---
 title: "Prestazioni e ottimizzazione delle query su S3"
 description: >-
-  Tecniche avanzate per query veloci su data lake: caching, materializzazione, statistiche.
+  Ridurre i byte letti da una tabella Parquet su S3 con ordinamento dei Row Group, statistiche per il join, cache e pre-aggregazioni, misurando il risultato in MB scansionati.
 module: "Modulo 10: Data lake e lakehouse su S3"
 order: 7
 category: Tecnico
 headerImage: /course-headers/s3-data-lake-performance-s3-ginnytech-ad-v3.webp
 headerImageAlt: "Prestazioni e ottimizzazione delle query su S3 - immagine ufficiale della lezione su GinnyTech, creata da AD"
-difficulty: advanced
-duration: 18 min
+difficulty: avanzato
+duration: 40 min
 prerequisites:
   - s3-data-lake/governance
 learningObjectives:
-  - Convertire i dati in Parquet compresso con file tra 200 e 500 MB
-  - Aggiornare le statistiche con ANALYZE e sfruttare cache e pre-aggregazioni
-  - Misurare GB scansionati e latenza prima e dopo l'ottimizzazione
+  - Calcolare i MB letti da una query prima e dopo l'ordinamento dei Row Group e riconoscere il peso dei footer Parquet
+  - Verificare con PyArrow che le statistiche min/max dei Row Group siano disgiunte sulla colonna di filtro
+  - Attivare le statistiche di colonna in Glue e il riuso dei risultati in Athena da riga di comando
+  - Scegliere tra ordinamento lineare, Z-order e Bloom filter in base ai filtri reali delle query
 binario: "ml-tabellare"
-formato: "articolo"
-autore: "Hermes"
-controllatoDa: "Argo"
-autorizzatoDa: "Giano"
+formato: "didattica-v2"
 draft: false
-dateModified: 2026-11-13
+dateModified: 2026-11-17
 ---
 
-# Prestazioni e ottimizzazione delle query su S3
+Una query unisce una tabella di fatti da 800 milioni di righe a tre tabelle dimensionali e filtra per un singolo indirizzo email. Impiega 95 secondi e legge 180 GB, a ogni esecuzione, benché i file siano già Parquet e partizionati per mese. Questo è uno scenario costruito con numeri di esempio: il guasto che racconta si incontra spesso quando ci si ferma al partizionamento delle cartelle e si trascura che cosa succede dentro i file.
 
-Una query analitica su S3 unisce una tabella di fatti da 800 milioni di righe con tre tabelle dimensionali e filtra per `customer_email = 'mario.rossi@example.it'`, impiegando 95 secondi e leggendo 180 GB a ogni esecuzione. I file Parquet sono già partizionati per mese, ma non hanno statistiche aggiornate nel catalogo per l'ottimizzatore di join, non hanno indici Bloom filter sulle colonne ad alta cardinalità e non usano la cache locale NVMe del motore di query. La causa non è il limite di velocità di S3: è fermarsi al solo partizionamento delle cartelle ignorando **statistiche CBO (`ANALYZE`), ordinamento/Bloom filter Parquet, cache locale su disco SSD e pre-aggregazioni**.
+## Novantacinque secondi su una tabella già Parquet
 
-## Novantacinque secondi e 180 gigabyte letti nonostante il formato Parquet
+Il dataset delle transazioni del mese pesa 180 GB compressi. L'analista lancia una query con filtro su `customer_email` e su `country_code`, più i join con l'anagrafica punti vendita e con l'anagrafica contratti. L'analisi del piano con `EXPLAIN ANALYZE` mostra tre colli di bottiglia.
 
-Questo è un caso ricostruito con numeri di esempio su quanto accade quando una tabella su S3, pur essendo già in formato Parquet e partizionata per mese, resta lenta sulle query complesse con join e filtri selettivi. Il dataset delle transazioni mensili pesa 180 GB in Parquet compresso.
+Il primo riguarda i dati: le righe sono scritte nell'ordine in cui arrivano, quindi ogni Row Group contiene email di tutto l'alfabeto. Nel footer del file il minimo di `customer_email` è un valore che comincia per `a` e il massimo uno che comincia per `z`, per ogni Row Group di ogni file. Le statistiche min/max non escludono nulla e il motore scarica l'intera colonna dai 700 e più file del mese.
 
-Un analista esegue una query che filtra le transazioni di una manciata di codici fiscali o email e fa join con l'anagrafica punti vendita e l'anagrafica contratti. L'ispezione del piano di esecuzione (`EXPLAIN ANALYZE`) rivela tre colli di bottiglia nascosti:
-1. Poiché il file Parquet non è ordinato per `customer_email` e non ha un indice *Bloom filter*, in ogni singolo Row Group del mese il valore minimo è `'a...'` e il valore massimo è `'z...'`: le statistiche `min/max` non riescono a scartare nessun blocco e il motore deve scaricare l'intera colonna da tutti i file del mese.
-2. Nel catalogo mancano le statistiche sul numero di righe e sulla cardinalità (`ANALYZE TABLE` non è mai stato eseguito): il *Cost-Based Optimizer* (CBO) di Trino/Athena sceglie la strategia di join sbagliata (un pesante *Distributed Hash Join* con ridistribuzione via rete di 800 milioni di righe invece di un veloce *Broadcast Join* della tabella dimensionale).
-3. Ogni volta che la query viene rilanciata a distanza di due minuti, i worker riscaricano da capo i 180 GB da S3 via rete perché la cache su disco locale dei nodi è disattivata.
+Il secondo riguarda il catalogo: non esistono statistiche di cardinalità sulle tabelle, quindi l'ottimizzatore dei join non sa quale tabella è piccola. Sceglie un join con ridistribuzione sulla rete di tutte le 800 milioni di righe, invece del broadcast di una dimensione di poche migliaia di righe.
 
-La causa della lentezza è non aver attivato i quattro moltiplicatori di velocità che operano dopo il *partition pruning*: data skipping interno, statistiche CBO, caching locale e materializzazione.
+Il terzo è la ripetizione: la stessa query rilanciata due minuti dopo riscarica i 180 GB, perché nessuna cache conserva i blocchi già letti.
 
-## Data Skipping (Min/Max e Bloom Filter), Statistiche CBO e Caching NVMe
+> **Idea chiave:** dopo il partition pruning i byte letti si abbattono con quattro leve distinte, ordinamento interno dei file, statistiche per il join, cache e pre-aggregazione, e si verifica ciascuna misurando i MB scansionati prima e dopo.
 
-Portare una query su data lake S3 da oltre un minuto a meno di due secondi richiede di agire in sequenza su quattro livelli fisici.
+## Le quattro leve dopo il pruning
 
-Il primo livello è l'**ottimizzazione fisica del file Parquet (dimensione `200–500 MB`, ordinamento `ORDER BY` e `Bloom Filter`)**. Quando scrivete file Parquet tra 200 e 500 MB ordinati per le colonne di filtro più frequenti (`tenant_id, status`), i valori identici finiscono raggruppati negli stessi Row Group da 128 MB, rendendo strettissimi gli intervalli `[min, max]` nel footer: il motore legge solo i primi kilobyte del footer e salta il 95% dei blocchi tramite HTTP Range Request. Per le colonne ad altissima cardinalità che non sono al primo posto dell'ordinamento (es. `order_id`, `customer_email`, `trace_id`), l'attivazione dei **Parquet Bloom Filters** inserisce nel footer una struttura bit-array compatta che permette al motore di sapere con certezza matematica se `'mario.rossi@example.it'` **non è presente** in quel blocco, evitando di scaricarlo da S3.
+Il pruning delle partizioni toglie le cartelle fuori intervallo, ma dentro la cartella resta molto da fare. Le quattro leve operano su livelli fisici diversi e vanno applicate in ordine, perché ognuna riduce il lavoro su cui agisce la successiva.
 
-Il secondo livello è l'**aggiornamento delle statistiche per il Cost-Based Optimizer (`ANALYZE TABLE`)**. Motori MPP come Trino, Presto e Athena decidono l'ordine dei join (quale tabella mettere dal lato *probe* e quale dal lato *build* in RAM) basandosi su numero di righe, frazione di `NULL` e numero di valori distinti (`NDV`). Eseguire `ANALYZE` dopo il caricamento popola queste metriche nel catalogo, permettendo al CBO di mettere automaticamente in *broadcast* le tabelle piccole e riordinare i join dal più selettivo al meno selettivo.
-
-Il terzo e quarto livello sono il **Caching locale (Filesystem Cache su NVMe in ClickHouse / Query Result Reuse in Athena)** e le **Pre-aggregazioni (Materialized Views / Rollup)**. Abilitando `enable_filesystem_cache = 1` in ClickHouse su una tabella `s3()`, i blocchi Parquet letti da S3 vengono salvati sui dischi NVMe locali dei nodi: la seconda query legge a 5 GB/s dal disco locale con zero traffico verso S3.
-
-**Le prestazioni estreme su S3 si ottengono solo combinando file Parquet da 200–500 MB ordinati e dotati di Bloom filter, statistiche `ANALYZE` aggiornate per i join, cache locale NVMe e tabelle di rollup per i pattern ripetitivi.**
-
-## Tre errori che castrano la velocità di un query engine su S3
-
-Il blocco SQL qui sotto mostra una configurazione e una query che ignorano ordinamento interno, cache locale su disco e statistiche di join, costringendo il motore a riscaricare tutto da S3 a ogni esecuzione:
-
-```sql
--- ERRORE 1: scrittura di file Parquet su S3 senza ORDER BY (le statistiche min/max dei Row Group
--- coprono sempre l'intero alfabeto 'A'..'Z' e non saltano nemmeno un blocco!).
--- ERRORE 2: interrogazione di S3 con filesystem cache disabilitata (enable_filesystem_cache = 0),
--- riscaricando via rete da S3 gli stessi identici blocchi a ogni singola query!
-SELECT
-    o.country_code,
-    c.segment,
-    count() AS ordini,
-    sum(o.amount_eur) AS ricavo_eur
-FROM s3(
-    'https://s3.eu-central-1.amazonaws.com/acme-lake-prod/curated/orders_unsorted/month=2026-11/*.parquet',
-    'Parquet'
-) AS o
-INNER JOIN s3(
-    'https://s3.eu-central-1.amazonaws.com/acme-lake-prod/curated/customers/*.parquet',
-    'Parquet'
-) AS c
-    ON o.customer_id = c.customer_id
-WHERE o.country_code = 'IT'
-  AND o.customer_email = 'cliente.vip@azienda.it'
-GROUP BY o.country_code, c.segment
-SETTINGS enable_filesystem_cache = 0;
+```mermaid
+flowchart TD
+    A["Partition pruning (cartelle)"] --> B["Data skipping nel file (min/max, Bloom filter)"]
+    B --> C["Statistiche di tabella (ordine e tipo di join)"]
+    C --> D["Cache locale e riuso dei risultati"]
+    D --> E["Pre-aggregazione per i KPI ripetuti"]
 ```
 
-### Scrivere file Parquet senza ordinare i dati per le chiavi di filtro (Min/Max inutilizzabili)
+Il data skipping nel file dipende da come i dati sono scritti. Un file di 256 MB con Row Group da 128 MB espone due intervalli min/max per colonna: se i dati sono ordinati per `country_code` e poi per `customer_email`, quegli intervalli sono stretti e disgiunti tra Row Group diversi. Il motore legge il footer con una richiesta HTTP di tipo Range, confronta il valore cercato con gli intervalli e scarica solo i Row Group che possono contenerlo.
 
-Convertire un file CSV in Parquet con un semplice `SELECT *` senza clausola `ORDER BY` lascia le righe mescolate in modo casuale dentro tutti i Row Group. Se `country_code = 'IT'` è sparso uniformemente in tutte le righe del file, ogni singolo Row Group da 1 milione di righe avrà `min(country_code) = 'AT'` e `max(country_code) = 'US'`: quando la query filtra `WHERE country_code = 'IT'`, l'indice `min/max` del Parquet non può escludere alcun Row Group e il motore è costretto a scaricare e decomprimere il 100% del file da S3.
+Le statistiche di tabella servono al Cost-Based Optimizer, il componente che decide l'ordine dei join e se una tabella va replicata su tutti i worker (broadcast) o se entrambe vanno ridistribuite per chiave. Senza numero di righe e valori distinti, il CBO ripiega su euristiche, e con tabelle grandi l'euristica sbaglia di ordini di grandezza.
 
-### Non eseguire ANALYZE TABLE dopo il caricamento di nuove partizioni in Trino e Athena
+La cache e il riuso dei risultati azzerano la rilettura delle stesse informazioni. La pre-aggregazione, infine, evita di ricalcolare ogni volta le stesse metriche su miliardi di righe quando una dashboard chiede sempre i totali per paese e giorno.
 
-Aggiungere milioni di righe a una tabella nel catalogo Glue senza aggiornare le statistiche delle colonne lascia il *Cost-Based Optimizer* completamente cieco (`rowCount = unknown`). In assenza di statistiche, il motore esegue i join nell'ordine lessicale in cui sono scritti nella query: se per sfortuna due tabelle grandi vengono unite prima di applicare il join con una piccola tabella dimensionale molto selettiva, i worker scambiano centinaia di gigabyte sulla rete andando in errore `EXCEEDED_MEMORY_LIMIT`.
+## Ordinare i dati e controllare i Row Group con PyArrow
 
-### Rileggere continuamente da S3 i dati caldi senza attivare la cache NVMe o il Result Reuse
+Il controllo più rapido sulla qualità dell'ordinamento è leggere le statistiche dei Row Group di un file campione. Il blocco seguente scrive un file ordinato e stampa, per ogni Row Group, minimo e massimo della colonna di filtro:
 
-Per le query esplorative e le dashboard che interrogano decine di volte le partizioni degli ultimi 7 giorni, andare su S3 via HTTP a ogni esecuzione spreca tempo e denaro. In ClickHouse non attivare `filesystem_cache` sulle letture S3 (o in Athena non abilitare il *Query Result Reuse* con durata di 15–60 minuti per i report identici) moltiplica per dieci la latenza mediana (`p50`) percepita dagli utenti.
+```python
+# Scrive un campione ordinato e verifica che i Row Group abbiano intervalli disgiunti
+import pyarrow.parquet as pq
 
-## Parquet ordinato da 256 MB, Filesystem Cache NVMe e verifica dei byte risparmiati
+table = pq.read_table("orders_sample.parquet")
 
-Per ottimizzare metodicamente una tabella lenta su S3 e misurare con rigore il guadagno ottenuto, applicate questi quattro passi in ordine di priorità:
+# Ordinamento per le colonne di filtro più selettive, nello stesso ordine del WHERE
+table = table.sort_by([("country_code", "ascending"), ("customer_email", "ascending")])
 
-1. Riscrivete/compattate le partizioni in file **Parquet ZSTD da 200–500 MB** ordinati per le colonne di filtro (`ORDER BY country_code, customer_email`) e abilitate gli indici dei Row Group / Bloom filter.
-2. In Trino/Athena/Iceberg eseguite **`ANALYZE table_name`** dopo ogni caricamento per aggiornare le statistiche CBO di cardinalità e distribuzione.
-3. In ClickHouse abilitate la **Filesystem Cache locale su SSD NVMe** (`enable_filesystem_cache = 1`) o create una tabella di pre-aggregazione per i KPI più richiesti.
-4. Misurate sempre il **prima e dopo** confrontando `read_bytes` (GB scansionati da S3), `query_duration_ms` e i colpi in cache (`ProfileEvents['S3ReadBytes']` vs `CachedReadBufferReadFromCacheBytes`) in `system.query_log`.
-
-Ecco il codice SQL completo per creare il file Parquet ordinato, interrogarlo con la cache S3 attiva e misurare scientificamente il miglioramento in `system.query_log`:
-
-```sql
--- 1. Scrittura ottimizzata su S3: Parquet ZSTD ordinato per (country_code, customer_email)
--- così che i Row Group abbiano min/max disgiunti e permettano il salto del 99% dei blocchi:
-INSERT INTO FUNCTION s3(
-    'https://s3.eu-central-1.amazonaws.com/acme-lake-prod/curated/orders_sorted/month=2026-11/part_256mb_01.parquet',
-    'Parquet'
+pq.write_table(
+    table,
+    "orders_sorted.parquet",
+    compression="zstd",
+    row_group_size=500_000,
+    write_statistics=True,
 )
-SETTINGS
-    output_format_parquet_compression_method = 'zstd',
-    output_format_parquet_row_group_size = 500000,
-    output_format_parquet_write_bloom_filter = 1
-SELECT
-    country_code,
-    customer_email,
-    customer_id,
-    order_id,
-    occurred_at,
-    amount_eur
-FROM raw_stream.orders_ingested
-WHERE toYYYYMM(occurred_at) = 202611
-ORDER BY country_code, customer_email;
 
--- 2. Query su S3 con Data Skipping Parquet + Filesystem Cache NVMe attiva:
-SELECT
-    country_code,
-    count() AS ordini_cliente,
-    sum(amount_eur) AS spesa_totale_eur
-FROM s3(
-    'https://s3.eu-central-1.amazonaws.com/acme-lake-prod/curated/orders_sorted/month=2026-11/*.parquet',
-    'Parquet'
-)
-WHERE country_code = 'IT'
-  AND customer_email = 'cliente.vip@azienda.it'
-GROUP BY country_code
-SETTINGS
-    input_format_parquet_filter_push_down = 1,
-    input_format_parquet_bloom_filter_push_down = 1,
-    enable_filesystem_cache = 1,
-    filesystem_cache_name = 's3_nvme_cache';
+meta = pq.ParquetFile("orders_sorted.parquet").metadata
+names = [meta.schema.column(i).name for i in range(meta.num_columns)]
+col = names.index("country_code")
 
--- 3. Benchmark Prima vs Dopo su system.query_log (verifica byte letti da S3, cache hit e durata ms):
-SELECT
-    query_id,
-    query_duration_ms,
-    round(read_bytes / 1048576.0, 2) AS mb_letti_logici,
-    round(ProfileEvents['S3ReadBytes'] / 1048576.0, 2) AS mb_scaricati_da_s3_rete,
-    round(ProfileEvents['CachedReadBufferReadFromCacheBytes'] / 1048576.0, 2) AS mb_serviti_da_cache_nvme
-FROM system.query_log
-WHERE type = 'QueryFinish'
-  AND event_date = today()
-  AND query LIKE '%orders_sorted%'
-ORDER BY event_time DESC
-LIMIT 5;
+for i in range(meta.num_row_groups):
+    stats = meta.row_group(i).column(col).statistics
+    # Intervalli disgiunti tra gruppi consecutivi significa skipping efficace
+    print(i, stats.min, stats.max)
 ```
 
-La tabella restituita da `system.query_log` fornisce la prova matematica dell'ottimizzazione. Prima dell'intervento (Parquet non ordinato, senza Bloom filter né cache), `query_duration_ms` era pari a `95.200 ms` con `mb_scaricati_da_s3_rete = 184.320 MB` (180 GB). Dopo l'ottimizzazione, già alla prima esecuzione a freddo grazie all'`ORDER BY country_code, customer_email` e a `input_format_parquet_bloom_filter_push_down = 1`, ClickHouse salta tutti i Row Group tranne uno, scaricando da S3 appena **`14,2 MB`** in **`620 ms`** (riduzione del **99,99%** dei byte letti e velocità $150\times$ superiore). Alla seconda esecuzione a caldo, `mb_scaricati_da_s3_rete` scende a `0 MB`, `mb_serviti_da_cache_nvme` mostra `14,2 MB` e la durata scende a **`38 ms`**.
+Se l'output mostra, per esempio, il Row Group 0 con intervallo `AT..DE`, il Row Group 1 con `DE..FR` e il Row Group 5 con `IT..IT`, una query con `country_code = 'IT'` scarta quasi tutti i gruppi. Se invece ogni riga stampa `AT US`, le statistiche non servono a niente e l'ordinamento va rifatto.
 
-## Ordinamento lineare (ORDER BY) o Ordinamento multi-dimensionale (Z-Order / Hilbert)
+Le colonne ad alta cardinalità che non stanno ai primi posti dell'ordinamento, come `order_id` o `trace_id`, hanno intervalli ampi anche nei dati ordinati. Per queste i Bloom filter Parquet aggiungono nel footer una struttura compatta che può dire con certezza che un valore non è presente in un blocco. Con Spark si attivano per colonna con l'opzione di scrittura `parquet.bloom.filter.enabled#customer_email`. Un Bloom filter può dare falsi positivi, ma non falsi negativi: nel peggiore dei casi si legge un blocco in più, non si perde una riga.
 
-Quando un file Parquet su S3 viene interrogato frequentemente filtrando su due o tre colonne diverse che non compaiono sempre insieme nel `WHERE` (es. alcune query filtrano solo per `customer_id`, altre solo per `product_id`, altre solo per `postal_code`), bisogna scegliere come ordinare i dati in scrittura tra **Ordinamento Lessicografico Lineare (`ORDER BY col1, col2`)** e **Clustering Multi-Dimensionale (`Z-Order` / curva di Hilbert in Iceberg e Delta Lake)**.
+## Quanti MB legge davvero la query, prima e dopo
 
-Il criterio di scelta è netto: **usate l'ordinamento lineare classico (`ORDER BY col1, col2`) quando quasi tutte le query includono sempre la prima colonna (`col1`, es. `tenant_id` o `country_code`) nella clausola `WHERE`, usate invece lo `Z-Order` (`OPTIMIZE ... ZORDER BY (colA, colB)`) quando avete 2 o 3 colonne ad alta cardinalità interrogate in modo indipendente l'una dall'altra senza un prefisso comune fisso.**
+Esempio numerico svolto sulla tabella del mese, con 1 TB pari a 1.000 GB per semplicità e un prezzo indicativo di 5 USD per TB scansionato (verifica il listino della tua regione):
 
-La confusione comune consiste nel mettere 6 o 7 colonne dentro uno `Z-Order`: poiché le curve space-filling dividono la risoluzione dei bit per il numero di dimensioni, oltre le 3–4 colonne l'efficacia del data skipping dello Z-Order crolla drasticamente e diventa peggiore di un normale `ORDER BY` sulle due colonne principali abbinato a un **Bloom filter** sulle restanti colonne di ricerca puntuale. Sbagliare questa scelta spreca CPU durante la compattazione senza ridurre i byte scansionati.
+1. Prima: la query legge 180 GB, quindi il costo è 180 / 1.000 × 5 = 0,90 USD per esecuzione. Con una dashboard che la lancia 400 volte al mese si arriva a 400 × 0,90 = 360 USD.
+2. File della tabella dopo la riscrittura: 180.000 MB / 256 MB = 703 file, ciascuno con 2 Row Group da 128 MB, per un totale di 1.406 Row Group.
+3. Footer da leggere: il motore legge un footer per file, supponiamo 0,2 MB ciascuno, quindi 703 × 0,2 MB = 140,6 MB.
+4. Row Group da scaricare: con dati ordinati per `country_code` e `customer_email` la ricerca dell'email di un cliente italiano cade in 1 Row Group da 128 MB.
+5. Totale letto: 140,6 MB + 128 MB = 268,6 MB, cioè 0,2686 GB.
+6. Costo dopo: 0,2686 / 1.000 × 5 = 0,00134 USD per esecuzione, e 400 × 0,00134 = 0,54 USD al mese.
 
-Questo articolo non tratta l'accelerazione hardware tramite S3 Select (ormai deprecato a favore del predicate pushdown nativo Parquet nei query engine moderni). Ricordate che su Athena per sfruttare il riutilizzo gratuito dei risultati in cache basta attivare nei parametri di esecuzione `ResultConfigurationUpdates -> ManagedQueryResults` o il *Query Result Reuse* (`MaxAgeInMinutes = 60`).
+La riduzione dei byte è 1 − 268,6 / 180.000 = 99,85%. Va notato che i 140,6 MB dei footer pesano più del Row Group utile: oltre un certo numero di file il costo dei metadati domina, ed è la ragione per cui la dimensione dei file non va ridotta sotto i 128 MB nemmeno per migliorare lo skipping. I tempi vanno sempre misurati sul proprio motore; a questa scala il lavoro si riduce a una lettura di poche centinaia di MB, che in genere si chiude in pochi secondi anche su un motore serverless.
 
-## Cinque domande per ottimizzare una query lenta sul data lake S3
+## Statistiche di tabella e scelta del join
 
-1. I file Parquet nelle partizioni interrogate hanno una dimensione compresa tra **200 MB e 500 MB** e sono compressi con `zstd`?
-2. I dati dentro ciascun file Parquet sono stati scritti con un `ORDER BY` sulle 1–2 colonne di filtro più selettive (o `Z-Order` se i filtri sono indipendenti) e con i **Bloom filter** attivi sulle chiavi ad alta cardinalità?
-3. Le statistiche della tabella nel catalogo sono aggiornate (`ANALYZE TABLE` eseguito dopo il caricamento) così che il Cost-Based Optimizer scelga correttamente i *Broadcast Join* e l'ordine delle tabelle?
-4. Avete abilitato la cache locale su disco NVMe (`enable_filesystem_cache = 1` in ClickHouse) o il *Query Result Reuse* in Athena per azzerare le riletture di rete da S3 sulle partizioni calde?
-5. Per le dashboard che interrogano sempre le stesse metriche aggregate, avete creato una tabella pre-aggregata (Materialized View / CTAS giornaliera) invece di ricalcolare i miliardi di righe grezze a ogni clic?
+Per il secondo collo di bottiglia, Athena usa le statistiche di colonna del Glue Data Catalog. Si generano con un task di Glue, avviabile da riga di comando:
 
-La metrica regina per certificare il lavoro di tuning su S3 è il confronto documentato prima/dopo su **`S3ReadBytes` (MB scaricati via rete da S3)** e **`query_duration_ms` al 95° percentile**: ogni intervento di ottimizzazione deve dimostrare numeri alla mano quanti gigabyte di scansione ha eliminato.
+```bash
+# Avvia il calcolo delle statistiche di colonna su una tabella Glue
+aws glue start-column-statistics-task-run \
+  --database-name acme_lake \
+  --table-name orders_sorted \
+  --role arn:aws:iam::123456789012:role/GlueColumnStatsRole \
+  --sample-size 100
 
-Di tutte le tecniche di performance su data lake, ricordate un'unica verità fisica: il byte più veloce e più economico da leggere su S3 è quello che non scaricate affatto perché il footer del Parquet o la cache NVMe vi ha già detto la risposta.
+# Controlla l'esito del task
+aws glue get-column-statistics-task-runs \
+  --database-name acme_lake \
+  --table-name orders_sorted \
+  --max-results 1
+```
+
+Su Trino con connettore Hive o Iceberg il comando equivalente è `ANALYZE acme_lake.orders_sorted`. Le statistiche vanno rigenerate dopo ogni carico importante, altrimenti il CBO lavora su una fotografia vecchia.
+
+Il vantaggio si calcola. Supponiamo che la query proietti 40 byte per riga dalla tabella dei fatti e che la dimensione punti vendita abbia 50.000 righe da 200 byte, su un cluster di 8 worker. Con la ridistribuzione di entrambe le tabelle, la tabella dei fatti attraversa la rete: 800.000.000 righe × 40 byte = 32.000 MB. Con il broadcast, la dimensione viene copiata su ogni worker: 50.000 × 200 byte = 10 MB, per 8 worker pari a 80 MB. Il rapporto è 32.000 / 80 = 400 volte meno traffico di rete. Senza statistiche il CBO non sa che la dimensione è piccola e sceglie la strada da 32 GB, spesso fermandosi con l'errore di memoria superata.
+
+## Cache locale, riuso dei risultati e pre-aggregazioni
+
+Per le dashboard, il terzo livello è non rifare ciò che è già stato fatto. In Athena si può chiedere il riuso dei risultati di un'esecuzione recente, con un'età massima:
+
+```bash
+# Esegue la query riusando il risultato di una esecuzione identica degli ultimi 60 minuti
+aws athena start-query-execution \
+  --query-string "SELECT country_code, count(*) AS ordini FROM acme_lake.orders_sorted WHERE dt = DATE '2026-11-16' GROUP BY country_code" \
+  --work-group dashboard-bi \
+  --result-reuse-configuration "ResultReuseByAgeConfiguration={Enabled=true,MaxAgeInMinutes=60}"
+```
+
+Un'esecuzione che riusa un risultato non scansiona dati e quindi non costa per i byte. Su Trino gestito in proprio la cache del filesystem si abilita nelle proprietà del catalogo (`fs.cache.enabled=true` e `fs.cache.directories` puntato al disco NVMe locale): i blocchi letti da S3 restano sul nodo e la seconda lettura avviene dal disco locale.
+
+Per le metriche ripetitive la pre-aggregazione è più efficace del cache. Una tabella giornaliera di KPI si costruisce con una CTAS:
+
+```sql
+-- Athena: tabella di KPI giornaliera, la colonna di partizione dt va in coda al SELECT
+CREATE TABLE acme_lake.orders_daily_kpi
+WITH (
+    format = 'PARQUET',
+    write_compression = 'ZSTD',
+    external_location = 's3://acme-lake-prod/curated/orders_daily_kpi/',
+    partitioned_by = ARRAY['dt']
+) AS
+SELECT
+    country_code,
+    count(*)        AS ordini,
+    sum(amount_eur) AS ricavo_eur,
+    CAST(date(occurred_at) AS date) AS dt
+FROM acme_lake.orders_sorted
+GROUP BY country_code, CAST(date(occurred_at) AS date);
+```
+
+Con 20 paesi e 365 giorni la tabella ha circa 7.300 righe: la dashboard legge kilobyte invece di gigabyte, e il costo del ricalcolo si paga una sola volta per giorno.
+
+## Ordinamento lineare o Z-order
+
+Se quasi tutte le query includono la stessa colonna di testa, per esempio `tenant_id` o `country_code`, l'ordinamento lineare `ORDER BY col1, col2` è la scelta giusta: le statistiche di `col1` sono strettissime e quelle di `col2` lo sono dentro ciascun valore di `col1`. Il limite è che le query che filtrano solo per `col2` non traggono beneficio, perché `col2` è ordinata solo all'interno di ogni `col1`.
+
+Lo Z-order, disponibile su Delta Lake e come funzione di riscrittura su Iceberg, interlaccia i bit di più colonne e tiene vicine nello spazio le righe simili su tutte. Conviene quando due o tre colonne vengono filtrate in modo indipendente, per esempio `customer_id` in alcune query e `product_id` in altre. Oltre le tre o quattro colonne la risoluzione per dimensione si riduce e il beneficio crolla, mentre il costo di riscrittura rimane. Per le ricerche puntuali sulle colonne restanti, un ordinamento sulle due principali più Bloom filter sulle altre è di solito la combinazione più semplice da mantenere.
+
+## Tre errori che annullano le ottimizzazioni
+
+### Convertire in Parquet senza ordinare
+
+Il sintomo è una tabella Parquet piccola ma lenta quanto il CSV di partenza sulle query selettive. Sembra ragionevole perché Parquet è colonnare e la conversione sembra già sufficiente. La causa è che senza `ORDER BY` ogni Row Group contiene valori sparsi di ogni colonna, quindi min/max non scartano niente. La correzione è riscrivere con ordinamento sulle colonne di filtro e verificare le statistiche con lo script PyArrow visto sopra.
+
+### Non rigenerare le statistiche dopo il caricamento
+
+Il sintomo è un join che prima funzionava e dopo un grosso backfill va in errore di memoria o diventa dieci volte più lento. La causa è che il catalogo contiene numeri di righe e cardinalità del vecchio stato della tabella, e il CBO sceglie un piano adatto a una tabella che non esiste più. La correzione è inserire la rigenerazione delle statistiche nel job di caricamento, subito dopo la scrittura delle partizioni.
+
+### Rileggere ogni volta i dati caldi
+
+Il sintomo è una dashboard con latenza mediana alta e costo proporzionale al numero di utenti. Sembra normale perché ogni utente esegue la sua query. La causa è l'assenza di cache e di riuso dei risultati: le stesse partizioni degli ultimi 7 giorni vengono scaricate decine di volte. La correzione combina riuso dei risultati con età di 15-60 minuti per i report identici e tabelle pre-aggregate per i KPI fissi.
+
+## Controllo sulla query lenta
+
+1. Una query legge 90 GB a 5 USD per TB: quanto costa, e quanto costerebbe dopo una riduzione del 99,5% dei byte?
+
+<details>
+<summary>Mostra risposta</summary>
+
+Prima: 90 / 1.000 × 5 = 0,45 USD. Dopo: i byte scendono a 90 GB × 0,5% = 0,45 GB, e il costo è 0,45 / 1.000 × 5 = 0,00225 USD, circa un quinto di centesimo.
+
+</details>
+
+2. Dopo la riscrittura i file sono 703 con footer da 0,2 MB: perché ridurre i file a 64 MB non migliora necessariamente la query?
+
+<details>
+<summary>Mostra risposta</summary>
+
+Con file da 64 MB il numero di file raddoppia, circa 1.406, e i footer passano da 703 × 0,2 = 140,6 MB a 1.406 × 0,2 = 281,2 MB. Si legge più metadato e si aprono più oggetti, mentre lo skipping non migliora in modo corrispondente.
+
+</details>
+
+3. Come verifichi che l'ordinamento abbia prodotto statistiche utili sulla colonna `country_code`?
+
+<details>
+<summary>Mostra risposta</summary>
+
+Si legge il footer di un file campione con PyArrow e si stampano minimo e massimo per ogni Row Group. Se gli intervalli di Row Group consecutivi sono disgiunti o quasi, lo skipping funziona. Se ogni gruppo copre l'intero intervallo, l'ordinamento non è stato applicato o non è sulla colonna giusta.
+
+</details>
+
+4. Un join tra 800 milioni di righe da 40 byte e una dimensione da 10 MB su 8 worker: quanti MB attraversano la rete con la ridistribuzione e quanti con il broadcast?
+
+<details>
+<summary>Mostra risposta</summary>
+
+Con la ridistribuzione passa la tabella dei fatti: 800.000.000 × 40 byte = 32.000 MB. Con il broadcast la dimensione va a ogni worker: 10 MB × 8 = 80 MB. La differenza è di 400 volte, ed è il motivo per cui le statistiche vanno mantenute aggiornate.
+
+</details>

@@ -1,183 +1,256 @@
 ---
 title: "Glossario del tracking: entità, eventi, proprietà"
-description: >-
-  Glossario operativo dei termini chiave nella data collection: eventi, proprietà, utenti, sessioni.
+description: "Definizioni operative di evento, proprietà, tratto, anonymous_id, user_id, group_id e sessione, con identity stitching retroattivo e sessionizzazione a 30 minuti in ClickHouse."
 module: "Modulo 2: Raccolta dati e sistemi di tracking"
 order: 5
 category: Tecnico
 headerImage: /course-headers/data-collection-terminology-ginnytech-ad.webp
 headerImageAlt: "Glossario del tracking: entità, eventi, proprietà - immagine ufficiale della lezione su GinnyTech, creata da AD"
-difficulty: advanced
-duration: 18 min
+difficulty: avanzato
+duration: "45 min"
 learningObjectives:
-  - Fissare definizioni operative per eventi, proprietà, identità e sessioni
-  - Distinguere user_id, anonymous_id, group_id e alias nell'attribuzione
-  - Congelare le definizioni approvate nel tracking plan versionato
+  - Distinguere event properties da traits e scegliere dove registrare le informazioni che non devono cambiare nel tempo
+  - Costruire una mappa di identity resolution tra anonymous_id e user_id con una guardia contro i dispositivi condivisi
+  - Calcolare sessioni con soglia di inattività di 30 minuti sopra l'identità risolta e verificare l'attribuzione first touch
 prerequisites:
   - data-collection/privacy
 binario: "ml-tabellare"
-formato: "articolo"
-autore: "Hermes"
-controllatoDa: "Argo"
-autorizzatoDa: "Giano"
 draft: false
-dateModified: 2026-11-13
+dateModified: 2026-11-17
+formato: "didattica-v2"
 ---
 
-# Glossario del tracking: entità, eventi, proprietà
+Una domenica sera un utente clicca un annuncio Google Ads dallo smartphone e visita il sito da ospite, con `anonymous_id = 'anon_99a'`. Il lunedì mattina riapre la pagina, fa login come `usr_42` e completa un acquisto da 500 euro per conto della sua società, `company_800`. Il team usa una sola colonna `id_utente` che viene sovrascritta al login. Nel warehouse compaiono due persone: un visitatore anonimo che ha consumato budget senza comprare e un cliente apparso dal nulla, attribuito al "Traffico Diretto". Questo è un caso ricostruito con numeri di esempio, e la sua causa non è la navigazione in due momenti, ma un vocabolario di tracking che confonde identità, proprietà e tratti.
 
-Un utente clicca su un annuncio Google Ads dallo smartphone domenica sera visitando il sito come ospite (`anonymous_id = 'anon_99a'`), poi lunedì mattina apre la pagina, effettua il login (`user_id = 'usr_42'`) e completa l'acquisto aziendale per conto della sua società (`group_id = 'company_800'`). Poiché il team usa una colonna unica chiamata `id_utente` che viene sovrascritta al momento del login senza una tabella di **Identity Resolution (`anonymous_id <-> user_id`)**, nel data warehouse compaiono due persone diverse: un visitatore anonimo che ha consumato budget Google Ads senza comprare nulla, e un cliente loggato spuntato dal nulla ("Traffico Diretto") che ha fatto l'acquisto. La causa non è la navigazione multi-momento: è confondere nel modello dati i quattro identificativi fondamentali (**`anonymous_id`, `user_id`, `group_id` e `session_id`**) e non distinguere **Event Properties** da **User/Group Traits**.
+## Un acquisto dopo il login e Google Ads a zero conversioni
 
-## Un cliente che compra dopo il login e fa sembrare Google Ads a zero conversioni
+L'azienda dell'esempio investe 40.000 euro al mese in campagne di acquisizione per un software B2B e scopre che l'85% delle conversioni risulta attribuito a `Direct / None`. L'analisi trova tre errori concettuali. Il primo: ogni evento ha un solo campo `visitor_id`, che contiene il cookie anonimo finché l'utente non si autentica e poi viene sostituito dall'ID del database. Se l'evento di login non conserva entrambi gli identificativi, tutto ciò che è accaduto prima del login resta orfano e il canale di primo contatto si perde.
 
-Questo è un caso ricostruito con numeri di esempio su quanto accade quando un team non fissa definizioni rigorose per entità, identità, sessioni e proprietà. L'azienda investe 40.000 euro al mese in campagne di acquisizione per un software B2B.
+Il secondo errore riguarda il B2B. Cinque colleghi della stessa azienda usano il prodotto: uno ha avviato la prova gratuita, uno ha inserito la carta, tre lo usano ogni giorno. Guardando solo `user_id`, senza l'entità superiore `group_id`, chi paga sembra inattivo e chi usa il prodotto sembra non pagante. Il terzo errore: il piano tariffario viene salvato solo come attributo mutabile dell'anagrafica. Quando il cliente passa da `basic` a `pro` a novembre, tutte le sue azioni di gennaio sembrano compiute da un utente `pro`.
 
-Analizzando perché l'85% delle conversioni nel data warehouse risulti attribuito al canale `"Direct / None"` invece che alle campagne reali, emergono tre errori concettuali nel modello del tracking:
-1. Ogni evento ha un solo campo `visitor_id` che contiene il cookie anonimo finché l'utente non è autenticato e viene sostituito con l'ID del database non appena l'utente fa login: senza conservare **entrambi** i campi sullo stesso evento di login (`identify`), tutti gli eventi avvenuti prima del login restano orfani e il canale di primo contatto viene perso.
-2. Nel B2B cinque colleghi della stessa azienda cliente (`company_800`) usano il prodotto: uno ha avviato la prova gratuita, un altro ha inserito la carta di credito e gli altri tre usano le funzionalità ogni giorno. Guardando solo `user_id` senza l'entità superiore `group_id` (`account_id`), chi paga sembra inattivo e chi usa il prodotto sembra non pagante.
-3. Il piano tariffario corrente dell'utente viene salvato solo come attributo mutabile sull'anagrafica utente anziché anche come proprietà immutabile dell'evento al momento del fatto: quando un cliente fa upgrade da `Basic` a `Pro` a novembre, tutte le sue azioni di gennaio sembrano fatte da un utente `Pro`.
+Per correggere questi tre difetti serve fissare nel tracking plan un vocabolario rigoroso, dove ogni termine ha un significato e un posto.
 
-La causa di questi cortocircuiti è non aver scolpito nel Tracking Plan la tassonomia esatta del tracking comportamentale.
+## Le primitive del tracking: evento, proprietà, tratto, identità, sessione
 
-## Le cinque primitive del Tracking: Event, Property, Trait, Identity Graph e Session
+> **Idea chiave:** ciò che è accaduto in un istante va registrato come evento con le sue proprietà e non cambia mai; ciò che una persona o un'azienda è oggi va registrato come tratto e può cambiare.
 
-Un sistema di tracciamento rigoroso modella il comportamento umano e aziendale attraverso cinque concetti ortogonali con regole matematiche precise.
+La tabella riassume le cinque primitive con un esempio per ciascuna.
 
-Il primo concetto è la distinzione tra **Event + Event Properties (immutabili nel tempo)** ed **Entity + Traits (stato corrente mutabile)**. Un **Evento (`track` / `page`)** è un fatto avvenuto in un istante preciso (`occurred_at`) che non può mai cambiare nel passato (`order_completed`, `invoice_paid`). Le **Event Properties** descrivono il contesto esatto in quell'istante (`order_amount_eur = 120.00`, `plan_at_event_time = 'basic'`, `utm_campaign = 'autunno_2026'`). Un'**Entità (`user` o `group`/`account`)** ha invece dei **Traits** (`identify` / `group`) che rappresentano il suo stato attuale (`current_plan = 'pro'`, `employees_count = 50`). Salvare le informazioni storiche critiche come *Event Properties* garantisce che un cambio di stato futuro non riscriva la storia passata.
+| Primitiva | Definizione operativa | Esempio | Mutabile |
+|---|---|---|---|
+| Evento (`track`, `page`) | Fatto avvenuto in un istante preciso, `occurred_at` | `order_completed` | No |
+| Event property | Contesto del fatto nell'istante in cui accade | `plan_at_event_time = 'basic'` | No, è fotografia |
+| Trait (`identify`, `group`) | Stato corrente di un utente o di un'azienda | `current_plan = 'pro'` | Sì |
+| Identità | Chiave che lega gli eventi a una persona o a un account | `anonymous_id`, `user_id`, `group_id` | No, chiavi tecniche |
+| Sessione | Sequenza contigua di eventi con pause sotto soglia | `usr_42_s2` | Derivata |
 
-Il secondo concetto è la **Triade delle Identità (`anonymous_id`, `user_id`, `group_id`) e l'Identity Stitching (retroattivo)**. L'**`anonymous_id`** è l'UUID generato sul dispositivo o cookie first-party al primo atterraggio ed esiste sempre, sia prima sia dopo il login. Il **`user_id`** è l'identificativo univoco e immutabile della persona nel database autenticato, valorizzato dopo registrazione o login (non bisogna mai usare l'email come `user_id` perché l'utente può cambiare indirizzo email). Il **`group_id` (`account_id` / `organization_id`)** è l'identificativo dell'azienda o team a cui appartiene l'utente nel B2B. Quando l'utente effettua il login o si registra, l'evento contiene contemporaneamente `anonymous_id = 'anon_99a'` e `user_id = 'usr_42'`: una tabella di ponte (**Identity Graph / Alias Map**) lega i due ID permettendo di cucire retroattivamente (*backfill / stitching*) tutte le azioni pre-login al profilo reale `usr_42`.
+La distinzione tra proprietà e tratti ha una conseguenza pratica. Salvare le informazioni storiche critiche come event properties garantisce che un cambio di stato futuro non riscriva il passato. Il piano al momento dell'acquisto va nel payload dell'evento, non solo nell'anagrafica.
 
-Il terzo concetto è la **Sessione (`session_id`)**. Una sessione è una sequenza contigua di eventi dello stesso utente dove il tempo trascorso tra due eventi consecutivi non supera la soglia di inattività (standard universale: **30 minuti**).
-
-**L'attribuzione e l'analisi comportamentale funzionano solo se ogni evento conserva separatamente `anonymous_id`, `user_id` e `group_id` e se una mappa di Identity Resolution cuce retroattivamente le sessioni pre-login al cliente autenticato.**
-
-## Tre errori di modellazione terminologica nel tracking
-
-Il blocco SQL qui sotto mostra l'errore di sovrascrivere l'ID anonimo col `user_id` nella stessa colonna e di calcolare la conversione per canale senza prima risolvere il grafo di identità:
-
-```sql
--- ERRORE 1: usare coalesce(user_id, anonymous_id) direttamente sugli eventi grezzi SENZA
--- prima mappare gli anonymous_id storici al user_id scoperto al momento del login!
--- Risultato: l'evento di atterraggio (che aveva solo anonymous_id='anon_99a' e utm_source='google_ads')
--- e l'evento di acquisto (che ha user_id='usr_42') vengono visti come DUE utenti diversi!
-SELECT
-    coalesce(nullIf(user_id, ''), anonymous_id) AS id_ingenuo_spezzato,
-    argMin(utm_source, occurred_at) AS first_touch_channel,
-    countIf(event_name = 'order_completed') AS ordini
-FROM raw_tracking.events_valid
-GROUP BY id_ingenuo_spezzato;
+```json
+{
+  "_comment": "Evento track con proprietà immutabili e contesto: il piano al momento del fatto resta scritto nell'evento",
+  "type": "track",
+  "event": "order_completed",
+  "event_id": "evt_a91",
+  "anonymousId": "anon_99a",
+  "userId": "usr_42",
+  "groupId": "company_800",
+  "timestamp": "2026-11-09T09:12:40.000Z",
+  "properties": {
+    "order_amount_eur": 500.0,
+    "plan_at_event_time": "basic",
+    "utm_campaign": "autunno_2026"
+  }
+}
 ```
 
-### Scrivere coalesce(user_id, anonymous_id) riga per riga senza tabella di Identity Stitching
+Il tratto corrispondente, invece, descrive lo stato attuale e viene aggiornato con una chiamata `identify`.
 
-Scrivere `coalesce(nullIf(user_id, ''), anonymous_id) AS blended_user_id` direttamente sulla singola riga dell'evento è l'errore più diffuso nei progetti di web analytics. Alle 10:00 l'utente clicca sull'annuncio Google Ads da sloggato: la riga ha `user_id = ''` e `anonymous_id = 'anon_99a'`, quindi `coalesce` restituisce `'anon_99a'`. Alle 10:05 l'utente fa login e compra: la riga ha `user_id = 'usr_42'` e `anonymous_id = 'anon_99a'`, quindi `coalesce` restituisce `'usr_42'`. Quando fate `GROUP BY blended_user_id`, `'anon_99a'` e `'usr_42'` finiscono in due gruppi separati: Google Ads risulta aver portato zero acquisti e `'usr_42'` risulta nato al momento del login senza alcuna campagna di origine.
+```json
+{
+  "_comment": "Identify: collega anonymous_id e user_id e aggiorna i tratti correnti",
+  "type": "identify",
+  "anonymousId": "anon_99a",
+  "userId": "usr_42",
+  "traits": { "current_plan": "pro", "company_id": "company_800" }
+}
+```
 
-### Usare un attributo mutabile (email o nome azienda) come user_id o group_id
+## La triade delle identità e il legame retroattivo
 
-Passare `user_id = 'mario.rossi@vecchiaazienda.it'` nella chiamata `identify()` invece dell'ID surrogato immutabile del database (`usr_42`) spacca la storia dell'utente non appena la persona aggiorna il proprio indirizzo email nel profilo (o quando l'azienda cambia ragione sociale). Gli identificativi `user_id` e `group_id` devono essere **chiavi tecniche immutabili e prive di significato semantico**; l'email e la ragione sociale sono *Traits* che possono cambiare nel tempo.
+L'`anonymous_id` è l'UUID generato sul dispositivo, in un cookie first-party, al primo atterraggio: esiste prima e dopo il login. Lo `user_id` è l'identificativo immutabile della persona nel database autenticato, valorizzato dopo registrazione o login, e non deve mai essere l'email, perché l'email cambia. Il `group_id` identifica l'azienda o il team nel B2B. Nell'evento di login compaiono insieme `anonymous_id = 'anon_99a'` e `user_id = 'usr_42'`, e una tabella ponte, la mappa di identity resolution, lega i due ID. Con quella mappa le azioni precedenti al login si possono attribuire retroattivamente al profilo reale.
 
-### Confondere gli eventi Utente con le metriche di Account nel B2B (assenza di group_id)
+```mermaid
+flowchart LR
+    A["Domenica 21:05 anon_99a (utm_source google_ads)"] --> M{"Mappa di identity resolution"}
+    B["Lunedì 09:10 login: anon_99a e usr_42"] --> M
+    M --> C["resolved_user_id = usr_42 per tutti gli eventi"]
+    C --> D["Primo contatto: google_ads"]
+    C --> E["Ordine da 500 euro attribuito a google_ads"]
+```
 
-Calcolare l'attivazione o la retention di un software B2B contando i singoli `user_id` invece dei `group_id` (`account_id`) porta a conclusioni completamente sbagliate. In un'azienda cliente da 20 dipendenti, l'amministratore che ha creato l'account e inserito la carta di credito spesso non usa mai il software operativamente, perché lo usano i suoi 19 collaboratori invitati nel workspace: senza `group_id` su ogni evento, l'account pagante sembra a rischio abbandono quando in realtà il team lo usa otto ore al giorno.
+## Quanto costa l'identità spezzata: un calcolo
 
-## Identity Stitching retroattivo e Sessionizzazione a 30 minuti in ClickHouse
+Con numeri di esempio, la campagna Google Ads dell'azienda ha un budget mensile di 12.000 euro e genera 30 ordini da 500 euro, per un ricavo reale di 30 × 500 = 15.000 euro. Il ROAS corretto è 15.000 / 12.000 = 1,25. Ora supponi che l'80% di quegli ordini avvenga dopo un login in una sessione successiva alla visita anonima: 30 × 0,80 = 24 ordini. Con la colonna unica sovrascritta al login, quei 24 ordini non hanno più il canale di primo contatto e finiscono in `Direct`. Alla campagna restano 30 − 24 = 6 ordini, cioè 6 × 500 = 3.000 euro, e il ROAS apparente diventa 3.000 / 12.000 = 0,25.
 
-Per implementare nel vostro data warehouse (ClickHouse / dbt) la risoluzione delle identità e il calcolo delle sessioni secondo il glossario standard, applicate questi quattro passi in ordine di priorità:
+La differenza tra 1,25 e 0,25 è un fattore 5. Un responsabile marketing che legge 0,25 spegne una campagna che rende. Il difetto non sta nei dati raccolti, che erano completi, ma nel modello che non ha conservato `anonymous_id` accanto a `user_id`.
 
-1. Richiedete nel Tracking Plan che **ogni singolo evento** invii sempre `anonymous_id` (anche quando l'utente è loggato), `user_id` (quando autenticato) e `group_id` (nei prodotti B2B multi-utente).
-2. Costruite la mappa di **Identity Resolution (`identity_map`)** associando a ciascun `anonymous_id` l'ultimo `user_id` non vuoto mai osservato su quello stesso `anonymous_id`.
-3. Arricchite tutti gli eventi storici (inclusi quelli pre-login) con `resolved_user_id = coalesce(nullIf(e.user_id, ''), m.mapped_user_id, e.anonymous_id)`.
-4. Calcolate dinamicamente le sessioni usando una window function che apre una nuova sessione ogni volta che tra due eventi consecutivi dello stesso `resolved_user_id` trascorrono più di **1.800 secondi (30 minuti)**.
+## Sessione: soglia di 30 minuti su identità risolta
 
-Ecco la query SQL completa in ClickHouse che esegue l'**Identity Stitching retroattivo** e la **Sessionizzazione a 30 minuti**, ripristinando la corretta attribuzione del primo clic pubblicitario fino all'acquisto post-login:
+Una sessione è una sequenza contigua di eventi dello stesso utente in cui il tempo tra due eventi consecutivi non supera la soglia di inattività, convenzionalmente 30 minuti, cioè 1.800 secondi. Il calcolo si fa dopo aver risolto l'identità, altrimenti un login a metà navigazione spezza una visita unica in due.
+
+Applicalo ai tuoi eventi di esempio: domenica alle 21:05 e alle 21:20, lunedì alle 09:10 e alle 09:15. Il primo intervallo è di 15 min, sotto soglia, quindi i due eventi di domenica appartengono alla stessa sessione. Il secondo intervallo va dalle 21:20 alle 09:10, cioè 11 ore e 50 minuti, pari a 710 min, molto oltre i 30 min: apre una nuova sessione. L'ultimo, di 5 min, resta nella sessione di lunedì. Il totale è di 2 sessioni, `usr_42_s1` (scoperta) e `usr_42_s2` (acquisto).
+
+La stessa logica si verifica con poche righe di Python, utili come controllo indipendente della query SQL.
+
+```python
+from datetime import datetime, timedelta
+
+# Sessionizzazione di controllo: nuova sessione se la pausa supera 30 minuti
+SOGLIA = timedelta(minutes=30)
+eventi = [datetime(2026, 11, 8, 21, 5), datetime(2026, 11, 8, 21, 20),
+          datetime(2026, 11, 9, 9, 10), datetime(2026, 11, 9, 9, 15)]
+
+sessioni, corrente = [], [eventi[0]]
+for prec, att in zip(eventi, eventi[1:]):
+    if att - prec > SOGLIA:
+        sessioni.append(corrente)
+        corrente = []
+    corrente.append(att)
+sessioni.append(corrente)
+print(len(sessioni))  # 2
+```
+
+## Identity stitching e sessioni in ClickHouse
+
+La query seguente costruisce la mappa, risolve l'identità su tutti gli eventi, calcola le sessioni e attribuisce il ricavo al primo contatto. La guardia contro i dispositivi condivisi esclude dalla mappa gli `anonymous_id` associati a più di 3 `user_id` distinti, per non fondere clienti diversi che usano lo stesso computer.
 
 ```sql
--- 1. Costruzione della mappa di Identity Resolution (lega ogni anonymous_id al suo user_id autenticato)
-WITH identity_stitching_map AS (
+-- Mappa anonymous_id -> user_id, con guardia sui dispositivi condivisi (più di 3 utenti distinti)
+WITH identity_map AS (
     SELECT
         anonymous_id,
         argMax(user_id, occurred_at) AS mapped_user_id
     FROM raw_tracking.events_valid
-    WHERE user_id != ''
-      AND anonymous_id != ''
+    WHERE user_id != '' AND anonymous_id != ''
     GROUP BY anonymous_id
+    HAVING uniqExact(user_id) <= 3
 ),
--- 2. Applicazione retroattiva del resolved_user_id a TUTTI gli eventi (anche quelli pre-login!)
--- e calcolo del confine di sessione (inattività > 1800 secondi = 30 minuti):
-events_with_resolved_identity AS (
+-- Identità risolta su tutti gli eventi, anche quelli precedenti al login
+resolved AS (
     SELECT
         e.event_id,
         e.occurred_at,
         e.event_name,
-        e.anonymous_id,
-        e.user_id,
-        e.group_id,
-        -- Se l'evento era anonimo prima del login, riceve comunque il mapped_user_id scoperto dopo:
-        coalesce(nullIf(e.user_id, ''), nullIf(m.mapped_user_id, ''), e.anonymous_id) AS resolved_user_id,
         e.utm_source,
         e.revenue_eur,
-        lagInFrame(e.occurred_at) OVER (
-            PARTITION BY resolved_user_id
-            ORDER BY e.occurred_at ASC
-        ) AS prev_event_at,
-        if(
-            prev_event_at = toDateTime64(0, 3, 'UTC')
-            OR dateDiff('second', prev_event_at, e.occurred_at) > 1800,
-            1,
-            0
-        ) AS is_new_session
+        coalesce(nullIf(e.user_id, ''), nullIf(m.mapped_user_id, ''), e.anonymous_id) AS resolved_user_id
     FROM raw_tracking.events_valid AS e
-    LEFT JOIN identity_stitching_map AS m
-        ON e.anonymous_id = m.anonymous_id
+    LEFT JOIN identity_map AS m ON e.anonymous_id = m.anonymous_id
     WHERE e.event_date >= today() - 30
 ),
--- 3. Generazione del session_id univoco cumulando i flag is_new_session per ciascun utente risolto:
-sessionized_events AS (
+-- Confine di sessione: primo evento dell'utente oppure pausa oltre 1800 secondi
+flagged AS (
     SELECT
         *,
-        concat(
-            resolved_user_id,
-            '_s',
-            toString(sum(is_new_session) OVER (
-                PARTITION BY resolved_user_id
-                ORDER BY occurred_at ASC
-                ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
-            ))
-        ) AS resolved_session_id
-    FROM events_with_resolved_identity
+        row_number() OVER (PARTITION BY resolved_user_id ORDER BY occurred_at) AS rn,
+        lagInFrame(occurred_at, 1, occurred_at) OVER (
+            PARTITION BY resolved_user_id ORDER BY occurred_at
+            ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING
+        ) AS prev_at
+    FROM resolved
+),
+sessionized AS (
+    SELECT
+        *,
+        sum(if(rn = 1 OR dateDiff('second', prev_at, occurred_at) > 1800, 1, 0)) OVER (
+            PARTITION BY resolved_user_id ORDER BY occurred_at
+            ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+        ) AS session_n
+    FROM flagged
 )
--- 4. Verifica Attribuzione First-Touch cucita attraverso il login:
+-- Attribuzione first touch cucita attraverso il login
 SELECT
-    argMinIf(utm_source, occurred_at, utm_source != '') AS true_first_touch_utm_source,
-    uniqExact(resolved_user_id) AS utenti_unici_cuciti,
-    uniqExact(resolved_session_id) AS sessioni_totali,
-    countIf(event_name = 'order_completed') AS ordini_completati,
-    sum(revenue_eur) AS ricavo_attribuito_eur
-FROM sessionized_events
-GROUP BY true_first_touch_utm_source
-ORDER BY ricavo_attribuito_eur DESC;
+    argMinIf(utm_source, occurred_at, utm_source != '') AS primo_contatto,
+    uniqExact(resolved_user_id) AS utenti_unici,
+    uniqExact((resolved_user_id, session_n)) AS sessioni_totali,
+    countIf(event_name = 'order_completed') AS ordini,
+    sum(revenue_eur) AS ricavo_eur
+FROM sessionized
+GROUP BY resolved_user_id
+ORDER BY ricavo_eur DESC
+LIMIT 50;
 ```
 
-Il risultato sistema immediatamente l'attribuzione e il conteggio degli utenti: quando l'utente atterra domenica sera con `anonymous_id = 'anon_99a'` da `utm_source = 'google_ads'` e lunedì mattina fa login come `'usr_42'` e compra per `500 €`, la CTE `identity_stitching_map` associa `'anon_99a' -> 'usr_42'`; di conseguenza **anche l'evento di domenica sera riceve `resolved_user_id = 'usr_42'`**, per cui `argMinIf(utm_source, occurred_at, ...)` attribuisce correttamente i `500 €` di lunedì a `'google_ads'` invece che al traffico diretto. Allo stesso tempo, la pausa notturna tra domenica sera e lunedì mattina ($> 1.800\text{ secondi}$) incrementa `is_new_session = 1`, distinguendo correttamente la sessione `'usr_42_s1'` (scoperta) dalla sessione `'usr_42_s2'` (acquisto).
+Il risultato per `usr_42` è un solo utente risolto, due sessioni e 500 euro di ricavo con primo contatto `google_ads`. Per avere il totale per canale basta sommare queste righe per `primo_contatto` in un secondo passaggio.
 
-## Sessionizzazione al momento della raccolta (Client Session ID) o Sessionizzazione nel Warehouse (SQL)
+## Perché il vocabolario va scritto prima del codice
 
-Per assegnare un `session_id` agli eventi, conviene fidarsi del **`session_id` generato nel browser dallo script client** (es. cookie che scade dopo 30 minuti) oppure **ricalcolare le sessioni nel data warehouse tramite window function SQL** dopo l'Identity Stitching?
+Un glossario condiviso sembra un documento di cortesia, ma in un progetto di tracking è lo strumento che evita le discussioni più costose. Quando due team usano lo stesso termine con significati diversi, i numeri non tornano e nessuno sa chi ha ragione. Un esempio frequente è la parola "utente": per il prodotto è chi ha un account, per il marketing è chi ha visitato il sito, per la finanza è chi ha pagato almeno una fattura. Se il tracking plan non fissa che cosa è un utente, ciascun reparto costruisce la propria definizione nelle query e i report dello stesso mese divergono.
 
-Il criterio di scelta è netto: **usate il `session_id` client-side per le analisi in tempo reale immediato e per collegare i log tecnici di una singola visita, ma per tutte le analisi di attribuzione, conversion rate e funnel multi-sessione nei Marts di dbt ricalcolate (o cucite) le sessioni nel Data Warehouse sopra `resolved_user_id` così da unire anche gli eventi server-side e i passaggi tra stato anonimo e stato autenticato.**
+Per questo ogni voce del glossario deve avere tre elementi: la definizione operativa, il campo o l'evento in cui compare e il proprietario che può cambiarla. Le definizioni approvate vanno congelate nel tracking plan versionato, così che una modifica passi da una revisione e non da un cambio silenzioso in una query. Lo stesso vale per la soglia di sessione: se i 30 minuti sono scritti una sola volta nel modello dbt, tutti i reparti leggono le stesse sessioni; se ciascuno li ricalcola, un'analisi di marketing e una di prodotto sullo stesso periodo possono dare conteggi diversi senza che nessuno abbia sbagliato.
 
-La confusione comune consiste nel contare il tasso di conversione per sessione dividendo gli ordini server-side (che spesso non conoscono il `session_id` temporaneo di Google Analytics) per le sessioni client-side, oppure nel lasciare che il login a metà navigazione spezzi una singola visita di dieci minuti in due sessioni distinte (una anonima e una loggata). Cucire prima `resolved_user_id` e calcolare poi le finestre di inattività di 30 minuti produce sessioni coerenti dall'inizio alla fine.
+## Sessione calcolata nel browser o nel warehouse
 
-Questo articolo fissa il vocabolario tecnico che useremo in tutte le lezioni di Product e Marketing Analytics. Ricordate di gestire il caso dei **dispositivi condivisi** (es. un chiosco in negozio o due familiari sullo stesso computer che fanno login con due `user_id` diversi): nella query di Identity Stitching, se uno stesso `anonymous_id` si autentica con più di 3 `user_id` distinti, escludetelo dal backfill retroattivo per non fondere insieme clienti diversi.
+Il `session_id` generato dallo script client, di solito un cookie che scade dopo 30 minuti, serve per analisi in tempo quasi reale e per collegare i log di una singola visita. Per attribuzione, tassi di conversione e funnel multi-sessione conviene ricalcolare le sessioni nel warehouse sopra `resolved_user_id`, perché così si uniscono anche gli eventi server-side, che non conoscono il `session_id` temporaneo del browser, e i passaggi tra stato anonimo e autenticato.
 
-## Cinque domande per verificare le definizioni nel vostro Tracking Plan
+| Criterio | Sessione client | Sessione nel warehouse |
+|---|---|---|
+| Disponibilità | Immediata | Dopo l'elaborazione |
+| Eventi server-side | Non coperti | Coperti |
+| Login a metà visita | Spezza la sessione | Resta continua |
+| Definizione | Dipende dallo script | Scritta una volta nel modello dbt |
 
-1. Ogni evento trasporta sempre sia `anonymous_id` (persistito nel cookie first-party anche dopo il login) sia `user_id` (immutabile da database, mai l'email) sia `group_id` (se operate nel B2B)?
-2. Avete distinto chiaramente nel Tracking Plan le **Event Properties** (fotografia immutabile del contesto al momento del fatto, es. `price_paid_eur`, `plan_at_purchase`) dai **User/Group Traits** (stato anagrafico corrente mutabile)?
-3. Nel vostro layer intermedio di dbt esiste la tabella di **Identity Stitching (`int_identity_map`)** che propaga retroattivamente il `resolved_user_id` agli eventi pre-login prima di calcolare funnel e attribuzione?
-4. Avete inserito una guardia contro i dispositivi condivisi (es. ignorare il mapping `anonymous_id -> user_id` se lo stesso `anonymous_id` è associato a $> 3$ `user_id` distinti)?
-5. La definizione di **Sessione** (soglia di inattività di 30 minuti = 1.800 secondi, o eventuale taglio a mezzanotte/cambio UTM) è scritta una sola volta nel modello dbt e condivisa da tutti i reparti?
+La confusione tipica è dividere gli ordini server-side per le sessioni client-side, che hanno basi diverse e producono un tasso di conversione incoerente.
 
-La metrica che misura la qualità della vostra Identity Resolution è la percentuale di **Conversioni Orfane ("Direct / Unknown" sui nuovi clienti registrati)**: con un Identity Stitching funzionante tra `anonymous_id` pre-login e `user_id` post-login, la quota di nuovi iscritti privi di sorgente di acquisizione scende drasticamente verso il fisiologico traffico diretto reale.
+## Tre errori di modellazione
 
-Di tutto il glossario del tracking, scolpite questa regola d'oro: un utente non nasce quando fa login, nasce quando atterra per la prima volta sul sito da anonimo. Conservate sempre `anonymous_id` e `user_id` fianco a fianco sullo stesso evento di login, o non saprete mai quale campagna vi ha portato i vostri clienti migliori.
+### coalesce riga per riga senza tabella di stitching
+
+Sintomo: Google Ads risulta con zero acquisti e `usr_42` sembra nato al login. Succede scrivendo `coalesce(nullIf(user_id, ''), anonymous_id)` direttamente sulla riga. Alle 21:05 `user_id` è vuoto e il risultato è `anon_99a`, lunedì il risultato è `usr_42`, e il `GROUP BY` crea due gruppi. Si corregge costruendo prima la mappa di identity resolution e applicandola a tutti gli eventi.
+
+### Un attributo mutabile come user_id o group_id
+
+Sintomo: la storia di una persona si spezza quando cambia email. Sembra comodo passare `mario.rossi@vecchiaazienda.it` come `user_id` perché è leggibile, ma l'email e la ragione sociale cambiano. Si corregge usando chiavi tecniche immutabili e senza significato, e tenendo email e ragione sociale come tratti.
+
+### Contare utenti invece di account nel B2B
+
+Sintomo: un account pagante sembra a rischio abbandono. In un cliente da 20 dipendenti l'amministratore che ha inserito la carta spesso non usa il software, lo usano i suoi 19 collaboratori, quindi guardando solo `user_id` l'account appare inattivo. Si corregge aggiungendo `group_id` a ogni evento e calcolando attivazione e retention a livello di account.
+
+## Controllo del vocabolario nel tracking plan
+
+1. Un evento di login contiene solo `user_id`. Quale informazione perdi e quale effetto ha sull'attribuzione?
+
+<details>
+<summary>Mostra risposta</summary>
+
+Perdi `anonymous_id`, cioè il legame con gli eventi precedenti al login. Quegli eventi restano orfani e le conversioni successive finiscono nel canale diretto, anche se la visita nasceva da una campagna.
+
+</details>
+
+2. Una campagna da 12.000 euro genera 30 ordini da 500 euro, ma 24 ordini perdono il primo contatto. Quali ROAS ottieni, corretto e apparente?
+
+<details>
+<summary>Mostra risposta</summary>
+
+Corretto: 30 × 500 = 15.000 euro, quindi 15.000 / 12.000 = 1,25. Apparente: restano 6 ordini, 6 × 500 = 3.000 euro, quindi 3.000 / 12.000 = 0,25.
+
+</details>
+
+3. Un utente cambia piano da basic a pro a novembre. Dove deve essere scritto il piano per non alterare le analisi di gennaio?
+
+<details>
+<summary>Mostra risposta</summary>
+
+Come event property `plan_at_event_time` su ogni evento rilevante, oltre al tratto corrente `current_plan`. Il tratto cambia con l'upgrade, la proprietà dell'evento di gennaio resta quella scritta allora.
+
+</details>
+
+4. Un chiosco in negozio fa autenticare 5 clienti diversi con lo stesso `anonymous_id`. Che cosa fa la mappa di stitching?
+
+<details>
+<summary>Mostra risposta</summary>
+
+Con la guardia `HAVING uniqExact(user_id) <= 3` quell'`anonymous_id` viene escluso dalla mappa, perché è associato a più di 3 utenti. Così gli eventi pre-login non vengono attribuiti a una sola persona sbagliata.
+
+</details>

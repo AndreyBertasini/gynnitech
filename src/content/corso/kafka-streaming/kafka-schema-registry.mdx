@@ -1,7 +1,7 @@
 ---
 title: "Schema Registry e governance degli eventi"
 description: >-
-  Gestire l'evoluzione degli schemi con Schema Registry e garantire compatibilità.
+  Registrare schemi Avro con Schema Registry, scegliere la modalità di compatibilità giusta, bloccare le modifiche distruttive in CI e instradare i messaggi non validi verso una dead letter queue invece di scartarli.
 module: "Modulo 11: Kafka e streaming di eventi"
 order: 5
 category: Tecnico
@@ -9,175 +9,252 @@ headerImage: /course-headers/kafka-streaming-kafka-schema-registry-ginnytech-ad.
 headerImageAlt: >-
   Schema Registry - immagine ufficiale della lezione su GinnyTech
 difficulty: advanced
-duration: 22 min
+duration: 40 min
 prerequisites:
   - kafka-streaming/kafka-connect
 learningObjectives:
-  - Impostare la compatibilità BACKWARD e aggiungere campi con default espliciti
-  - Eseguire il check di compatibilità in CI e verificare i consumer critici prima della release
-  - Gestire la deprecazione dei campi con un periodo di transizione
+  - Scrivere uno schema Avro evolvibile aggiungendo campi con default espliciti e scegliere tra BACKWARD, FORWARD e FULL con la variante transitiva
+  - Automatizzare il controllo di compatibilità nella pipeline CI chiamando l'API REST dello Schema Registry
+  - Instradare i messaggi non deserializzabili in una dead letter queue e stimare le perdite evitate rispetto allo scarto silenzioso
 binario: "ml-tabellare"
-formato: "articolo"
-autore: "Hermes"
-controllatoDa: "Argo"
-autorizzatoDa: "Giano"
+formato: "didattica-v2"
 draft: false
-dateModified: 2026-11-13
+dateModified: 2026-11-17
 ---
 
-# Schema Registry e governance degli eventi
+## Un campo diventa oggetto e la pipeline si ferma per il weekend
 
-Il team che sviluppa il carrello e-commerce rilascia il venerdì pomeriggio una modifica al microservizio di checkout: nel payload pubblicato su Kafka il campo `total_amount` passa da numero decimale (`129.90`) a oggetto annidato (`{"value": 129.90, "currency": "EUR"}`). Il broker Kafka accetta i byte senza battere ciglio, ma tre secondi dopo il connettore di ClickHouse e il motore antifrode vanno in crash con `SerializationException` bloccando l'intera pipeline per tutto il fine settimana. La causa non è la mancanza di comunicazione tra team: è non aver interposto uno Schema Registry con verifica automatica di compatibilità `BACKWARD` o `FULL` prima della pubblicazione.
+Considera uno scenario costruito con numeri di esempio. Un e-commerce ha otto microservizi che pubblicano su Kafka e quattro sistemi che consumano gli eventi: il data warehouse, il data lake su S3, il motore antifrode e il CRM. Il venerdì pomeriggio il team del checkout rilascia una modifica al messaggio `OrderCreated`. Il campo `total_amount` passa da un numero (`129.90`) a un oggetto (`{"value": 129.90, "currency": "EUR"}`), perché l'azienda sta aprendo il mercato estero.
 
-## Un campo trasformato in oggetto e l'intera pipeline bloccata per il weekend
+Il broker accetta il messaggio senza protestare, perché per Kafka ogni messaggio è una sequenza di byte e il contenuto non viene mai interpretato. Pochi secondi dopo il connettore verso il data warehouse e il motore antifrode falliscono con un errore di deserializzazione. Il team corregge i consumer nel fine settimana, ma resta un secondo problema: il topic contiene ormai due forme dello stesso campo nella stessa partizione, e un replay dall'inizio della settimana incontra prima numeri e poi oggetti.
 
-Questo è un caso ricostruito con numeri di esempio su quanto accade quando i topic Kafka vengono trattati come tubi senza contratto (*schemaless JSON*). In azienda otto microservizi pubblicano eventi su Kafka e quattro sistemi a valle (ClickHouse, data lake su S3, antifrode, CRM) li consumano in tempo reale.
+Una modifica di questo genere non si ripara a posteriori, perché un log Kafka è immutabile e i vecchi messaggi non possono essere riscritti. L'unica difesa sta prima della pubblicazione, in un registro che conosce gli schemi, li confronta e rifiuta le modifiche che romperebbero chi legge. Martin Kleppmann descrive questo problema di evoluzione dei formati nel capitolo sulla codifica dei dati di [Designing Data-Intensive Applications](https://dataintensive.net/), e i registri di schemi sono la sua applicazione pratica ai flussi di eventi.
 
-Poiché Kafka per design vede ogni messaggio solo come un array opaco di byte (`byte[]`), il broker non valida la struttura del contenuto. Durante uno sprint per l'espansione all'estero, uno sviluppatore backend modifica la classe del messaggio `OrderCreated` trasformando `"total_amount": 129.90` in `"total_amount": {"value": 129.90, "currency": "EUR"}` e distribuisce in produzione:
-1. I nuovi messaggi entrano nel topic mescolandosi ai precedenti.
-2. Non appena i consumer arrivano al primo offset col nuovo formato, la tabella `ENGINE = Kafka` di ClickHouse e i job di ingestione falliscono nel tentativo di convertire la stringa `'{"value":129.90...}'` in `Decimal(12, 2)`.
-3. Anche dopo aver corretto il codice del consumer per leggere il nuovo oggetto, non è più possibile fare replay del topic dall'inizio della settimana perché la prima metà della partizione contiene numeri semplici e la seconda metà contiene oggetti incompatibili.
+## Il wire format: cinque byte al posto dello schema
 
-La causa del blocco è l'assenza di un registro centrale degli schemi (**Schema Registry**) che imponga regole matematiche di evoluzione tra versioni successive del contratto ([Kleppmann, 2017](https://dataintensive.net/)).
+Uno Schema Registry, come quello di Confluent o Apicurio, è un servizio che associa a ogni schema un identificativo numerico. Il producer registra lo schema una volta e riceve un ID intero di 4 byte. Ogni messaggio che pubblica inizia con un byte fisso a zero, il magic byte, seguito dai 4 byte dell'ID e dal contenuto codificato. Sono 5 byte di intestazione.
 
-## Wire format con Schema ID, regole di compatibilità e CI/CD
+> **Idea chiave:** il messaggio porta con sé solo un riferimento di 5 byte allo schema, quindi il contratto è verificabile da chiunque legga senza pagare il costo di trasportare lo schema in ogni record.
 
-Uno Schema Registry (Confluent Schema Registry o Apicurio) governa l'evoluzione dei contratti in streaming senza appesantire i messaggi grazie a tre meccanismi architetturali.
+Il consumer legge i primi 5 byte, chiede una volta sola il testo dello schema al registro, lo tiene in memoria e deserializza i record seguenti senza altre chiamate di rete. Il risparmio è consistente. Prendi un record Avro di 45 byte e uno schema di 900 byte. Con lo schema incorporato in ogni messaggio il record pesa 945 byte, 18,9 volte il record con riferimento, che pesa 45 + 5 = 50 byte. Su 10 milioni di record al giorno il calcolo è 945 byte × 10.000.000 record = 9,45 GB con lo schema incorporato, contro 50 byte × 10.000.000 record = 0,5 GB con il riferimento: il totale scende del 94,7%.
 
-Il primo meccanismo è il **Wire Format a 5 byte di intestazione**. Invece di allegare l'intero schema testuale dentro ogni singolo messaggio Kafka, il producer registra lo schema (Avro, Protobuf o JSON Schema) sullo Schema Registry ricevendo un identificativo intero univoco di 4 byte (`Schema ID`). Ogni messaggio pubblicato sul topic inizia con `1 byte` fisso (`0x00`, magic byte) seguito dai `4 byte` dello `Schema ID` e infine dai soli byte compressi dei dati. Quando il consumer legge il messaggio, estrae i primi 5 byte, scarica una sola volta lo schema corrispondente dal registro (mettendolo in cache locale) e deserializza il payload.
-
-Il secondo meccanismo è il **controllo formale di compatibilità** (`BACKWARD`, `FORWARD`, `FULL` e le rispettive varianti `_TRANSITIVE`). Con la modalità predefinita e raccomandata **`BACKWARD`**, il registro accetta una nuova versione dello schema (`v2`) solo se un consumer aggiornato allo schema `v2` è matematicamente in grado di leggere anche tutti i vecchi messaggi scritti con lo schema `v1`. Per rispettare `BACKWARD`, ogni nuovo campo aggiunto in `v2` **deve avere un valore `default` esplicito** (es. `"default": "EUR"` o `"default": null`): così, quando il consumer `v2` legge un messaggio storico `v1` in cui quel campo non esisteva ancora, la libreria riempie automaticamente il campo mancante col valore predefinito. Con **`FULL_TRANSITIVE`** si garantisce sia la lettura dei vecchi messaggi col nuovo codice sia la lettura dei nuovi messaggi col vecchio codice lungo tutte le versioni storiche.
-
-Il terzo meccanismo è il **gate di validazione in Continuous Integration (CI)** associato alla Dead Letter Queue (DLQ). Prima ancora che il codice del producer venga unito al branch principale su GitHub/GitLab, uno step della pipeline CI interroga l'API dello Schema Registry (`/compatibility/subjects/...`): se lo sviluppatore ha cambiato il tipo di un campo o aggiunto un campo obbligatorio senza `default`, la build fallisce in pull request impedendo che il cambiamento distruttivo arrivi mai in produzione.
-
-**Una piattaforma di streaming è immune dalle rotture di schema solo se ogni messaggio viaggia associato a uno Schema ID versionato e la pipeline di CI blocca qualsiasi modifica che violi la compatibilità `BACKWARD` o `FULL_TRANSITIVE`.**
-
-## Tre errori nella gestione degli schemi degli eventi Kafka
-
-Il blocco qui sotto mostra una modifica distruttiva al contratto che fa fallire l'ingestione in ClickHouse e costringe a scartare i messaggi corrotti:
-
-```sql
--- ERRORE 1: il producer cambia il tipo di total_amount da numero a oggetto JSON senza versionamento
--- né campo additivo separato, rompendo il parser tipizzato del database analitico.
--- Messaggio v1: {"order_id": 101, "total_amount": 129.90}
--- Messaggio v2 (BREAKING!): {"order_id": 102, "total_amount": {"value": 129.90, "currency": "EUR"}}
-
--- ERRORE 2: tentare di "risolvere" l'errore di schema alzando kafka_skip_broken_messages = 10000,
--- che butta via nel cestino migliaia di ordini validi senza salvarli in una Dead Letter Queue!
-CREATE TABLE raw_stream.kafka_orders_unsafe
-(
-    order_id UInt64,
-    total_amount Decimal(12, 2)
-)
-ENGINE = Kafka
-SETTINGS
-    kafka_broker_list = 'kafka-1:9092',
-    kafka_topic_list = 'orders.created.v1',
-    kafka_group_name = 'cg-clickhouse-unsafe',
-    kafka_format = 'JSONEachRow',
-    kafka_skip_broken_messages = 10000;
+```mermaid
+flowchart LR
+    P["Producer"] -->|"1. registra schema v2"| R["Schema Registry"]
+    R -->|"2. ID = 17"| P
+    P -->|"3. byte 0x00 + ID 17 + dati"| K["Topic Kafka"]
+    K --> C["Consumer"]
+    C -->|"4. GET schema ID 17 (una volta, poi cache)"| R
+    R -->|"testo dello schema"| C
 ```
 
-### Aggiungere un nuovo campo obbligatorio senza valore di default in modalità BACKWARD
+Il registro svolge anche una seconda funzione, più importante della compattezza: prima di assegnare un ID a una nuova versione, la confronta con quelle precedenti secondo la regola di compatibilità configurata. Se la verifica fallisce, la registrazione viene rifiutata e il producer non può pubblicare il nuovo formato.
 
-Aggiungere nello schema `v2` un nuovo campo `"currency": "string"` senza dichiarare `"default": "EUR"` (o `["null", "string"]` con `"default": null`) sembra innocuo perché il nuovo producer valorizza sempre quel campo da oggi in avanti. Non funziona perché rompe il replay storico e la compatibilità `BACKWARD`: non appena aggiornate il consumer allo schema `v2` e provate a leggere i messaggi rimasti in coda da ieri (scritti con `v1` dove `currency` non era presente), il deserializzatore solleva un errore fatale perché non sa quale valore assegnare al campo obbligatorio mancante.
+## Il contratto in Avro: una versione 1 e una versione 2
 
-### Modificare il tipo o il nome di un campo esistente invece di aggiungere un campo nuovo
+Lo schema è un documento JSON che dichiara nome, campi e tipi. Per gli importi in denaro conviene un tipo decimale con precisione e scala dichiarate, perché un `double` accumula errori di arrotondamento nelle somme. Ecco la versione 1 di `OrderCreated`.
 
-Rinominare `total_amount` in `gross_amount` o cambiarne il tipo da `double` a `record` all'interno dello stesso topic `orders.created.v1` rende il log fisicamente illeggibile. Poiché in un log immutabile i messaggi vecchi non possono essere riscritti, all'interno della stessa partizione coesistono per giorni offset con il vecchio tipo e offset con il nuovo tipo: nessun singolo schema statico può più leggere l'intero topic dall'offset zero alla fine.
-
-### Usare kafka_skip_broken_messages alto invece di catturare gli errori in una tabella DLQ
-
-Quando un messaggio malformato blocca il consumo, impostare `kafka_skip_broken_messages = 10000` per far ripartire la coda è una scorciatoia pericolosissima. ClickHouse scarta silenziosamente tutti i messaggi che non rispettano lo schema senza salvarne il contenuto grezzo da nessuna parte: la pipeline sembra "verde" e allineata, ma avete appena perso migliaia di transazioni finanziarie senza modo di sapere quali fossero.
-
-## Evoluzione compatibile con default, check in CI e cattura errori (_error) in ClickHouse
-
-Per far evolvere i contratti degli eventi senza mai fermare i consumer né perdere un solo messaggio, applicate questi quattro criteri in ordine di priorità:
-
-1. Configurate lo Schema Registry sul livello di compatibilità `BACKWARD_TRANSITIVE` (o `FULL_TRANSITIVE`) per tutti i topic condivisi, usando la strategia di naming `TopicNameStrategy` (`<topic>-value`).
-2. Evolvete gli schemi solo in modo additivo: non cambiate mai il tipo di `total_amount`, ma mantenete `total_amount` invariato e aggiungete accanto il nuovo campo `currency` con `"default": "EUR"`.
-3. Collegate in ClickHouse lo Schema Registry nativo (`format_schema_registry_url`) oppure abilitate `kafka_handle_error_mode = 'stream'` per dirottare automaticamente qualsiasi messaggio invalido (col testo grezzo `_raw_message` e il motivo `_error`) in una tabella Dead Letter Queue (`dlq_errors`) senza bloccare i messaggi sani né perdere dati.
-4. Solo quando una modifica strutturale radicale è davvero inevitabile, create un nuovo topic esplicito `orders.created.v2` e gestite la doppia lettura di transizione.
-
-Ecco l'implementazione completa in ClickHouse che evolve lo schema con valore predefinito e cattura in modo sicuro eventuali messaggi non conformi in una tabella DLQ ispezionabile:
-
-```sql
--- 1. Tabella Kafka Engine con evoluzione additiva (currency con default 'EUR')
--- e gestione errori in modalità 'stream' (zero messaggi persi, zero blocchi di partizione).
-CREATE TABLE raw_stream.kafka_orders_v1_safe
-(
-    order_id UInt64,
-    total_amount Decimal(12, 2),
-    currency LowCardinality(String) DEFAULT 'EUR'
-)
-ENGINE = Kafka
-SETTINGS
-    kafka_broker_list = 'kafka-1:9092',
-    kafka_topic_list = 'orders.created.v1',
-    kafka_group_name = 'cg-clickhouse-safe-v1',
-    kafka_format = 'AvroConfluent',
-    format_schema_registry_url = 'http://schema-registry:8081',
-    kafka_handle_error_mode = 'stream',
-    kafka_max_block_size = 65536;
-
--- 2. Materialized View principale: scrive i record validi (_error == '') nella tabella analitica
-CREATE MATERIALIZED VIEW raw_stream.mv_orders_valid
-TO raw_stream.orders_valid
-AS SELECT
-    order_id,
-    total_amount,
-    currency,
-    _partition AS kafka_partition,
-    _offset AS kafka_offset
-FROM raw_stream.kafka_orders_v1_safe
-WHERE _error = '';
-
--- 3. Materialized View Dead Letter Queue (DLQ): cattura e conserva ogni messaggio rotto (_error != '')
-CREATE TABLE raw_stream.orders_dlq
-(
-    failed_at DateTime DEFAULT now(),
-    kafka_topic String,
-    kafka_partition UInt32,
-    kafka_offset UInt64,
-    error_reason String,
-    raw_payload String
-)
-ENGINE = MergeTree
-ORDER BY (failed_at, kafka_partition, kafka_offset);
-
-CREATE MATERIALIZED VIEW raw_stream.mv_orders_dlq
-TO raw_stream.orders_dlq
-AS SELECT
-    now() AS failed_at,
-    _topic AS kafka_topic,
-    _partition AS kafka_partition,
-    _offset AS kafka_offset,
-    _error AS error_reason,
-    _raw_message AS raw_payload
-FROM raw_stream.kafka_orders_v1_safe
-WHERE _error != '';
+```json
+{
+  "type": "record",
+  "name": "OrderCreated",
+  "namespace": "com.example.orders",
+  "doc": "Versione 1: ordine creato dal checkout",
+  "fields": [
+    {"name": "order_id", "type": "long"},
+    {"name": "total_amount",
+     "type": {"type": "bytes", "logicalType": "decimal", "precision": 12, "scale": 2}}
+  ]
+}
 ```
 
-Con questa architettura si ottengono due protezioni simultanee: in primo luogo, lo Schema Registry rifiuta già in CI il tentativo di trasformare `total_amount` in un oggetto e guida lo sviluppatore ad aggiungere `currency` con default `'EUR'`, permettendo a ClickHouse di leggere senza interruzioni sia i messaggi vecchi (`v1`) sia i nuovi (`v2`); in secondo luogo, grazie a `kafka_handle_error_mode = 'stream'`, se mai un messaggio corrotto dovesse arrivare sul topic, `mv_orders_valid` continua a processare il traffico sano mentre `mv_orders_dlq` salva l'intero payload grezzo e il messaggio d'errore in `orders_dlq`, pronto per essere corretto e reinserito. Configurare lo Schema Registry e la vista DLQ richiede mezz'ora; passare il sabato notte a cercare nel log binario di Kafka quale offset ha mandato in crash il parser blocca l'intero team.
+La modifica richiesta dal mercato estero si fa in modo additivo. Lasci `total_amount` com'è e aggiungi un campo nuovo, `currency`, con un valore predefinito. Il default è ciò che permette a un consumer aggiornato alla versione 2 di leggere un vecchio messaggio della versione 1 in cui il campo non esiste: la libreria riempie il vuoto con `EUR`.
 
-## Modalità di compatibilità BACKWARD, FORWARD o FULL_TRANSITIVE
+```json
+{
+  "type": "record",
+  "name": "OrderCreated",
+  "namespace": "com.example.orders",
+  "doc": "Versione 2: aggiunge la valuta con default EUR",
+  "fields": [
+    {"name": "order_id", "type": "long"},
+    {"name": "total_amount",
+     "type": {"type": "bytes", "logicalType": "decimal", "precision": 12, "scale": 2}},
+    {"name": "currency", "type": "string", "default": "EUR"}
+  ]
+}
+```
 
-Quando si configura un soggetto sullo Schema Registry, l'architetto deve scegliere quale regola di compatibilità imporre tra **`BACKWARD`** (nuovi consumer leggono vecchi dati), **`FORWARD`** (vecchi consumer leggono nuovi dati) e **`FULL_TRANSITIVE`** (compatibilità bidirezionale garantita su tutte le versioni storiche, non solo l'ultima).
+Per un campo opzionale in senso stretto, cioè che può mancare davvero, si usa un'unione con `null` al primo posto e `"default": null`. L'ordine conta in Avro, perché il valore predefinito deve corrispondere al primo tipo dell'unione.
 
-Il criterio di scelta è netto: **usate `BACKWARD_TRANSITIVE` quando avete il controllo sull'ordine di rilascio e potete aggiornare prima i consumer a valle (ClickHouse, dbt, data lake) e poi i producer a monte così che il replay dell'intero storico del topic funzioni sempre, usate invece `FULL_TRANSITIVE` in ambienti multi-team con decine di consumer indipendenti dove i producer possono essere rilasciati prima che tutti i team consumatori abbiano aggiornato i propri client.**
+## BACKWARD, FORWARD e FULL: chi legge cosa
 
-La confusione comune consiste nell'usare la modalità non transitiva (`BACKWARD` semplice invece di `BACKWARD_TRANSITIVE`), che controlla la compatibilità di `v3` solo contro `v2` ignorando `v1`: in quel modo due passaggi intermedi apparentemente validi possono rendere `v3` incompatibile con i messaggi `v1` ancora presenti in un topic compattato o a lunga retention. Sbagliare questa scelta fa fallire i replay completi a distanza di settimane.
+La regola di compatibilità risponde a una domanda precisa su chi legge i dati di chi. Con `BACKWARD` un consumer che usa lo schema nuovo legge anche i messaggi scritti con lo schema precedente. Con `FORWARD` un consumer che usa lo schema vecchio legge anche i messaggi scritti con lo schema nuovo. Con `FULL` valgono entrambe. Le varianti `_TRANSITIVE` estendono il confronto a tutte le versioni registrate invece che alla sola ultima.
 
-Questo articolo non tratta la crittografia a livello di singolo campo (*Client-Side Field Level Encryption*, CSFLE) per la conformità GDPR tramite cancellazione della chiave crittografica (*crypto-shredding*) né la migrazione tra formati diversi (da JSON Schema a Protobuf). Ricordate che in Apache Avro per rendere un campo opzionale compatibile in `FULL_TRANSITIVE` bisogna dichiararlo come unione `["null", "string"]` posizionando `"null"` al primo posto e specificando `"default": null`.
+| Modalità | Chi può restare indietro | Aggiungere un campo | Rimuovere un campo |
+| --- | --- | --- | --- |
+| `BACKWARD` | Nessuno: si aggiornano prima i consumer | Ammesso solo con default | Ammesso |
+| `FORWARD` | I consumer possono aggiornarsi dopo i producer | Ammesso | Ammesso solo se il campo aveva un default |
+| `FULL` | Entrambi, rispetto alla versione precedente | Ammesso solo con default | Ammesso solo se il campo aveva un default |
+| `BACKWARD_TRANSITIVE` | Come BACKWARD, su tutte le versioni storiche | Ammesso solo con default | Ammesso |
 
-## Cinque domande prima di approvare una modifica allo schema di un evento
+La scelta dipende da chi controlla l'ordine di rilascio. Se puoi aggiornare prima i consumer a valle e poi i producer, `BACKWARD_TRANSITIVE` è sufficiente e garantisce che un replay completo dell'intero topic funzioni. Se decine di consumer appartengono a team indipendenti e i producer possono uscire prima che tutti abbiano aggiornato, serve `FULL_TRANSITIVE`.
 
-1. Il topic è registrato sullo Schema Registry con compatibilità almeno `BACKWARD_TRANSITIVE` (o `FULL_TRANSITIVE`) e il check di compatibilità gira automaticamente nella pipeline CI a ogni pull request?
-2. Ogni nuovo campo aggiunto allo schema possiede un valore `default` esplicito così che la lettura dei messaggi storici precedenti non fallisca?
-3. Avete evitato qualsiasi rinomina o cambio di tipo sul posto, affiancando invece un nuovo campo e mantenendo valorizzato anche il vecchio durante il periodo di deprecazione?
-4. Se la modifica è inevitabilmente distruttiva (cambio della chiave primaria o ristrutturazione completa del dominio), avete previsto la pubblicazione su un nuovo topic versionato (`.v2`)?
-5. I consumer analitici in ClickHouse hanno `kafka_handle_error_mode = 'stream'` con una tabella Dead Letter Queue monitorata (invece di scartare silenziosamente i messaggi con `kafka_skip_broken_messages`)?
+La variante non transitiva ha un limite che emerge solo dopo settimane. Una `v3` viene confrontata con la sola `v2`, quindi due passaggi ciascuno valido può produrre una `v3` che non legge più i messaggi della `v1` ancora presenti in un topic compattato o con retention lunga. Nei topic che si rileggono dall'inizio, la forma transitiva è la sola che offre la garanzia desiderata.
 
-La metrica operativa che certifica una governance degli eventi matura è il **conteggio di righe nella tabella Dead Letter Queue (`SELECT count() FROM orders_dlq`) uguale a zero**, abbinato a **zero fermi di ingestione causati da rilasci dei microservizi a monte**.
+## Registrare e verificare dalla riga di comando
 
-Di tutta la governance con Schema Registry, una sola regola riassume il contratto tra chi produce e chi analizza i dati: in un log immutabile non si riscrive mai il significato di un campo esistente; si aggiunge sempre un campo nuovo col suo valore predefinito.
+Il registro espone un'API REST. Il blocco seguente imposta la modalità transitiva sul subject del topic, poi verifica se la versione 2 è compatibile con le versioni registrate prima di registrarla. Il subject segue la strategia predefinita `<topic>-value`.
+
+```bash
+# Imposta la compatibilità del subject: ogni nuova versione si confronta con tutte le precedenti
+curl -s -X PUT -H "Content-Type: application/vnd.schemaregistry.v1+json" \
+  --data '{"compatibility": "BACKWARD_TRANSITIVE"}' \
+  http://schema-registry:8081/config/orders.created.v1-value
+
+# Controlla la compatibilità senza registrare: jq incapsula lo schema nel campo "schema"
+jq -Rs '{schema: .}' order_created_v2.avsc \
+  | curl -s -X POST -H "Content-Type: application/vnd.schemaregistry.v1+json" \
+      --data @- \
+      http://schema-registry:8081/compatibility/subjects/orders.created.v1-value/versions/latest
+# Risposta attesa: {"is_compatible":true}
+
+# Registra la versione 2 solo dopo il controllo, restituisce l'ID assegnato
+jq -Rs '{schema: .}' order_created_v2.avsc \
+  | curl -s -X POST -H "Content-Type: application/vnd.schemaregistry.v1+json" \
+      --data @- http://schema-registry:8081/subjects/orders.created.v1-value/versions
+```
+
+Se provi lo stesso controllo con lo schema che trasforma `total_amount` in un record, la risposta è `{"is_compatible":false}`, perché un lettore con il tipo nuovo non sa interpretare i byte decimali della versione 1. L'errore emerge sul computer dello sviluppatore, prima di qualunque rilascio.
+
+## Il controllo in CI blocca la modifica prima del merge
+
+L'API di verifica diventa uno strumento di governo quando gira in automatico a ogni pull request. Il job seguente, scritto per GitHub Actions, estrae gli schemi modificati e li confronta con il registro di test. Se anche un solo schema è incompatibile, il job termina con errore e la pull request non può essere unita.
+
+```yaml
+# Controllo di compatibilità degli schemi Avro a ogni pull request
+name: schema-compatibility
+on:
+  pull_request:
+    paths: ["schemas/**/*.avsc"]
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verifica compatibilità contro il registro
+        env:
+          REGISTRY: http://schema-registry.staging:8081
+        run: |
+          for f in schemas/*.avsc; do
+            subject="$(basename "$f" .avsc)-value"
+            ok=$(jq -Rs '{schema: .}' "$f" \
+              | curl -s -X POST -H "Content-Type: application/vnd.schemaregistry.v1+json" \
+                  --data @- "$REGISTRY/compatibility/subjects/$subject/versions/latest" \
+              | jq -r '.is_compatible')
+            # Un subject non ancora registrato restituisce errore: lo trattiamo come nuovo
+            if [ "$ok" = "false" ]; then echo "INCOMPATIBILE: $f"; exit 1; fi
+          done
+```
+
+Il costo del controllo è di pochi secondi per pull request. Il costo evitato è il fine settimana di indagine del caso iniziale, con quattro sistemi fermi e un topic con due forme dello stesso campo.
+
+## Messaggi non validi: una dead letter queue al posto dello scarto
+
+Anche con un registro e una CI ben configurati, può arrivare un messaggio non conforme: un producer legacy, un errore di serializzazione, un messaggio inviato a mano. La reazione sbagliata è ignorarlo. Molti connettori offrono un'opzione per saltare i messaggi malformati fino a una soglia, per esempio 10.000, e farlo sembra un modo rapido per sbloccare la coda.
+
+Un calcolo con numeri di esempio mostra il danno. Supponi che dopo un rilascio difettoso il 40% dei 500 messaggi al secondo non sia più deserializzabile. I messaggi invalidi sono 500 × 0,40 = 200 al secondo, quindi 200 × 3.600 = 720.000 in un'ora. Con lo scarto silenzioso la pipeline appare verde e perdi 720.000 eventi all'ora senza sapere quali siano. Con una dead letter queue li conservi tutti, con il payload originale e il motivo dell'errore, e puoi correggerli e reimmetterli in seguito.
+
+```python
+# Consumer con deserializzazione Avro e dead letter queue per i messaggi non validi
+from confluent_kafka import Consumer, Producer
+from confluent_kafka.schema_registry import SchemaRegistryClient
+from confluent_kafka.schema_registry.avro import AvroDeserializer
+from confluent_kafka.serialization import SerializationContext, MessageField
+
+registry = SchemaRegistryClient({"url": "http://schema-registry:8081"})
+deserialize = AvroDeserializer(registry)
+dlq = Producer({"bootstrap.servers": "kafka-1:9092"})
+consumer = Consumer({"bootstrap.servers": "kafka-1:9092",
+                     "group.id": "cg-warehouse-orders",
+                     "enable.auto.commit": False})
+consumer.subscribe(["orders.created.v1"])
+
+def process(order: dict) -> None:
+    ...  # scrittura nel data warehouse, idempotente
+
+while True:
+    msg = consumer.poll(1.0)
+    if msg is None or msg.error():
+        continue
+    try:
+        order = deserialize(msg.value(), SerializationContext(msg.topic(), MessageField.VALUE))
+        process(order)
+    except Exception as exc:
+        # Il messaggio originale resta intatto, con il motivo nell'header
+        dlq.produce("orders.created.v1.dlq", value=msg.value(), key=msg.key(),
+                    headers=[("error", str(exc).encode()),
+                             ("source", f"{msg.topic()}[{msg.partition()}]@{msg.offset()}".encode())])
+        dlq.poll(0)
+    consumer.commit(message=msg, asynchronous=False)
+```
+
+La metrica da tenere sotto controllo è la lunghezza della dead letter queue, che in una pipeline sana resta a zero. Un valore diverso da zero non è un incidente di per sé, è la prova che il meccanismo di cattura funziona, ma deve generare un avviso e una revisione entro un tempo stabilito.
+
+## Quando la modifica è davvero distruttiva
+
+Esistono cambiamenti che nessuna regola additiva può esprimere, come cambiare la chiave primaria di un evento o ristrutturare l'intero dominio. In quel caso la strada corretta è un nuovo topic con la versione nel nome, per esempio `orders.created.v2`, e una fase di doppia pubblicazione. Il producer scrive per un periodo su entrambi i topic, i consumer migrano uno alla volta e il vecchio topic viene chiuso solo quando nessun gruppo lo legge più.
+
+Anche la deprecazione di un campo segue un percorso graduale. Prima si smette di usarlo nei consumer, poi lo si dichiara con un default nello schema, solo alla fine lo si rimuove, e questo passaggio è ammesso solo se il campo aveva un valore predefinito. L'intervallo tra i passaggi deve coprire la retention del topic, altrimenti i messaggi vecchi con il campo restano nel log e un lettore nuovo li incontra comunque.
+
+## Tre errori nella gestione degli schemi
+
+### Aggiungere un campo obbligatorio senza default
+
+Il sintomo è un consumer aggiornato che fallisce sui messaggi di ieri con un errore di campo mancante. Succede perché il nuovo producer scrive sempre il campo e sembra superfluo dichiarare un valore predefinito. Si corregge aggiungendo `"default": "EUR"` oppure un'unione `["null", "string"]` con `"default": null`, così il registro accetta la versione in modalità `BACKWARD`.
+
+### Cambiare tipo o nome di un campo esistente
+
+Il sintomo è un topic che nessuno schema riesce più a leggere dall'inizio alla fine. Succede perché rinominare `total_amount` in `gross_amount` o trasformarlo in record sembra un cambiamento locale, mentre nel log immutabile i vecchi messaggi restano con la vecchia forma. Si corregge lasciando il campo e aggiungendone uno nuovo, mantenendo entrambi valorizzati durante la deprecazione.
+
+### Saltare i messaggi malformati con una soglia alta
+
+Il sintomo è una pipeline sempre verde con un conteggio di righe inferiore a quello degli eventi prodotti. Succede perché saltare i messaggi sblocca subito la coda e il costo non è visibile. Si corregge instradando gli errori in una dead letter queue con payload e motivo, e confrontando il numero di eventi prodotti con quelli scritti a valle.
+
+## Controllo prima di approvare una modifica allo schema
+
+1. Un nuovo campo `currency` viene aggiunto senza default in modalità `BACKWARD`. Perché la registrazione viene rifiutata?
+
+<details>
+<summary>Mostra risposta</summary>
+
+Con `BACKWARD` un consumer sulla nuova versione deve poter leggere i messaggi scritti con la precedente. In quei messaggi `currency` non esiste e, senza un valore predefinito, il lettore non sa cosa assegnare. Aggiungendo `"default": "EUR"` la libreria riempie il campo mancante e il registro accetta la versione.
+
+</details>
+
+2. Un record Avro pesa 45 byte e lo schema 900 byte. Quanto occupano 10 milioni di messaggi con lo schema incorporato e con il wire format di Schema Registry?
+
+<details>
+<summary>Mostra risposta</summary>
+
+Con lo schema incorporato ogni messaggio pesa 945 byte, quindi 945 × 10.000.000 = 9,45 GB. Con il wire format pesa 45 + 5 = 50 byte, quindi 50 × 10.000.000 = 0,5 GB, circa un diciannovesimo.
+
+</details>
+
+3. Perché per un topic con retention di 30 giorni conviene `BACKWARD_TRANSITIVE` invece di `BACKWARD`?
+
+<details>
+<summary>Mostra risposta</summary>
+
+`BACKWARD` confronta la nuova versione solo con l'ultima registrata. Dopo qualche passaggio una `v3` potrebbe non leggere più i messaggi della `v1` ancora presenti nel topic. La forma transitiva confronta con tutte le versioni, quindi un replay dell'intero storico funziona sempre.
+
+</details>
+
+4. Dopo un rilascio, il 40% di 500 messaggi al secondo non è deserializzabile. Quanti eventi perdi in un'ora se salti i malformati e quanti ne conservi con una dead letter queue?
+
+<details>
+<summary>Mostra risposta</summary>
+
+I messaggi invalidi sono 500 × 0,40 = 200 al secondo, quindi 200 × 3.600 = 720.000 in un'ora. Saltandoli li perdi tutti senza saperlo, con la dead letter queue li conservi con payload e motivo dell'errore e puoi reimmetterli dopo la correzione.
+
+</details>

@@ -1,172 +1,245 @@
 ---
 title: "Sicurezza e access control sul data lake"
 description: >-
-  Gestire sicurezza, autenticazione e autorizzazioni granulari su data lake S3.
+  Proteggere un data lake S3 con ruoli temporanei per prefisso, bucket policy con Deny espliciti, cifratura SSE-KMS con Bucket Key e audit dei Data Events in CloudTrail, con i costi di ciascuna misura.
 module: "Modulo 10: Data lake e lakehouse su S3"
 order: 8
 category: Tecnico
 headerImage: /course-headers/s3-data-lake-sicurezza-ginnytech-ad-v3.webp
 headerImageAlt: "Sicurezza e access control sul data lake - immagine ufficiale della lezione su GinnyTech, creata da AD"
-difficulty: advanced
-duration: 18 min
+difficulty: avanzato
+duration: 40 min
 learningObjectives:
-  - Applicare il minimo privilegio con bucket policy, IAM e Lake Formation
-  - Attivare encryption a riposo e in transito con SSE-S3 o KMS
-  - Registrare ogni accesso con CloudTrail e rivedere i permessi periodicamente
+  - Scrivere una policy di ruolo limitata a un solo prefisso e a una sola azione, e una bucket policy con Deny su traffico non TLS e fuori dal VPC endpoint
+  - Calcolare il costo delle chiamate KMS con e senza S3 Bucket Key e il costo dei Data Events CloudTrail
+  - Attivare da riga di comando Block Public Access, cifratura SSE-KMS e registrazione dei Data Events su un bucket
+  - Interrogare i log CloudTrail con Athena per individuare chiavi IAM statiche, accessi negati e letture anomale
 prerequisites:
   - s3-data-lake/performance-s3
 binario: "ml-tabellare"
-formato: "articolo"
-autore: "Hermes"
-controllatoDa: "Argo"
-autorizzatoDa: "Giano"
+formato: "didattica-v2"
 draft: false
-dateModified: 2026-11-13
+dateModified: 2026-11-17
 ---
 
-# Sicurezza e access control sul data lake
+Uno sviluppatore crea un utente IAM per una pipeline esterna e, per fare in fretta, gli assegna `AmazonS3FullAccess`. Le chiavi statiche finiscono in un file `.env` che per errore viene committato in un repository visibile a fornitori esterni. Sul bucket non sono mai stati attivati i Data Events di CloudTrail, per risparmiare qualche dollaro. Quando la chiave esposta viene scoperta, tre settimane dopo, nessuno può dire se i 40 TB di anagrafiche clienti siano stati scaricati. Questo è uno scenario costruito con numeri di esempio, ma il suo schema è quello di molti incidenti reali sui data lake.
 
-Uno sviluppatore crea un utente IAM per una pipeline esterna assegnandogli per comodità la policy `AmazonS3FullAccess` con chiavi statiche `AWS_ACCESS_KEY_ID` salvate in un file `.env` che finisce per errore in un repository Git accessibile a fornitori esterni; inoltre sul bucket non sono mai stati attivati i Data Events di AWS CloudTrail per risparmiare qualche dollaro. Quando il team di sicurezza scopre la chiave esposta tre settimane dopo, non ha alcun modo di sapere se i 40 TB di anagrafiche clienti siano stati scaricati o meno, ed è costretto a notificare una potenziale violazione dati al Garante Privacy. La causa non è solo l'errore umano del commit: è usare credenziali statiche con permessi wildcard (`s3:*` su `*`) su bucket privi di guardrail di rete (`aws:SourceVpce`) e privi di audit trail sulle letture (`Data Events`).
+## Una chiave statica su Git e nessun log per sapere cosa è uscito
 
-## Una chiave IAM con S3FullAccess su Git e zero log per sapere cosa è stato rubato
+Il data lake aziendale contiene contratti, fatture e profili utente in tre bucket. L'indagine dopo l'incidente trova tre debolezze.
 
-Questo è un caso ricostruito con numeri di esempio su quanto accade quando la sicurezza del data lake viene trattata come un adempimento burocratico anziché come un'architettura a difesa in profondità (*defense in depth*). Il data lake aziendale contiene dati contrattuali, fatture e profili utenti su tre bucket S3.
+La prima riguarda l'identità. Il job usava una chiave utente di lunga durata con `Action: "s3:*"` e `Resource: "*"`: chi la possedeva poteva leggere e cancellare ogni bucket dell'account da qualsiasi indirizzo IP. Un ruolo temporaneo limitato a `raw/partner_x/*` avrebbe contenuto il danno a una sola cartella.
 
-Durante un'ispezione post-incidente emergono tre vulnerabilità fatali:
-1. Invece di usare ruoli IAM temporanei (`STS AssumeRole`) limitati al singolo prefisso `s3://acme-lake-prod/raw/partner_x/*`, il job usava una chiave utente statica di lunga durata con `Action: "s3:*"` e `Resource: "*"`: chiunque possedesse quella stringa poteva leggere e cancellare tutti i bucket dell'account AWS da qualsiasi indirizzo IP del mondo.
-2. Il bucket accettava connessioni anche dalla rete internet pubblica (nessuna restrizione su VPC Endpoint aziendale) e usava la crittografia base `SSE-S3` invece di una chiave gestita `SSE-KMS` (che avrebbe bloccato chiunque non avesse anche il permesso esplicito `kms:Decrypt`).
-3. CloudTrail registrava di default solo i *Management Events* (`CreateBucket`, `PutBucketPolicy`), ma non i **S3 Data Events** (`GetObject`, `PutObject`, `DeleteObject`): davanti alla domanda del revisore legale *"quali file Parquet sono stati scaricati da quella chiave nelle ultime tre settimane?"*, i log sono completamente vuoti.
+La seconda riguarda la rete e la cifratura. Il bucket accettava connessioni da Internet e usava la cifratura `SSE-S3`, che decifra in automatico per chiunque abbia il permesso `s3:GetObject`. Con una chiave KMS dedicata, servirebbe anche `kms:Decrypt`, un secondo permesso indipendente.
 
-La causa del disastro è violare i tre pilastri della sicurezza cloud su S3: minimo privilegio con ruoli temporanei, crittografia KMS con vincoli di Bucket Policy (TLS + VPC Endpoint) e registrazione immutabile degli accessi ai dati.
+La terza riguarda la traccia. CloudTrail registra di default i Management Events, come `CreateBucket` e `PutBucketPolicy`, ma non i Data Events (`GetObject`, `PutObject`, `DeleteObject`). Davanti alla domanda del revisore su quali file siano stati scaricati con quella chiave, i log sono vuoti, e l'azienda deve trattare l'evento come una potenziale violazione di dati personali. Per dare un ordine di grandezza all'impatto, 40 TB in uscita verso Internet a 0,09 USD per GB (tariffa indicativa di listino) sarebbero 40.000 × 0,09 = 3.600 USD di solo trasferimento, un costo piccolo rispetto a quello legale e reputazionale.
 
-## Minimo Privilegio (IAM + Bucket Policy + KMS), S3 Block Public Access e Audit CloudTrail
+> **Idea chiave:** la sicurezza di un data lake è una difesa a strati in cui ogni strato deve fallire da solo, quindi un permesso troppo largo in un punto non deve bastare a leggere i dati.
 
-Proteggere un data lake su S3 contro esfiltrazioni di dati e accessi non autorizzati richiede quattro barriere concentriche che devono essere superate contemporaneamente.
+## Quattro barriere concentriche
 
-La prima barriera è il blocco perimetrale **`BlockPublicAccess` a livello di intero Account AWS** unito a una **Bucket Policy con `Deny` espliciti**. Su S3 un `Deny` esplicito vince sempre su qualsiasi `Allow`: anche se un amministratore distratto assegna `AmazonS3FullAccess` a un utente, una Bucket Policy che contiene tre regole `Effect: Deny` invalicabili garantisce che:
-1. Nessuna chiamata possa mai viaggiare in chiaro senza HTTPS (`"Bool": {"aws:SecureTransport": "false"}`).
-2. Nessuna lettura o scrittura sui dati sensibili possa provenire da fuori dalla rete privata aziendale o dal VPC Endpoint dei motori analitici (`"StringNotEquals": {"aws:SourceVpce": "vpce-0123456789"}`).
-3. Nessun oggetto possa essere caricato senza la chiave crittografica KMS aziendale.
+Le misure si dispongono in quattro cerchi, dall'esterno verso i dati.
 
-La seconda barriera è il **Minimo Privilegio tramite Ruoli Temporanei (`IAM Roles`) ristretti per prefisso e separati per ruolo**. Nessun essere umano e nessun applicativo deve possedere `AWS_ACCESS_KEY_ID` statiche: le applicazioni su Kubernetes/EC2 usano *IAM Roles for Service Accounts (IRSA)* e le pipeline CI usano *OIDC federation*, ricevendo token che scadono dopo un'ora. I permessi sono separati chirurgicamente: il producer di ingestione ha solo `s3:PutObject` sul proprio prefisso `raw/<fonte>/*` (non può leggere le altre fonti né cancellare), il job di trasformazione dbt/Spark legge `raw/` e scrive in `curated/`, e gli analisti non hanno alcun accesso diretto a S3 ma passano attraverso i permessi granulari di **Lake Formation** o ClickHouse.
-
-La terza e quarta barriera sono la **Crittografia `SSE-KMS` (con *Bucket Keys* attive per abbattere del 99% il costo delle chiamate a KMS)** e l'**Audit completo dei Data Events su AWS CloudTrail**. Con `SSE-KMS`, per leggere un file Parquet non basta avere `s3:GetObject`: serve anche `kms:Decrypt` sulla chiave specifica di quella zona, e in caso di compromissione basta disabilitare o revocare il grant sulla chiave KMS per rendere istantaneamente illeggibili tutti i terabyte del bucket.
-
-**Un data lake S3 è sicuro solo se bandisce le chiavi IAM statiche, impone `Deny` espliciti su connessioni non-TLS o esterne alla VPC, cifra le zone sensibili con `SSE-KMS` (Bucket Key) e registra ogni `GetObject`/`DeleteObject` su CloudTrail.**
-
-## Tre errori di sicurezza che lasciano esposto il data lake
-
-Il blocco SQL qui sotto mostra l'audit dei log di sicurezza che rivela i tre errori più gravi: accessi provenienti da IP pubblici con chiavi IAM statiche (`IAMUser` invece di `AssumedRole`), oggetti scritti senza crittografia KMS e tentativi di scansione massiva da ruoli sovra-privilegiati:
-
-```sql
--- Analisi dei log CloudTrail Data Events in ClickHouse / Athena che smaschera le falle:
--- ERRORE 1: user_identity_type = 'IAMUser' (chiavi statiche a lunga scadenza invece di AssumedRole!).
--- ERRORE 2: vpc_endpoint_id = '' (letture di file Parquet eseguite da IP internet pubblici!).
--- ERRORE 3: un singolo ruolo di ingestione legge (GetObject) prefissi di altri domini (violazione least privilege).
-SELECT
-    user_identity_type,
-    user_identity_arn,
-    source_ip_address,
-    vpc_endpoint_id,
-    event_name,
-    count() AS chiamate_s3,
-    uniqExact(request_s3_key) AS file_distinti_toccati
-FROM security_audit.cloudtrail_s3_data_events
-WHERE event_time >= now() - INTERVAL 24 HOUR
-  AND (
-      user_identity_type = 'IAMUser'
-      OR vpc_endpoint_id = ''
-      OR tls_version NOT IN ('TLSv1.2', 'TLSv1.3')
-  )
-GROUP BY user_identity_type, user_identity_arn, source_ip_address, vpc_endpoint_id, event_name
-ORDER BY chiamate_s3 DESC;
+```mermaid
+flowchart TD
+    A["Perimetro: Block Public Access e VPC endpoint"] --> B["Identità: ruoli temporanei per prefisso"]
+    B --> C["Cifratura: SSE-KMS con Key Policy separata"]
+    C --> D["Audit: Data Events CloudTrail e revisione periodica"]
+    D --> E["Dati nel bucket"]
 ```
 
-### Usare utenti IAM con Access Key statiche invece di IAM Roles temporanei
+Il perimetro è costituito dal blocco dell'accesso pubblico a livello di account e da una bucket policy con `Deny` espliciti. Su S3 un `Deny` esplicito prevale sempre su qualsiasi `Allow`: anche un amministratore che assegna per errore un permesso troppo ampio non scavalca una regola di negazione scritta sul bucket.
 
-Generare una coppia `Access Key / Secret Key` statica per collegare uno script Python, un server BI o un laptop al data lake crea una bomba a orologeria che non scade mai. Le chiavi statiche finiscono inevitabilmente nei log di errore, nella cronologia bash, nei ticket Jira o nei commit Git. Usando **IAM Roles** con credenziali temporanee STS (o il *Role ARN* nativo nelle integrazioni cloud di ClickHouse / Snowflake / Databricks), non esiste alcun segreto statico da rubare e ogni sessione ha una durata massima limitata.
+L'identità si basa su credenziali temporanee. Le applicazioni su Kubernetes o EC2 ricevono ruoli tramite IAM Roles for Service Accounts o profili di istanza, le pipeline di integrazione continua usano la federazione OIDC, e i token scadono in un'ora al massimo. Nessun essere umano e nessun job deve possedere una coppia di chiavi statiche.
 
-### Cifrare con SSE-KMS senza abilitare le S3 Bucket Keys
+La cifratura con `SSE-KMS` aggiunge il secondo lucchetto. La revoca del grant su una chiave rende illeggibili gli oggetti cifrati con essa, anche quando la policy S3 resta aperta. L'audit chiude il cerchio: senza una registrazione dei Data Events non esiste modo di rispondere a chi ha letto che cosa.
 
-Attivare la crittografia `SSE-KMS` su un bucket che riceve milioni di oggetti al giorno senza spuntare l'opzione **`S3 Bucket Key` (`BucketKeyEnabled = true`)** fa esplodere i costi di AWS KMS e fa sbattere le pipeline contro il limite di quota di KMS (`10.000–30.000 richieste/s`). Senza Bucket Key, S3 deve chiamare il servizio KMS per ogni singolo `PUT` e `GET` ($0,03 per 10.000 chiamate); abilitando la **S3 Bucket Key**, S3 genera una chiave temporanea a livello di bucket derivata dalla chiave KMS, riducendo del **99%** il traffico e i costi verso KMS a parità di sicurezza crittografica.
+## Ruoli temporanei con minimo privilegio
 
-### Non attivare i Data Events su CloudTrail per i bucket con dati critici o PII
+Il ruolo del produttore di dati deve poter solo scrivere nel proprio prefisso. La policy seguente concede `s3:PutObject` su `raw/partner_x/*` e nient'altro, quindi non permette né di leggere altri prefissi né di cancellare:
 
-Affidarsi alla configurazione predefinita di AWS CloudTrail pensando di essere protetti per gli audit di sicurezza è un errore fatale: di default CloudTrail registra solo la creazione o cancellazione dell'intero bucket, ma **non registra chi ha scaricato (`GetObject`) o cancellato (`DeleteObject`) i singoli file Parquet**. Se un dipendente infedele o una credenziale compromessa scarica l'intera anagrafica clienti alle due di notte, senza i *Data Events* (o i *Server Access Logs*) attivi non avrete alcuna traccia forense dell'accesso.
-
-## Audit forense su CloudTrail e rilevamento esfiltrazioni in ClickHouse
-
-Per blindare l'accesso al vostro data lake S3 e verificare continuamente il rispetto del minimo privilegio, applicate questi quattro criteri in ordine di priorità:
-
-1. Attivate `BlockPublicAccess` a livello di account, disabilitate le ACL legacy di S3 (`ObjectOwnership = BucketOwnerEnforced`) e applicate sulla Bucket Policy il `Deny` per `aws:SecureTransport = false` e per gli accessi fuori dai `aws:SourceVpce` autorizzati.
-2. Attivate la crittografia predefinita **`SSE-KMS` con `BucketKeyEnabled = true`** sulle zone `raw/` e `curated/` contenenti dati sensibili, concedendo `kms:Decrypt` solo ai ruoli strettamente autorizzati.
-3. Sostituite ogni utente IAM statico con **IAM Roles** confinati al singolo prefisso (`s3://acme-lake-prod/raw/crm/*`) e alle sole azioni necessarie (solo `PutObject` per chi scrive, solo `GetObject`/`ListBucket` con condizione `s3:prefix` per chi legge).
-4. Ingerite i **CloudTrail S3 Data Events** in una tabella immutabile di sicurezza e schedulate una query di anomaly detection e un'ispezione trimestrale con IAM Access Analyzer per revocare i permessi inutilizzati.
-
-Ecco la query di sicurezza e audit forense su ClickHouse che monitora i CloudTrail Data Events per intercettare tentativi di accesso negato (`AccessDenied`), letture massive anomale (potenziale esfiltrazione) e violazioni di perimetro:
-
-```sql
--- 1. Tabella di audit dei Data Events S3 alimentata da AWS CloudTrail:
-CREATE TABLE security_audit.cloudtrail_s3_events
-(
-    event_time DateTime64(3, 'UTC'),
-    aws_account_id LowCardinality(String),
-    user_identity_type LowCardinality(String),
-    principal_arn String,
-    source_ip String,
-    vpc_endpoint_id LowCardinality(String),
-    event_name LowCardinality(String),
-    bucket_name LowCardinality(String),
-    s3_object_key String,
-    error_code LowCardinality(String),
-    bytes_transferred UInt64,
-    kms_key_arn String
-)
-ENGINE = MergeTree
-PARTITION BY toYYYYMM(event_time)
-ORDER BY (bucket_name, toStartOfHour(event_time), principal_arn);
-
--- 2. Query di sicurezza: rileva picchi di AccessDenied (ricognizione/attacco),
--- scaricamenti massivi (> 10 GB in 1 ora da un singolo ruolo) o accessi fuori dal VPC Endpoint:
-SELECT
-    principal_arn,
-    user_identity_type,
-    source_ip,
-    vpc_endpoint_id,
-    countIf(error_code IN ('AccessDenied', 'AllAccessDisabled')) AS tentativi_negati,
-    countIf(event_name = 'GetObject' AND error_code = '') AS file_scaricati_ok,
-    round(sumIf(bytes_transferred, event_name = 'GetObject') / 1073741824.0, 2) AS gb_scaricati_1h,
-    uniqExact(splitByChar('/', s3_object_key)[2]) AS domini_distinti_letti
-FROM security_audit.cloudtrail_s3_events
-WHERE bucket_name = 'acme-lake-prod'
-  AND event_time >= now() - INTERVAL 1 HOUR
-GROUP BY principal_arn, user_identity_type, source_ip, vpc_endpoint_id
-HAVING tentativi_negati >= 5
-    OR gb_scaricati_1h > 10.0
-    OR vpc_endpoint_id = ''
-ORDER BY tentativi_negati DESC, gb_scaricati_1h DESC;
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "ScritturaSoloPrefissoPartnerX",
+      "Effect": "Allow",
+      "Action": "s3:PutObject",
+      "Resource": "arn:aws:s3:::acme-lake-prod/raw/partner_x/*"
+    },
+    {
+      "Sid": "UsoChiaveKmsRaw",
+      "Effect": "Allow",
+      "Action": ["kms:GenerateDataKey", "kms:Encrypt"],
+      "Resource": "arn:aws:kms:eu-central-1:123456789012:key/aaaa-bbbb-cccc"
+    }
+  ]
+}
 ```
 
-Con questa difesa stratificata, anche se uno sviluppatore dovesse commettere per sbaglio una credenziale temporanea in un repository pubblico, l'attaccante esterno che tenta di usarla da casa sua viene bloccato immediatamente dalla Bucket Policy (`vpc_endpoint_id != 'vpce-...'`), non possiede il permesso `kms:Decrypt` sulla chiave KMS e i suoi primi 5 tentativi `AccessDenied` fanno scattare in meno di sessanta secondi la query di allerta del team di sicurezza con l'indicazione esatta del `principal_arn` da revocare. Inoltre, in qualsiasi ispezione GDPR o ISO 27001, potete dimostrare matematicamente chi ha letto quale file in qualsiasi minuto dell'anno.
+Il job di trasformazione ha una policy distinta: legge `raw/` e scrive `curated/`. Gli analisti non hanno accesso diretto a S3 e passano dai permessi di colonna e di tabella di Lake Formation o dal motore di query, così il controllo sta in un solo punto. La separazione per ruolo e per prefisso ha un effetto pratico: se la chiave di `partner_x` si compromette, l'attaccante può solo aggiungere file in una cartella, ed è un danno che si individua e si ripulisce.
 
-## Crittografia gestita da S3 (SSE-S3) o Crittografia con chiave cliente in KMS (SSE-KMS)
+## Bucket policy con Deny espliciti
 
-Quando si configura la crittografia a riposo su un bucket S3, AWS offre due opzioni principali gestite lato server: **`SSE-S3` (AES-256 gestita interamente e gratuitamente da Amazon S3)** e **`SSE-KMS` (chiave gestita nel servizio AWS Key Management Service con policy di accesso separata, rotazione annuale e log di utilizzo su CloudTrail)**.
+La bucket policy impone tre regole che valgono per chiunque, qualunque sia il suo ruolo. La prima rifiuta il traffico non cifrato, la seconda rifiuta l'accesso da fuori dal VPC endpoint autorizzato, la terza rifiuta le scritture senza cifratura KMS:
 
-Il criterio di scelta è netto: **usate `SSE-KMS` (sempre con `S3 Bucket Key` attiva) per tutti i bucket e prefissi che contengono dati personali (PII), dati finanziari, segreti industriali o dati condivisi tra account AWS diversi dove serve una doppia chiave di controllo (`s3:GetObject` + `kms:Decrypt`), l'audit dell'uso della chiave e la revoca istantanea (*kill switch*), usate invece `SSE-S3` per i bucket di log tecnici non sensibili, artefatti pubblici o dati temporanei di calcolo dove il requisito è la sola crittografia fisica dei dischi nel data center.**
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "DenyTrafficoNonTls",
+      "Effect": "Deny",
+      "Principal": "*",
+      "Action": "s3:*",
+      "Resource": ["arn:aws:s3:::acme-lake-prod", "arn:aws:s3:::acme-lake-prod/*"],
+      "Condition": { "Bool": { "aws:SecureTransport": "false" } }
+    },
+    {
+      "Sid": "DenyFuoriVpcEndpoint",
+      "Effect": "Deny",
+      "Principal": "*",
+      "Action": "s3:*",
+      "Resource": ["arn:aws:s3:::acme-lake-prod", "arn:aws:s3:::acme-lake-prod/*"],
+      "Condition": {
+        "StringNotEquals": { "aws:SourceVpce": "vpce-0123456789abcdef0" },
+        "ArnNotLike": { "aws:PrincipalArn": "arn:aws:iam::123456789012:role/BreakGlassAdmin" }
+      }
+    },
+    {
+      "Sid": "DenyScritturaSenzaKms",
+      "Effect": "Deny",
+      "Principal": "*",
+      "Action": "s3:PutObject",
+      "Resource": "arn:aws:s3:::acme-lake-prod/*",
+      "Condition": {
+        "StringNotEquals": { "s3:x-amz-server-side-encryption": "aws:kms" }
+      }
+    }
+  ]
+}
+```
 
-La confusione comune consiste nel pensare che `SSE-S3` protegga contro un ruolo IAM mal configurato dentro lo stesso account: poiché `SSE-S3` decifra automaticamente gli oggetti per chiunque abbia il permesso `s3:GetObject` nel vostro account, se una policy S3 è troppo permissiva `SSE-S3` non oppone alcuna barriera aggiuntiva. Al contrario, con `SSE-KMS` anche un utente con `AmazonS3FullAccess` riceve `AccessDenied` se il suo ruolo non è esplicitamente autorizzato nella *Key Policy* della chiave KMS. Sbagliare questa scelta priva i dati più critici della seconda serratura indipendente.
+La seconda regola contiene un'eccezione per un ruolo di emergenza, indispensabile: senza di essa un errore nella condizione del VPC endpoint bloccherebbe anche gli amministratori, e il bucket non sarebbe più gestibile. Il ruolo di emergenza va protetto con autenticazione a più fattori e monitorato, perché ogni suo utilizzo deve far scattare un allarme.
 
-Questo articolo non tratta la crittografia lato client prima dell'invio a S3 (*Client-Side Encryption*) né l'integrazione con Hardware Security Modules dedicati (AWS CloudHSM). Ricordate di impostare sempre sui bucket di produzione `ObjectOwnership = BucketOwnerEnforced`: questa impostazione disabilita definitivamente le vecchie ACL per singolo oggetto e garantisce che ogni file caricato sul vostro bucket (anche da un account partner esterno) appartenga al 100% al vostro account e rispetti la vostra Bucket Policy.
+Tre impostazioni del bucket completano il perimetro e si attivano da riga di comando:
 
-## Cinque domande per l'audit di sicurezza del data lake S3
+```bash
+# Blocco dell'accesso pubblico a livello di account
+aws s3control put-public-access-block \
+  --account-id 123456789012 \
+  --public-access-block-configuration BlockPublicAcls=true,IgnorePublicAcls=true,BlockPublicPolicy=true,RestrictPublicBuckets=true
 
-1. `S3 Block Public Access` è attivo sia a livello di singolo bucket sia a livello globale di Account AWS, e le ACL legacy sono disabilitate con `BucketOwnerEnforced`?
-2. Avete eliminato il 100% delle Access Key IAM statiche a lunga durata, sostituendole con **IAM Roles temporanei** dotati di permessi ristretti al singolo prefisso (`raw/<fonte>/*`)?
-3. La Bucket Policy impone un `Deny` esplicito per qualsiasi richiesta non cifrata in transito (`aws:SecureTransport = false`) e per gli accessi provenienti da fuori dei VPC Endpoint autorizzati?
-4. I bucket contenenti dati PII o finanziari sono cifrati a riposo con **`SSE-KMS` e `S3 Bucket Key` attiva**, separando i permessi sulle chiavi tra zona `raw` e zona `curated`?
-5. I **CloudTrail Data Events** sono attivi sui bucket critici, monitorati contro picchi di `AccessDenied` o download anomali, ed eseguite una revisione periodica (almeno trimestrale) dei permessi con IAM Access Analyzer?
+# ACL legacy disattivate: ogni oggetto appartiene al proprietario del bucket
+aws s3api put-bucket-ownership-controls \
+  --bucket acme-lake-prod \
+  --ownership-controls 'Rules=[{ObjectOwnership=BucketOwnerEnforced}]'
 
-La metrica di postura di sicurezza del data lake è composta da due zeri assoluti: **0 chiavi IAM statiche attive con accesso ai bucket di produzione** e **0 letture eseguite fuori da connessioni TLS 1.2+ / VPC Endpoint autorizzati**.
+# Cifratura predefinita SSE-KMS con S3 Bucket Key attiva
+aws s3api put-bucket-encryption \
+  --bucket acme-lake-prod \
+  --server-side-encryption-configuration '{"Rules":[{"ApplyServerSideEncryptionByDefault":{"SSEAlgorithm":"aws:kms","KMSMasterKeyID":"arn:aws:kms:eu-central-1:123456789012:key/aaaa-bbbb-cccc"},"BucketKeyEnabled":true}]}'
+```
 
-Di tutta la sicurezza sul data lake, tenete a mente un solo principio: i permessi non si concedono mai per "far funzionare in fretta lo script" promettendo di restringerli domani. Chiudete il bucket con `BlockPublicAccess` e VPC Endpoint, date a ogni processo solo il suo prefisso con un ruolo temporaneo e lasciate che `SSE-KMS` e CloudTrail facciano la guardia a ogni singolo file.
+## SSE-S3 o SSE-KMS e il costo delle chiamate a KMS
+
+`SSE-S3` cifra gli oggetti con chiavi gestite da S3, senza costo aggiuntivo e senza una policy di chiave separata. `SSE-KMS` usa una chiave in AWS Key Management Service, con una Key Policy indipendente, un registro di utilizzo in CloudTrail e la possibilità di revoca immediata. La differenza di sicurezza è concreta: con `SSE-S3` un ruolo con `s3:GetObject` legge in chiaro; con `SSE-KMS` lo stesso ruolo riceve `AccessDenied` se non compare nella Key Policy.
+
+Il prezzo da pagare sono le chiamate a KMS. Esempio numerico svolto, con tariffa indicativa di 0,03 USD ogni 10.000 richieste (verifica il listino della tua regione):
+
+1. Volume: un bucket riceve 100 milioni di richieste al mese tra `PUT` e `GET` su oggetti cifrati.
+2. Senza Bucket Key ogni richiesta chiama KMS: 100.000.000 / 10.000 = 10.000 blocchi da 10.000 richieste, quindi 10.000 × 0,03 = 300 USD al mese.
+3. Con la S3 Bucket Key S3 genera una chiave temporanea a livello di bucket e riduce le chiamate verso KMS di circa il 99%: restano 1.000.000 di chiamate, cioè 100 blocchi, quindi 100 × 0,03 = 3 USD al mese.
+4. Risparmio: 300 − 3 = 297 USD al mese, a parità di Key Policy e di audit.
+
+Oltre al costo, esiste una quota di richieste al secondo per chiave KMS, che nelle pipeline ad alto parallelismo si raggiunge prima del costo: la Bucket Key allontana anche questo limite. Le zone `raw` e `curated` con dati personali o finanziari meritano `SSE-KMS`; i bucket di log tecnici non sensibili possono restare su `SSE-S3`.
+
+## Audit con i Data Events di CloudTrail
+
+I Data Events si attivano per bucket con selettori avanzati, così si limita la registrazione ai soli bucket critici e si contiene il costo:
+
+```bash
+# Registra GetObject, PutObject e DeleteObject solo sul bucket di produzione
+aws cloudtrail put-event-selectors \
+  --trail-name lake-audit \
+  --advanced-event-selectors '[{"Name":"S3 data events lake prod","FieldSelectors":[{"Field":"eventCategory","Equals":["Data"]},{"Field":"resources.type","Equals":["AWS::S3::Object"]},{"Field":"resources.ARN","StartsWith":["arn:aws:s3:::acme-lake-prod/"]}]}]'
+```
+
+Il costo si stima in anticipo. Con una tariffa indicativa di 0,10 USD ogni 100.000 eventi di dati e 50 milioni di operazioni al mese sul bucket, il calcolo è 50.000.000 / 100.000 = 500 blocchi, quindi 500 × 0,10 = 50 USD al mese. È una cifra trascurabile accanto al valore dei dati che protegge, e infatti risparmiarla è l'errore che apre lo scenario iniziale.
+
+Una volta che i log sono su S3, una tabella Athena sui file di CloudTrail permette la ricerca di anomalie. La query seguente isola, nell'ultima ora, gli accessi con identità `IAMUser` (chiavi statiche) e i ruoli con molti rifiuti:
+
+```sql
+-- Athena su tabella CloudTrail: chiavi statiche e picchi di AccessDenied nell'ultima ora
+SELECT
+    useridentity.arn                 AS principal_arn,
+    useridentity.type                AS tipo_identita,
+    sourceipaddress                  AS ip_origine,
+    count_if(errorcode IN ('AccessDenied', 'AllAccessDisabled')) AS tentativi_negati,
+    count_if(eventname = 'GetObject' AND errorcode IS NULL)      AS letture_riuscite,
+    count(DISTINCT requestparameters['key'])                     AS oggetti_distinti
+FROM cloudtrail_logs
+WHERE eventsource = 's3.amazonaws.com'
+  AND from_iso8601_timestamp(eventtime) > current_timestamp - INTERVAL '1' HOUR
+GROUP BY useridentity.arn, useridentity.type, sourceipaddress
+HAVING useridentity.type = 'IAMUser'
+    OR count_if(errorcode IN ('AccessDenied', 'AllAccessDisabled')) >= 5
+ORDER BY tentativi_negati DESC, letture_riuscite DESC;
+```
+
+Se la query restituisce una riga con `IAMUser` e un indirizzo IP esterno, c'è una chiave statica in uso da fuori dalla rete aziendale. Con i Data Events attivi, la stessa query avrebbe risposto in pochi secondi alla domanda del revisore: chi, da quale IP, quali oggetti. Una revisione trimestrale dei permessi con IAM Access Analyzer, che segnala i privilegi mai usati, riduce nel tempo la superficie esposta.
+
+Un secondo calcolo mostra perché la finestra di rilevamento conta. Nello scenario iniziale la chiave è rimasta esposta 21 giorni, cioè 21 × 24 = 504 ore. Se l'allarme sui picchi di `AccessDenied` e sui download anomali scatta entro 1 ora, la finestra scende da 504 ore a 1 ora, una riduzione del 99,8% (1 / 504 = 0,2%). A parità di velocità di scaricamento, i dati che l'attaccante poteva portare via passano da 40 TB a una frazione di quella cifra. Il costo di questa protezione, tra Data Events e query di controllo, resta nell'ordine di qualche decina di euro al mese, quindi il rapporto tra spesa e rischio evitato è nettamente favorevole. La regola che ne deriva è semplice: ogni misura di prevenzione va accompagnata da una di rilevamento, perché nessun perimetro è perfetto e il tempo che passa tra un accesso illecito e la sua scoperta determina l'entità del danno e gli obblighi di notifica verso l'autorità.
+
+## Tre errori che lasciano esposto il lake
+
+### Usare utenti IAM con chiavi statiche
+
+Il sintomo è un utente IAM con chiavi attive da anni, usate da script, server di BI e laptop. Sembra comodo perché funziona subito e non richiede federazione. Il motivo del rischio è che le chiavi finiscono nei log di errore, nella cronologia della shell e nei ticket, e non scadono. Si corregge sostituendole con ruoli assunti tramite STS e, dove un fornitore esterno lo richiede, con un ruolo cross-account con condizione sull'identificativo esterno e durata breve della sessione.
+
+### Attivare SSE-KMS senza la Bucket Key
+
+Il sintomo è una fattura KMS inattesa e, nei picchi, errori di throttling sulle pipeline. Sembra un effetto collaterale normale della cifratura, ma dipende dal fatto che S3 chiama KMS per ogni oggetto. Con 100 milioni di richieste il conto passa da 3 a 300 USD, come nel calcolo sopra. La correzione è impostare `BucketKeyEnabled` sulla cifratura predefinita del bucket.
+
+### Non registrare i Data Events
+
+Il sintomo è l'impossibilità di ricostruire un accesso dopo un incidente. Sembra una scelta ragionevole perché la configurazione predefinita di CloudTrail registra la creazione e la cancellazione dei bucket, e ci si sente coperti. In realtà quella configurazione non traccia chi ha letto o cancellato i singoli file. La correzione è attivare i selettori avanzati sui bucket con dati personali o critici e inviare i log a un bucket separato, con versioning e blocco della cancellazione.
+
+## Controllo sulla postura del bucket
+
+1. Un bucket riceve 20 milioni di richieste al mese cifrate con `SSE-KMS`, senza Bucket Key, a 0,03 USD ogni 10.000 richieste: quanto costa KMS, e quanto con la Bucket Key che riduce del 99%?
+
+<details>
+<summary>Mostra risposta</summary>
+
+Senza Bucket Key: 20.000.000 / 10.000 = 2.000 blocchi, quindi 2.000 × 0,03 = 60 USD al mese. Con la riduzione del 99% restano 200.000 chiamate, cioè 20 blocchi, quindi 20 × 0,03 = 0,60 USD al mese.
+
+</details>
+
+2. Un amministratore assegna `AmazonS3FullAccess` a un ruolo, ma la bucket policy contiene un `Deny` per il traffico fuori dal VPC endpoint: che cosa succede a una richiesta da Internet?
+
+<details>
+<summary>Mostra risposta</summary>
+
+La richiesta viene rifiutata. Su S3 un `Deny` esplicito prevale su qualsiasi `Allow`, quindi il permesso ampio del ruolo non basta. L'eccezione prevista per il ruolo di emergenza è l'unico percorso di accesso da fuori dal VPC endpoint.
+
+</details>
+
+3. Stimi 80 milioni di operazioni al mese sul bucket critico: quanto costano i Data Events a 0,10 USD ogni 100.000 eventi?
+
+<details>
+<summary>Mostra risposta</summary>
+
+80.000.000 / 100.000 = 800 blocchi, quindi 800 × 0,10 = 80 USD al mese. Restringere i selettori ai soli prefissi con dati personali, se il resto del bucket è poco sensibile, riduce la cifra proporzionalmente.
+
+</details>
+
+4. Perché `SSE-KMS` protegge da un ruolo con policy S3 troppo permissiva e `SSE-S3` no?
+
+<details>
+<summary>Mostra risposta</summary>
+
+Con `SSE-S3` la decifratura è automatica per chiunque abbia `s3:GetObject`. Con `SSE-KMS` la lettura richiede anche `kms:Decrypt` sulla chiave, concesso dalla Key Policy: un ruolo che ha accesso a S3 ma non alla chiave riceve `AccessDenied`. Inoltre revocare il grant sulla chiave rende illeggibili gli oggetti in un solo passo.
+
+</details>

@@ -1,6 +1,9 @@
 ---
 title: "Ambienti, deploy e disciplina di rilascio"
-description: "Ambienti, deploy e disciplina di rilascio. Lezione su CI/CD e ambienti dbt."
+description: >-
+  Come separare ambienti dev, staging e prod in un progetto dbt su ClickHouse,
+  promuovere i marts con EXCHANGE TABLES senza downtime, preparare rollback,
+  exposures e release note, e calcolare quanta indisponibilità evita un deploy Blue/Green.
 module: "Modulo 16: Analytics engineering con dbt"
 order: 9
 category: Decisione
@@ -8,67 +11,74 @@ headerImage: /course-headers/analytics-engineering-documentazione-lineage-exposu
 headerImageAlt: >-
   Environment e deploy - immagine ufficiale della lezione su GinnyTech, creata da AD
 difficulty: advanced
-duration: 18 min
+duration: 32 min
 prerequisites:
   - analytics-engineering/seed-macro-e-package-riusabili
 learningObjectives:
-  - Separare ambienti di sviluppo, staging e produzione per i modelli dbt
-  - Validare un rilascio con test automatici e 24 ore di staging stabile
-  - Preparare rollback e release note per ogni deploy in produzione
+  - Separare ambienti dev, staging e prod con target dbt distinti e permessi di scrittura riservati al service account dell'orchestratore
+  - Promuovere un mart ricostruito con EXCHANGE TABLES dopo un gate sul numero di righe e predisporre il comando di rollback
+  - Calcolare la finestra di indisponibilità di un full-refresh non atomico e confrontarla con un deploy Blue/Green
+  - Dichiarare exposures e scrivere una release note che renda visibile l'impatto di un cambio di logica
 binario: "ml-tabellare"
-formato: "articolo"
-autore: "Hermes"
-controllatoDa: "Argo"
-autorizzatoDa: "Giano"
+formato: "didattica-v2"
 draft: false
-dateModified: 2026-11-13
+dateModified: 2026-11-17
 ---
 
-# Ambienti, deploy e disciplina di rilascio
+Un venerdì alle 17:30 viene unita una pull request che cambia la formula delle provvigioni nel mart `fct_sales_commissions`. Parte subito `dbt run --full-refresh` in produzione, senza passaggio in un ambiente di collaudo, senza piano di rollback e senza avvisare i commerciali (caso ricostruito con numeri di esempio). La tabella viene cancellata e ricostruita, ma al minuto 24 il job va in timeout per un limite di memoria sui dati del 2022 che in sviluppo, filtrato a sette giorni, non erano mai stati letti.
 
-Un venerdì pomeriggio viene unita una pull request che modifica la formula di calcolo delle provvigioni nel mart `fct_sales_commissions`, facendo partire immediatamente un `dbt run --full-refresh` direttamente in produzione senza passaggio in ambiente di pre-produzione (*staging*), senza piano di rollback e senza avvisare il team commerciale. Il ricalcolo completo fallisce a metà per un timeout dopo aver già cancellato la vecchia tabella, lasciando la rete vendita con le dashboard rotte per tutto il fine settimana. La causa non è la complessità della query: è l'assenza di una **disciplina di rilascio strutturata su tre ambienti (`dev -> staging -> prod`), promozione con artefatti immutabili e strategia di rollback Blue/Green (o `RENAME TABLE` atomico)**.
+La tabella di produzione non esiste più. Le dashboard di 80 commerciali restano rotte fino a lunedì alle 09:00, cioè per `63,5` ore, e nessuno sa come tornare indietro.
 
-## Un full-refresh lanciato il venerdì pomeriggio che cancella la tabella e va in timeout
+> **Idea chiave:** in produzione non si distrugge mai la tabella che sta servendo gli utenti prima di aver costruito e testato per intero quella che deve sostituirla: si costruisce accanto e si scambiano i puntatori in un'operazione atomica.
 
-Questo è un caso ricostruito con numeri di esempio su quanto accade quando il deploy di un progetto dbt viene gestito senza separazione tra collaudo d'integrazione e produzione. Il progetto alimenta i report operativi di 80 commerciali su ClickHouse.
+## Venerdì alle 17:30: cosa è andato storto davvero
 
-Nel processo di rilascio improvvisato si concatenano tre errori operativi:
-1. Non esiste un ambiente di `staging` (pre-produzione) dove l'intero grafo giri sui volumi completi per 24 ore prima di toccare le tabelle lette dalle dashboard: il codice passa direttamente dallo schema locale ridotto (`dev`, filtrato a 7 giorni) alla produzione (`analytics_prod`).
-2. Quando la modifica richiede un `--full-refresh` di una tabella grande, l'esecuzione standard fa prima `DROP TABLE` (o `TRUNCATE`) e poi tenta di ricostruirla in 25 minuti: durante quei 25 minuti le dashboard mostrano errore `Table does not exist`, e se la query fallisce al minuto 24 per un limite di memoria inaspettato sui dati storici del 2022, la tabella di produzione non esiste più.
-3. Nessuno ha salvato uno snapshot della tabella precedente né scritto una nota di rilascio (*release note*), quindi il team di reperibilità non sa cosa sia cambiato né come tornare indietro in trenta secondi.
+Il guasto non nasce dalla complessità della query. Nasce da tre scelte di processo che ciascuna sembrava ragionevole. La prima: non esisteva un ambiente di pre-produzione dove l'intero grafo girasse sui volumi completi, e il codice è passato dallo schema locale ridotto direttamente a `analytics_prod`.
 
-La causa del disservizio è non separare i tre ambienti (`dev`, `staging`, `prod`) e non implementare il pattern di **deploy atomico Blue/Green (`EXCHANGE TABLES`)** con procedura di rollback immediata.
+La seconda: il `--full-refresh` esegue prima `DROP` o `TRUNCATE` e poi ricostruisce. Per i 25 minuti previsti di ricostruzione le dashboard mostrano `Table does not exist`, e se la query fallisce prima della fine la tabella precedente non c'è più. La terza: nessuno aveva conservato una copia né scritto una nota di rilascio, quindi chi era reperibile non sapeva cosa fosse cambiato né come tornare indietro in trenta secondi.
 
-## La promozione Dev -> Staging -> Prod, il Deploy Blue/Green e le Exposures
+La disciplina di rilascio che evita questa sequenza poggia su tre elementi: ambienti separati con permessi diversi, promozione con scambio atomico e rollback pronto, e un registro delle dipendenze che dica chi avvisare. Si parte dagli ambienti.
 
-Una disciplina di rilascio industriale per l'Analytics Engineering protegge gli utenti di business da qualsiasi interruzione attraverso tre meccanismi architetturali.
+## Tre ambienti, tre livelli di permessi
 
-Il primo meccanismo è la **separazione rigorosa dei tre ambienti (`dev`, `staging`, `prod`)**:
-1. **`dev` (`dbt_dev_<nome>`)**: ambiente individuale dello sviluppatore con finestra dati ridotta (es. ultimi 7 giorni) per iterazioni rapide in pochi secondi.
-2. **`staging` / `pre-prod` (`analytics_staging` + `dbt_ci_pr_<id>`)**: ambiente automatizzato dove i modelli vengono compilati e testati sui **volumi reali completi** senza limitazioni di data. Per le modifiche strutturali ai marts di primo livello (`tier_1`), il nuovo modello gira in `analytics_staging` per **24 ore (almeno un ciclo notturno completo)** verificando tempi di esecuzione, memoria consumata e quadratura dei KPI prima di essere promosso.
-3. **`prod` (`analytics_prod`)**: ambiente immutabile scritto **esclusivamente** dal service account dell'orchestratore (Airflow, Dagster, dbt Cloud, GitHub Actions) a partire da un tag Git certificato.
+L'ambiente `dev` è individuale: ogni sviluppatore lavora nel proprio schema `dbt_dev_<nome>` con una finestra dati ridotta, per esempio gli ultimi sette giorni, per iterare in pochi secondi. L'ambiente `staging` compila e testa i modelli sui volumi reali completi, in `analytics_staging` o in schemi temporanei per pull request del tipo `dbt_ci_pr_<id>`. L'ambiente `prod` è `analytics_prod` ed è scritto soltanto dal service account dell'orchestratore, a partire da un tag Git certificato.
 
-Il secondo meccanismo è il **Deploy Blue/Green con scambio atomico (`EXCHANGE TABLES` in ClickHouse)** e **Rollback istantaneo**. Invece di sovrascrivere o cancellare sul posto la tabella `analytics_prod.fct_sales_commissions` mentre gli utenti la stanno interrogando, il job costruisce e testa la nuova versione in una tabella gemella (`analytics_staging.fct_sales_commissions`). Solo quando tutti i test `dbt test` su `analytics_staging` sono verdi, il deploy esegue `EXCHANGE TABLES analytics_prod.fct_sales_commissions AND analytics_staging.fct_sales_commissions`: su ClickHouse questa operazione scambia i puntatori nel dizionario dei metadati in **meno di un millisecondo** con zero tempi di inattività (*zero downtime*). E se dieci minuti dopo un direttore segnala un'anomalia di business, il **rollback** consiste semplicemente nel rieseguire lo stesso comando `EXCHANGE TABLES` (o il rollback dello snapshot Iceberg) tornando alla versione precedente in un millisecondo.
+| Ambiente | Schema | Volume dati | Chi può scrivere | Scopo |
+|---|---|---|---|---|
+| dev | `dbt_dev_<nome>` | Ultimi 7 giorni | Lo sviluppatore | Iterazione veloce |
+| staging | `analytics_staging`, `dbt_ci_pr_<id>` | Storico completo | CI e orchestratore | Test su volumi reali, durata, memoria |
+| prod | `analytics_prod` | Storico completo | Solo `svc_dbt_prod_orchestrator` | Servire dashboard e job |
 
-Il terzo meccanismo è il tracciamento delle **Exposures (`exposures.yml`)** e le **Release Notes**. Dichiarando in dbt quali dashboard e processi dipendono da ciascun mart, prima di ogni rilascio il team sa esattamente quali stakeholder avvisare.
+La separazione si esprime con i target di dbt. Il profilo di ciascun sviluppatore contiene solo `dev`, mentre i target `staging` e `prod` vivono sul server dell'orchestratore con credenziali lette dai segreti. Gli esseri umani hanno su `analytics_prod` il solo permesso `SELECT`, utile per confrontare i risultati con un Data Diff.
 
-**Un rilascio in produzione è sicuro solo se valida il codice per 24 ore sui volumi completi di staging, promuove i marts con scambio atomico Blue/Green dopo il superamento dei test e dispone di un comando di rollback eseguibile in meno di un minuto.**
+```yaml
+# profiles.yml sul server di CI/CD: le credenziali arrivano da variabili d'ambiente, mai dal repository
+analytics:
+  target: staging
+  outputs:
+    staging:
+      type: clickhouse
+      host: "{{ env_var('CH_HOST') }}"
+      user: svc_dbt_prod_orchestrator
+      password: "{{ env_var('CH_PASSWORD') }}"
+      schema: analytics_staging
+      threads: 4
+    prod:
+      type: clickhouse
+      host: "{{ env_var('CH_HOST') }}"
+      user: svc_dbt_prod_orchestrator
+      password: "{{ env_var('CH_PASSWORD') }}"
+      schema: analytics_prod
+      threads: 4
+```
 
-## Tre errori nella gestione dei rilasci e degli ambienti dbt
-
-Il blocco SQL qui sotto mostra l'effetto devastante di un deploy tradizionale non atomico e dell'uso di credenziali di produzione condivise con gli sviluppatori umani:
+Condividere nei `profiles.yml` locali la password dell'utente con permessi `CREATE`, `DROP` e `INSERT` su `analytics_prod` garantisce che prima o poi qualcuno lanci `dbt run --target prod` da un ramo sporco. Un audit su `system.query_log` rivela chi ha scritto in produzione fuori dall'orchestratore.
 
 ```sql
--- ERRORE 1: durante un rebuild non atomico (DROP + CREATE AS SELECT lunga 20 minuti),
--- per 20 minuti le query della BI falliscono o leggono una tabella parziale/inesistente!
--- ERRORE 2: nessuna copia di backup (_prev / staging) conservata per il rollback immediato!
-
--- Audit su system.query_log che rivela anche l'ERRORE 3: utenti umani che lanciano CREATE/DROP
--- direttamente nel database analytics_prod fuori dall'orchestratore CI/CD!
+-- Audit: scritture su analytics_prod negli ultimi 7 giorni da utenti diversi dall'orchestratore.
 SELECT
     event_time,
     initial_user,
-    client_hostname,
     query_kind,
     query
 FROM system.query_log
@@ -79,69 +89,158 @@ WHERE event_date >= today() - 7
 ORDER BY event_time DESC;
 ```
 
-### Consentire agli sviluppatori permessi di scrittura sullo schema di produzione
+## La promozione dev, staging e prod passo per passo
 
-Condividere la password dell'utente database che ha permessi `CREATE / DROP / INSERT` su `analytics_prod` nei file `profiles.yml` locali del team garantisce che prima o poi qualcuno lancerà per sbaglio `dbt run --target prod` da un branch di test sporco. Gli esseri umani devono avere su `analytics_prod` esclusivamente il permesso **`SELECT`** (per fare confronti di Data Diff), mentre i permessi di scrittura (`CREATE`, `ALTER`, `INSERT`, `EXCHANGE TABLES`) devono appartenere unicamente al ruolo `svc_dbt_prod_orchestrator` custodito nei segreti del server di CI/CD.
+Una modifica attraversa gli ambienti in ordine. Lo sviluppatore apre la pull request e la CI esegue una build dei soli modelli modificati e dei loro discendenti. Dopo l'approvazione, il job di staging ricostruisce i marts coinvolti sui volumi completi e li testa. Solo a test verdi parte la promozione in produzione.
 
-### Lanciare --full-refresh in produzione senza pre-costruzione in Staging o Blue/Green
+```mermaid
+flowchart LR
+    A["dev (7 giorni)"] --> B["Pull request: dbt build --select state:modified+"]
+    B --> C["staging: build su storico completo"]
+    C --> D{"Test verdi e gate sulle righe"}
+    D -->|"sì"| E["EXCHANGE TABLES verso prod"]
+    D -->|"no"| F["Prod intatta, correzione in dev"]
+    E --> G["Vecchia prod conservata in staging per il rollback"]
+```
 
-Eseguire un `dbt run --full-refresh` direttamente sulla tabella calda di produzione quando la query impiega 15 o 30 minuti espone l'azienda a un doppio rischio: se la query va in `MEMORY_LIMIT_EXCEEDED` sui dati vecchi di tre anni (che non erano stati testati nel filtro di 7 giorni di `dev`), la tabella di produzione rimane distrutta o corrotta e non avete più la versione precedente da rimettere online. Ogni `--full-refresh` deve sempre essere costruito e validato prima in `analytics_staging` e poi scambiato atomicamente con `analytics_prod`.
+Per i marts di primo livello, quelli da cui dipendono bilanci e compensi, il nuovo codice resta in `analytics_staging` per un ciclo notturno completo, circa 24 ore, durante il quale si controllano tempi, memoria consumata e quadratura dei KPI. Per modifiche banali la finestra non serve, come si vedrà più avanti.
 
-### Modificare definizioni di metriche o nomi di colonne senza Exposures né Release Note
+```bash
+# Costruzione dei soli modelli modificati e dei loro discendenti nello schema di collaudo
+dbt build --select state:modified+ --defer --state ./prod-artifacts --target staging
 
-Cambiare la logica di calcolo del margine o deprecare una colonna in `fct_orders` il martedì notte senza aver dichiarato le `exposures` e senza pubblicare una *Release Note* nel canale aziendale `#data-releases` genera panico il mercoledì mattina: i manager vedono cambiare i numeri storici rispetto al giorno prima e aprono ticket pensando a un bug del database, quando si trattava di una correzione contabile concordata con la finanza ma mai comunicata agli altri reparti.
+# Costruzione completa del mart critico, test inclusi, prima della promozione
+dbt build --select fct_sales_commissions --full-refresh --target staging
+```
 
-## Promozione Blue/Green con EXCHANGE TABLES e Rollback in 1 millisecondo su ClickHouse
+## Blue/Green su ClickHouse con EXCHANGE TABLES
 
-Per implementare una pipeline di deploy a zero interruzioni (*Zero-Downtime Blue/Green Deployment*) e rollback istantaneo su ClickHouse + dbt, applicate questi quattro passi in ordine di priorità:
+Invece di sovrascrivere sul posto `analytics_prod.fct_sales_commissions`, il job costruisce la nuova versione nella tabella gemella `analytics_staging.fct_sales_commissions`. Quando i test sono verdi si esegue `EXCHANGE TABLES`, che su database con motore `Atomic` scambia in modo atomico i due nomi: è un'operazione sui soli metadati, quindi non copia dati, e gli utenti non vedono mai una tabella mancante o parziale. La vecchia produzione finisce nello schema di staging e resta lì come paracadute.
 
-1. Revocate i permessi di scrittura su `analytics_prod` a tutti gli account utente personali, lasciando la scrittura al solo `svc_dbt_prod_orchestrator`.
-2. Per i rilasci di nuovi marts o modifiche strutturali (`--full-refresh`), eseguite `dbt build` sullo schema `analytics_staging` sui **volumi completi** e lasciatelo girare per un ciclo completo verificando test, tempi e consumi di memoria.
-3. Promuovete la tabella in produzione eseguendo lo scambio atomico **`EXCHANGE TABLES analytics_prod.<tabella> AND analytics_staging.<tabella>`**: in questo modo la nuova tabella va live in `0,5 ms` e la vecchia tabella di produzione rimane intatta e pronta dentro `analytics_staging.<tabella>` come paracadute.
-4. Se dopo il rilascio emerge un qualsiasi problema di business, eseguite nuovamente lo stesso comando `EXCHANGE TABLES` per completare il **rollback istantaneo** alla versione precedente.
-
-Ecco il codice SQL completo della procedura di validazione pre-swap, promozione atomica Blue/Green e rollback d'emergenza in ClickHouse:
+Prima dello scambio serve un gate che confronti le due tabelle. Con numeri di esempio, supponiamo `1.200.000` righe in produzione e `1.236.000` in staging dopo la modifica: la variazione è (1.236.000 − 1.200.000) / 1.200.000 = 3%, compatibile con la crescita del periodo, e il gate dà via libera. Se invece staging avesse `1.128.000` righe, la variazione sarebbe (1.128.000 − 1.200.000) / 1.200.000 = −6%, sotto la soglia di −5%, e il deploy si fermerebbe per capire dove siano finite 72.000 righe.
 
 ```sql
--- PASSO 1: Gate di verifica pre-promozione (controlla che analytics_staging abbia superato i test,
--- sia stata aggiornata nelle ultime 2 ore e non abbia un crollo anomalo di righe rispetto a prod):
+-- Passo 1: gate pre-promozione. Confronta righe di staging e prod e blocca un calo anomalo.
 SELECT
     (SELECT count() FROM analytics_staging.fct_sales_commissions) AS staging_rows,
     (SELECT count() FROM analytics_prod.fct_sales_commissions) AS prod_rows,
     round((staging_rows - prod_rows) * 100.0 / nullIf(prod_rows, 0), 2) AS delta_rows_pct,
     if(staging_rows > 0 AND delta_rows_pct >= -5.0, 'READY_FOR_SWAP', 'ABORT_DEPLOY') AS deploy_gate;
 
--- PASSO 2: PROMOZIONE ATOMICA BLUE/GREEN (Zero-Downtime Swap in < 1 millisecondo!)
--- La tabella validata in staging diventa prod, e la vecchia prod diventa il backup in staging:
+-- Passo 2: promozione atomica. La tabella validata diventa prod, la vecchia prod passa in staging.
 EXCHANGE TABLES analytics_prod.fct_sales_commissions
             AND analytics_staging.fct_sales_commissions;
 
--- PASSO 3: COMANDO DI ROLLBACK ISTANTANEO (da eseguire in caso di anomalia post-rilascio)
--- Ripristina in < 1 millisecondo l'esatta tabella precedente senza dover ricalcolare nulla!
+-- Passo 3: rollback. Lo stesso comando riporta in prod la versione precedente senza ricalcolare nulla.
 EXCHANGE TABLES analytics_prod.fct_sales_commissions
             AND analytics_staging.fct_sales_commissions;
 ```
 
-Il risultato elimina per sempre la paura dei rilasci del venerdì e dei `--full-refresh` pesanti: mentre `dbt build` impiega 15 minuti per costruire e testare la nuova versione sui cinque anni di storico in `analytics_staging.fct_sales_commissions`, gli 80 commerciali continuano a interrogare `analytics_prod.fct_sales_commissions` senza un solo millisecondo di rallentamento; se la build in staging fallisce per memoria, la produzione non viene nemmeno sfiorata; quando i test passano, `EXCHANGE TABLES` effettua il cambio in meno di un millisecondo e conserva automaticamente la vecchia tabella pronta per un eventuale rollback istantaneo.
+Il rollback è lo stesso comando perché lo scambio è simmetrico. Questo vale finché nessuno ricostruisce `analytics_staging.fct_sales_commissions` per un altro rilascio, quindi il job deve conservare la copia precedente fino alla fine della finestra di osservazione e non rilanciare la build di staging prima di averla chiusa.
 
-## Deploy continuo ad ogni Merge (CD) o Rilascio schedulato con finestra di Staging (24h)
+## I conti del rilascio: indisponibilità con e senza Blue/Green
 
-Quando una pull request supera i controlli di Slim CI e viene unita a `main`, conviene mandarla immediatamente in produzione (**Continuous Deployment immediato**) oppure farla girare prima per 24 ore in ambiente di **`staging`**?
+Il vantaggio dello scambio atomico si misura confrontando le finestre di indisponibilità nello scenario del venerdì (numeri di esempio). La ricostruzione completa dura 25 min in condizioni normali e le dashboard di 80 commerciali leggono la tabella ogni giorno lavorativo.
 
-Il criterio di scelta è netto: **usate il Continuous Deployment immediato (con swap Blue/Green) per le correzioni di bug urgenti (*hotfix*), per l'aggiunta di nuove colonne non distruttive e per i modelli nuovi non ancora collegati alle dashboard direzionali, imponete invece una finestra di validazione di 24 ore in `analytics_staging` (e l'uso delle *Model Versions* `v1` / `v2` di dbt) prima dello swap in produzione quando modificate la formula di calcolo di un KPI esistente di primo livello (`MRR`, `Margine`, `Provvigioni`) o cambiate la logica incrementale di una tabella da miliardi di righe.**
+Con il rilascio non atomico `DROP` più `CREATE ... AS SELECT`, l'indisponibilità è pari alla durata della ricostruzione: 25 min nel caso buono. Nel caso del timeout, la tabella manca fino al ripristino manuale e l'indisponibilità sale da 25 min a 63,5 ore, cioè 63,5 × 60 = 3.810 min, un aumento di 3.810 / 25 = 152,4 volte. Con il rilascio Blue/Green, la build di 15 min sul solo staging non tocca la produzione: l'indisponibilità per gli utenti è 0 sec nel caso buono, e nel caso del timeout resta 0 sec perché la tabella di produzione non è mai stata sfiorata. Il tempo di ripristino dopo un'anomalia segnalata a posteriori passa dalle ore di ricostruzione al tempo di digitare un comando, inferiore a 2 min.
 
-La confusione comune consiste nell'applicare la stessa identica burocrazia a una correzione di un refuso nella descrizione di una colonna e alla riscrittura totale del calcolo delle provvigioni della rete vendita. Classificare i modelli per criticità (`tier_1_board` vs `tier_3_internal`) permette di essere velocissimi sulle modifiche quotidiane e rigorosissimi sui modelli da cui dipendono i bilanci e i compensi.
+La differenza non è un'ottimizzazione di velocità. Con un rilascio non atomico la durata del guasto dipende dal punto in cui la ricostruzione fallisce, e quel punto non si controlla. Con il Blue/Green l'esito peggiore è una build di staging fallita, che non ha nessun effetto sugli utenti.
 
-Questo articolo non tratta la gestione delle versioni parallele dei modelli (`models/marts/fct_orders_v1.sql` e `fct_orders_v2.sql` con `latest_version: 2` e `deprecation_date` in YAML), che permette di mantenere online per 30 giorni sia la vecchia sia la nuova tabella mentre i team di BI aggiornano le proprie query.
+## Exposures e release note: chi avvisare prima di cambiare
 
-## Cinque domande prima di autorizzare un deploy dbt in produzione
+Un cambio di logica su un KPI esistente ha un secondo rischio, di natura comunicativa. Se la correzione contabile concordata con la finanza modifica i numeri storici e nessuno lo sa, il mercoledì mattina i manager aprono ticket pensando a un guasto. Le `exposures` di dbt dichiarano quali dashboard e processi dipendono da ciascun mart, così prima del rilascio il team sa chi avvisare.
 
-1. Gli ambienti `dev` (`dbt_dev_<utente>`), `staging` (`analytics_staging` / `dbt_ci_pr_*`) e `prod` (`analytics_prod`) sono fisicamente separati, e nessun essere umano ha permessi di scrittura diretta su `analytics_prod`?
-2. Per le modifiche a modelli incrementali grandi o a KPI critici, il nuovo codice ha girato con successo sui **volumi completi** in `analytics_staging` superando tutti i test `dbt build`?
-3. I rebuild completi (`--full-refresh`) vengono promossi tramite scambio atomico **Blue/Green (`EXCHANGE TABLES`)** così da garantire zero secondi di indisponibilità per le dashboard?
-4. Prima di premere il pulsante di deploy, è pronto e testato il comando esatto di **rollback** (es. `EXCHANGE TABLES` inverso o `git revert` + promozione dello stato precedente) ed è stata verificata la lista delle dashboard impattate tramite le `exposures`?
-5. Per ogni rilascio che modifica una logica di business visibile agli utenti, viene pubblicata una breve **Release Note** (cosa cambia, perché cambia, impatto percentuale sui numeri storici e data di entrata in vigore)?
+```yaml
+# models/marts/sales/_sales__exposures.yml
+version: 2
 
-La metrica operativa che misura la maturità della vostra disciplina di rilascio è la combinazione di **Deployment Downtime = 0 secondi** (grazie allo swap atomico Blue/Green) e **Mean Time To Recovery (MTTR) < 2 minuti** tramite rollback istantaneo.
+exposures:
+  - name: dashboard_provvigioni_rete_vendita
+    type: dashboard
+    maturity: high
+    url: https://bi.example.com/dashboards/provvigioni
+    description: "Dashboard consultata ogni giorno dagli 80 commerciali per verificare le provvigioni maturate."
+    depends_on:
+      - ref('fct_sales_commissions')
+    owner:
+      name: Team Sales Operations
+      email: sales-ops@example.com
+```
 
-Di tutta la disciplina di deploy per dbt, ricordate sempre una sola regola: non distruggete mai la tabella che sta servendo la produzione prima di aver costruito, testato e certificato per intero la tabella che deve prenderne il posto. Costruite a fianco, testate a fondo e scambiate i puntatori in un millisecondo.
+Alla dichiarazione si affianca una nota di rilascio breve pubblicata nel canale dedicato, scritta con lo stesso schema ogni volta, in modo che chi la legge trovi subito cosa cambia, perché, quanto pesa sui numeri storici e da quando.
+
+> **Release note, `fct_sales_commissions` v2:** dal 2 marzo la provvigione include le note di credito emesse nel mese.
+> Impatto: le provvigioni storiche dei 12 mesi precedenti scendono in media del 1,8%.
+> Motivo: correzione concordata con la finanza, che già escludeva le note di credito dal fatturato.
+> Rollback disponibile per 7 giorni: il responsabile dati può riportare la versione precedente in meno di 2 min.
+
+## Rilascio immediato o finestra di 24 ore: la regola per criticità
+
+Dopo la CI verde conviene mandare subito la modifica in produzione oppure farla maturare 24 ore in staging? Dipende dal danno che l'errore può fare, non dalla dimensione del codice. Si classificano i modelli per criticità, per esempio `tier_1_board` per quelli da cui dipendono bilanci e compensi e `tier_3_internal` per le analisi interne.
+
+La correzione di un refuso nella descrizione di una colonna, l'aggiunta di una colonna non distruttiva o un modello nuovo non ancora collegato a dashboard direzionali possono andare subito in produzione, con swap Blue/Green. La riscrittura della formula di un KPI di primo livello come MRR, margine o provvigioni, oppure del filtro incrementale di una tabella da miliardi di righe, richiede la finestra di 24 ore in `analytics_staging` e, quando i team di BI devono adattarsi, le versioni dei modelli di dbt con `latest_version` e `deprecation_date`, che mantengono online per 30 giorni sia la vecchia sia la nuova tabella. Applicare la stessa burocrazia a un refuso e alla riscrittura delle provvigioni rallenta tutto senza proteggere nulla.
+
+## Tre errori nella gestione dei rilasci
+
+I tre errori sono tra loro collegati e si riconoscono dalle tracce che lasciano. Ciascuno ha una correzione di processo, non di codice SQL.
+
+### Permessi di scrittura sullo schema di produzione agli sviluppatori
+
+Il sintomo è una tabella di produzione modificata fuori da qualsiasi pull request, individuabile nell'audit di `system.query_log`. Sembra ragionevole perché velocizza le correzioni urgenti e tutti sanno cosa stanno facendo. Succede però che un `dbt run --target prod` parta per sbaglio da un ramo di prova. Si corregge lasciando agli umani il solo `SELECT` su `analytics_prod` e assegnando `CREATE`, `ALTER`, `INSERT` ed `EXCHANGE TABLES` al ruolo `svc_dbt_prod_orchestrator`, custodito nei segreti del server di CI.
+
+### Full-refresh in produzione senza costruire prima in staging
+
+Il sintomo è una dashboard con errore di tabella mancante per tutta la durata del rebuild, e nel caso peggiore la tabella distrutta. Sembra ragionevole perché la query funziona in sviluppo sui sette giorni di dati. Succede che sui dati di tre anni compaiono limiti di memoria che il filtro di sviluppo nascondeva. Si corregge costruendo e testando sempre prima in `analytics_staging` e poi scambiando in modo atomico con `analytics_prod`.
+
+### Cambiare una logica di business senza exposures né release note
+
+Il sintomo è una raffica di ticket il giorno dopo il rilascio, dai manager che vedono cambiare i numeri storici. Sembra ragionevole perché la correzione era già stata concordata con un reparto. Succede che gli altri reparti non lo sanno e interpretano il cambio come un bug. Si corregge dichiarando le `exposures` del mart e pubblicando una release note con motivo, impatto percentuale sullo storico e data di entrata in vigore.
+
+## Controllo prima di autorizzare un deploy in produzione
+
+La maturità del processo si misura con due numeri: Deployment Downtime pari a 0 sec grazie allo scambio atomico e Mean Time To Recovery sotto i 2 min grazie al rollback. Le domande seguenti verificano che le condizioni per ottenerli siano soddisfatte.
+
+1. Nessun essere umano ha permessi di scrittura su `analytics_prod`, e come lo verifichi?
+
+<details>
+<summary>Mostra risposta</summary>
+
+Si verifica con l'audit su `system.query_log`, filtrando `current_database = 'analytics_prod'`, i tipi di query `Create`, `Drop`, `Alter`, `Insert` e un utente diverso dall'orchestratore. Il risultato atteso è zero righe. In aggiunta si controllano i `GRANT` dei ruoli umani, che devono contenere solo `SELECT`.
+
+</details>
+
+2. Il gate pre-swap trova `1.050.000` righe in staging contro `1.200.000` in prod. Il deploy procede?
+
+<details>
+<summary>Mostra risposta</summary>
+
+No. La variazione è (1.050.000 − 1.200.000) / 1.200.000 = −12,5%, sotto la soglia di −5%, quindi il gate restituisce `ABORT_DEPLOY`. Prima di riprovare bisogna capire dove siano finite 150.000 righe, per esempio un filtro troppo stretto o un join che scarta chiavi.
+
+</details>
+
+3. Un rebuild non atomico dura 25 min e il job fallisce al minuto 24. Quale parte del rischio elimina il Blue/Green e quale lascia?
+
+<details>
+<summary>Mostra risposta</summary>
+
+Elimina l'indisponibilità per gli utenti e il rischio di perdere la tabella: la build fallisce in staging e la produzione resta intatta. Lascia il costo del tempo di calcolo e la necessità di correggere il problema di memoria prima di ritentare.
+
+</details>
+
+4. Dopo uno `EXCHANGE TABLES` un direttore segnala un'anomalia. Qual è la sequenza di rollback e quale condizione deve essere ancora vera?
+
+<details>
+<summary>Mostra risposta</summary>
+
+Si esegue di nuovo lo stesso `EXCHANGE TABLES`, che riporta in produzione la versione precedente, poi si pubblica una nota sull'incidente. La condizione è che `analytics_staging.fct_sales_commissions` contenga ancora la vecchia produzione, cioè che nessun altro job l'abbia ricostruita nel frattempo.
+
+</details>
+
+5. Per quale tipo di modifica salti la finestra di 24 ore e per quale la imponi?
+
+<details>
+<summary>Mostra risposta</summary>
+
+La salti per refusi, nuove colonne non distruttive e modelli non ancora collegati a dashboard direzionali. La imponi per modifiche alla formula di KPI di primo livello e per cambi alla logica incrementale di tabelle molto grandi, dove un errore ha un costo economico o contabile alto.
+
+</details>

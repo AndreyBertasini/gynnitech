@@ -1,8 +1,7 @@
 ---
 title: "FIRST_VALUE, LAST_VALUE, NTILE e frame di finestra"
 description: >-
-  FIRST_VALUE, LAST_VALUE e NTILE con frame di finestra espliciti: bordi della
-  partizione, fasce di velocità e funnel con ordine temporale imposto.
+  Estrarre pagina di ingresso e di uscita di una sessione con FIRST_VALUE e LAST_VALUE dichiarando il frame, dividere gli utenti in quartili di velocità con NTILE e imporre l'ordine dei passi in un funnel, con tabelle di ingresso e righe intermedie verificate in ClickHouse.
 module: "Modulo 14: SQL avanzato per l'analisi"
 order: 6
 category: Tecnico
@@ -10,158 +9,242 @@ headerImage: /course-headers/advanced-sql-frame-first-last-e-ntile-ginnytech-ad.
 headerImageAlt: >-
   FIRST_VALUE, LAST_VALUE, NTILE e frame di finestra - immagine ufficiale della
   lezione su GinnyTech, creata da AD
-difficulty: advanced
-duration: 22 min
+difficulty: avanzato
+duration: 35 min
 prerequisites:
   - advanced-sql/aggregazioni-su-finestra
 learningObjectives:
-  - Estrarre primo e ultimo evento per utente con FIRST_VALUE e LAST_VALUE con frame esplicito
-  - Dividere gli utenti in quartili di velocità con NTILE e imporre l'ordine temporale nel funnel
+  - Spiegare perché LAST_VALUE con il frame predefinito restituisce la riga corrente e correggerlo con ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING
+  - Dividere 10 utenti in quartili con NTILE, calcolare a mano le dimensioni dei secchi e gestire i pari merito sul confine
+  - Verificare l'ordine cronologico dei passi di un funnel confrontando i timestamp minimi per utente
 binario: "ml-tabellare"
-formato: "articolo"
-autore: "Hermes"
-controllatoDa: "Argo"
-autorizzatoDa: "Giano"
+formato: "didattica-v2"
 draft: false
-dateModified: 2026-11-13
+dateModified: 2026-11-17
 ---
 
-# FIRST_VALUE, LAST_VALUE, NTILE e frame di finestra
+Scenario costruito, con numeri di esempio: un analista vuole sapere da quale pagina escono gli utenti dopo aver visto i prezzi. Scrive `last_value(page_path) OVER (PARTITION BY session_id ORDER BY occurred_at)` e ottiene una colonna `exit_page` identica, riga per riga, alla colonna `page_path`. Il report dice che ogni pagina del sito è una pagina di uscita al 100%. La funzione non è rotta: sta rispondendo alla domanda che le è stata posta, cioè quale sia l'ultima riga visibile dalla finestra, e la finestra termina sulla riga corrente.
 
-Un analista vuole associare a ogni evento di un utente la sua prima pagina vista e la sua ultima pagina vista nella sessione, quindi scrive `FIRST_VALUE(page_path) OVER (PARTITION BY session_id ORDER BY occurred_at)` e `LAST_VALUE(page_path) OVER (PARTITION BY session_id ORDER BY occurred_at)`. Il risultato di `FIRST_VALUE` è corretto, ma `LAST_VALUE` restituisce su ogni riga la pagina corrente invece dell'ultima pagina della sessione. La causa non è un bug di `LAST_VALUE`: è il **frame di finestra predefinito in SQL**, che in presenza di `ORDER BY` si ferma alla riga corrente (`CURRENT ROW`) e non vede il resto della partizione.
+> **Idea chiave:** il valore di `first_value`, `last_value` e `nth_value` dipende dal frame, non dalla partizione; se non dichiari tu dove finisce la finestra, decide il motore, e di solito decide male per l'ultimo valore.
 
-## LAST_VALUE che restituisce la riga corrente invece dell'ultimo evento della sessione
+Il tema della lezione è dunque il frame: il tratto di partizione che ogni riga può vedere. Una volta chiaro questo, `ntile` e il controllo dell'ordine dei passi in un funnel diventano due applicazioni dello stesso principio.
 
-Questo è un caso ricostruito con numeri di esempio su quanto accade quando si usano funzioni di bordo (`FIRST_VALUE`, `LAST_VALUE`) senza dichiarare esplicitamente l'estensione del frame fino alla fine della partizione.
+## Una finestra che si ferma alla riga corrente
 
-Le funzioni di estrazione dei bordi e di partizionamento in fasce dipendono direttamente dal frame attivo nella clausola `OVER (...)`:
-
-| Funzione | Frame di default con `ORDER BY` | Risultato senza frame esplicito | Frame corretto da scrivere |
-| :--- | :--- | :--- | :--- |
-| `FIRST_VALUE(col)` | `UNBOUNDED PRECEDING AND CURRENT ROW` | Funziona (vede la prima riga) | `ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING` |
-| `LAST_VALUE(col)` | `UNBOUNDED PRECEDING AND CURRENT ROW` | **Errato**: restituisce la riga corrente | `ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING` |
-| `NTH_VALUE(col, n)` | `UNBOUNDED PRECEDING AND CURRENT ROW` | `NULL` finché non raggiunge la riga `n` | `ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING` |
-| `NTILE(k)` | Intera partizione | Funziona, ma sensibile ai pari merito | Aggiungere chiave univoca in `ORDER BY` |
-
-Senza dichiarare `ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING`, `LAST_VALUE` non può guardare in avanti oltre la riga corrente.
-
-## Frame esplicito, NTILE per fasce di velocità e ordine temporale nel funnel
-
-Il primo meccanismo è la **dichiarazione esplicita del frame completo (`ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING`)**. Ogni volta che usate `FIRST_VALUE`, `LAST_VALUE` o `NTH_VALUE` per attribuire a tutte le righe di una sessione il canale di ingresso (`entry_page`) o la pagina di uscita (`exit_page`), dovete estendere il frame fino a `UNBOUNDED FOLLOWING`. In alternativa, in ClickHouse potete usare `first_value` / `last_value` con la sintassi completa della finestra oppure `argMin` / `argMax` in aggregazione.
-
-Il secondo meccanismo è l'uso di **`NTILE(4)` per segmentare gli utenti in quartili di velocità di conversione**. Calcolando `dateDiff('second', signup_at, first_purchase_at)` per ciascun utente convertito e applicando `NTILE(4) OVER (ORDER BY seconds_to_convert ASC, user_id ASC)`, dividete automaticamente i clienti in 4 fasce di uguale numerosità: il quartile 1 rappresenta i *fast-track buyers* (il 25% più veloce), mentre il quartile 4 rappresenta chi ha impiegato più tempo a decidere.
-
-Il terzo meccanismo è l'**imposizione dell'ordine temporale stretto nei funnel** tramite `FIRST_VALUE` o `MIN(...) OVER (...)`. Se volete verificare quanti utenti hanno completato `step_1 -> step_2 -> step_3` nell'ordine esatto, dovete controllare che `min_step1_at < min_step2_at < min_step3_at`, evitando di contare come convertiti utenti che hanno visitato la pagina di conferma prima del carrello per un link diretto.
-
-**Dichiarate sempre `ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING` con `LAST_VALUE` e `NTH_VALUE`, e aggiungete sempre una chiave univoca di spareggio in `NTILE`.**
-
-## Tre errori comuni con LAST_VALUE, NTILE e frame di finestra
-
-Il blocco SQL qui sotto mostra l'errore classico di `LAST_VALUE` senza `UNBOUNDED FOLLOWING` e di `NTILE` senza chiave di spareggio:
+Per vedere il difetto servono poche righe. La tabella `fct_pageviews` contiene due sessioni: la prima con quattro pagine, la seconda con tre, di cui due con lo stesso timestamp. Il campo `utm_source` è valorizzato solo sul primo evento della visita, come accade quando il parametro compare nell'URL di atterraggio.
 
 ```sql
--- ERRORE 1: LAST_VALUE senza ROWS BETWEEN ... AND UNBOUNDED FOLLOWING restituisce la riga corrente!
--- ERRORE 2: NTILE(4) senza spareggio separa in modo casuale gli utenti con lo stesso tempo!
+-- Eventi di due sessioni; utm_source presente solo sul primo evento
+CREATE TABLE fct_pageviews
+(
+    session_id String,
+    user_id String,
+    event_id UInt32,
+    occurred_at DateTime,
+    page_path String,
+    utm_source Nullable(String)
+) ENGINE = Memory;
+
+INSERT INTO fct_pageviews VALUES
+('s1', 'u1', 1, '2026-11-10 09:00:00', '/landing',    'newsletter'),
+('s1', 'u1', 2, '2026-11-10 09:01:10', '/prezzi',     NULL),
+('s1', 'u1', 3, '2026-11-10 09:03:40', '/checkout',   NULL),
+('s1', 'u1', 4, '2026-11-10 09:05:00', '/conferma',   NULL),
+('s2', 'u2', 5, '2026-11-10 10:00:00', '/blog/guida', 'google'),
+('s2', 'u2', 6, '2026-11-10 10:02:00', '/prezzi',     NULL),
+('s2', 'u2', 7, '2026-11-10 10:02:00', '/contatti',   NULL);
+```
+
+Quando una finestra ha `ORDER BY` e non dichiari il frame, in ClickHouse il frame predefinito è `RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW`: dall'inizio della partizione fino alla riga corrente, compresi i pari ordinamento. Per `first_value` questo non crea problemi, perché la prima riga è sempre dentro. Per `last_value` l'ultima riga visibile è la riga stessa.
+
+| Funzione | Frame predefinito con `ORDER BY` | Che cosa restituisce | Frame da dichiarare |
+| :--- | :--- | :--- | :--- |
+| `first_value(x)` | Dall'inizio alla riga corrente | Il valore giusto | Opzionale |
+| `last_value(x)` | Dall'inizio alla riga corrente | La riga corrente | `ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING` |
+| `nth_value(x, n)` | Dall'inizio alla riga corrente | `NULL` finché la riga `n` non è raggiunta | Come `last_value` |
+| `ntile(k)` | Intera partizione | Il secchio, sensibile ai pari merito | Chiave di spareggio in `ORDER BY` |
+
+## Il frame esplicito su un caso reale
+
+La query affianca la versione sbagliata e quella corretta, così la differenza si legge riga per riga.
+
+```sql
+-- entry_page e exit_page con frame completo; wrong_exit usa il frame predefinito
 SELECT
     session_id,
-    occurred_at,
+    event_id,
     page_path,
-    last_value(page_path) OVER (PARTITION BY session_id ORDER BY occurred_at) AS wrong_exit_page,
-    ntile(4) OVER (ORDER BY session_duration_sec) AS unstable_quartile
-FROM analytics_prod.fct_pageviews;
+    last_value(page_path) OVER (
+        PARTITION BY session_id
+        ORDER BY occurred_at, event_id
+    ) AS wrong_exit,
+    last_value(page_path) OVER (
+        PARTITION BY session_id
+        ORDER BY occurred_at, event_id
+        ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING
+    ) AS exit_page,
+    first_value(page_path) OVER (
+        PARTITION BY session_id
+        ORDER BY occurred_at, event_id
+        ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING
+    ) AS entry_page
+FROM fct_pageviews
+ORDER BY event_id;
 ```
 
-### Usare LAST_VALUE con il frame predefinito
+```text
+session  event  page_path    wrong_exit   exit_page   entry_page
+s1       1      /landing     /landing     /conferma   /landing
+s1       2      /prezzi      /prezzi      /conferma   /landing
+s1       3      /checkout    /checkout    /conferma   /landing
+s1       4      /conferma    /conferma    /conferma   /landing
+s2       5      /blog/guida  /blog/guida  /contatti   /blog/guida
+s2       6      /prezzi      /prezzi      /contatti   /blog/guida
+s2       7      /contatti    /contatti    /contatti   /blog/guida
+```
 
-Scrivere `LAST_VALUE(page_path) OVER (PARTITION BY session_id ORDER BY occurred_at)` è uno degli errori SQL più frequenti in assoluto: siccome `ORDER BY` attiva il frame implicito `RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW`, per la riga 1 l'ultima riga visibile è la riga 1, per la riga 2 è la riga 2, e così via. Il campo `exit_page` risulta identico a `page_path` su ogni singola riga.
+La colonna `wrong_exit` ricalca `page_path` in ogni riga, mentre `exit_page` assume un solo valore per sessione: `/conferma` per la prima e `/contatti` per la seconda. Il test di coerenza è semplice: `uniqExact(exit_page)` per ogni `session_id` deve fare 1. Se ottieni un numero maggiore, manca il frame esplicito o manca la chiave di spareggio nell'`ORDER BY`.
 
-### Ignorare i valori NULL dentro FIRST_VALUE e LAST_VALUE
+Quando ti serve un valore per sessione e non per evento, spesso la finestra è un di più. In aggregazione `argMin(page_path, (occurred_at, event_id))` e `argMax(page_path, (occurred_at, event_id))` restituiscono la pagina di ingresso e quella di uscita con una sola riga per sessione, senza ordinamenti in memoria della partizione. Il risultato è `/landing` e `/conferma` per s1, `/blog/guida` e `/contatti` per s2. Scegli la finestra quando vuoi conservare le righe di evento, la `GROUP BY` quando vuoi riassumere.
 
-Se il primo o l'ultimo evento della sessione ha `utm_source IS NULL`, `FIRST_VALUE(utm_source)` restituisce `NULL` a meno che non filtriate prima i valori nulli o non usiate `IGNORE NULLS` (dove supportato) o `argMinIf(utm_source, occurred_at, utm_source != '')` in ClickHouse.
+Un modo pratico per ricordare la regola è distinguere due domande. La prima è "che valore ha la riga di partenza della partizione", e a questa risponde bene `first_value` anche con il frame predefinito. La seconda è "che valore ha la riga di arrivo della partizione", e a questa il frame predefinito non può rispondere, perché per costruzione non guarda oltre la riga corrente. Ogni volta che la domanda riguarda la fine di qualcosa, la chiusura di una sessione, l'ultimo stato di un ordine, l'ultimo prezzo di un giorno, devi allargare il frame a mano.
 
-### Usare NTILE(4) su metriche molto discrete senza controllare i confini
+Il costo di questa precisione è minimo. Il frame completo non obbliga il motore a calcoli aggiuntivi rispetto al frame predefinito sulla stessa partizione, e la riga in più di codice documenta l'intenzione per chi leggerà la query tra sei mesi. Nei modelli dbt conviene racchiudere la coppia entry_page ed exit_page in un unico modello di sessione, così il frame è scritto una volta sola.
 
-Se il 40% degli utenti ha `session_duration_sec = 0` (rimbalzo immediato), `NTILE(4)` metterà comunque il 25% nel secchio 1 e il restante 15% con valore `0` nel secchio 2. Per metriche con molti valori identici è meglio verificare prima la distribuzione dei quantili con `quantileExact(0.25)(...)`.
+## Dividere in quartili con NTILE
 
-## Bordi di sessione e quartili di velocità di conversione in ClickHouse
+`ntile(k)` ordina le righe e le distribuisce in `k` secchi consecutivi di numerosità il più possibile uguale. Se le righe sono `n` e `k` non divide `n`, i primi `n mod k` secchi ricevono una riga in più. Con 10 utenti convertiti e `k = 4`: 10 / 4 = 2 con resto 2, quindi i primi due quartili hanno 3 utenti e gli ultimi due ne hanno 2, per un totale di 3 + 3 + 2 + 2 = 10.
 
-Per estrarre correttamente inizio/fine sessione e segmentare la velocità di conversione in ClickHouse, applicate questi quattro passi:
-
-1. Ordinate gli eventi di ogni sessione per `(occurred_at ASC, event_id ASC)`.
-2. Estraete `entry_page` e `exit_page` con `FIRST_VALUE` e `LAST_VALUE` su frame esplicito `ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING`.
-3. Calcolate il tempo di conversione in secondi tra il primo ingresso e l'acquisto.
-4. Segmentate gli utenti convertiti con `NTILE(4)` aggiungendo `user_id ASC` come spareggio deterministico.
-
-Ecco la query SQL completa in ClickHouse:
+I dati sono i secondi che ciascun utente ha impiegato per passare dall'iscrizione al primo acquisto.
 
 ```sql
--- Estrazione entry/exit page con frame completo esplicito e quartili di velocità di conversione:
-WITH session_bounds AS (
-    SELECT
-        session_id,
-        user_id,
-        occurred_at,
-        page_path,
-        first_value(page_path) OVER (
-            PARTITION BY session_id
-            ORDER BY occurred_at ASC, event_id ASC
-            ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING
-        ) AS entry_page,
-        last_value(page_path) OVER (
-            PARTITION BY session_id
-            ORDER BY occurred_at ASC, event_id ASC
-            ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING
-        ) AS exit_page,
-        minIf(occurred_at, event_name = 'signup_completed') OVER (PARTITION BY user_id) AS signup_at,
-        minIf(occurred_at, event_name = 'order_completed') OVER (PARTITION BY user_id) AS purchase_at
-    FROM analytics_prod.fct_product_events
-    WHERE event_date >= today() - 30
-),
-converted_users AS (
-    SELECT
-        user_id,
-        any(entry_page) AS first_entry_page,
-        any(exit_page) AS last_exit_page,
-        dateDiff('second', min(signup_at), min(purchase_at)) AS seconds_to_convert
-    FROM session_bounds
-    WHERE signup_at IS NOT NULL
-      AND purchase_at IS NOT NULL
-      AND purchase_at >= signup_at
-    GROUP BY user_id
-)
+-- 10 utenti convertiti e tempo di conversione in secondi
+CREATE TABLE conv (user_id String, seconds_to_convert UInt32) ENGINE = Memory;
+
+INSERT INTO conv VALUES
+('u01', 45), ('u02', 60), ('u03', 60), ('u04', 60), ('u05', 300),
+('u06', 600), ('u07', 900), ('u08', 3600), ('u09', 7200), ('u10', 86400);
+
+-- Quartili di velocità, con user_id come spareggio deterministico
 SELECT
     user_id,
-    first_entry_page,
-    last_exit_page,
     seconds_to_convert,
-    ntile(4) OVER (ORDER BY seconds_to_convert ASC, user_id ASC) AS speed_quartile
-FROM converted_users
-ORDER BY seconds_to_convert ASC, user_id ASC
-LIMIT 50;
+    ntile(4) OVER (ORDER BY seconds_to_convert, user_id) AS speed_quartile
+FROM conv
+ORDER BY seconds_to_convert, user_id;
 ```
 
-Grazie al frame esplicito `ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING`, `entry_page` ed `exit_page` sono identici e coerenti su tutte le righe della stessa sessione, mentre `purchase_at >= signup_at` impone l'ordine temporale stretto del funnel prima di calcolare `NTILE(4)`. Questo pattern è particolarmente utile quando dovete collegare l'esperienza di navigazione al valore economico della conversione: confrontando i quattro quartili di velocità generati da `NTILE(4)`, potete scoprire ad esempio che gli utenti nel quartile più veloce (`speed_quartile = 1`) atterrano quasi sempre su pagine prodotto specifiche o arrivano da campagne brand ad alta intenzione, mentre gli utenti nel quartile più lento (`speed_quartile = 4`) attraversano molte pagine informative o si bloccano più volte sul carrello prima di completare l'ordine.
+```text
+user_id  seconds_to_convert  speed_quartile
+u01      45                  1
+u02      60                  1
+u03      60                  1
+u04      60                  2
+u05      300                 2
+u06      600                 2
+u07      900                 3
+u08      3600                3
+u09      7200                4
+u10      86400               4
+```
 
-Un altro caso d'uso frequente per `FIRST_VALUE` e `LAST_VALUE` riguarda l'attribuzione intra-sessione e la pulizia dei percorsi di navigazione: quando un utente entra con parametri UTM sulla prima pagina e poi naviga su cinque pagine interne prive di query string, `FIRST_VALUE(utm_source)` esteso sull'intera sessione propaga il canale di ingresso su tutti gli eventi successivi della visita senza dover ricorrere a join costose. Allo stesso modo, `LAST_VALUE(page_path)` permette di identificare esattamente quali pagine rappresentano i punti di uscita più frequenti prima dell'abbandono del funnel, offrendo al team UX un elenco prioritario di schermate su cui intervenire.
+Raggruppando per quartile con una sottoquery si ottiene il profilo dei secchi: il primo contiene 3 utenti con tempi da 45 a 60 secondi, il secondo 3 utenti da 60 a 600 secondi, il terzo 2 utenti da 900 a 3.600 secondi e il quarto 2 utenti da 7.200 a 86.400 secondi. Il quartile più lento copre un intervallo di quasi un giorno, mentre il più veloce copre quindici secondi: i quartili hanno uguale numerosità, non uguale ampiezza, ed è proprio questo che li rende utili per le distribuzioni di durata, notoriamente asimmetriche.
 
-Ricordate infine che in presenza di molti eventi con timestamp identico al millisecondo, la chiave di spareggio `event_id ASC` nell'`ORDER BY` della finestra è ciò che impedisce a `FIRST_VALUE` e `LAST_VALUE` di invertire casualmente la pagina di ingresso o di uscita tra un'esecuzione e l'altra della query. In ClickHouse, se preferite evitare la sintassi verbosa del frame completo su tabelle aggregate, potete ottenere lo stesso identico risultato deterministico usando `argMin(page_path, (occurred_at, event_id))` e `argMax(page_path, (occurred_at, event_id))` in una normale `GROUP BY session_id`, mantenendo comunque la stessa regola rigorosa sull'ordinamento totale della tupla.
+## Quando i pari merito cadono sul confine
 
-Quando invece costruite modelli intermedi in dbt che devono restare portabili tra ClickHouse, BigQuery e PostgreSQL, la sintassi standard con `FIRST_VALUE`, `LAST_VALUE` e `ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING` rimane la scelta più sicura e leggibile per tutto il team analitico. Verificate sempre su un piccolo campione di sessioni multi-pagina che `entry_page` ed `exit_page` corrispondano rispettivamente al primo e all'ultimo evento cronologico reale prima di promuovere il modello in produzione.
+Guarda gli utenti u02, u03 e u04: hanno tutti lo stesso tempo, 60 secondi, ma `ntile` ne mette due nel primo quartile e uno nel secondo. Il secchio non è una soglia sul valore, è una posizione nell'ordinamento. Con la chiave di spareggio `user_id` il risultato è almeno riproducibile; senza, il motore è libero di ordinare i pari merito come preferisce e la stessa query può restituire quartili diversi a ogni esecuzione.
 
-## LAST_VALUE con frame completo vs FIRST_VALUE con ORDER BY DESC
+Per capire se il confine è affidabile, calcola i quantili veri della distribuzione. Sulle 10 osservazioni, `quantileExact(0.25)`, `quantileExact(0.5)` e `quantileExact(0.75)` restituiscono 60, 600 e 3.600 secondi. Il primo quantile coincide con il valore che si ripete tre volte: ogni etichetta "quartile 1" o "quartile 2" per un utente da 60 secondi è un artefatto dell'ordinamento. Se la decisione di business dipende dalla fascia, per esempio un'offerta riservata ai "più veloci", definisci la fascia con una soglia sul valore e non con la posizione.
 
-Per ottenere l'ultimo valore di una partizione senza incorrere nel limite del frame di default, esistono due tecniche equivalenti: **`LAST_VALUE(...) OVER (... ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING)`** oppure **`FIRST_VALUE(...) OVER (PARTITION BY ... ORDER BY occurred_at DESC)`**.
+## Imporre l'ordine dei passi in un funnel
 
-Il criterio di scelta è netto: **usate `LAST_VALUE` con frame completo esplicito quando nella stessa query state già calcolando altre window functions ordinate in senso crescente (`ORDER BY occurred_at ASC`), così il motore può riutilizzare lo stesso ordinamento in memoria senza riordinare due volte la partizione; usate `FIRST_VALUE` con `ORDER BY DESC` solo per query isolate su motori che non supportano il frame esteso.**
+I quartili descrivono quanto in fretta un utente converte; il funnel descrive se converte seguendo il percorso previsto. Le due analisi si combinano spesso: prima si filtrano gli utenti con percorso valido, poi si dividono in fasce di velocità. Invertire l'ordine produce fasce calcolate anche su utenti il cui acquisto precede l'iscrizione, con tempi negativi o nulli che sfalsano il primo quartile.
 
-La confusione comune consiste nel dimenticare che due clausole `OVER` con ordinamenti opposti (`ASC` e `DESC`) nella stessa `SELECT` costringono il database a eseguire due ordinamenti separati dei dati.
+Il terzo uso dei valori di bordo è il funnel. Per ciascun utente prendi il timestamp minimo di ogni passo e controlla che siano in ordine crescente. Dichiarare gli eventi presenti non basta: un utente che ha completato un ordine prima di vedere il prodotto, magari da un link diretto o da un test, entrerebbe nel conteggio dello step finale senza aver percorso il flusso.
 
-## Cinque domande prima di usare FIRST_VALUE, LAST_VALUE o NTILE
+```sql
+-- Funnel product_view -> add_to_cart -> order_completed con ordine cronologico verificato
+CREATE TABLE ev (user_id String, event_name String, occurred_at DateTime) ENGINE = Memory;
 
-1. Avete specificato `ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING` su ogni `LAST_VALUE` e `NTH_VALUE`?
-2. L'`ORDER BY` dentro `OVER (...)` include una chiave univoca di spareggio (`event_id ASC`)?
-3. Avete verificato se la colonna estratta può contenere `NULL` al primo o all'ultimo posto della sessione?
-4. Nel calcolo dei quartili con `NTILE(4)`, avete controllato che non ci siano troppi valori identici al confine tra un secchio e il successivo?
-5. Nei funnel basati su timestamp di bordo, avete imposto esplicitamente `step1_at <= step2_at <= step3_at`?
+INSERT INTO ev VALUES
+('a', 'product_view',    '2026-11-10 09:00:00'), ('a', 'add_to_cart',     '2026-11-10 09:05:00'),
+('a', 'order_completed', '2026-11-10 09:20:00'),
+('b', 'product_view',    '2026-11-10 10:00:00'), ('b', 'add_to_cart',     '2026-11-10 10:04:00'),
+('c', 'order_completed', '2026-11-10 11:00:00'), ('c', 'product_view',    '2026-11-10 11:10:00'),
+('c', 'add_to_cart',     '2026-11-10 11:15:00'),
+('d', 'product_view',    '2026-11-10 12:00:00'), ('d', 'add_to_cart',     '2026-11-10 12:02:00'),
+('d', 'add_to_cart',     '2026-11-10 12:09:00'), ('d', 'order_completed', '2026-11-10 12:30:00');
 
-La metrica di controllo per i bordi di sessione è la **coerenza intra-sessione**: `uniqExact(exit_page)` raggruppato per `session_id` deve essere sempre esattamente **`1`**, mai maggiore di `1`. Allo stesso modo, per `entry_page` e per qualsiasi proprietà attribuita a livello di sessione tramite `FIRST_VALUE` o `LAST_VALUE`, un valore di `uniqExact` superiore a `1` indica che avete dimenticato il frame `ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING` oppure che avete omesso la chiave univoca di spareggio nell'`ORDER BY` della finestra. Aggiungere questo controllo automatico nei test dbt vi mette al riparo da qualsiasi regressione silenziosa nei modelli di sessionizzazione, funnel e attribuzione.
+-- t1, t2, t3: primo timestamp di ogni passo; epoch (1970) se il passo manca
+SELECT
+    user_id,
+    t1, t2, t3,
+    (t1 > toDateTime(0) AND t2 > t1 AND t3 > t2) AS completed_in_order
+FROM
+(
+    SELECT
+        user_id,
+        minIf(occurred_at, event_name = 'product_view') AS t1,
+        minIf(occurred_at, event_name = 'add_to_cart') AS t2,
+        minIf(occurred_at, event_name = 'order_completed') AS t3
+    FROM ev
+    GROUP BY user_id
+)
+ORDER BY user_id;
+```
+
+Il risultato per i quattro utenti: `a` e `d` completano il percorso in ordine (valore 1); `b` si ferma al carrello, e il suo `t3` vale `1970-01-01 00:00:00`, che non è maggiore di `t2` e quindi fallisce il controllo; `c` ha tutti e tre i passi ma l'ordine è `t3 = 11:00`, poi `t1 = 11:10` e `t2 = 11:15`, quindi `t3 > t2` è falso. Un conteggio non ordinato darebbe 4, 4 e 3 utenti per i tre passi, un conteggio con ordine dà 4, 4 e 2: l'ultimo passo è sovrastimato del 50% (3 contro 2) se ignori la sequenza.
+
+Un dettaglio del dialetto: `minIf` su una colonna non nullable restituisce il valore di default del tipo, cioè l'epoca, quando nessuna riga soddisfa la condizione. Per questo il controllo `t2 > t1` funziona anche come test di esistenza del passo. Se preferisci un `NULL` esplicito, applica `toNullable` alla colonna prima di `minIf`.
+
+## Tre errori ricorrenti con i valori di bordo
+
+### LAST_VALUE senza il frame completo
+
+Sintomo: `exit_page` uguale a `page_path` su ogni riga. Perché succede: il frame predefinito si ferma alla riga corrente e per di più, essendo di tipo `RANGE`, include anche i pari ordinamento. Nella sessione s2 gli eventi 6 e 7 hanno lo stesso timestamp: ordinando solo per `occurred_at`, `last_value` sulla riga 6 restituisce `/contatti`, cioè la pagina della riga 7, e il valore dipende da un pareggio che nessuno ha controllato. Correzione: dichiara sempre `ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING` e aggiungi `event_id` all'ordinamento.
+
+### I NULL in FIRST_VALUE e LAST_VALUE
+
+Sintomo: il canale di ingresso sparisce, oppure compare in alcuni motori e non in altri. Perché succede: lo standard SQL restituisce il valore della prima riga anche se `NULL`, mentre ClickHouse per impostazione predefinita salta i `NULL`. Su tre eventi con `utm_source` pari a `NULL`, `google`, `NULL`, `first_value(utm_source)` restituisce `google` in ClickHouse e `NULL` con `RESPECT NULLS` o su PostgreSQL. Correzione: decidi la semantica che vuoi e scrivila, con `RESPECT NULLS` oppure `argMinIf(utm_source, event_id, utm_source IS NOT NULL)`, e verifica il risultato quando porti la query su un altro motore.
+
+### NTILE su metriche molto discrete
+
+Sintomo: utenti con lo stesso valore in fasce diverse, come i tre utenti a 60 secondi. Perché succede: il secchio dipende dalla posizione. Correzione: guarda prima i quantili con `quantileExact`; se un valore occupa più di un confine, definisci le fasce con soglie esplicite sul valore. Se usi `ntile`, aggiungi sempre la chiave di spareggio e dichiara nel report che i pari merito possono cadere in secchi diversi.
+
+## Controllo prima di usare i valori di bordo
+
+1. In una sessione con quattro pagine, `last_value(page_path) OVER (PARTITION BY session_id ORDER BY occurred_at)` restituisce quattro valori diversi. Che cosa non va?
+
+<details>
+<summary>Mostra risposta</summary>
+
+Il frame predefinito si ferma alla riga corrente, quindi ogni riga vede sé stessa come ultima. Serve `ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING`; il controllo di coerenza è che `uniqExact(exit_page)` per sessione faccia 1.
+
+</details>
+
+2. Dividi 10 utenti con `ntile(4)`. Quanti utenti finiscono in ogni secchio e perché?
+
+<details>
+<summary>Mostra risposta</summary>
+
+3, 3, 2 e 2. Il calcolo è 10 / 4 = 2 con resto 2, quindi i primi due secchi ricevono una riga in più; la somma 3 + 3 + 2 + 2 dà 10.
+
+</details>
+
+3. Un funnel conta 3 utenti all'ultimo passo con eventi indipendenti e 2 con l'ordine cronologico. Quale utente è la differenza e che cosa ha fatto?
+
+<details>
+<summary>Mostra risposta</summary>
+
+È l'utente `c`, che ha completato l'ordine alle 11:00 e solo dopo ha visto il prodotto alle 11:10 e aggiunto al carrello alle 11:15. Ha tutti e tre gli eventi ma non il percorso: `t3 > t2` è falso e il controllo di ordine lo esclude.
+
+</details>
+
+4. Su un motore che salta i `NULL` nei valori di bordo e su uno che li rispetta, come rendi identica la query?
+
+<details>
+<summary>Mostra risposta</summary>
+
+Rendi esplicita la semantica: `RESPECT NULLS` se vuoi il valore della prima riga anche se vuoto, oppure `argMinIf(utm_source, event_id, utm_source IS NOT NULL)` se vuoi il primo valore presente. Lasciare il comportamento implicito produce risultati diversi tra motori.
+
+</details>

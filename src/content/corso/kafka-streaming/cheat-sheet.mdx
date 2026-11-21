@@ -1,215 +1,201 @@
 ---
 title: "Cheat sheet: Kafka e stream processing"
-description: "Riferimento operativo rapido per Kafka: comandi, configurazioni e pattern principali."
+description: "Mappa del modulo Kafka e scheda di controllo pre-rilascio: profilo di configurazione di topic, producer e consumer, comandi di diagnosi, calcolo del lag in secondi e scelta tra at-least-once e transazioni."
 module: "Modulo 11: Kafka e streaming di eventi"
 order: 8
 category: Sintesi Operativa
 headerImage: /course-headers/kafka-streaming-cheat-sheet-ginnytech-ad.webp
 headerImageAlt: "Cheat sheet: Kafka e stream processing - immagine ufficiale della lezione su GinnyTech, creata da AD"
-difficulty: advanced
-duration: 10 min
+difficulty: avanzato
+duration: 30 min
 prerequisites:
   - kafka-streaming/kafka-ops
 learningObjectives:
-  - Applicare la checklist di review pre-rilascio su topic, producer, consumer e metriche
-  - Configurare acks, idempotenza e commit manuale per la durabilità richiesta
-  - Interpretare lag, partizioni sotto-replicate e spazio disco con soglie di escalation
+  - Applicare la scheda di controllo pre-rilascio a topic, producer, consumer e metriche prima di un go-live
+  - Calcolare il ritardo di un consumer in secondi e il tempo di smaltimento dell'arretrato confrontando velocità di produzione e di consumo
+  - Scegliere tra at-least-once con deduplicazione e transazioni exactly-once in base alla destinazione dei dati
 binario: "ml-tabellare"
-formato: "articolo"
-autore: "Hermes"
-controllatoDa: "Argo"
-autorizzatoDa: "Giano"
+formato: "didattica-v2"
 draft: false
-dateModified: 2026-11-13
+dateModified: 2026-11-17
 ---
 
-# Cheat sheet: Kafka e stream processing
+Un team rilascia il venerdì pomeriggio la pipeline degli abbonamenti ricorrenti, `subscriptions.events.v1`, dimenticando tre parametri. Il topic nasce da auto-creazione con una partizione e `replication.factor=1`, il producer non ha l'idempotenza attiva e la tabella di destinazione non ha una coda per i messaggi malformati. Sabato, dopo un breve problema di rete, risultano persi 800 eventi, duplicati 2.300 per effetto dei retry, e un singolo messaggio corrotto blocca il consumer per dodici ore. È uno scenario costruito con numeri di esempio. Nessuno dei tre guasti è sfortuna: sono tre voci di una scheda di controllo che nessuno ha passato.
 
-Un team rilascia in produzione una nuova pipeline Kafka + ClickHouse venerdì pomeriggio dimenticando tre parametri nei file di configurazione: il topic parte con `min.insync.replicas=1`, il producer non ha `enable.idempotence=true` e il connettore verso il database non ha la gestione errori su Dead Letter Queue. Al primo micro-riavvio di rete del sabato mattina si perdono 800 eventi sul broker, se ne duplicano 2.300 nei retry e un singolo messaggio malformato blocca la partizione per dodici ore. La causa non è la sfortuna: è andare in produzione senza passare la configurazione attraverso la scheda di controllo standard di topic, producer, consumer e osservabilità.
+## Tre parametri dimenticati il venerdì
 
-## Tre parametri dimenticati il venerdì e dodici ore di blocco il sabato
+Il primo errore sta nel broker. Con `auto.create.topics.enable=true` un topic può nascere da un nome sbagliato o da un'applicazione di test, con i valori di sviluppo: una partizione, nessuna replica aggiuntiva e `min.insync.replicas=1`. Quando l'unico broker che lo ospita si riavvia, gli 800 eventi non ancora scritti su disco sono persi.
 
-Questo è un caso ricostruito con numeri di esempio che sintetizza perché serve una checklist pre-rilascio vincolante per ogni componente Kafka. L'azienda rilascia il nuovo flusso degli abbonamenti ricorrenti (`subscriptions.events.v1`) verso il data warehouse.
+Il secondo errore sta nel producer. Senza `enable.idempotence=true`, un timeout fa scattare un retry, ma il broker potrebbe aver già scritto il messaggio: nascono così 2.300 duplicati. Il terzo sta nel sink, dove una tabella costruita senza gestione degli errori si ferma sull'offset corrotto e non avanza più.
 
-Durante la messa in produzione senza checklist passano inosservate tre sviste:
-1. Il topic viene creato automaticamente dal broker (`auto.create.topics.enable=true`) con i valori di default di sviluppo: 1 sola partizione, `replication.factor=1` e `min.insync.replicas=1`.
-2. Il producer invia i messaggi senza compressione e con `enable.idempotence=false`: quando un timeout di rete fa scattare i retry, vengono accodati 2.300 eventi duplicati.
-3. Sul lato ClickHouse la tabella `ENGINE = Kafka` viene creata senza `kafka_handle_error_mode = 'stream'`: sabato alle 04:10 un test manuale scrive sul topic una stringa non valida e l'intero consumer group si ferma sull'offset corrotto per dodici ore.
+> **Idea chiave:** una pipeline Kafka è pronta per la produzione quando quattro livelli (broker e topic, producer, consumer o sink, monitoraggio) rispettano insieme una configurazione di riferimento, e basta una voce mancante per trasformare un incidente di rete in una perdita di dati.
 
-La causa di tutti e tre gli incidenti è non aver bloccato l'auto-creazione dei topic e non aver verificato il profilo aureo di configurazione prima del go-live.
+Questa lezione è un indice operativo. Raccoglie in un posto solo i parametri e i comandi che le altre lezioni del modulo spiegano per esteso, e dice dove tornare per l'approfondimento di ciascuno.
 
-## I quattro quadranti di controllo: Broker/Topic, Producer, Consumer/Sink e Metriche
+## Mappa del modulo e lezione da aprire per ogni problema
 
-Questa scheda operativa riunisce in un unico riferimento i parametri esatti che devono essere presenti in ogni pipeline Kafka destinata all'analytics e alle applicazioni critiche.
+Il modulo segue il percorso di un evento, dal momento in cui nasce fino a quando una dashboard lo mostra. La tabella associa a ciascun sintomo la lezione che lo spiega.
 
-Il primo quadrante governa **Broker e Topic**. Sul broker `auto.create.topics.enable` deve essere `false` e `unclean.leader.election.enable` deve essere `false`. Ogni topic di produzione viene creato tramite codice (Terraform / script) con `replication.factor=3`, `min.insync.replicas=2`, numero di partizioni calibrato sul throughput ($6\text{–}24$), `compression.type=producer` e una retention esplicita (`retention.ms >= 604800000` per 7 giorni, oppure `cleanup.policy=compact` per le tabelle di stato e anagrafica).
+| Sintomo o domanda | Lezione da aprire | Concetto da recuperare |
+|---|---|---|
+| Perché non basta una coda? | `introduzione-streaming` | Log append-only, offset, consumer group |
+| Messaggi confermati e poi spariti | `kafka-fondamenti` | Triade RF, `min.insync.replicas`, `acks` |
+| Duplicati, rebalance, commit | `kafka-producers-consumers` | Idempotenza, commit manuale |
+| Schema cambiato e consumer rotti | `kafka-schema-registry` | Compatibilità e versioni di schema |
+| Sincronizzare un database | `kafka-connect` | CDC su WAL, SMT, Dead Letter Queue |
+| Lag, disco, partizioni sotto-replicate | `kafka-ops` e `kafka-operations` | Metriche e soglie di escalation |
+| Costruire tutto insieme | `caso-studio` | Co-partizionamento, join, sink idempotente |
 
-Il secondo quadrante governa **Producer e Schema Registry**. Ogni producer deve avere `acks=all`, `enable.idempotence=true`, `compression.type=zstd`, `linger.ms=20` e `batch.size=65536`. La chiave di partizionamento deve avere alta cardinalità e distribuzione uniforme (`order_id`, `user_id`), mentre il contratto del payload deve essere validato dallo Schema Registry in modalità `BACKWARD_TRANSITIVE` (o `FULL_TRANSITIVE`) con un valore `default` per ogni nuovo campo aggiunto.
-
-Il terzo e quarto quadrante governano **Consumer / Sink Analitico** e **Soglie di Escalation**. Nei consumer applicativi `enable.auto.commit` è sempre `false` col commit eseguito solo dopo la persistenza su disco; nel motore `ENGINE = Kafka` di ClickHouse si impostano blocchi da `65536` righe, `kafka_handle_error_mode = 'stream'` con Materialized View dedicata alla Dead Letter Queue (`_error != ''`) e tabella di destinazione `ReplacingMergeTree` per assorbire i replay in modo idempotente. Sul fronte del monitoraggio, le soglie di escalation sono tassative: `OfflinePartitionsCount > 0` (`P1` immediato), `UnderReplicatedPartitions > 0` per oltre 3 minuti (`P1`), `time_lag_sec > 120` (`P2`) e disco oltre il `75%` (`P2`).
-
-**Una pipeline Kafka supera il collaudo di produzione solo se disabilita l'auto-creazione dei topic, impone la triade `RF=3 / ISR=2 / acks=all` con compressione `zstd`, isola gli errori in una Dead Letter Queue e scrive in tabelle di destinazione idempotenti.**
-
-## Tre configurazioni vietate da bloccare in code review
-
-Il blocco SQL qui sotto raccoglie le tre configurazioni di ingestione da respingere immediatamente durante la revisione di una pull request:
-
-```sql
--- VIETATO 1: lettura da un topic auto-creato senza prefisso di versione, con blocchi minuscoli (100 righe)
--- che causano "Too many parts" e senza gestione errori (un singolo JSON rotto blocca tutto).
-CREATE TABLE raw_stream.kafka_bad_review
-(
-    id String,
-    payload String
-)
-ENGINE = Kafka
-SETTINGS
-    kafka_broker_list = 'localhost:9092',
-    kafka_topic_list = 'unversioned_topic',
-    kafka_group_name = 'default_group',
-    kafka_format = 'JSONEachRow',
-    kafka_max_block_size = 100;
-
--- VIETATO 2: inserire lo stream direttamente in un MergeTree senza colonne di offset/event_id
--- rendendo impossibile deduplicare i messaggi dopo un replay o un ribilanciamento di Kafka!
-CREATE TABLE raw_stream.target_no_dedup_bad
-(
-    id String,
-    payload String
-)
-ENGINE = MergeTree
-ORDER BY id;
+```mermaid
+flowchart LR
+    A["Evento nasce (producer)"] --> B["Topic (RF=3, ISR=2)"]
+    B --> C["Consumer o Connect (commit dopo la scrittura)"]
+    C --> D["Destinazione idempotente (event_id)"]
+    C -.->|"messaggio malformato"| E["Dead Letter Queue"]
+    B --> F["Metriche e allarmi"]
+    C --> F
 ```
 
-### Lasciare auto.create.topics.enable=true sui broker di produzione
+Il diagramma indica anche dove si mettono i controlli. Ogni freccia è un punto in cui un parametro dimenticato può far perdere o duplicare un evento, e per questo la scheda che segue è organizzata per livelli e non per strumento.
 
-Permettere che un producer o un consumer crei automaticamente un topic semplicemente sbagliando a digitare una lettera nel nome (`orders.cretead.v1` invece di `orders.created.v1`) inquina il cluster e crea topic privi di garanzie di replica. I topic auto-creati nascono spesso con `replication.factor=1` e `num.partitions=1`: nessuno si accorge dell'errore finché quel singolo broker non si riavvia cancellando l'intero flusso.
+## Profilo di configurazione di riferimento
 
-### Omettere kafka_handle_error_mode = 'stream' e la tabella Dead Letter Queue
+La scheda seguente vale per cluster con almeno tre broker e flussi che alimentano analytics o applicazioni critiche. Ogni riga è un valore da pretendere in code review, e ciascuna ha una lezione che la giustifica.
 
-Creare una tabella `ENGINE = Kafka` in ClickHouse con le impostazioni di errore predefinite lascia a disposizione due sole alternative disastrose quando arriva un messaggio corrotto: o il consumer va in loop infinito sullo stesso offset bloccando per ore tutta la partizione (`kafka_skip_broken_messages = 0`), o il consumer butta via nel nulla i messaggi senza lasciare traccia (`kafka_skip_broken_messages > 0`). Solo `kafka_handle_error_mode = 'stream'` salva il messaggio rotto in una tabella DLQ e fa proseguire il flusso sano.
+| Livello | Parametro | Valore di riferimento |
+|---|---|---|
+| Broker | `auto.create.topics.enable` | `false` |
+| Broker | `unclean.leader.election.enable` | `false` |
+| Topic | `replication.factor` e `min.insync.replicas` | 3 e 2 |
+| Topic | `retention.ms` | almeno 604800000 (7 giorni), oppure `cleanup.policy=compact` per stati |
+| Producer | `acks` e `enable.idempotence` | `all` e `true` |
+| Producer | `compression.type`, `linger.ms` | `zstd`, 20 |
+| Consumer | `enable.auto.commit` | `false`, commit dopo la persistenza |
+| Schema | compatibilità | `BACKWARD_TRANSITIVE` con `default` sui nuovi campi |
 
-### Non salvare _partition, _offset ed event_id nella tabella di destinazione
+Il topic si crea con codice o script versionato, mai a mano e mai per auto-creazione. Il comando seguente applica il profilo e poi verifica che ogni partizione abbia davvero tre repliche sincronizzate, perché una creazione riuscita non garantisce che le repliche siano allineate:
 
-Scrivere i messaggi da Kafka a ClickHouse senza portare nella tabella finale l'identificativo univoco dell'evento (`event_id`) o le coordinate fisiche di Kafka (`_partition`, `_offset`) impedisce qualsiasi operazione di replay. Se la settimana prossima dovrete usare `--reset-offsets` per rielaborare due giorni di dati, una tabella `MergeTree` priva di chiave di deduplicazione duplicherà ogni singola riga rielaborata.
+```bash
+# Topic di produzione con il profilo di riferimento (RF=3, ISR=2, 7 giorni)
+kafka-topics.sh --bootstrap-server kafka-1:9092 --create \
+  --topic subscriptions.events.v1 --partitions 12 --replication-factor 3 \
+  --config min.insync.replicas=2 --config retention.ms=604800000 \
+  --config compression.type=producer
 
-## Template completo di riferimento per Ingestione Kafka + DLQ + Audit in ClickHouse
-
-Usate questo template standardizzato a quattro componenti per tutte le vostre pipeline di ingestione da Kafka a ClickHouse:
-
-1. Verificate che il topic su Kafka abbia `RF=3`, `min.insync.replicas=2` e producer con `acks=all`, `enable.idempotence=true`, `compression.type=zstd`.
-2. Definite la coda `ENGINE = Kafka` con `kafka_max_block_size = 65536` e `kafka_handle_error_mode = 'stream'`.
-3. Create la tabella principale `ReplacingMergeTree` ordinata per cardinalità crescente con salvataggio di `_partition` e `_offset`, più la tabella `dlq` per i messaggi scartati.
-4. Eseguite la query di audit su throughput, duplicati ed errori DLQ.
-
-Ecco il codice SQL completo pronto da copiare in produzione:
-
-```sql
--- 1. CODA KAFKA ENGINE (blocchi grandi da 64k righe + cattura errori in streaming)
-CREATE TABLE raw_stream.kafka_subscriptions_queue
-(
-    event_id String,
-    tenant_id LowCardinality(String),
-    subscription_id UInt64,
-    occurred_at DateTime64(3, 'UTC'),
-    mrr_delta_eur Decimal(12, 2)
-)
-ENGINE = Kafka
-SETTINGS
-    kafka_broker_list = 'kafka-1:9092,kafka-2:9092,kafka-3:9092',
-    kafka_topic_list = 'subscriptions.events.v1',
-    kafka_group_name = 'cg-ch-subscriptions-v1',
-    kafka_format = 'JSONEachRow',
-    kafka_max_block_size = 65536,
-    kafka_flush_interval_ms = 2000,
-    kafka_handle_error_mode = 'stream';
-
--- 2. TABELLA PRINCIPALE IDEMPOTENTE (ReplacingMergeTree con coordinate Kafka per replay sicuro)
-CREATE TABLE raw_stream.subscriptions_events
-(
-    tenant_id LowCardinality(String),
-    occurred_at DateTime64(3, 'UTC'),
-    event_id String,
-    subscription_id UInt64,
-    mrr_delta_eur Decimal(12, 2),
-    kafka_partition UInt32,
-    kafka_offset UInt64,
-    ingested_at DateTime64(3, 'UTC') DEFAULT now64(3)
-)
-ENGINE = ReplacingMergeTree(ingested_at)
-PARTITION BY toYYYYMM(occurred_at)
-ORDER BY (tenant_id, toStartOfHour(occurred_at), event_id);
-
-CREATE MATERIALIZED VIEW raw_stream.mv_subscriptions_valid
-TO raw_stream.subscriptions_events
-AS SELECT
-    tenant_id,
-    occurred_at,
-    event_id,
-    subscription_id,
-    mrr_delta_eur,
-    _partition AS kafka_partition,
-    _offset AS kafka_offset
-FROM raw_stream.kafka_subscriptions_queue
-WHERE _error = '';
-
--- 3. DEAD LETTER QUEUE (cattura ogni payload malformato senza mai fermare la partizione)
-CREATE TABLE raw_stream.subscriptions_dlq
-(
-    failed_at DateTime DEFAULT now(),
-    kafka_partition UInt32,
-    kafka_offset UInt64,
-    error_msg String,
-    raw_message String
-)
-ENGINE = MergeTree
-ORDER BY (failed_at, kafka_partition, kafka_offset);
-
-CREATE MATERIALIZED VIEW raw_stream.mv_subscriptions_dlq
-TO raw_stream.subscriptions_dlq
-AS SELECT
-    now() AS failed_at,
-    _partition AS kafka_partition,
-    _offset AS kafka_offset,
-    _error AS error_msg,
-    _raw_message AS raw_message
-FROM raw_stream.kafka_subscriptions_queue
-WHERE _error != '';
-
--- 4. QUERY DI AUDIT POST-RILASCIO (verifica bilanciamento partizioni, lag di evento e assenza errori DLQ)
-SELECT
-    kafka_partition,
-    count() AS righe_totali,
-    uniqExact(event_id) AS eventi_unici,
-    max(kafka_offset) - min(kafka_offset) + 1 AS range_offset,
-    max(dateDiff('second', occurred_at, ingested_at)) AS max_e2e_lag_sec,
-    (SELECT count() FROM raw_stream.subscriptions_dlq WHERE failed_at >= now() - INTERVAL 1 HOUR) AS errori_dlq_1h
-FROM raw_stream.subscriptions_events
-WHERE ingested_at >= now() - INTERVAL 1 HOUR
-GROUP BY kafka_partition
-ORDER BY kafka_partition ASC;
+# Verifica: ogni partizione deve elencare tre repliche in Isr
+kafka-topics.sh --bootstrap-server kafka-1:9092 --describe --topic subscriptions.events.v1
 ```
 
-Con questo template standardizzato la messa in produzione diventa ripetibile e prevedibile: ogni blocco scrive fino a 65.536 righe in una sola part su disco; se un produttore invia un messaggio corrotto, `mv_subscriptions_dlq` lo isola in `subscriptions_dlq` incrementando `errori_dlq_1h` senza fermare gli altri messaggi; e se il team deve eseguire un `--reset-offsets` di sei ore, `ReplacingMergeTree` ordinata su `(tenant_id, toStartOfHour(occurred_at), event_id)` ricompatta i duplicati mantenendo intatti i numeri di business. Copiare questo schema di base per ogni nuovo topic richiede cinque minuti; andare in produzione senza DLQ e senza idempotenza trasforma ogni anomalia dei dati in un fermo notturno.
+Il consumer applicativo applica la stessa disciplina dal lato lettura. Il commit avviene solo dopo che il dato è stato scritto a destinazione, così un crash produce una rielaborazione e non una perdita:
 
-## Scelta rapida della garanzia di consegna: At-Least-Once + Dedup o Transazioni Kafka EOS
+```python
+# Consumer con commit manuale dopo la scrittura (at-least-once)
+from confluent_kafka import Consumer
 
-Quando progettate una pipeline da Kafka verso un sistema analitico, dovete scegliere come ottenere l'esattezza dei conteggi tra due strade: **consegna *At-Least-Once* abbinata a deduplicazione idempotente nel database di destinazione** oppure **transazioni distribuite *Exactly-Once* (`isolation.level=read_committed` + transazioni two-phase commit)**.
+consumer = Consumer({
+    "bootstrap.servers": "kafka-1:9092",
+    "group.id": "cg-subscriptions-sink-prod",
+    "enable.auto.commit": False,       # il commit lo decidiamo noi
+    "auto.offset.reset": "earliest",
+})
+consumer.subscribe(["subscriptions.events.v1"])
 
-Il criterio di scelta è netto: **usate *At-Least-Once* (producer idempotente + commit manuale post-scrittura) abbinato a deduplicazione su `event_id` in ClickHouse (`ReplacingMergeTree` / `uniqState(event_id)`) per tutte le pipeline di ingestione verso data warehouse e data lake, riservate invece le transazioni native Kafka (`exactly_once_v2`) esclusivamente alle topologie stream-to-stream interne a Kafka (Kafka Streams o Flink che leggono da un topic Kafka e scrivono il risultato su un altro topic Kafka).**
+while True:
+    msg = consumer.poll(1.0)
+    if msg is None or msg.error():
+        continue
+    scrivi_su_destinazione(msg.key(), msg.value())   # idempotente su event_id
+    consumer.commit(message=msg, asynchronous=False) # solo dopo la scrittura
+```
 
-La confusione comune consiste nel cercare di coordinare una transazione two-phase commit tra il broker Kafka e un database analitico esterno come ClickHouse o S3, rallentando di dieci volte i commit e introducendo blocchi su transazioni appese (*hanging transactions*). Sbagliare questa scelta complica enormemente il connettore di uscita quando a un database colonnare basta avere un `event_id` univoco nel payload per rendere qualsiasi inserimento *at-least-once* matematicamente equivalente a *exactly-once* in lettura.
+## Diagnosi rapida con i comandi del cluster
 
-Questo cheat sheet riassume i parametri operativi standard per cluster a 3 o più broker. In ambienti di sviluppo locale a singolo nodo (Docker Compose su laptop), ricordate di abbassare `replication.factor=1`, `min.insync.replicas=1` e `offsets.topic.replication.factor=1`, altrimenti la creazione dei topic interni fallirà per mancanza di broker.
+Prima di cambiare qualsiasi configurazione conviene guardare lo stato reale del cluster, perché molte segnalazioni di perdita dati sono in realtà un consumer in ritardo o una replica fuori dall'ISR. Quando qualcosa va storto, tre comandi rispondono a quasi tutte le prime domande. Il primo mostra il lag di un gruppo, il secondo le partizioni che hanno perso una replica e il terzo quelle senza leader.
 
-## Cinque controlli finali prima di firmare il rilascio in produzione
+```bash
+# Lag per partizione di un gruppo: colonna LAG = LOG-END-OFFSET - CURRENT-OFFSET
+kafka-consumer-groups.sh --bootstrap-server kafka-1:9092 \
+  --describe --group cg-subscriptions-sink-prod
 
-1. Sul topic sono attivi `replication.factor=3`, `min.insync.replicas=2`, `unclean.leader.election.enable=false` e `compression.type=producer`, con auto-creazione dei topic disabilitata sul cluster?
-2. Il producer usa `acks=all`, `enable.idempotence=true`, `compression.type=zstd`, `linger.ms >= 10` e una chiave di partizionamento ad alta cardinalità uniforme?
-3. Lo schema dell'evento è registrato sullo Schema Registry con compatibilità `BACKWARD_TRANSITIVE` (o `FULL_TRANSITIVE`) e ogni nuovo campo ha un valore `default`?
-4. Il consumer o la tabella `ENGINE = Kafka` di ClickHouse scrive a blocchi grandi (`65536`), ha `kafka_handle_error_mode = 'stream'` con tabella DLQ collegata e salva `event_id`, `_partition` e `_offset` in una tabella idempotente?
-5. Sono attivi gli alert con runbook e owner su `OfflinePartitionsCount > 0`, `UnderReplicatedPartitions > 0`, `errori_dlq > 0` e `time_lag_sec > SLA`?
+# Partizioni sotto-replicate: in condizioni sane non stampa nulla
+kafka-topics.sh --bootstrap-server kafka-1:9092 --describe --under-replicated-partitions
 
-La metrica di sintesi che certifica che l'intera pipeline rispetta questa scheda operativa è la tripla **`OfflinePartitions = 0`**, **`DLQ_Errors_1h = 0`** e **`Max_Time_Lag_Sec < 30`**.
+# Partizioni senza leader: ogni riga è un incidente P1
+kafka-topics.sh --bootstrap-server kafka-1:9092 --describe --unavailable-partitions
+```
 
-Di tutto il modulo su Kafka, tenete questa scheda come filtro invalicabile per ogni pull request: se un topic ha `RF=3 / ISR=2 / acks=all`, una chiave ben distribuita, una Dead Letter Queue per gli errori e un `event_id` per l'idempotenza, non vi sveglierà mai nel cuore della notte.
+Il lag indica quanto lavoro è accumulato, le partizioni sotto-replicate indicano un rischio di durabilità e quelle senza leader indicano una scrittura impossibile: sono tre problemi diversi con urgenze diverse. Per un replay, il gruppo si ferma e si riporta indietro solo lui, con `--reset-offsets --to-datetime` seguito dall'opzione `--execute`. L'opzione `--dry-run` mostra prima dove arriverebbero gli offset, ed è la buona abitudine prima di ogni reset.
+
+## Dal numero di eventi in coda ai secondi di ritardo
+
+Il lag in eventi dice poco senza la velocità di produzione. Un arretrato di 90.000 eventi è un problema grave su un flusso da 50 eventi al secondo e irrilevante su uno da 5.000. Il ritardo si legge in secondi, e la soglia di allarme si fissa su quel valore.
+
+Il calcolo si fa con numeri di esempio, passo dopo passo.
+
+Numeri di esempio: il topic riceve 1.000 eventi al secondo, il gruppo ha un arretrato di 90.000 eventi e il consumer smaltisce 1.500 eventi al secondo. La soglia di allarme `P2` è 120 secondi.
+
+Il ritardo in secondi è 90.000 eventi ÷ 1.000 eventi/s = 90 secondi, sotto la soglia di 120. La velocità netta di smaltimento è la differenza tra consumo e produzione, 1.500 − 1.000 = 500 eventi/s, quindi il tempo per azzerare l'arretrato è 90.000 ÷ 500 = 180 secondi, cioè 3 minuti. Se il consumer rallentasse a 900 eventi/s, la velocità netta diventerebbe 900 − 1.000 = −100 eventi/s: l'arretrato crescerebbe di 100 eventi al secondo e non si smaltirebbe mai.
+
+Questo ultimo caso è quello da riconoscere: un consumer più lento del producer non recupera, e l'allarme deve scattare sulla tendenza oltre che sul valore. Le soglie di escalation della scheda sono: `OfflinePartitionsCount > 0` come `P1` immediato, `UnderReplicatedPartitions > 0` per oltre 3 minuti come `P1`, ritardo oltre 120 secondi come `P2` e disco oltre il 75% come `P2`. Su un broker da 2 TB il 75% corrisponde a 1,5 TB usati.
+
+Va notato che il ritardo in secondi dipende dal ritmo di produzione e non dalla capacità del consumer: se la produzione raddoppia a 2.000 eventi/s, lo stesso arretrato di 90.000 eventi vale solo 45 secondi di ritardo, mentre lo smaltimento rallenta perché la velocità netta scende a 1.500 − 2.000 = −500 eventi/s. Per questo si monitorano insieme ritardo, tendenza e rapporto tra le due velocità, e non un singolo numero.
+
+## Tre configurazioni da bloccare in review
+
+### Topic con auto-creazione attiva
+
+Il sintomo è un topic con nome quasi uguale a quello giusto (`orders.cretead.v1`), una partizione e nessuna replica. Succede perché un refuso nel codice basta a farlo nascere, e nessuno se ne accorge finché il broker non si riavvia. La correzione è disattivare `auto.create.topics.enable` e creare i topic solo da codice versionato.
+
+### Consumer senza gestione degli errori
+
+Il sintomo è un consumer fermo sullo stesso offset per ore. L'impostazione predefinita lascia due scelte entrambe sbagliate: ripetere all'infinito l'elaborazione del messaggio rotto, oppure scartarlo senza lasciare traccia. La soluzione è una Dead Letter Queue, che nei connettori è `errors.tolerance=all` con topic di quarantena e nel motore Kafka di ClickHouse è `kafka_handle_error_mode = 'stream'` con una tabella per gli errori.
+
+### Destinazione senza chiave di deduplicazione
+
+Il sintomo si vede al primo replay: dopo un `--reset-offsets` di due giorni, i conteggi raddoppiano. La tabella finale non conserva né un `event_id` né le coordinate `_partition` e `_offset`, e quindi non può riconoscere i messaggi già scritti. Si corregge portando l'identificativo dell'evento fino alla destinazione e usando un motore o una query che deduplica su di esso.
+
+## At-least-once con deduplicazione o transazioni exactly-once
+
+Per ottenere conteggi esatti ci sono due strade. La prima è consegna *at-least-once*, con producer idempotente e commit dopo la scrittura, abbinata alla deduplicazione su `event_id` nella destinazione. La seconda sono le transazioni Kafka (`exactly_once_v2` con `isolation.level=read_committed`).
+
+Il criterio è netto. Per le pipeline verso data warehouse e data lake si usa at-least-once con deduplicazione, perché un identificativo univoco nel payload rende un inserimento ripetuto equivalente a uno singolo in lettura. Le transazioni si riservano alle topologie interne a Kafka, dove un'applicazione Kafka Streams o Flink legge da un topic e scrive su un altro. Coordinare una transazione tra Kafka e un sistema esterno come ClickHouse o S3 rallenta i commit e introduce transazioni appese, senza dare ciò che la deduplicazione offre a costo minimo.
+
+In sviluppo locale con un solo broker, ricorda di abbassare `replication.factor`, `min.insync.replicas` e `offsets.topic.replication.factor` a 1, altrimenti la creazione dei topic interni fallisce per mancanza di broker.
+
+## Controllo prima di firmare il rilascio
+
+1. Un topic ha RF=3 e `min.insync.replicas=3` con `acks=all`. Perché è una configurazione da respingere?
+
+<details>
+<summary>Mostra risposta</summary>
+
+Un solo broker fermo per manutenzione porta l'ISR a 2 e tutti i producer ricevono `NotEnoughReplicasException`. Il valore corretto è `min.insync.replicas=2`.
+
+</details>
+
+2. Il topic riceve 2.000 messaggi al secondo, il gruppo ha 150.000 messaggi di arretrato e il consumer ne elabora 2.500 al secondo. Quanto ritardo hai in secondi e in quanto tempo si azzera?
+
+<details>
+<summary>Mostra risposta</summary>
+
+Ritardo: 150.000 ÷ 2.000 = 75 secondi. Velocità netta: 2.500 − 2.000 = 500 messaggi/s, quindi 150.000 ÷ 500 = 300 secondi, cioè 5 minuti.
+
+</details>
+
+3. Dopo un reset degli offset di sei ore i conteggi risultano gonfiati. Quale pezzo della scheda manca?
+
+<details>
+<summary>Mostra risposta</summary>
+
+La deduplicazione nella destinazione: manca un `event_id` (o `_partition` e `_offset`) con un motore o una query che collassi i duplicati. Il consumer at-least-once rilegge per costruzione parte dei messaggi.
+
+</details>
+
+4. Per un job che legge da Kafka e scrive su un altro topic Kafka, usi at-least-once con dedup o transazioni?
+
+<details>
+<summary>Mostra risposta</summary>
+
+Transazioni (`exactly_once_v2`), perché lettura e scrittura avvengono entrambe dentro Kafka e il coordinamento è nativo. At-least-once con dedup si usa per le destinazioni esterne.
+
+</details>

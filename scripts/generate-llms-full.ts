@@ -54,7 +54,9 @@ async function main() {
         sections.push("");
     }
 
-    await fs.writeFile("public/llms-full.txt", sections.join("\n"), "utf-8");
+    const rawOutput = sections.join("\n").replace(/\r\n/g, "\n");
+    const output = rawOutput.endsWith("\n") ? rawOutput : `${rawOutput}\n`;
+    await fs.writeFile("public/llms-full.txt", output, "utf-8");
     console.log(`Wrote public/llms-full.txt (${sections.length} lines)`);
 }
 
@@ -65,6 +67,7 @@ function toPosix(file: string): string {
 
 function stripMarkdown(md: string): string {
     return md
+        .replace(/\r\n/g, "\n")
         .replace(/\{\/\*[\s\S]*?\*\/\}/g, "") // MDX comments (internal editorial markers)
         .replace(/```[\s\S]*?```/g, "") // code blocks
         .replace(/`([^`]+)`/g, "$1") // inline code

@@ -3,7 +3,7 @@ import { describe, expect, test } from "vitest";
 import { COURSE_MODULES } from "../src/data/course-modules";
 import { PERSON_SAME_AS, PERSON_TOPICS } from "../src/lib/entity";
 
-const llms = readFileSync("public/llms.txt", "utf-8");
+const llms = readFileSync("public/llms.txt", "utf-8").replace(/\r\n/g, "\n");
 
 function section(heading: string): string {
     const start = llms.indexOf(`## ${heading}`);
@@ -28,7 +28,7 @@ describe("llms.txt author section", () => {
 
     test("names the Markdown profile page and the topics the author works on", () => {
         expect(author).toContain("https://ginnytech.it/about.md");
-        const topics = author.split("\n").find((line) => line.startsWith("- Topics:")) ?? "";
+        const topics = author.split(/\r?\n/).find((line) => line.startsWith("- Topics:")) ?? "";
         for (const topic of PERSON_TOPICS) {
             expect(topics, `topic "${topic.name}"`).toContain(topic.name);
         }
@@ -55,7 +55,7 @@ describe("llms.txt Markdown convention", () => {
 
 describe("llms-full.txt", () => {
     const full = readFileSync("public/llms-full.txt", "utf-8");
-    const lines = full.split("\n");
+    const lines = full.split(/\r?\n/);
 
     const blogCount = readdirSync("src/content/blog").filter((f) => f.endsWith(".mdx")).length;
     const lessonCount = readdirSync("src/content/corso", { withFileTypes: true })

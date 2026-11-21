@@ -1,123 +1,216 @@
 ---
 title: "Introduzione allo streaming con Kafka"
 description: >-
-  Fondamenti di Apache Kafka: architettura, concetti chiave e pattern di utilizzo per analytics.
+  Perché un commit log partizionato non è una coda: offset, chiavi, consumer group e retention, con il calcolo di partizioni e disco per un flusso di ordini e il replay di un bug del weekend.
 module: "Modulo 11: Kafka e streaming di eventi"
 order: 1
 category: Tecnico
 headerImage: /course-headers/kafka-streaming-introduzione-streaming-ginnytech-ad.webp
 headerImageAlt: >-
   Introduzione Kafka - immagine ufficiale della lezione su GinnyTech, creata da AD
-difficulty: advanced
-duration: 22 min
+difficulty: avanzato
+duration: 40 min
 prerequisites: []
 learningObjectives:
-  - Distinguere log immutabile e code tradizionali in base a replay e fan-out
-  - Valutare volume, consumer e necessità di replay prima di adottare Kafka
-  - Descrivere topic, partizioni, offset e consumer group come interfacce di un flusso
+  - Distinguere un commit log immutabile da una coda distruttiva in base a replay, fan-out e ordinamento per chiave
+  - Calcolare numero di partizioni e spazio disco di un topic a partire da picco di eventi al secondo, dimensione del messaggio e retention
+  - Creare un topic con kafka-topics.sh, pubblicare con chiave da Python e riportare indietro gli offset di un solo consumer group
 binario: "ml-tabellare"
-formato: "articolo"
-autore: "Hermes"
-controllatoDa: "Argo"
-autorizzatoDa: "Giano"
+formato: "didattica-v2"
 draft: false
-dateModified: 2026-11-13
+dateModified: 2026-11-17
 ---
 
-# Introduzione allo streaming con Kafka
+Un'azienda B2B distribuisce gli eventi d'ordine su una coda RabbitMQ, dove il broker cancella il messaggio nel momento in cui il primo worker risponde con `ACK`. Un nuovo sviluppatore collega il servizio di fatturazione alla stessa coda da cui legge il connettore del data warehouse. Da quel giorno ogni sistema riceve solo metà degli ordini e nessun log segnala qualcosa di strano. Tre giorni dopo emerge un bug nel parser, che ha ignorato il campo `vat_amount` da venerdì a domenica, e il team scopre che i messaggi del weekend non esistono più da nessuna parte. È uno scenario costruito con numeri di esempio, ma i meccanismi sono quelli reali: la causa non è un guasto hardware, è l'uso di una coda distruttiva dove serviva un registro di eventi che conserva la storia.
 
-Un'azienda B2B distribuisce gli eventi d'ordine su una coda di messaggistica tradizionale (RabbitMQ) dove il messaggio viene cancellato dal broker non appena il primo worker invia la conferma di lettura (`ACK`). Quando il servizio di fatturazione legge per sbaglio dalla stessa coda destinata al data warehouse e un bug nel parser scarta tre giorni di pagamenti, il data warehouse perde metà degli ordini e i messaggi scartati sono spariti per sempre dal disco del broker. La causa non è un guasto hardware: è usare una coda distruttiva punto-a-punto al posto di un commit log distribuito immutabile con consumer group indipendenti e capacità di replay.
+## Tre giorni di ordini cancellati dopo l'ACK
 
-## Tre giorni di pagamenti cancellati dalla coda dopo l'ACK
+La piattaforma dello scenario genera 80.000 eventi d'ordine al giorno, e quegli eventi devono arrivare a tre sistemi: il motore antifrode, la fatturazione e il data warehouse in ClickHouse. Nel disegno iniziale esiste un'unica coda AMQP, e il broker consegna i messaggi ai consumatori collegati a turno, in *round-robin*. Con due consumatori sulla stessa coda, i messaggi pari vanno alla fatturazione e quelli dispari al warehouse. Entrambi vedono il 50% del traffico, ognuno convinto di vederlo tutto.
 
-Questo è un caso ricostruito con numeri di esempio su quanto accade quando si usa un message broker progettato per code di lavoro (*task queues*) come spina dorsale per i dati analitici aziendali. La piattaforma genera 80.000 eventi di ordine al giorno che devono raggiungere tre sistemi diversi: il motore antifrode, il gestionale di fatturazione e il data warehouse in ClickHouse.
+Il secondo incidente è più costoso. Il bug sul campo `vat_amount` produce tre giorni di dati sbagliati, pari a 3 giorni × 80.000 eventi = 240.000 ordini da ricalcolare. Il worker ha però confermato ogni lettura con `ACK`, e dopo la conferma il broker libera memoria e disco. Il materiale da rielaborare è sparito.
 
-Nel disegno iniziale tutti gli eventi confluiscono in un'unica coda AMQP. Si verificano due incidenti strutturali:
-1. Un nuovo sviluppatore collega il worker di fatturazione alla stessa coda da cui legge il connettore del data warehouse: il broker applica una distribuzione *round-robin* tra i due processi, consegnando i messaggi pari alla fatturazione e i messaggi dispari a ClickHouse. Entrambi i sistemi ricevono solo il 50% degli ordini senza che nessun errore compaia nei log.
-2. Quando il team si accorge che un bug di parsing ha ignorato il campo `vat_amount` da venerdì a domenica, tenta di rileggere gli eventi del fine settimana per ricalcolare le tabelle: ma poiché il worker aveva inviato l'`ACK` dopo ogni lettura, il broker ha già rimosso fisicamente tutti i messaggi dalla memoria e dal disco.
+> **Idea chiave:** una coda custodisce un messaggio finché qualcuno lo consuma, un log lo custodisce finché scade la retention, indipendentemente da quante volte e da chi lo ha letto.
 
-La causa di entrambi i disastri è confondere una coda di messaggi effimera con un registro sequenziale immutabile (*append-only commit log*) come Apache Kafka ([Kreps et al., 2011](https://notes.stephenholiday.com/Kafka.pdf)).
+La differenza strutturale è questa, e discende dal progetto originale di Kafka descritto da [Kreps, Narkhede e Rao nel 2011](https://notes.stephenholiday.com/Kafka.pdf): trattare il flusso di eventi come un file in append su disco, dove ogni lettore tiene un proprio segnalibro.
 
-## Commit log append-only, partizioni ordinate e consumer group
+| Aspetto | Coda di lavoro (RabbitMQ, SQS) | Commit log (Kafka) |
+|---|---|---|
+| Dopo la lettura | Il messaggio viene rimosso | Il messaggio resta fino alla retention |
+| Più lettori indipendenti | Si spartiscono i messaggi | Ciascun gruppo li riceve tutti |
+| Rilettura del passato | Non possibile | Si sposta l'offset indietro |
+| Ordine | Per coda, perso con più worker | Per partizione, quindi per chiave |
+| Uso tipico | Job in background (email, PDF) | Flussi di eventi di dominio |
 
-Apache Kafka risolve il problema della distribuzione multi-consumatore e del ricalcolo storico sostituendo la metafora della "cassetta postale che si svuota" con tre astrazioni fisiche su disco.
+## Il log append-only: perché leggere non consuma
 
-Il primo meccanismo è il **log append-only immutabile con retention temporale**. In Kafka un *topic* non cancella mai un messaggio quando viene letto: i nuovi eventi vengono sempre appesi in coda al file su disco con un numero progressivo immutabile chiamato **offset** (`0, 1, 2, ...`) e restano disponibili sul broker per tutta la finestra di conservazione configurata (es. 7 giorni, 30 giorni o infinito su object storage), indipendentemente da quanti sistemi li abbiano già letti.
+Un *topic* Kafka è un file di log suddiviso in segmenti. I nuovi eventi si aggiungono sempre in coda e ricevono un numero progressivo che non cambia mai, l'**offset** (0, 1, 2, ...). Leggere un messaggio significa leggere il file a partire da un certo offset: l'operazione non modifica nulla, per questo dieci lettori diversi non si ostacolano. Il broker cancella dati solo per scadenza, secondo `retention.ms` oppure `retention.bytes`, e non per effetto delle letture.
 
-Il secondo meccanismo è il **partizionamento per chiave e l'ordinamento garantito**. Per scalare orizzontalmente oltre il limite di un singolo disco o di una singola macchina, un topic viene diviso in $P$ **partizioni** indipendenti distribuite sui broker del cluster. Kafka garantisce l'ordine rigoroso di arrivo dei messaggi **solo all'interno della stessa partizione**: calcolando l'hash della chiave del messaggio (`murmur2(key) mod P`), tutti gli eventi che condividono la stessa chiave (es. `order_id = 'ORD-901'`) atterrano sempre nella stessa partizione e vengono letti nell'esatto ordine cronologico (`created -> paid -> shipped`).
+Questo cambia anche la responsabilità del consumatore. Nel modello a coda il broker sa cosa è stato consegnato. Nel modello a log il broker conosce solo la posizione di ciascun gruppo, memorizzata nel topic interno `__consumer_offsets`, e il consumatore decide quando avanzarla (il *commit*). Se il consumatore muore a metà lavoro, alla ripartenza riprende dall'ultimo offset confermato, e un messaggio può essere rielaborato. Per questo i consumatori Kafka vanno scritti in modo idempotente, un tema che torna nelle lezioni su producer, consumer e connettori.
 
-Il terzo meccanismo è il disaccoppiamento tra **fan-out tra Consumer Group diversi** e **parallelismo dentro lo stesso Consumer Group**. Ogni applicazione che legge dal topic dichiara un proprio identificativo `group.id` (es. `cg-antifrode`, `cg-fatturazione`, `cg-clickhouse`): ciascun gruppo mantiene il proprio cursore di lettura (offset) in modo totalmente autonomo, ricevendo il 100% dei messaggi senza ostacolare gli altri. All'interno di un singolo gruppo, invece, ogni partizione viene assegnata ad **al massimo un consumer** attivo di quel gruppo, dividendo il carico di lavoro senza mai duplicare le letture. In caso di bug nel codice, basta riportare indietro l'offset del gruppo (`--reset-offsets`) per riprocessare da zero gli ultimi sette giorni.
-
-**Un'infrastruttura di streaming garantisce sia il fan-out multi-team sia il recupero dagli errori applicativi solo se conserva gli eventi in un log immutabile partizionato per chiave di dominio e separa ogni applicazione in un proprio consumer group.**
-
-## Tre errori quando si progetta il primo flusso su Kafka
-
-Il blocco di comandi e configurazioni qui sotto mostra i tre errori classici di chi tratta Kafka come una coda tradizionale: condividere lo stesso `group.id` tra applicazioni diverse, pubblicare senza chiave perdendo l'ordine di stato e creare più istanze consumer che partizioni:
-
-```sql
-# ERRORE 1: topic creato con 1 sola partizione e retention di appena 1 ora (impedisce il replay del weekend).
-kafka-topics.sh --bootstrap-server kafka:9092 --create   --topic orders.events.v1   --partitions 1   --replication-factor 1   --config retention.ms=3600000
-
-# ERRORE 2: due applicazioni diverse (fatturazione e analytics) lanciate con lo stesso group.id!
-# Risultato: si rubano le partizioni a vicenda e ciascuna riceve solo una frazione dei dati.
-kafka-console-consumer.sh --bootstrap-server kafka:9092   --topic orders.events.v1 --group app-condivisa-errata
+```mermaid
+flowchart LR
+    P["Producer ordini"] -->|append| L["Topic orders.events.v1 (6 partizioni)"]
+    L --> G1["Gruppo cg-antifrode (offset 41.200)"]
+    L --> G2["Gruppo cg-fatturazione (offset 41.150)"]
+    L --> G3["Gruppo cg-clickhouse (offset 12.000, dopo il reset)"]
 ```
 
-### Assegnare lo stesso group.id a due servizi con scopi diversi
+Il diagramma mostra tre gruppi con tre offset diversi sullo stesso log. Il gruppo del warehouse è stato riportato indietro per il replay, e gli altri due non se ne sono accorti.
 
-Configurare il servizio di fatturazione e l'ingestione del data warehouse con lo stesso parametro `group.id = "orders-consumer"` sembra un dettaglio burocratico innocuo. In Kafka il `group.id` definisce una singola applicazione logica: se il topic ha 6 partizioni e i due servizi avviano un'istanza ciascuno sotto lo stesso `group.id`, il broker assegna 3 partizioni alla fatturazione e 3 partizioni al data warehouse. Nessuno dei due sistemi vede più l'intero flusso aziendale.
+## Partizioni, chiavi e ordine degli eventi
 
-### Inviare eventi correlati con chiave nulla su un topic multi-partizione
+Un singolo file su un singolo disco non scala, quindi il topic viene diviso in $P$ **partizioni** distribuite sui broker. Ogni partizione è un log indipendente con una propria numerazione degli offset. Kafka garantisce l'ordine di arrivo solo dentro la stessa partizione, e nessuna garanzia tra partizioni diverse.
 
-Pubblicare gli eventi di ciclo di vita di un ordine (`OrderCreated`, `OrderPaid`, `OrderCancelled`) su un topic a 12 partizioni lasciando `key = null` distribuisce i messaggi in *round-robin* su partizioni diverse. Poiché consumer diversi leggono le 12 partizioni a velocità leggermente differenti, l'evento `OrderCancelled` (finito sulla partizione 4) può essere elaborato dal data warehouse due secondi prima dell'evento `OrderCreated` (finito sulla partizione 1), lasciando l'ordine in uno stato incoerente.
+Il producer sceglie la partizione calcolando l'hash della chiave del messaggio, in pratica `murmur2(key) mod P`. Tutti gli eventi con la stessa chiave finiscono nella stessa partizione e vengono letti nell'ordine in cui sono stati scritti. Se la chiave è `order_id`, la sequenza `OrderCreated`, `OrderPaid`, `OrderShipped` di uno stesso ordine resta coerente, mentre eventi di ordini diversi possono mescolarsi senza danno.
 
-### Impostare una retention di poche ore cancellando la possibilità di replay
+Con chiave nulla il producer distribuisce i messaggi a rotazione sulle partizioni. Il throughput è bilanciato, ma l'ordine tra eventi correlati è perso, perché partizioni diverse vengono lette a velocità diverse. La scelta della chiave è quindi una decisione di modellazione: la chiave giusta è l'identificativo dell'entità di cui serve la sequenza causale, con cardinalità alta abbastanza da distribuire il carico in modo uniforme. Una chiave come `country` con il 70% degli ordini in Italia produce una *hot partition* che da sola riceve il 70% del traffico.
 
-Ridurre `retention.ms` a una o due ore "per risparmiare qualche gigabyte di disco" annulla il vantaggio principale di Kafka rispetto a una coda in memoria. Se un rilascio difettoso del venerdì sera corrompe la logica di trasformazione a valle e il problema viene scoperto il lunedì mattina, i messaggi del fine settimana sono già stati eliminati dal log cleaner e non è più possibile fare replay spostando indietro gli offset.
+C'è un vincolo che conviene conoscere subito. Il numero di partizioni si può aumentare dopo la creazione, ma `murmur2(key) mod P` cambia al variare di $P$. Dopo l'aumento, la stessa chiave può finire su una partizione diversa, e per un periodo gli eventi dello stesso ordine si ritrovano distribuiti su due log. Si sceglie quindi $P$ con un margine di crescita fin dall'inizio.
 
-## Creazione del topic partizionato, isolamento dei gruppi e replay con reset-offsets
+## Consumer group: fan-out tra sistemi, parallelismo dentro il gruppo
 
-Per impostare un topic di dominio pronto per alimentare più sistemi e supportare il ricalcolo storico, applicate questi quattro criteri in ordine di priorità:
+Ogni applicazione che legge un topic dichiara un `group.id`, e Kafka tiene un offset per ogni coppia gruppo-partizione. Gruppi diversi leggono in modo indipendente e ciascuno riceve il 100% dei messaggi: è il *fan-out*. Dentro lo stesso gruppo, invece, ogni partizione è assegnata a un solo consumatore alla volta, e il lavoro si divide senza duplicare le letture.
 
-1. Dimensionate il topic con un numero di partizioni multiplo dei worker previsti (es. 6 o 12 partizioni), fattore di replica 3 e retention di almeno 7 giorni (`604800000` ms) per coprire i fine settimana e le festività lunghe.
-2. Usate sempre come chiave del messaggio l'identificativo dell'entità di cui volete preservare la sequenza causale (es. `order_id` o `customer_id`).
-3. Assegnate un `group.id` univoco e descrittivo a ogni sistema consumatore (`cg-billing-prod`, `cg-clickhouse-sink-prod`, `cg-fraud-engine-prod`).
-4. In caso di bug nel consumatore analitico, fermate il gruppo, riportate gli offset all'inizio dell'incidente con `--reset-offsets --to-datetime` e riavviate il servizio.
+Ne discende il tetto del parallelismo. Con 6 partizioni un gruppo può usare al massimo 6 consumatori attivi. Se ne avvii 10, quattro restano inattivi in attesa di subentrare ai primi sei in caso di crash. Per aumentare il parallelismo di lettura servono più partizioni, non più istanze.
 
-Ecco i comandi operativi completi per creare il topic corretto, verificare il lag dei gruppi indipendenti ed eseguire il replay degli ultimi tre giorni dopo aver corretto un bug:
+Nello scenario iniziale l'errore era speculare. Fatturazione e warehouse erano due applicazioni diverse ma, essendo collegate alla stessa coda, ricevevano a turno gli stessi messaggi. In Kafka lo stesso errore si commette assegnando lo stesso `group.id` a due servizi: il broker li tratta come due istanze della stessa applicazione e si divide le partizioni tra loro.
 
-```sql
-# 1. Creazione topic con 6 partizioni, replica 3 e retention di 7 giorni (604.800.000 ms)
-kafka-topics.sh --bootstrap-server kafka-1:9092 --create   --topic orders.events.v1   --partitions 6   --replication-factor 3   --config min.insync.replicas=2   --config retention.ms=604800000
+## Dimensionare un topic: partizioni e disco per il flusso degli ordini
 
-# 2. Ispezione del Consumer Group del Data Warehouse (verifica offset corrente, log-end-offset e LAG)
-kafka-consumer-groups.sh --bootstrap-server kafka-1:9092   --describe --group cg-clickhouse-sink-prod
+Il dimensionamento è un calcolo, e conviene farlo prima di creare il topic. Prendiamo i numeri di esempio dello scenario: picco di 1.200 eventi al secondo, messaggio medio di 600 byte, il consumatore di fatturazione elabora 400 eventi al secondo per istanza (scrive su un database transazionale), retention di 7 giorni e fattore di replica 3.
 
-# 3. REPLAY STORICO: dopo aver corretto il bug sul calcolo IVA, riportiamo indietro il solo
-# gruppo di ClickHouse a venerdì alle 00:00 UTC senza toccare fatturazione né antifrode:
-kafka-consumer-groups.sh --bootstrap-server kafka-1:9092   --group cg-clickhouse-sink-prod   --topic orders.events.v1   --reset-offsets --to-datetime 2026-11-06T00:00:00.000Z   --execute
+Partizioni minime per il consumatore più lento:
+
+1. Picco 1.200 eventi/s ÷ 400 eventi/s per istanza = 3 istanze, quindi almeno 3 partizioni.
+2. La piattaforma prevede di raddoppiare il traffico entro un anno: 2.400 eventi/s ÷ 400 = 6 istanze.
+3. Il vincolo di scrittura per partizione non pesa: 2.400 eventi/s × 600 byte = 1,44 MB/s, ben sotto i 10 MB/s circa che una partizione regge. Risultato: 6 partizioni.
+
+Spazio disco, a regime medio di 80.000 eventi al giorno:
+
+1. Volume giornaliero: 80.000 eventi × 600 byte = 48.000.000 byte = 48 MB.
+2. Retention di 7 giorni: 48 MB × 7 = 336 MB per replica.
+3. Con fattore di replica 3: 336 MB × 3 = 1.008 MB, circa 1 GB.
+4. Con il 30% di margine operativo: 1.008 MB × 1,3 = 1.310 MB.
+
+Sono numeri minuscoli, ed è un'informazione utile: per questo volume il costo della retention lunga è trascurabile, e ridurla a un'ora per risparmiare disco sarebbe un falso risparmio. Il replay del weekend, infine, costa poco anche in tempo: rileggere 240.000 eventi a 50.000 eventi al secondo richiede 240.000 ÷ 50.000 = 4,8 secondi.
+
+## Tre errori del primo flusso su Kafka
+
+I tre errori seguenti sono i più frequenti in un primo progetto, e nascono tutti dal ragionare ancora per code.
+
+```bash
+# ERRORE 1: una sola partizione e retention di un'ora, nessun replay possibile
+kafka-topics.sh --bootstrap-server kafka-1:9092 --create \
+  --topic orders.events.v1 --partitions 1 --replication-factor 1 \
+  --config retention.ms=3600000
+
+# ERRORE 2: due applicazioni diverse con lo stesso group.id
+kafka-console-consumer.sh --bootstrap-server kafka-1:9092 \
+  --topic orders.events.v1 --group app-condivisa
 ```
 
-Il risultato mostra in pratica la potenza del commit log: mentre `cg-billing-prod` e `cg-fraud-engine-prod` continuano a lavorare in tempo reale sull'offset più recente senza accorgersi di nulla, `cg-clickhouse-sink-prod` riavvolge il nastro a venerdì mezzanotte, rilegge a 50.000 eventi al secondo i 240.000 ordini del fine settimana dal disco dei broker e ripopola la tabella in ClickHouse in meno di cinque secondi. Conservare 7 giorni di eventi compressi su disco costa pochi euro al mese; perdere per sempre tre giorni di transazioni perché il broker li ha cancellati dopo il primo `ACK` trasforma un normale bug applicativo in una perdita di dati irreversibile.
+### Lo stesso group.id per due servizi con scopi diversi
 
-## Log distribuito Apache Kafka o coda di lavoro tradizionale RabbitMQ / SQS
+Il sintomo è che fatturazione e data warehouse ricevono ciascuno una frazione degli ordini, senza errori nei log. Sembra ragionevole perché il `group.id` pare una semplice etichetta. In realtà identifica un'applicazione logica: con 6 partizioni e un'istanza per servizio, 3 partizioni vanno a un servizio e 3 all'altro. La correzione è un `group.id` descrittivo e unico per ogni sistema (`cg-billing-prod`, `cg-clickhouse-sink-prod`), registrato nel catalogo aziendale.
 
-Non tutti i problemi di comunicazione asincrona richiedono Apache Kafka: un errore frequente è adottare Kafka per compiti da coda di lavoro semplice o, al contrario, usare una coda tradizionale per lo streaming di eventi aziendali.
+### Chiave nulla su eventi correlati
 
-Il criterio di scelta è netto: **adottate Apache Kafka quando lo stesso flusso di eventi deve essere letto in modo indipendente da più sistemi (*fan-out*), quando vi serve l'ordinamento rigoroso per chiave di entità ad alto throughput o quando è indispensabile poter rileggere il passato (*replay*) per alimentare nuovi modelli analitici e riparare bug, usate invece una coda tradizionale (RabbitMQ, AWS SQS, Redis Streams leggero) quando dovete semplicemente distribuire job in background a un pool di worker singoli (invio di un'email, generazione di un PDF) con instradamento per priorità e cancellazione immediata a lavoro svolto.**
+Il sintomo è un ordine nello stato incoerente, per esempio annullato prima di essere creato. Succede perché con `key = null` gli eventi dello stesso ordine finiscono su partizioni diverse, lette a velocità diverse: `OrderCancelled` sulla partizione 4 può essere elaborato due secondi prima di `OrderCreated` sulla partizione 1. La correzione è pubblicare sempre con `order_id` come chiave.
 
-La confusione comune consiste nel montare un cluster Kafka per inviare 500 email di conferma password al giorno, oppure nell'usare SQS per alimentare il data lake e il motore real-time spendendo fortune per duplicare le code con SNS senza comunque avere la possibilità di fare replay di sette giorni. Sbagliare questa scelta o introduce un'inutile complessità operativa su piccoli volumi punto-a-punto, o priva l'architettura dati della sua macchina del tempo (*time-travel replay*).
+### Retention di poche ore per risparmiare disco
 
-Questo articolo introduttivo non tratta il protocollo interno di consenso del controller (KRaft vs ZooKeeper) né le transazioni cross-partizione (affrontate nelle lezioni successive). Ricordate che se in un consumer group avviate 10 istanze di consumer su un topic che ha solo 6 partizioni, 4 istanze resteranno completamente inattive (*idle*) in attesa di un eventuale crash delle prime 6: il numero di partizioni fissa il tetto massimo di parallelismo di lettura per singolo gruppo.
+Il sintomo si vede il lunedì mattina, quando il bug del venerdì sera è stato scoperto ma i dati del weekend sono già stati eliminati dal log cleaner. La tentazione di tagliare la retention nasce dal costo del disco, che per un flusso da 48 MB al giorno è irrisorio. Si evita fissando la retention sul tempo di rilevazione più lungo realistico di un errore, con un minimo di 7 giorni per coprire fine settimana e festività.
 
-## Cinque domande prima di introdurre un topic Kafka nell'architettura
+## Creare il topic, pubblicare con chiave e rieseguire il replay
 
-1. Avete davvero bisogno di multi-consumer (*fan-out*), alto throughput o replay storico, oppure vi basta una semplice coda di task punto-a-punto?
-2. Avete scelto come chiave di partizionamento l'identificativo dell'entità che richiede ordinamento causale (es. `order_id`, `user_id`) verificando che non crei una partizione sbilanciata (*hot partition*)?
-3. Il numero di partizioni del topic è maggiore o uguale al numero massimo di istanze parallele che prevedete di avviare nel consumer group più pesante?
-4. Ogni applicazione distinta che legge dal topic ha un proprio `group.id` esclusivo, documentato nel catalogo aziendale?
-5. La finestra di conservazione (`retention.ms` / `retention.bytes`) è abbastanza lunga (almeno 7 giorni) da permettere al team di accorgersi di un bug del fine settimana ed eseguire il replay il lunedì?
+Il topic corretto per lo scenario ha 6 partizioni, replica 3 e retention di 7 giorni, cioè 604.800.000 ms. Con `min.insync.replicas=2` e `acks=all` lato producer, la lezione successiva spiega perché la triade protegge dalla perdita di dati.
 
-La metrica fondamentale da osservare fin dal primo giorno su qualsiasi topic Kafka è il **Consumer Lag per partizione** (`LOG-END-OFFSET - CURRENT-OFFSET`): misura esattamente quanti messaggi sono stati scritti dai produttori ma non sono ancora stati elaborati dal vostro consumer group.
+```bash
+# 1. Creazione del topic: 6 partizioni, RF=3, retention 7 giorni (604800000 ms)
+kafka-topics.sh --bootstrap-server kafka-1:9092 --create \
+  --topic orders.events.v1 --partitions 6 --replication-factor 3 \
+  --config min.insync.replicas=2 --config retention.ms=604800000
 
-Di tutti i concetti di questa prima lezione, fissate un'unica distinzione: una coda cancella il messaggio appena qualcuno lo legge; un log conserva la storia in ordine e lascia che chiunque sposti il proprio segnalibro avanti o indietro nel tempo.
+# 2. Stato del gruppo del warehouse: offset corrente, fine del log e LAG per partizione
+kafka-consumer-groups.sh --bootstrap-server kafka-1:9092 \
+  --describe --group cg-clickhouse-sink-prod
+
+# 3. Replay: dopo il fix sul calcolo IVA riporta a venerdì 00:00 UTC solo questo gruppo
+# (il gruppo deve essere fermo, altrimenti il comando rifiuta l'operazione)
+kafka-consumer-groups.sh --bootstrap-server kafka-1:9092 \
+  --group cg-clickhouse-sink-prod --topic orders.events.v1 \
+  --reset-offsets --to-datetime 2026-11-06T00:00:00.000 --execute
+```
+
+Il producer Python che usa `order_id` come chiave garantisce l'ordine degli eventi di ciascun ordine:
+
+```python
+# Producer minimale con chiave: eventi dello stesso order_id -> stessa partizione
+import json
+from confluent_kafka import Producer
+
+producer = Producer({
+    "bootstrap.servers": "kafka-1:9092",
+    "acks": "all",                 # conferma da tutte le repliche in sync
+    "enable.idempotence": True,    # i retry non creano duplicati
+})
+
+def pubblica(evento: dict) -> None:
+    producer.produce(
+        topic="orders.events.v1",
+        key=evento["order_id"],
+        value=json.dumps(evento),
+    )
+
+pubblica({"order_id": "ORD-901", "type": "OrderCreated", "vat_amount": 22.0})
+pubblica({"order_id": "ORD-901", "type": "OrderPaid", "vat_amount": 22.0})
+producer.flush()  # attende le conferme prima di uscire
+```
+
+Dopo il reset, `cg-billing-prod` e `cg-fraud-engine-prod` continuano a lavorare sull'offset più recente. Solo il gruppo del warehouse riavvolge il nastro e ripopola la tabella con i 240.000 ordini del weekend.
+
+## Log distribuito o coda di lavoro: come decidere
+
+Kafka non è la risposta a ogni problema di messaggistica. Il criterio è netto: Kafka ha senso quando lo stesso flusso deve essere letto in modo indipendente da più sistemi, quando serve l'ordine per chiave ad alto throughput oppure quando è necessario rileggere il passato per riparare bug o alimentare nuovi modelli. Una coda tradizionale (RabbitMQ, AWS SQS) è più adatta quando devi solo distribuire lavori a un pool di worker, come l'invio di un'email o la generazione di un PDF, con priorità e cancellazione a lavoro finito.
+
+L'errore opposto si paga in complessità. Montare un cluster Kafka per 500 email di conferma password al giorno aggiunge broker, partizioni e coordinamento a un problema che una coda risolve con un servizio gestito. Alimentare invece il data lake con SQS obbliga a duplicare le code con SNS e non offre comunque un replay di sette giorni.
+
+Questa lezione non entra nel protocollo di consenso del controller (KRaft contro ZooKeeper) né nelle transazioni tra partizioni. Entrambi i temi vengono ripresi nella lezione sull'architettura.
+
+## Controllo prima di introdurre un topic nell'architettura
+
+1. Il flusso richiede davvero più lettori indipendenti, alto throughput o replay, oppure basta una coda di task punto a punto?
+
+<details>
+<summary>Mostra risposta</summary>
+
+Se i lettori sono uno solo, i messaggi si cancellano a lavoro finito e il replay non serve, una coda gestita è più semplice. Kafka si giustifica con almeno uno tra fan-out, ordine per chiave ad alto volume e rilettura del passato.
+
+</details>
+
+2. Un topic ha 6 partizioni e un gruppo avvia 10 consumatori. Quanti lavorano e quanti restano fermi?
+
+<details>
+<summary>Mostra risposta</summary>
+
+Ne lavorano 6, una partizione per consumatore, e 4 restano inattivi come riserva. Per usare tutte le 10 istanze servono almeno 10 partizioni, ricordando che aumentare $P$ cambia l'assegnazione delle chiavi.
+
+</details>
+
+3. Il flusso ha picco di 900 eventi/s, messaggi da 500 byte, consumer da 300 eventi/s per istanza, retention di 5 giorni e RF=3. Quante partizioni minime servono e quanto disco serve a regime di 60.000 eventi al giorno?
+
+<details>
+<summary>Mostra risposta</summary>
+
+Partizioni minime: 900 ÷ 300 = 3. Disco: 60.000 × 500 byte = 30 MB al giorno, × 5 giorni = 150 MB per replica, × 3 = 450 MB, circa 585 MB con il 30% di margine.
+
+</details>
+
+4. Quale metrica osservi fin dal primo giorno su ogni gruppo, e come si calcola?
+
+<details>
+<summary>Mostra risposta</summary>
+
+Il consumer lag per partizione, cioè `LOG-END-OFFSET - CURRENT-OFFSET`: misura quanti messaggi sono stati scritti ma non ancora elaborati dal gruppo. Si legge con `kafka-consumer-groups.sh --describe`.
+
+</details>

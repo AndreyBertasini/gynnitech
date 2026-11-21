@@ -1,89 +1,119 @@
 ---
 title: "SQL per analisti: query per dashboard"
 description: >-
-  Pattern SQL ottimizzati per alimentare dashboard analitiche.
+  Scrivere query per dashboard con grain dichiarato, data di competenza allineata, date spine, pre-aggregazione prima dei join e Top N con voce residuale, e riconciliare due viste in conflitto.
 module: "Modulo 7: Dashboard e visualizzazione dei dati"
 order: 4
 category: Tecnico
 headerImage: /course-headers/dashboard-visualizzazione-sql-per-analisti-ginnytech-ad.webp
 headerImageAlt: "SQL per analisti: query per dashboard - immagine ufficiale della lezione su GinnyTech, creata da AD"
 difficulty: advanced
-duration: 22 min
+duration: 30 min
 learningObjectives:
   - Scrivere query per dashboard con grain, filtri e denominatore espliciti
   - Usare date spine, window function e Top N con categoria residuale
-  - Allineare grain, join e data di competenza per risolvere dashboard in conflitto
+  - Allineare grain, join e data di competenza per riconciliare due dashboard con totali diversi
+  - Individuare e correggere la moltiplicazione degli importi di testata in un join uno-a-molti
 prerequisites:
   - dashboard-visualizzazione/storytelling-dati
 binario: "ml-tabellare"
-formato: "articolo"
-autore: "Hermes"
-controllatoDa: "Argo"
-autorizzatoDa: "Giano"
+formato: "didattica-v2"
 draft: false
-dateModified: 2026-11-13
+dateModified: 2026-11-17
 ---
 
-## Il caso delle due dashboard con fatturati diversi sullo stesso mese
+Caso ricostruito, con numeri di esempio: a fine mese il report del marketing segna 400.000 euro di vendite e quello della finanza 370.000 euro, per lo stesso mese e per la stessa azienda commerciale. In riunione ciascuno difende la propria cifra e nessuno dei due ha sbagliato un calcolo. Le due query leggono la stessa tabella ordini ma una filtra per data dell'ordine e l'altra per data di spedizione. Quando due dashboard si contraddicono, la fiducia nei dati cala per tutta l'azienda, non solo per quelle due viste.
 
-Quando due dashboard aziendali mostrano numeri diversi per lo stesso mese di fatturato, la fiducia nei dati crolla in tutta l'azienda. In questo caso ricostruito su un'azienda commerciale italiana (numeri di esempio), il report del marketing segna quattrocentomila euro di vendite mentre quello della finanza ne segna trecentosettantamila: la causa non è un errore di calcolo, ma una query che usa la data dell'ordine invece della data di spedizione e un join su righe d'ordine che duplica gli importi di testata.
+## Una query per dashboard non è una query esplorativa
 
-Scrivere SQL affidabile per le dashboard significa dichiarare esplicitamente il grain della tabella, allineare la data di competenza, gestire i giorni senza eventi tramite date spine e proteggere ogni divisione e classifica Top N.
+Una query esplorativa la scrivi, la guardi, la correggi e la butti. Una query che alimenta una dashboard viene eseguita centinaia di volte da persone che non la leggeranno mai, e deve dare lo stesso risultato ogni volta. Questo richiede tre qualità: deve essere deterministica, deve dichiarare che cosa conta una riga e non deve avere buchi temporali.
 
-## Pattern SQL fondamentali per alimentare le viste BI
+> **Idea chiave:** prima di scrivere qualsiasi join per una dashboard, dichiara il grain di partenza e il grain di arrivo; quasi tutti i totali sbagliati nascono da un grain cambiato senza accorgersene.
 
-Le query che alimentano una dashboard hanno esigenze diverse dalle query esplorative: devono essere veloci, deterministiche e prive di buchi temporali. Tre pattern risolvono quasi tutti i problemi quotidiani: la date spine (calendario continuo per non saltare i giorni a zero vendite), le window function per medie mobili e quote percentuali sul totale, e il raggruppamento Top N con voce residuale "Altro".
+Quattro pattern coprono la maggior parte dei casi quotidiani. Li riassumiamo nella tabella con il problema che risolvono e il rischio che corri se li ometti.
 
-**Prima di scrivere qualsiasi join per una dashboard, verificate sempre il grain di partenza e di arrivo per evitare duplicazioni silenziose dei totali.**
-
-| Pattern SQL | Problema che risolve | Funzione chiave | Rischio se omesso |
+| Pattern | Problema che risolve | Costrutto chiave | Rischio se omesso |
 | :--- | :--- | :--- | :--- |
-| Date spine | Giorni senza vendite spariscono dal grafico | `LEFT JOIN` su calendario continuo | Trend distorti e medie errate |
-| Controllo grain | Join uno-a-molti moltiplica gli importi | Pre-aggregazione in CTE dedicata | Fatturato gonfiato in dashboard |
-| Window function | Confronto con periodo precedente o totale | `OVER (ORDER BY ...)` | Query lente con self-join |
-| Top N + Altro | Grafici a barre con cinquanta categorie | `row_number()` + `if(rn <= N, ...)` | Grafici illeggibili |
+| Date spine | I giorni senza vendite spariscono dal grafico | `LEFT JOIN` su calendario continuo | Trend distorti e medie sbagliate |
+| Controllo del grain | Un join uno-a-molti moltiplica gli importi | Pre-aggregazione in una CTE | Fatturato gonfiato |
+| Window function | Confronto con periodo precedente o quota sul totale | `OVER (ORDER BY ...)` | Self-join lenti e fragili |
+| Top N con residuo | Grafico a barre con cinquanta categorie | `row_number()` e `if(rn <= N, ...)` | Grafico illeggibile |
 
-## Tre errori SQL che rompono silenziosamente le dashboard
+## Riconciliare 400.000 e 370.000 euro: il calcolo
 
-Anche analisti esperti commettono spesso tre errori quando collegano una query SQL direttamente a uno strumento di visualizzazione.
+Torniamo al caso d'apertura e trattiamolo come un esercizio di riconciliazione. Il metodo è sempre lo stesso: parti da una cifra, aggiungi e togli i gruppi di righe che l'altra definizione include o esclude, e verifica di arrivare all'altra cifra.
 
-### Fare join tra testata ordini e righe dettaglio prima di sommare il totale
+Il report del marketing usa la data dell'ordine e conta 400.000 euro per gli ordini piazzati nel mese. Di quegli ordini, 38.000 euro sono stati piazzati negli ultimi giorni del mese ma spediti nel mese successivo, quindi la finanza, che riconosce il ricavo alla spedizione, non li conta. Al contrario, 8.000 euro di ordini piazzati nel mese precedente sono stati spediti in questo mese, e la finanza li include.
 
-Se la tabella degli ordini contiene il costo di spedizione a livello di ordine e fate join con le righe dei prodotti prima di sommare, il costo di spedizione verrà contato tante volte quanti sono i prodotti nel carrello.
+| Passaggio | Importo in euro | Spiegazione |
+| :--- | ---: | :--- |
+| Vendite per data ordine (marketing) | 400.000 | Tutti gli ordini piazzati nel mese |
+| Ordini del mese spediti nel mese successivo | -38.000 | Non ancora ricavo per la finanza |
+| Ordini del mese precedente spediti in questo mese | +8.000 | Già ricavo per la finanza |
+| Ricavi per data spedizione (finanza) | 370.000 | 400.000 - 38.000 + 8.000 |
+
+Il conto della finanza è quindi 400.000 - 38.000 + 8.000 = 370.000 euro, che coincide con il suo report. La differenza totale di 30.000 euro è spiegata per intero: nessuno dei due calcoli era errato, perché misuravano due cose diverse. La soluzione non è scegliere quale cifra sia giusta, ma dare un nome a ciascuna, per esempio "vendite per data ordine" e "ricavi per data spedizione", e mostrare nelle dashboard quella che serve alla decisione.
+
+Chi decide un budget pubblicitario ha bisogno della prima, perché misura la risposta del mercato alle campagne. Chi chiude un bilancio ha bisogno della seconda. La tabella dei fatti dovrebbe contenere entrambe le date, in colonne distinte, e ogni dashboard dichiarare nel sottotitolo quale usa.
+
+## Il join che moltiplica gli importi di testata
+
+C'è una seconda causa di discrepanza, più subdola, perché produce errori senza alcun avviso. Una tabella `orders` ha una riga per ordine e contiene il costo di spedizione a livello di ordine; una tabella `order_items` ha una riga per prodotto. Se unisci le due tabelle e poi sommi la spedizione, ogni ordine viene contato tante volte quanti sono i suoi prodotti.
+
+Il conto su tre ordini lo mostra. L'ordine A ha 2 prodotti, il B ne ha 3 e il C ne ha 1, e ciascuno ha una spedizione di 6 euro. La spedizione reale è 6 + 6 + 6 = 18 euro. Dopo il join le righe diventano 2 + 3 + 1 = 6 e la somma diventa 2 × 6 + 3 × 6 + 1 × 6 = 36 euro, cioè il doppio. Il fattore di moltiplicazione è il numero medio di prodotti per ordine, qui 6 / 3 = 2.
 
 ```sql
--- Anti-pattern: join diretto che moltiplica il totale di testata
+-- Anti-pattern: join diretto che ripete la spedizione di testata per ogni riga prodotto
 SELECT
   o.order_date,
-  sum(o.shipping_fee_eur) AS total_shipping
-FROM orders o
-JOIN order_items i ON o.order_id = i.order_id
+  sum(o.shipping_fee_eur) AS total_shipping   -- 36 euro invece di 18 nel caso dei tre ordini
+FROM orders AS o
+JOIN order_items AS i ON o.order_id = i.order_id
 GROUP BY o.order_date;
 ```
 
-### Dimenticare i giorni con zero eventi nelle serie storiche
-
-Se raggruppate direttamente sulla tabella delle transazioni, i giorni festivi o senza vendite spariscono dal risultato, facendo sembrare continuo un grafico a linee che in realtà salta intere giornate.
-
-### Dividere per zero o per denominatori non filtrati nei tassi di conversione
-
-Un filtro applicato solo al numeratore ma non al denominatore produce percentuali superiori al cento per cento o errori di runtime appena una categoria ha zero visite.
-
-## Query robusta con date spine, pre-aggregazione e Top N
-
-La query seguente mostra come combinare calendario continuo, aggregazione sicura prima del join e calcolo della media mobile a sette giorni per alimentare una dashboard veloce e coerente.
+La correzione consiste nel portare le righe al grain dell'ordine prima del join, in modo che il join sia uno-a-uno.
 
 ```sql
--- Pattern sicuro: date spine + pre-aggregazione + media mobile 7 giorni
+-- Pattern sicuro: pre-aggregazione al grain dell'ordine, poi join uno-a-uno (ClickHouse)
+WITH items AS (
+  SELECT order_id, sum(net_amount_eur) AS items_eur, count() AS lines
+  FROM order_items
+  GROUP BY order_id
+)
+SELECT
+  toDate(o.shipped_at) AS ship_day,
+  sum(o.shipping_fee_eur) AS shipping_eur,
+  sum(i.items_eur) AS items_eur
+FROM orders AS o
+LEFT JOIN items AS i ON o.order_id = i.order_id
+WHERE o.shipped_at IS NOT NULL
+GROUP BY ship_day
+ORDER BY ship_day;
+```
+
+Un controllo rapido che puoi lasciare in ogni query importante confronta il numero di righe con il numero di chiavi distinte: se sono diversi dopo un join che doveva essere uno-a-uno, il grain è cambiato.
+
+```sql
+-- Controllo del grain dopo il join: righe e ordini distinti devono coincidere
+SELECT count() AS rows_after_join, uniqExact(o.order_id) AS distinct_orders
+FROM orders AS o
+LEFT JOIN (SELECT order_id, sum(net_amount_eur) AS items_eur FROM order_items GROUP BY order_id) AS i
+  ON o.order_id = i.order_id;
+```
+
+## Date spine: il calendario che non salta i giorni
+
+Se raggruppi direttamente la tabella delle transazioni per giorno, i giorni senza vendite non producono righe, e il grafico a linee collega semplicemente il giorno prima con il giorno dopo, nascondendo il buco. Anche la media mobile sbaglia, perché una finestra di sette righe copre più di sette giorni di calendario. La soluzione è partire da un calendario continuo e agganciare i dati con un `LEFT JOIN`.
+
+```sql
+-- Date spine, pre-aggregazione e media mobile a 7 giorni (ClickHouse)
 WITH calendar AS (
   SELECT toDate(today() - number) AS day
   FROM numbers(30)
 ),
 daily_orders AS (
-  SELECT
-    toDate(order_date) AS day,
-    count() AS orders_count,
-    sum(net_amount_eur) AS revenue_eur
+  SELECT toDate(order_date) AS day, count() AS orders_count, sum(net_amount_eur) AS revenue_eur
   FROM fact_orders
   WHERE status = 'completed' AND order_date >= today() - 30
   GROUP BY day
@@ -92,39 +122,103 @@ SELECT
   c.day,
   coalesce(d.orders_count, 0) AS orders_count,
   coalesce(d.revenue_eur, 0) AS revenue_eur,
-  round(avg(coalesce(d.revenue_eur, 0)) OVER (ORDER BY c.day ROWS BETWEEN 6 PRECEDING AND CURRENT ROW), 0) AS ma_7d_eur
-FROM calendar c
-LEFT JOIN daily_orders d ON c.day = d.day
+  round(avg(coalesce(d.revenue_eur, 0))
+        OVER (ORDER BY c.day ROWS BETWEEN 6 PRECEDING AND CURRENT ROW), 0) AS ma_7d_eur
+FROM calendar AS c
+LEFT JOIN daily_orders AS d ON c.day = d.day
 ORDER BY c.day;
 ```
 
-Questa query garantisce trenta righe esatte, zero buchi temporali e nessuna duplicazione degli importi.
+Il risultato ha sempre 30 righe, una per giorno, con zero esplicito dove non ci sono vendite. La media mobile usa 7 righe che sono davvero 7 giorni, perché non ne manca nessuno. Per un negozio chiuso la domenica, la media include correttamente quel giorno a zero, che è esattamente ciò che ti aspetti da un indicatore di ricavo giornaliero medio.
 
-## Il caso difficile delle dashboard lente su tabelle da decine di milioni di righe
+## Top N con voce residuale
 
-Quando una dashboard interattiva impiega quindici secondi ad aprirsi, gli utenti smettono di usarla. Non cercate di ottimizzare l'interfaccia grafica: spostate i calcoli pesanti e i join multipli in una tabella materializzata o modello dbt aggiornato a monte, lasciando alla dashboard solo `SELECT` leggere su dati già pre-aggregati al grain corretto.
-Un ulteriore elemento che distingue una dashboard davvero usata da un report abbandonato è la coerenza tra le definizioni usate in interfaccia e quelle documentate nel glossario aziendale. Quando marketing, vendite e amministrazione leggono la stessa parola — ad esempio "cliente attivo" o "ricavo netto" — ma applicano filtri temporali o esclusioni diverse, ogni riunione di aggiornamento si trasforma in un dibattito sterile sulla fonte dei numeri. Scrivere la definizione esatta accanto al titolo del grafico o in un breve riquadro informativo elimina l'ambiguità alla radice e permette di concentrare la discussione sulle azioni da intraprendere.
+Un grafico a barre con cinquanta categorie non comunica nulla. La regola pratica è mostrare le prime cinque o sei e raggruppare il resto in una barra "Altro", mantenendo il totale intatto. Il calcolo della classifica va fatto sul totale per categoria, non sulle righe.
 
-Allo stesso modo, conviene progettare ogni vista pensando al percorso naturale dell'occhio umano: in alto a sinistra vanno posizionati il numero principale e il confronto con l'obiettivo, subito sotto l'andamento storico per capire la direzione del fenomeno e nella parte inferiore la scomposizione per segmento o canale. Questa gerarchia visiva riduce il carico cognitivo di chi legge e rende la dashboard comprensibile anche a chi la apre per la prima volta senza bisogno di una guida vocale da parte dell'analista.
+```sql
+-- Top 5 categorie per ricavo, il resto in "Altro"; il totale non cambia
+WITH totals AS (
+  SELECT category, sum(net_amount_eur) AS revenue_eur
+  FROM fact_order_items
+  WHERE order_date >= toStartOfMonth(today())
+  GROUP BY category
+),
+ranked AS (
+  SELECT category, revenue_eur, row_number() OVER (ORDER BY revenue_eur DESC) AS rn
+  FROM totals
+)
+SELECT
+  if(rn <= 5, category, 'Altro') AS category_label,
+  sum(revenue_eur) AS revenue_eur,
+  round(sum(revenue_eur) * 100.0 / nullIf(sum(sum(revenue_eur)) OVER (), 0), 1) AS share_pct
+FROM ranked
+GROUP BY category_label
+ORDER BY revenue_eur DESC;
+```
 
-Dal punto di vista della manutenzione nel tempo, è buona norma assegnare a ogni dashboard pubblicata una data di revisione semestrale e un proprietario esplicito. Le viste che non registrano accessi da oltre sessanta giorni vanno archiviate o fuse con altre più complete, mentre quelle più consultate meritano test automatici più rigorosi a monte sulla pipeline SQL. Tenere ordinato l'ambiente BI impedisce l'effetto giungla tipico delle aziende che accumulano centinaia di report duplicati e protegge la credibilità dell'intero team dati.
+Se una divisione ha un denominatore che può essere zero, proteggilo con `nullIf` come fatto qui, e applica gli stessi filtri a numeratore e denominatore: un filtro applicato solo a uno dei due produce percentuali superiori al cento per cento oppure un errore di runtime non appena una categoria ha zero visite.
 
-Infine, ricordate che una buona visualizzazione non sostituisce il pensiero critico ma lo accelera: segnalate sempre con onestà eventuali limiti dei dati, cambiamenti recenti nel tracking o finestre temporali ancora parziali. La trasparenza metodologica rafforza l'autorevolezza del team analitico molto più di qualsiasi effetto grafico spettacolare e trasforma le dashboard in strumenti affidabili per guidare la crescita quotidiana dell'impresa.
-Quando queste pratiche diventano lo standard condiviso in azienda, anche la collaborazione tra team tecnici e responsabili di business migliora sensibilmente. Le richieste di nuovi report smettono di essere liste vaghe di grafici desiderati e si trasformano in domande decisionali precise con metrica guida, soglia di attenzione e frequenza di revisione concordata fin dall'inizio. In questo modo ogni ora investita nella progettazione della dashboard genera valore concreto, riduce le incomprensioni tra reparti e rende l'intero ciclo di analisi più rapido, trasparente e sostenibile nel lungo periodo.
+## Dashboard lente: sposta i calcoli a monte
 
-## Checklist di verifica sulle query SQL per dashboard
+Quando una dashboard impiega quindici secondi ad aprirsi, gli utenti smettono di consultarla, e nessuna modifica all'interfaccia risolve il problema. Il lavoro pesante, cioè join multipli, deduplicazioni e finestre su decine di milioni di righe, va fatto una volta in una tabella materializzata o in un modello dbt aggiornato a monte. La dashboard esegue solo `SELECT` leggere su dati già al grain corretto. Un criterio operativo: se la stessa query pesante viene eseguita più di dieci volte al giorno con gli stessi parametri, materializzala.
 
-Prima di collegare una nuova query a una vista BI aziendale, verificate queste cinque domande:
+## Tre errori che rompono le dashboard senza fare rumore
 
-1. Il grain della tabella finale è dichiarato chiaramente e verificato prima e dopo ogni join?
-2. La data di competenza (ordine, spedizione o fattura) è allineata con le altre dashboard aziendali?
-3. Le serie storiche usano una date spine continua per includere i giorni con zero eventi?
-4. I denominatori dei tassi usano `nullIf(..., 0)` e filtri coerenti con il numeratore?
-5. I calcoli pesanti sono pre-aggregati a monte anziché eseguiti a ogni clic dell'utente in dashboard?
+### Unire testata e righe prima di sommare
 
+Il sintomo è un totale di spedizione, sconto o imposta più alto del dovuto, spesso di un fattore vicino al numero medio di righe per ordine. Succede perché il join funziona e restituisce righe, quindi nessun errore ti avverte. Si evita con la pre-aggregazione al grain dell'ordine mostrata sopra e con il controllo che confronta righe e chiavi distinte.
 
-Nel contesto delle imprese italiane, dove spesso i manager devono prendere decisioni rapide tra una riunione operativa e l'altra, la qualità della visualizzazione non è un dettaglio estetico ma un moltiplicatore diretto di lucidità. Una dashboard progettata con codifiche visive corrette, definizioni condivise e contesto storico riduce drasticamente il tempo speso a discutere se un numero sia giusto e sposta tutta l'energia del team verso l'azione correttiva.
+### Dimenticare i giorni senza eventi
 
-Dal punto di vista pratico, conviene istituire una breve revisione trimestrale di tutte le viste pubblicate: si controlla quali grafici vengono effettivamente consultati ogni settimana, quali metriche hanno cambiato definizione nel frattempo e quali tabelle di supporto possono essere archiviate. Mantenere il catalogo BI snello e leggibile evita che gli utenti si perdano tra decine di schede duplicate e garantisce che ogni numero mostrato in sala riunioni resti coerente con il database centrale.
+Il sintomo è una linea continua dove in realtà mancano giornate, e una media mobile troppo alta. Succede perché il raggruppamento sulla tabella dei fatti produce solo giorni che hanno almeno una riga. Si corregge con la date spine e con `coalesce` sui valori mancanti.
 
-Infine, ricordate che la fiducia nei dati si costruisce un dettaglio alla volta: riportare sempre la data di ultimo aggiornamento, il perimetro geografico o di canale incluso nel filtro e l'unità di misura esatta elimina sul nascere il novanta per cento delle contestazioni. Quando chi legge capisce al primo sguardo cosa sta guardando e perché conta, il dato smette di essere un ornamento e diventa uno strumento quotidiano di guida aziendale.
+### Dividere per zero o per un denominatore non filtrato
+
+Il sintomo è una conversione del 140% oppure un errore appena una categoria resta senza visite. Succede perché il filtro è stato messo solo nel numeratore, ad esempio sugli ordini completati, mentre il denominatore conta tutte le sessioni, anche quelle di bot. Si risolve scrivendo i due filtri nella stessa condizione e proteggendo la divisione con `nullIf`.
+
+## Verifica sulle tue query
+
+1. Due dashboard mostrano 400.000 e 370.000 euro. La prima conta per data ordine, la seconda per data di spedizione. Come spieghi la differenza se 38.000 euro sono ordini del mese spediti dopo e 8.000 euro sono ordini precedenti spediti nel mese?
+
+<details>
+<summary>Mostra risposta</summary>
+
+La seconda cifra si ottiene da 400.000 - 38.000 + 8.000 = 370.000 euro. La differenza di 30.000 euro è interamente spiegata dalla data di competenza, non da un errore. Si dà un nome diverso alle due misure e ogni dashboard dichiara quale usa.
+
+</details>
+
+2. Tre ordini hanno 2, 3 e 1 prodotti e una spedizione di 6 euro ciascuno. Quanto somma una query che unisce testata e righe prima di sommare?
+
+<details>
+<summary>Mostra risposta</summary>
+
+Somma 2 × 6 + 3 × 6 + 1 × 6 = 36 euro, contro i 18 euro reali. Il fattore di moltiplicazione è 6 righe / 3 ordini = 2.
+
+</details>
+
+3. Come verifichi rapidamente che un join uno-a-uno non abbia cambiato il grain?
+
+<details>
+<summary>Mostra risposta</summary>
+
+Confronti `count()` con `uniqExact(order_id)` sul risultato del join: se i due valori differiscono, almeno un ordine compare su più righe e il join sta moltiplicando.
+
+</details>
+
+4. Perché una media mobile a 7 righe sbaglia senza date spine?
+
+<details>
+<summary>Mostra risposta</summary>
+
+Perché i giorni senza vendite non hanno righe, quindi la finestra di 7 righe copre più di 7 giorni di calendario e dà più peso ai giorni con vendite. Con il calendario continuo e `coalesce` a zero le 7 righe sono davvero 7 giorni.
+
+</details>
+
+5. Una dashboard impiega 15 secondi ad aprirsi e la query pesante gira 40 volte al giorno con gli stessi parametri. Che cosa fai?
+
+<details>
+<summary>Mostra risposta</summary>
+
+Materializzi il risultato in una tabella o in un modello dbt aggiornato a monte, al grain corretto, e lasci alla dashboard solo `SELECT` leggere. Con 40 esecuzioni al giorno il calcolo pesante passa da 40 a 1 o poche volte.
+
+</details>

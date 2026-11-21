@@ -1,7 +1,7 @@
 ---
 title: "Kafka Streams: processare eventi con Java"
 description: >-
-  Introduzione a Kafka Streams per trasformazioni stateful su flussi di eventi senza cluster esterno.
+  Costruire una topology Kafka Streams con join KStream-KTable co-partizionato, finestre con grace period e stato RocksDB ricostruibile dai changelog, e stabilire quando conviene invece aggregare altrove.
 module: "Modulo 11: Kafka e streaming di eventi"
 order: 6
 category: Tecnico
@@ -9,152 +9,251 @@ headerImage: /course-headers/kafka-streaming-kafka-operations-ginnytech-ad-v3.we
 headerImageAlt: >-
   Kafka Streams: processare eventi con Java - immagine ufficiale della lezione su GinnyTech, creata da AD
 difficulty: advanced
-duration: 22 min
+duration: 40 min
 prerequisites:
   - kafka-streaming/kafka-schema-registry
 learningObjectives:
-  - Disegnare una topology Kafka Streams con stato locale ricostruibile dai changelog
-  - Configurare aggregazioni con finestre e join con tabelle compatte
-  - Attivare la semantica exactly-once solo dove i duplicati hanno conseguenze reali
+  - Disegnare una topology Kafka Streams con join KStream-KTable co-partizionato e stato locale ricostruibile dai changelog
+  - Calcolare il tempo di ripristino dello stato e il numero di aggiornamenti emessi da una finestra con e senza suppress
+  - Decidere quando attivare exactly_once_v2 e quando una aggregazione esterna al flusso costa meno di una topology
 binario: "ml-tabellare"
-formato: "articolo"
-autore: "Hermes"
-controllatoDa: "Argo"
-autorizzatoDa: "Giano"
+formato: "didattica-v2"
 draft: false
-dateModified: 2026-11-13
+dateModified: 2026-11-17
 ---
 
-# Kafka Streams: processare eventi con Java
+## Quattromila SELECT al secondo contro il database dei clienti
 
-Un microservizio deve arricchire in tempo reale ogni evento di ordine con la fascia fedeltà del cliente e calcolare il totale speso negli ultimi 30 minuti per bloccare i furti di account. Il team scrive un consumer che a ogni messaggio esegue una `SELECT` sincrona sul database PostgreSQL dei clienti e tiene i contatori in una `HashMap` in memoria volatile: al primo picco di 4.000 ordini al secondo il database dei clienti crolla per esaurimento connessioni, e quando il container del microservizio si riavvia tutti i contatori di spesa dei 30 minuti si azzerano lasciando passare le frodi. La causa non è il linguaggio Java: è interrogare un database esterno sul percorso critico invece di usare la dualità Stream-Table (`KStream` + `KTable`) con state store locale RocksDB supportato da changelog topic.
+Considera uno scenario costruito con numeri di esempio. Un negozio online pubblica ogni ordine sul topic `orders.raw.v1`, a 12 partizioni, con una media di 4.000 ordini al secondo nei picchi. Un microservizio deve fare due cose: aggiungere a ogni ordine il segmento del cliente (`VIP`, `STANDARD`, `NEW`) e calcolare quanto ha speso quel cliente negli ultimi 30 minuti, per fermare i furti di account. Il team scrive un consumer che a ogni messaggio esegue una `SELECT` su PostgreSQL e tiene i totali in una `ConcurrentHashMap`.
 
-## Quattromila query al secondo su PostgreSQL e contatori azzerati al riavvio
+Il primo guasto è aritmetico. Una chiamata al database costa 3 ms di sola rete, quindi un thread che lavora in modo sincrono smaltisce 1 / 0,003 s ≈ 333 messaggi al secondo. Per arrivare a 4.000 messaggi al secondo servono 4.000 / 333 ≈ 12 thread che tengono aperte altrettante connessioni permanenti verso il CRM, lo stesso database che serve il sito. Il pool si esaurisce e le pagine del negozio rallentano.
 
-Questo è un caso ricostruito con numeri di esempio su quanto accade quando si costruiscono trasformazioni con stato (*stateful stream processing*) usando un semplice ciclo consumer-producer più chiamate a database esterni. L'applicazione legge dal topic `orders.raw.v1`, deve allegare a ogni ordine il segmento del cliente (`VIP`, `STANDARD`, `NEW`) e sommare gli acquisti degli ultimi 30 minuti per `customer_id`.
+Il secondo guasto è la memoria volatile. I totali vivono nell'heap della JVM, e quando Kubernetes sposta il pod su un altro nodo la mappa sparisce: chi aveva già speso 2.500 euro cinque minuti prima riparte da zero. Il terzo è più subdolo e riguarda le chiavi. Gli ordini sono partizionati per `order_id`, i clienti per `customer_id`, e senza un re-keying il profilo che serve all'ordine non si trova sulla partizione che lo sta elaborando.
 
-L'implementazione artigianale soffre di tre cedimenti strutturali:
-1. Per aggiungere il segmento cliente a 4.000 eventi al secondo, il worker esegue 4.000 query SQL puntuali al secondo contro il database relazionale del CRM: la latenza di rete di 3 millisecondi per chiamata limita ogni thread a 330 messaggi al secondo e satura il pool di connessioni di PostgreSQL, rallentando il sito web principale.
-2. I totali mobili di spesa a 30 minuti vengono tenuti in una mappa in RAM dentro la JVM (`ConcurrentHashMap`): quando Kubernetes sposta il pod su un altro nodo, la RAM viene distrutta e il servizio riparte da zero, dimenticando chi aveva già speso 5.000 euro cinque minuti prima.
-3. Quando il topic degli ordini (`key = order_id`) viene unito ai clienti (`key = customer_id`) senza ripartizionare per la stessa chiave, le istanze cercano i clienti sul nodo sbagliato mancando l'80% degli abbinamenti.
+Tutti e tre i problemi derivano dal trattare l'arricchimento come una chiamata di rete anziché come un join tra due flussi di dati. Kafka Streams, descritto da Sax e colleghi nell'articolo di riferimento ([Sax et al., 2018](https://doi.org/10.1145/3183713.3190664)), è una libreria client che porta lo stato dentro il processo e lo protegge con topic Kafka interni.
 
-La causa di questi tre problemi è non sfruttare l'architettura di **Kafka Streams** ([Sax et al., 2018](https://doi.org/10.1145/3183713.3190664)): la dualità tra flusso e tabella (`KStream` / `KTable`), gli state store su disco locale RocksDB sincronizzati con topic changelog compattati e il co-partizionamento delle chiavi.
+## KStream e KTable: lo stesso dato letto come evento o come stato
 
-## Dualità KStream/KTable, State Store RocksDB con Changelog e Exactly-Once v2
+Un `KStream` è una sequenza di fatti che non si sovrascrivono: ogni record di `orders.raw.v1` è un nuovo ordine e due ordini con la stessa chiave restano entrambi. Una `KTable` è la lettura opposta dello stesso tipo di topic: per ogni chiave conta solo l'ultimo valore, e un nuovo record con la stessa chiave sostituisce il precedente. Il topic `customers.profile.v1` è compattato, quindi la sua `KTable` contiene sempre il profilo corrente di ciascun cliente.
 
-Kafka Streams è una libreria client (non richiede un cluster separato come Spark o Flink) che risolve join e aggregazioni ad alto throughput grazie a tre meccanismi fondamentali.
+> **Idea chiave:** un join tra un flusso di eventi e una tabella di stato non chiama nessun servizio esterno, perché la tabella è una copia locale, aggiornata dal topic, che vive sul disco dello stesso processo che elabora l'evento.
 
-Il primo meccanismo è la **dualità tra `KStream` (flusso di fatti) e `KTable` (tabella di stato aggiornabile)** con il **co-partizionamento**. Un `KStream` rappresenta una sequenza append-only dove ogni record è un nuovo evento (`OrderCreated`); una `KTable` (o `GlobalKTable`) rappresenta invece lo stato corrente per chiave primaria letto da un topic compattato (`customers.profile.v1`), dove un nuovo record con la stessa chiave aggiorna il precedente. Quando l'applicazione fa un join tra `KStream` e `KTable`, non esegue alcuna chiamata di rete a database esterni: legge istantaneamente il profilo cliente dallo **State Store RocksDB** presente sul disco SSD locale dello stesso container. Affinché un join `KStream-KTable` trovi i dati sullo stesso nodo, entrambi i lati devono essere **co-partizionati** (stesso numero di partizioni e stessa chiave `customer_id`, ottenuta con `selectKey` / `repartition`).
+Il motore che rende possibile questa copia è RocksDB, un database chiave-valore embedded che Kafka Streams usa come state store. Ogni scrittura nello store viene replicata su un topic changelog interno, compattato, chiamato `<application.id>-<store>-changelog`. Lo store è quindi una cache veloce e il changelog è la sua fonte di verità durevole.
 
-Il secondo meccanismo è la **tolleranza ai guasti dello stato tramite Changelog Topic e Standby Replicas**. Ogni modifica scritta nello state store locale RocksDB viene automaticamente replicata su un topic interno compattato su Kafka (`<app>-<store>-changelog`). Se un container muore, la nuova istanza ricostruisce lo stato leggendo il changelog da Kafka; configurando `num.standby.replicas=1`, un secondo container mantiene già in tempo reale una copia calda di RocksDB, riducendo il tempo di failover da minuti a pochi millisecondi.
-
-Il terzo meccanismo è la **garanzia `processing.guarantee=exactly_once_v2` (EOS v2)** abbinata a `suppress()` per le finestre temporali. Attivando EOS v2, Kafka Streams avvolge in un'unica transazione atomica la lettura dell'offset sorgente, l'aggiornamento del changelog RocksDB e la scrittura sul topic di destinazione: anche in caso di crash a metà elaborazione, a valle in ClickHouse non vengono mai emessi conteggi duplicati.
-
-**Una topologia Kafka Streams scala senza colli di bottiglia esterni solo se esegue i join su state store locali RocksDB co-partizionati, protegge lo stato con changelog e standby replica, e attiva `exactly_once_v2` sulle aggregazioni finanziarie.**
-
-## Tre errori nella progettazione di topologie stateful
-
-Il blocco SQL/DDL qui sotto mostra l'effetto su ClickHouse di una topologia di stream processing mal progettata: join mancati per assenza di co-partizionamento, raffica di aggiornamenti intermedi non soppressi e duplicati da crash senza EOS:
-
-```sql
--- ERRORE 1: il topic di output riceve customer_segment = NULL nell'83% dei casi
--- perché il join KStream(key=order_id) con KTable(key=customer_id) non era co-partizionato!
--- ERRORE 2: senza .suppress(untilWindowCloses()), ogni singolo ordine emette una riga di finestra
--- parziale, moltiplicando per 20 le scritture nel database analitico.
-CREATE TABLE realtime.customer_window_spend_broken
-(
-    window_start DateTime,
-    window_end DateTime,
-    customer_id UInt64,
-    customer_segment Nullable(String),
-    orders_in_window UInt32,
-    spend_30m_eur Decimal(12, 2)
-)
-ENGINE = MergeTree
-ORDER BY (window_start, customer_id);
-
--- Query che evidenzia il disastro: segmenti nulli e decine di righe intermedie per la stessa finestra:
-SELECT
-    countIf(customer_segment IS NULL) AS join_mancati_per_chiave_errata,
-    count() - uniqExact(window_start, customer_id) AS aggiornamenti_intermedi_duplicati
-FROM realtime.customer_window_spend_broken;
+```mermaid
+flowchart LR
+    A["orders.raw.v1 (KStream, chiave order_id)"] --> B["selectKey: customer_id"]
+    B --> C["topic di repartition interno"]
+    C --> D{"join KStream-KTable"}
+    E["customers.profile.v1 (KTable, chiave customer_id)"] --> F["State store RocksDB locale"]
+    F --> D
+    F --> G["Changelog topic compattato"]
+    D --> H["Aggregazione su finestra da 30 minuti"]
+    H --> I["orders.enriched.spend30m.v1"]
 ```
 
-### Unire un KStream e una KTable con chiavi o numero di partizioni differenti
+Il diagramma mostra che il join avviene a valle del re-keying. Prima della riga `D` il flusso degli ordini deve avere la stessa chiave e lo stesso numero di partizioni della tabella, altrimenti il record dell'ordine e il profilo del cliente finiscono su task diversi.
 
-Tentare di unire il flusso degli ordini partizionato per `order_id` con la `KTable` dei clienti partizionata per `customer_id` senza prima eseguire un `.selectKey((k, v) -> v.getCustomerId())` (oppure usare una `GlobalKTable`) fallisce silenziosamente o solleva `TopologyException`. Poiché ogni task di Kafka Streams vede solo una singola partizione locale, l'ordine del cliente `C-42` (finito sulla partizione 2 in base a `order_id`) viene cercato nello state store locale della partizione 2, mentre l'anagrafica del cliente `C-42` si trova nello state store della partizione 5 sul server accanto.
+## Co-partizionamento: perché il join cerca sul nodo giusto
 
-### Non configurare num.standby.replicas né volumi persistenti per RocksDB
+Kafka Streams assegna le partizioni ai task in modo che il task `n` legga la partizione `n` di tutti i topic coinvolti nel join. Il profilo di un cliente è scritto dal partizionatore predefinito del producer, che calcola `murmur2(chiave) mod numero_partizioni`. Se la tabella dei clienti ha 12 partizioni e usa `customer_id` come chiave, il cliente `C-42` finisce sempre nella stessa partizione, per esempio la 5. Se gli ordini hanno chiave `order_id`, l'ordine di `C-42` finisce su una partizione qualunque.
 
-Eseguire un'applicazione Kafka Streams con gigabyte di stato in RocksDB dentro container effimeri senza disco persistente (`state.dir` su `/tmp`) e con `num.standby.replicas=0` blocca la pipeline a ogni rilascio. Quando riavviate il container per un banale aggiornamento del codice, il nuovo pod trova `/tmp` vuoto e deve rileggere da zero milioni di messaggi dal topic changelog prima di riprendere a processare gli eventi correnti, fermando il servizio per dieci o venti minuti.
+Facciamo il calcolo con 12 partizioni. Con chiavi diverse, la probabilità che l'ordine capiti sulla partizione che contiene il profilo del suo cliente è 1 / 12 ≈ 8,3%, quindi il join fallisce nel 100% − 8,3% = 91,7% dei casi e il campo `segment` resta nullo. Con 8 partizioni sul topic degli ordini e 12 su quello dei clienti il problema è ancora peggiore, perché Kafka Streams rifiuta di costruire la topology e solleva una `TopologyException` all'avvio.
 
-### Emettere ogni aggiornamento intermedio di una finestra senza suppress o deduplicazione a valle
+La soluzione ha due parti. La prima è eseguire `selectKey` sul flusso degli ordini per usare `customer_id`: la libreria crea da sola un topic di repartition interno, con lo stesso numero di partizioni del topic sorgente, e riscrive i record con la nuova chiave. La seconda è verificare che il topic dei clienti abbia davvero 12 partizioni. Prima di scrivere codice conviene controllare i due topic dalla riga di comando.
 
-In Kafka Streams un'aggregazione su finestra (`TimeWindows.ofSizeWithNoGrace(Duration.ofMinutes(30))`) aggiorna la `KTable` interna a ogni singolo evento che arriva: se un cliente fa 15 acquisti in mezz'ora, la topologia emette di default 15 messaggi di aggiornamento per la stessa finestra `(window_start, customer_id)`. Se a valle inserite quei 15 messaggi in una tabella `MergeTree` semplice invece che in una `ReplacingMergeTree` (o senza usare `.suppress()`), una `sum(spend_30m_eur)` sommerà tutti e 15 gli stati parziali progressivi.
-
-## Topologia co-partizionata con RocksDB, EOS v2 e tabella di destinazione idempotente
-
-Per implementare una trasformazione stateful robusta che arricchisca gli ordini e calcoli finestre di spesa pronte per ClickHouse, applicate questi quattro criteri in ordine di priorità:
-
-1. Prima del join con la `KTable` dei clienti, eseguite il re-keying del `KStream` su `customer_id` (oppure usate una `GlobalKTable` se l'anagrafica clienti occupa meno di qualche gigabyte e può essere replicata per intero su ogni istanza).
-2. Configurate `processing.guarantee = "exactly_once_v2"`, `num.standby.replicas = 1` e puntate `state.dir` su un volume disco persistente così che i riavvii durino meno di un secondo.
-3. Nelle aggregazioni a finestra, definite esplicitamente il *grace period* (`ofSizeAndGrace(Duration.ofMinutes(30), Duration.ofMinutes(2))`) per accettare gli eventi leggermente in ritardo.
-4. Scrivete il topic di output verso una tabella ClickHouse `ReplacingMergeTree(updated_at)` ordinata per `(window_start, customer_id)` così che eventuali aggiornamenti successivi della stessa finestra sovrascrivano il valore precedente senza mai duplicarlo.
-
-Ecco lo schema e la query in ClickHouse che ricevono il risultato della topologia Kafka Streams (arricchita e aggregata su finestra di 30 minuti con `exactly_once_v2`) garantendo zero join mancati e zero somme duplicate:
-
-```sql
--- 1. Tabella di destinazione per l'output della topologia Kafka Streams (KTable windowed + enriched)
--- Configurata con ReplacingMergeTree(event_timestamp) per gestire gli aggiornamenti della finestra:
-CREATE TABLE realtime.customer_spend_window_30m
-(
-    window_start DateTime('UTC'),
-    window_end DateTime('UTC'),
-    customer_id UInt64,
-    customer_segment LowCardinality(String),
-    orders_count UInt32,
-    total_spend_30m_eur Decimal(12, 2),
-    event_timestamp DateTime64(3, 'UTC')
-)
-ENGINE = ReplacingMergeTree(event_timestamp)
-PARTITION BY toYYYYMM(window_start)
-ORDER BY (window_start, customer_id);
-
--- 2. Lettura esatta dell'ultimo stato della finestra di 30 minuti per intercettare anomalie di spesa VIP:
-SELECT
-    window_start,
-    window_end,
-    customer_id,
-    argMax(customer_segment, event_timestamp) AS segment,
-    argMax(orders_count, event_timestamp) AS ordini_nella_finestra,
-    argMax(total_spend_30m_eur, event_timestamp) AS spesa_totale_30m_eur
-FROM realtime.customer_spend_window_30m
-WHERE window_start >= now() - INTERVAL 2 HOUR
-GROUP BY window_start, window_end, customer_id
-HAVING spesa_totale_30m_eur > 2500.00
-ORDER BY spesa_totale_30m_eur DESC;
+```bash
+# Verifica del co-partizionamento: il numero di partizioni deve coincidere
+for t in orders.raw.v1 customers.profile.v1; do
+  kafka-topics.sh --bootstrap-server kafka-1:9092 --describe --topic "$t" \
+    | head -1 | grep -o 'PartitionCount: [0-9]*'
+done
+# Atteso: PartitionCount: 12 per entrambi i topic.
+# Controlla anche che il topic clienti sia compattato:
+kafka-configs.sh --bootstrap-server kafka-1:9092 --describe \
+  --entity-type topics --entity-name customers.profile.v1 | grep cleanup.policy
 ```
 
-Il risultato risolve tutti i colli di bottiglia dell'architettura iniziale: il database PostgreSQL del CRM riceve zero query dalle 4.000 transazioni al secondo perché il join con `customer_segment` avviene in microsecondi sul disco locale RocksDB alimentato dal topic CDC; se un container cade, la `standby.replica` subentra istantaneamente senza perdere i contatori dei 30 minuti; e l'accoppiata tra `exactly_once_v2` su Kafka Streams e `ReplacingMergeTree` + `argMax` su ClickHouse garantisce che ogni finestra `(window_start, customer_id)` sia contata una volta sola al centesimo. Progettare il co-partizionamento e la `standby.replica` prima del lancio richiede poche righe di configurazione; mandare in crash il database transazionale di produzione con migliaia di query di arricchimento al secondo blocca l'intero sito.
+Quando l'anagrafica è piccola, per esempio qualche centinaio di megabyte, c'è un'alternativa al co-partizionamento: la `GlobalKTable`, che replica per intero la tabella su ogni istanza. Il join con una `GlobalKTable` accetta una chiave qualunque, calcolata con un `KeyValueMapper`, ma ogni istanza paga lo spazio disco e la banda dell'intera tabella.
 
-## Trasformazione in-flight con Kafka Streams o aggregazione diretta in ClickHouse
+## La topology completa in Java
 
-Quando si possiede già ClickHouse nello stack dati, sorge sempre un dubbio architetturale legittimo: conviene fare join e aggregazioni su finestre dentro **Kafka Streams** prima di scrivere nel database, oppure ingerire gli eventi grezzi direttamente in **ClickHouse** e usare le Materialized Views SQL?
+Il codice seguente costruisce l'intera pipeline. Il `KStream` degli ordini viene ricodificato su `customer_id`, unito alla `KTable` dei profili, raggruppato per cliente e aggregato su una finestra di 30 minuti con un grace period di 2 minuti per accettare i ritardatari.
 
-Il criterio di scelta è netto: **usate Kafka Streams quando il risultato del calcolo in tempo reale deve essere ripubblicato immediatamente su un altro topic Kafka per azionare altri microservizi operativi (es. bloccare una carta di credito in 20 millisecondi, inviare una notifica push, instradare dinamicamente un ordine) o richiede una logica procedurale complessa per singolo evento, ingerite invece lo stream grezzo direttamente in ClickHouse ed eseguite le aggregazioni con Materialized Views SQL quando i consumatori finali sono dashboard, sistemi di alerting analitico, data scientist e reportistica BI.**
+```java
+// Topology Kafka Streams: arricchimento con segmento cliente e spesa su 30 minuti
+StreamsBuilder builder = new StreamsBuilder();
 
-La confusione comune consiste nello scrivere e mantenere cinque microservizi Java Kafka Streams solo per pre-aggregare tabelle al minuto che vengono poi lette unicamente da Grafana su ClickHouse. Sbagliare questa scelta raddoppia il codice da manutenere (Java + SQL) e i punti di rottura per un lavoro che `AggregatingMergeTree` esegue nativamente in poche righe di SQL a una frazione del costo.
+KTable<String, Customer> customers = builder.table(
+    "customers.profile.v1",
+    Consumed.with(Serdes.String(), customerSerde),
+    Materialized.as("customer-store"));
 
-Questo articolo non tratta l'API a basso livello (*Processor API* con punteggiatura manuale `punctuate`) né il tuning fine della memoria off-heap di RocksDB (`BlockBasedTableConfig`). Attenzione quando eseguite i container Kafka Streams in Kubernetes: la memoria totale consumata dal pod è la somma dell'heap JVM (`-Xmx`) più la cache nativa off-heap allocata da RocksDB in C++; se non limitate la cache di RocksDB, il kernel Linux ucciderà il container con `OOMKilled` anche se l'heap Java è mezzo vuoto.
+KStream<String, Order> orders = builder.stream(
+    "orders.raw.v1", Consumed.with(Serdes.String(), orderSerde));
 
-## Cinque domande prima di mandare in produzione un'app Kafka Streams
+orders
+    // Re-keying: crea il topic di repartition con chiave customer_id
+    .selectKey((orderId, order) -> order.getCustomerId())
+    // Join locale su RocksDB: nessuna chiamata di rete
+    .join(customers, (order, customer) -> order.withSegment(customer.getSegment()),
+          Joined.with(Serdes.String(), orderSerde, customerSerde))
+    .groupByKey(Grouped.with(Serdes.String(), enrichedOrderSerde))
+    .windowedBy(TimeWindows.ofSizeAndGrace(Duration.ofMinutes(30), Duration.ofMinutes(2)))
+    .aggregate(SpendAccumulator::new,
+               (customerId, order, acc) -> acc.add(order.getAmountEur()),
+               Materialized.<String, SpendAccumulator, WindowStore<Bytes, byte[]>>as("spend-30m-store")
+                   .withValueSerde(spendSerde))
+    // Un solo risultato per finestra, emesso quando la finestra si chiude
+    .suppress(Suppressed.untilWindowCloses(Suppressed.BufferConfig.unbounded()))
+    .toStream((windowedKey, acc) -> windowedKey.key())
+    .to("orders.spend30m.v1", Produced.with(Serdes.String(), spendSerde));
+```
 
-1. Tutti i topic coinvolti in un join `KStream-KTable` o `KStream-KStream` sono co-partizionati (stessa chiave di business e stesso identico numero di partizioni), oppure state usando una `GlobalKTable` per le tabelle piccole?
-2. Avete configurato `num.standby.replicas = 1` e montato `state.dir` su un disco persistente (es. StatefulSet con PVC in Kubernetes) per evitare lunghi tempi di ricostruzione dello stato al riavvio?
-3. Avete abilitato `processing.guarantee = "exactly_once_v2"` per le topologie che calcolano somme finanziarie o contatori critici?
-4. Ogni finestra temporale dichiara esplicitamente la propria durata e il proprio *grace period* (`Duration`), scartando in modo controllato i ritardatari fuori tempo massimo?
-5. Avete limitato la memoria off-heap di RocksDB (`RocksDBConfigSetter`) lasciando almeno il 25–30% della RAM del container libera fuori dall'heap JVM per evitare `OOMKilled`?
+Il metodo `groupByKey` dopo il join non provoca un secondo repartition, perché la chiave è già `customer_id`. Se invece avessi chiamato `groupBy` con una funzione che cambia la chiave, la libreria avrebbe creato un altro topic interno e raddoppiato il traffico su Kafka.
 
-La metrica operativa fondamentale per monitorare un'applicazione Kafka Streams in produzione è il **`commit-latency-max` / `poll-latency-avg`** affiancato dallo stato del thread (`StreamsMetrics` `alive-stream-threads`): se il numero di thread vivi scende o il lag del topic di input cresce costantemente durante i picchi, occorre scalare le istanze (fino al numero di partizioni del topic).
+## Stato locale, changelog e standby replica
 
-Di tutta la programmazione con Kafka Streams, ricordate sempre una sola regola d'oro: non fate mai chiamate di rete sincrone a database o API esterne dentro un `mapValues` o un `filter`. Portate la tabella dentro Kafka come `KTable`, lasciatela vivere in locale su RocksDB e il vostro stream viaggerà alla velocità del disco locale.
+Quando un pod muore, la nuova istanza trova la propria cartella `state.dir` vuota e deve ricostruire gli store leggendo i changelog dall'inizio. Il tempo di ripristino dipende dalla dimensione dello stato e dalla velocità di lettura. Prendiamo numeri di esempio per un servizio con 60 GB di stato complessivo e una lettura del changelog a 100 MB/s per istanza. Convertiamo 60 GB in 61.440 MB, poi dividiamo: 61.440 MB / 100 MB/s = 614 secondi, cioè poco più di 10 minuti durante i quali il servizio non elabora nulla.
+
+Con `num.standby.replicas=1` un secondo processo mantiene una copia calda dello stesso store, leggendo il changelog in continuo. Al guasto del primario, il task passa allo standby che ha già quasi tutto lo stato: restano da leggere soltanto gli ultimi record non ancora applicati, per esempio 5 secondi di traffico, cioè pochi secondi di ripristino invece di 614. Il prezzo è un raddoppio dello spazio disco e della banda di lettura dei changelog, perché ogni store esiste in due copie.
+
+Il secondo rimedio, complementare, è non perdere la cartella dello stato a ogni riavvio. In Kubernetes questo significa un `StatefulSet` con un volume persistente per ogni pod, in modo che dopo un rilascio la nuova versione trovi i file RocksDB già al loro posto e legga dal changelog solo la differenza.
+
+```yaml
+# StatefulSet: il volume persistente conserva state.dir tra un rilascio e l'altro
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: orders-enricher
+spec:
+  serviceName: orders-enricher
+  replicas: 4
+  template:
+    spec:
+      containers:
+        - name: app
+          image: registry.example.com/orders-enricher:1.8.0
+          env:
+            - name: APPLICATION_ID
+              value: "orders-enricher"
+            - name: NUM_STANDBY_REPLICAS
+              value: "1"
+            - name: STATE_DIR
+              value: "/var/lib/kafka-streams"
+            - name: PROCESSING_GUARANTEE
+              value: "exactly_once_v2"
+            - name: JAVA_TOOL_OPTIONS
+              value: "-Xmx2g"
+          resources:
+            limits:
+              memory: "5Gi"   # heap 2 GB + cache RocksDB 1 GB + write buffer 0,5 GB + margine
+          volumeMounts:
+            - name: state
+              mountPath: /var/lib/kafka-streams
+  volumeClaimTemplates:
+    - metadata:
+        name: state
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 50Gi
+```
+
+Il limite di memoria merita un calcolo esplicito, perché è la causa più frequente di `OOMKilled`. L heap Java vale 2 GB, ma RocksDB alloca in C++ fuori dall heap: una block cache da 1 GB, i buffer di scrittura per circa 0,5 GB e altri 0,5 GB tra metaspace, stack dei thread e buffer di rete. La somma è 2 + 1 + 0,5 + 0,5 = 4 GB, quindi un limite di 5 GB lascia 1 GB, cioè il 20% di margine. Con un limite pari al solo heap, il kernel uccide il container pur con l heap mezzo vuoto.
+
+## Finestre, grace period e suppress
+
+Un aggregato su finestra viene aggiornato a ogni evento. Un cliente che fa 15 acquisti in 30 minuti produce 15 aggiornamenti per la stessa coppia `(finestra, cliente)`, e per default la topology li emette tutti sul topic di output. Con 200.000 clienti attivi per finestra, il traffico sul topic è 200.000 × 15 = 3.000.000 di record contro i 200.000 che servirebbero. La riduzione ottenibile è 1 − 200.000 / 3.000.000 = 93,3%.
+
+L'operatore `suppress(untilWindowCloses)` trattiene gli aggiornamenti in un buffer e ne emette soltanto uno, quando la finestra si chiude. Il momento di chiusura non coincide con la fine dei 30 minuti, perché il grace period di 2 minuti tiene la finestra aperta per i ritardatari: la chiusura avviene quando il tempo di flusso, cioè il timestamp massimo osservato, supera la fine della finestra più il grace. Questo ha una conseguenza che sorprende chi la scopre in produzione: se il traffico si ferma, il tempo di flusso non avanza e l'ultimo risultato non esce, perché Kafka Streams misura il tempo con gli eventi e non con l'orologio.
+
+Un esempio numerico mostra il significato del dato emesso. Il cliente `C-42` fa quattro ordini nella finestra 10:00-10:30, da 80 euro, 450 euro, 1.200 euro e 900 euro. La somma è 80 + 450 + 1.200 + 900 = 2.630 euro. La soglia antifrode del servizio è 2.500 euro, quindi l'alert scatta con un margine di 130 euro. Senza `suppress`, l'alert scatterebbe già al quarto aggiornamento parziale, ma con un valore intermedio di 1.730 euro dopo il terzo ordine un consumatore a valle che prende decisioni sul primo valore ricevuto agirebbe su un dato incompleto.
+
+Quando serve reagire subito e non a fine finestra, `suppress` è lo strumento sbagliato. Un controllo antifrode che deve bloccare un account entro pochi secondi lavora sugli aggiornamenti parziali, e si accetta di gestire i duplicati logici a valle con una chiave `(finestra, cliente)` e l'ultimo valore che vince.
+
+## Exactly-once v2: quando costa e quando serve
+
+Senza garanzie transazionali, un crash tra la scrittura sul topic di output e il commit dell'offset di input fa rileggere lo stesso record, e il totale di spesa viene sommato due volte. Con `processing.guarantee=exactly_once_v2`, Kafka Streams racchiude in una transazione Kafka l'avanzamento dell'offset sorgente, gli aggiornamenti dei changelog e i record scritti sul topic di destinazione. O si vedono tutti, o non si vede nessuno.
+
+Il costo è reale. Le transazioni impongono un commit più frequente, e ogni `commit.interval.ms` diventa un confine di transazione: il valore predefinito scende a 100 ms. I consumatori a valle devono leggere con `isolation.level=read_committed`, quindi vedono i record solo dopo il commit e la latenza end-to-end cresce di circa l'intervallo di commit. Per un conteggio di visualizzazioni di pagina un duplicato ogni tanto non cambia nessuna decisione, mentre per una somma di pagamenti o un limite di spesa un duplicato ha un effetto economico diretto.
+
+La regola operativa è attivare `exactly_once_v2` sulle topology il cui output cambia denaro, stato di un account o contatori di quota, e lasciare `at_least_once` su quelle che producono metriche approssimate. La versione 2 richiede broker dalla 2.5 in avanti e riduce il numero di producer transazionali a uno per thread invece di uno per task, quindi con 30 task per istanza il carico sul coordinatore delle transazioni cala sensibilmente rispetto alla prima versione.
+
+## Kafka Streams o aggregazione diretta in un database analitico
+
+Quando il risultato di un calcolo deve rientrare in Kafka per azionare altri servizi, Kafka Streams è la scelta naturale: un blocco carta in 20 ms, una notifica push, un instradamento dinamico. La stessa libreria è adatta a logica per singolo evento che non si esprime bene in una query, come una macchina a stati sul ciclo di vita di un ordine.
+
+Quando invece i consumatori finali sono dashboard e report, scrivere e mantenere servizi Java che pre-aggregano al minuto raddoppia il codice da gestire, perché un motore colonnare come ClickHouse esegue la stessa aggregazione con una vista materializzata a una frazione del costo. Il confronto sintetico:
+
+| Criterio | Kafka Streams | Aggregazione nel database analitico |
+| --- | --- | --- |
+| Destinazione del risultato | Un altro topic Kafka, per azionare servizi | Tabelle lette da dashboard e query ad hoc |
+| Latenza tipica | Decine di millisecondi per evento | Secondi, a seconda del flusso di ingestione |
+| Stato e ripristino | RocksDB, changelog, standby da gestire | Gestiti dal motore del database |
+| Linguaggio da mantenere | Java o Kotlin, con test della topology | SQL del database di destinazione |
+| Costo operativo | Un servizio da dimensionare e monitorare | Una vista materializzata |
+
+Per monitorare un servizio Kafka Streams le metriche più utili sono `commit-latency-max`, `poll-latency-avg` e `alive-stream-threads`. Se i thread vivi scendono, o se il lag del topic di input cresce per più di un picco, serve scalare le istanze, tenendo presente che il parallelismo massimo è il numero di partizioni del topic di input: oltre le 12 istanze di questo esempio le altre restano in attesa senza lavorare.
+
+## Tre errori che compaiono nelle topology stateful
+
+### Join tra chiavi o partizioni diverse
+
+Il sintomo è un campo di arricchimento nullo nella maggior parte dei record, senza alcuna eccezione nel log, oppure una `TopologyException` all'avvio quando il numero di partizioni non coincide. Succede perché sembra naturale unire due topic che parlano dello stesso cliente, senza ricordare che il join lavora per task e quindi per partizione. La correzione è `selectKey` prima del join, un controllo di `PartitionCount` sui due topic e, per anagrafiche piccole, una `GlobalKTable`.
+
+### Stato su disco effimero e zero standby
+
+Il sintomo è un servizio fermo per dieci minuti a ogni rilascio, con il lag in crescita. Succede perché in un container qualsiasi `state.dir` punta a `/tmp`, che a ogni riavvio è vuoto, e senza standby tutto lo stato deve tornare dal changelog. La correzione è un volume persistente per pod, `num.standby.replicas=1` e un tempo di ripristino calcolato in anticipo come dimensione dello stato diviso velocità di lettura.
+
+### Consumare gli aggiornamenti intermedi come se fossero risultati finali
+
+Il sintomo è un totale che a valle risulta gonfiato di un fattore pari al numero medio di eventi per finestra. Succede perché un aggregato su finestra emette un record a ogni evento e una tabella append-only li somma tutti. La correzione è usare `suppress` quando serve un risultato finale per finestra, oppure scrivere a valle con una chiave `(finestra, cliente)` e una regola di sostituzione, in modo che l'ultimo aggiornamento sovrascriva i precedenti.
+
+## Controllo prima del rilascio di una topology
+
+1. Il topic degli ordini ha 12 partizioni e la tabella dei clienti ne ha 8: cosa succede all'avvio e come si risolve?
+
+<details>
+<summary>Mostra risposta</summary>
+
+La libreria rifiuta di costruire la topology perché i due lati del join non sono co-partizionati, e solleva una `TopologyException`. Si risolve portando il topic dei clienti a 12 partizioni, cosa possibile solo ricreandolo e ricopiando i dati perché le partizioni di un topic compattato non si possono ridurre né ridistribuire in modo trasparente, oppure usando una `GlobalKTable` se l'anagrafica è piccola.
+
+</details>
+
+2. Il servizio ha 60 GB di stato e legge il changelog a 100 MB/s. Quanto resta fermo dopo un rilascio senza volume persistente e senza standby?
+
+<details>
+<summary>Mostra risposta</summary>
+
+60 GB equivalgono a 61.440 MB, e 61.440 MB / 100 MB/s = 614 secondi, cioè circa 10 minuti. Con `num.standby.replicas=1` il tempo scende a pochi secondi, perché lo standby ha già quasi tutto lo stato e deve leggere solo gli ultimi record del changelog.
+
+</details>
+
+3. Una finestra da 30 minuti con 200.000 clienti produce in media 15 aggiornamenti per cliente. Quanti record scrive sul topic di output senza `suppress`, e con `suppress`?
+
+<details>
+<summary>Mostra risposta</summary>
+
+Senza `suppress` scrive 200.000 × 15 = 3.000.000 di record. Con `suppress(untilWindowCloses)` ne scrive 200.000, uno per cliente, con una riduzione del 93,3%. Il compromesso è che il risultato esce solo dopo la chiusura della finestra, grace period incluso.
+
+</details>
+
+4. Il pod ha un limite di memoria di 2 GB e `-Xmx2g`. Perché viene ucciso con `OOMKilled` anche se l heap è quasi vuoto?
+
+<details>
+<summary>Mostra risposta</summary>
+
+RocksDB usa memoria nativa fuori dall heap, per block cache e buffer di scrittura, e anche la JVM ha un uso non-heap per metaspace e stack. Il consumo totale del processo supera il limite del container e il kernel lo termina. Il limite va calcolato come heap più cache RocksDB più buffer più margine, per esempio 2 + 1 + 0,5 + 0,5 = 4 GB, e arrotondato per eccesso a 5 GB.
+
+</details>
+
+5. Un servizio produce un conteggio di visualizzazioni di pagina per una dashboard, un altro calcola il saldo di crediti prepagati. Quale dei due richiede `exactly_once_v2`?
+
+<details>
+<summary>Mostra risposta</summary>
+
+Il servizio dei crediti prepagati, perché un duplicato o una perdita cambia un importo reale. Il conteggio di visualizzazioni tollera qualche duplicato occasionale e non giustifica il costo in latenza e in commit transazionali.
+
+</details>

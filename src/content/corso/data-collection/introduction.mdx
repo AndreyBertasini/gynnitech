@@ -1,102 +1,142 @@
 ---
 title: "Raccolta dati: fondamenti e strategia"
 description: >-
-  Come progettare una strategia di raccolta dati robusta: event tracking, ETL, qualità alla fonte.
+  Assegnare ogni evento al canale giusto (client, server, CDC), scrivere un tracking plan versionato con JSON Schema e validare e deduplicare alla fonte, misurando lo scarto contro il database degli ordini.
 module: "Modulo 2: Raccolta dati e sistemi di tracking"
 order: 1
 category: Tecnico
 headerImage: /course-headers/data-collection-introduction-ginnytech-ad.webp
 headerImageAlt: "Raccolta dati: fondamenti e strategia - immagine ufficiale della lezione su GinnyTech, creata da AD"
 difficulty: advanced
-duration: 22 min
+duration: "35 min"
 learningObjectives:
   - Progettare un tracking plan con eventi, proprietà obbligatorie e owner
-  - Scegliere il canale client, server o database per ogni evento
-  - Applicare validazione, deduplicazione e controlli di qualità alla fonte
+  - Scegliere il canale client, server o database per ogni evento in base a chi può vedere davvero il fatto
+  - Calcolare lo scarto tra eventi tracciati e ordini del database transazionale e applicare validazione e deduplicazione alla fonte
 prerequisites: []
 binario: "ml-tabellare"
-formato: "articolo"
-autore: "Hermes"
-controllatoDa: "Argo"
-autorizzatoDa: "Giano"
+formato: "didattica-v2"
 draft: false
-dateModified: 2026-11-13
+dateModified: 2026-11-17
 ---
 
-# Raccolta dati: fondamenti e strategia
+Un e-commerce italiano misura gli acquisti con uno script JavaScript nel browser, attivato sulla pagina di ringraziamento, e lascia che ogni team scelga i nomi degli eventi (scenario costruito, con numeri di esempio). Su iOS l'evento si chiama `Purchase_Done`, su Android `order_completed`, sul web `checkoutSuccess`. Il database dell'ERP registra 10.000 ordini al mese, ma nei sistemi di analisi marketing e prodotto i conti non tornano mai.
 
-Un e-commerce italiano misura gli acquisti esclusivamente tramite uno script JavaScript nel browser (`gtag` / Meta Pixel) attivato sulla pagina di ringraziamento ("Thank You Page") e lascia che gli sviluppatori inventino i nomi degli eventi senza un documento condiviso: su iOS l'evento si chiama `Purchase_Done`, su Android `order_completed` e su web `checkoutSuccess`. Tra ad-blocker, Safari ITP, utenti che chiudono la scheda della banca prima del redirect alla pagina di ringraziamento e doppi refresh della pagina, il data warehouse perde il 28% degli ordini reali e ne duplica il 6% dei restanti. La causa non è un guasto di Google Analytics: è affidare i fatti transazionali al browser anziché al server/database e operare senza un **Tracking Plan versionato con validazione e deduplicazione alla fonte (`event_id`)**.
+Il problema non è Google Analytics. I fatti transazionali sono affidati al browser anziché al server, e nessuno ha scritto un contratto che dica quali eventi esistono, con quali campi e con quale chiave di deduplicazione.
 
-## Ventotto percento di ordini persi nel browser e tre nomi diversi per lo stesso acquisto
+> **Idea chiave:** il browser vede l'interfaccia, il server vede i soldi. Una raccolta dati regge solo se ogni segnale parte dal livello che può osservarlo con certezza, ha un contratto scritto prima del codice ed è validato e deduplicato appena entra.
 
-Questo è un caso ricostruito con numeri di esempio su quanto accade quando la raccolta dati (*data collection*) nasce per accumulo caotico di tag anziché come un'architettura ingegnerizzata. L'azienda riceve 10.000 ordini reali al mese registrati nel database PostgreSQL dell'ERP, ma nei sistemi di analisi marketing e prodotto i conti non tornano mai.
+## Il ventotto percento di ordini che non arriva mai
 
-Un audit tecnico tra database gestionale e tabella degli eventi analitici porta alla luce tre falle strutturali:
-1. L'evento di acquisto viene sparato solo lato client (JavaScript nel browser dell'utente) quando si carica `/thank-you`. Il 18% degli utenti usa estensioni ad-blocker o browser con protezione anti-tracciamento (Brave, Firefox Strict, Safari), e un altro 10% paga con bonifico istantaneo o app bancaria chiudendo la finestra prima del ritorno al sito: il **28% degli incassi reali non arriva mai ai sistemi analitici**.
-2. Chi lascia aperta la pagina `/thank-you` sullo smartphone la ricarica automaticamente il giorno dopo riaprendo il browser: poiché l'evento non contiene un `event_id` univoco né un controllo di idempotenza, lo stesso ordine viene registrato due o tre volte.
-3. I tre team (Web, iOS, Android) non hanno un **Tracking Plan**: per sapere quanti carrelli sono stati creati bisogna unire con un `OR` sette nomi di evento diversi (`add_to_cart`, `AddToCart`, `cart_add`, `item_added`) dove il prezzo a volte è una stringa `"€ 49,90"` e a volte un numero in centesimi `4990`.
+Nello scenario costruito un audit confronta la tabella degli eventi analitici con il database PostgreSQL dell'ERP e trova tre falle strutturali.
 
-La causa del disastro è raccogliere i dati senza aver progettato i tre pilastri alla fonte: **il canale di emissione corretto (Client vs Server vs CDC), il Tracking Plan con contratto JSON Schema e l'idempotenza tramite `event_id`**.
+La prima: l'evento di acquisto parte solo dal browser, quando si carica `/thank-you`. Il 18% degli utenti usa ad-blocker o browser con protezione anti-tracciamento, e un altro 10% paga con bonifico istantaneo o app bancaria e chiude la finestra prima del ritorno al sito. Insieme sono il 28% degli incassi reali che non raggiunge mai l'analisi.
 
-## Architettura Ibrida (Client + Server + CDC), Tracking Plan e Validazione alla Fonte
+La seconda: chi lascia aperta `/thank-you` sullo smartphone la ricarica il giorno dopo riaprendo il browser. L'evento non contiene un identificativo univoco, quindi lo stesso ordine viene registrato due o tre volte.
 
-Una strategia di raccolta dati moderna non sceglie un unico canale per tutto, ma assegna ogni categoria di segnale al livello architetturale che ne garantisce il 100% di affidabilità.
+La terza: per sapere quanti carrelli sono stati creati bisogna unire sette nomi diversi (`add_to_cart`, `AddToCart`, `cart_add`, `item_added`), e il prezzo a volte è una stringa come `"€ 49,90"` e a volte un intero in centesimi, `4990`.
 
-Il primo meccanismo è la **ripartizione del canale di raccolta (Client-Side vs Server-Side vs Database CDC)**:
-1. **Client-Side (Browser / App Mobile SDK)**: è l'unico punto che vede il contesto del dispositivo, i parametri UTM della campagna di atterraggio, lo scroll, le impression visive e le micro-interazioni dell'interfaccia prima del login (`anonymous_id`). Tuttavia è inaffidabile per i fatti di business perché può essere bloccato dal client.
-2. **Server-Side (Backend API / Server-Side GTM)**: è il punto autorevole per tutti gli eventi transazionali e di stato (`order_completed`, `subscription_renewed`, `login_succeeded`, `lead_submitted`). Il backend emette l'evento nel momento esatto in cui la transazione va a buon fine, immune al 100% da ad-blocker e chiusure del browser, legando la sessione web tramite il cookie first-party o `anonymous_id` passato nella richiesta.
-3. **Database Change Data Capture (CDC / Replication)**: replica lo stato completo delle tabelle applicative (`orders`, `users`, `invoices`) nel data warehouse per la quadratura contabile al centesimo.
+Il conto, con i numeri dello scenario, mostra come due errori opposti si mascherino a vicenda.
 
-Il secondo meccanismo è il **Tracking Plan come codice (Convenzione `Oggetto + Verbo al passato` in `snake_case`)**. Ogni evento è documentato prima dello sviluppo con il formato `object_action` (`product_viewed`, `cart_updated`, `order_completed`), l'elenco delle proprietà obbligatorie tipizzate (`order_id: string`, `revenue_eur: decimal`, `currency: string`), il canale di emissione e il team `owner`.
+1. Ordini reali nell'ERP: 10.000 ordini.
+2. Ordini persi dal browser: 10.000 × 28% = 2.800 ordini, quindi ne restano 7.200.
+3. Duplicati da refresh sul 6% dei tracciati: 7.200 × 6% = 432 eventi.
+4. Eventi `order_completed` nel warehouse: 7.200 + 432 = 7.632 eventi.
+5. Scarto netto: (7.632 − 10.000) / 10.000 = −23,7%.
 
-Il terzo meccanismo è la **Qualità alla Fonte (*Shift-Left Data Quality*): Validazione Schema + Deduplicazione su `event_id`**. Il collettore di ingresso valida ogni payload contro il JSON Schema del Tracking Plan: i payload conformi entrano nella tabella principale, mentre i payload con tipi errati o campi obbligatori mancanti vengono deviati in una **Dead Letter Queue (`events_quarantine`)** con l'indicazione dell'errore, senza inquinare le tabelle analitiche né andare persi.
+Un cruscotto che guarda solo il totale vede un calo del 23,7% e pensa a un problema di copertura. In realtà ne ha due distinti, 2.800 ordini mancanti e 432 eventi fantasma, che richiedono rimedi diversi: un canale server-side per i primi, una chiave di idempotenza per i secondi.
 
-**Una strategia di data collection è solida solo se raccoglie le intenzioni di navigazione lato client ma certifica tutte le transazioni lato server, impone un Tracking Plan tipizzato e deduplica ogni evento tramite `event_id` univoco.**
+## Tre canali di raccolta, tre livelli di certezza
 
-## Tre errori che rendono inutilizzabili i dati raccolti alla fonte
+Una strategia moderna non sceglie un unico canale. Assegna ogni categoria di segnale al livello architetturale che ne garantisce l'osservabilità.
 
-Il blocco SQL qui sotto mostra l'effetto su ClickHouse di una raccolta dati priva di Tracking Plan, affidata solo al client e senza validazione in ingresso:
+Il **client** (browser o SDK mobile) è l'unico punto che vede il contesto del dispositivo, i parametri UTM della pagina di atterraggio, lo scorrimento, le impression e le micro-interazioni prima del login. È però inaffidabile per i fatti di business, perché l'utente o il browser possono bloccarlo.
 
-```sql
--- ERRORE 1: tre nomi diversi per lo stesso evento su Web, iOS e Android (assenza di Tracking Plan).
--- ERRORE 2: il prezzo arriva come stringa sporca ('€ 49,90', '49.90', 'N/A') che rompe i cast!
--- ERRORE 3: nessun event_id né deduplicazione sui refresh della Thank You Page lato client!
-SELECT
-    platform,
-    event_name,
-    count() AS raw_events,
-    -- Tentativo disperato di pulire a valle in SQL ciò che doveva essere validato alla fonte:
-    sum(toFloat64OrZero(replaceAll(replaceAll(JSONExtractString(properties_json, 'price'), '€', ''), ',', '.'))) AS ricavo_fragile
-FROM raw_tracking.unvalidated_client_events
-WHERE event_name IN ('Purchase_Done', 'order_completed', 'checkoutSuccess', 'ordine_ok')
-GROUP BY platform, event_name;
+Il **server** (API di backend, oppure un contenitore server-side di tag manager) è il punto autorevole per gli eventi transazionali e di stato. Il backend scrive l'evento nel momento in cui la transazione va a buon fine, indifferente agli ad-blocker e alle chiusure del browser. Per non perdere l'attribuzione riceve dal client l'`anonymous_id` nella richiesta.
+
+Il **Change Data Capture** (CDC) replica nel warehouse lo stato completo delle tabelle applicative, come `orders`, `users`, `invoices`, leggendo il log del database. Serve alla quadratura contabile e cattura anche ciò che nessun evento ha mai descritto, come un rimborso eseguito a mano.
+
+```mermaid
+flowchart LR
+    A["Browser / App (client)"] -->|"page_viewed, product_clicked"| C["Collettore con validazione"]
+    B["Backend (server)"] -->|"order_completed, user_registered"| C
+    D["Database ERP (CDC)"] -->|"stato di orders, invoices"| E["Warehouse"]
+    C -->|"eventi validi"| E
+    C -->|"payload non conformi"| Q["Quarantena (DLQ)"]
 ```
 
-### Tracciare gli ordini e i pagamenti solo tramite pixel JavaScript nel browser
+| Categoria di segnale | Canale corretto | Perché |
+|---|---|---|
+| Visualizzazione pagina, clic, impression | Client | Esiste solo sul dispositivo |
+| Registrazione, ordine, rinnovo | Server | Certifica una transazione, immune a blocchi |
+| Stato di ordini, fatture, resi | CDC | Quadratura contabile al centesimo |
 
-Affidare la misurazione di `order_completed` o `subscription_started` esclusivamente a uno script che gira nel browser del cliente significa accettare per design di perdere tra il 15% e il 35% del proprio business reale. Oltre agli ad-blocker, i pagamenti moderni (3D Secure bancario, PayPal, Satispay, Apple Pay, Klarna, bonifico) portano spesso l'utente su un'app esterna: se il pagamento va a buon fine ma l'utente non torna sulla pagina web finale, per il tracciamento client-side quell'acquisto non è mai esistito, mentre i rinnovi automatici mensili di un abbonamento avvengono a computer spento e sono invisibili al browser al 100%.
+## Il tracking plan come contratto versionato
 
-### Lasciare che ogni sviluppatore scelga nomi e tipi delle proprietà senza JSON Schema
+Il tracking plan è il documento che dice, per ogni evento, cosa significa, quando scatta, quali proprietà porta e chi ne risponde. Si scrive prima dello sviluppo e vive nel repository accanto al codice, così ogni modifica passa da una revisione.
 
-Dire a uno sviluppatore frontend *"traccia un evento quando l'utente compra"* senza consegnargli la specifica esatta del payload produce inevitabilmente incoerenza semantica: su web il campo si chiamerà `orderId` (stringa), su iOS `order_id` (intero) e su Android `id_ordine`, mentre la valuta sarà omessa. Cercare di rattoppare centinaia di varianti con `coalesce()` ed espressioni regolari dentro dbt rallenta le query e si rompe a ogni nuova versione dell'app.
+La convenzione è `oggetto_azione` con il verbo al passato, in `snake_case`: `product_viewed`, `cart_updated`, `order_completed`. Per ogni evento il piano elenca le proprietà obbligatorie con il loro tipo, il canale di emissione e il team `owner`. Senza owner, un evento rotto non ha nessuno a cui segnalarlo.
 
-### Scartare silenziosamente gli eventi invalidi invece di metterli in Quarantena (Dead Letter Queue)
+```yaml
+# tracking-plan.yaml: contratto dell'evento order_completed
+event: order_completed
+description: "Ordine pagato e confermato dal gateway di pagamento"
+channel: server
+owner: team-checkout
+schema_version: 2
+required:
+  - event_id
+  - occurred_at
+  - anonymous_id
+  - order_id
+  - revenue_eur
+  - currency
+properties:
+  event_id: { type: string, format: uuid }
+  occurred_at: { type: string, format: date-time }
+  anonymous_id: { type: string }
+  user_id: { type: [string, "null"] }
+  order_id: { type: string }
+  revenue_eur: { type: number, minimum: 0 }
+  currency: { type: string, enum: [EUR] }
+```
 
-Quando si attiva la validazione dello schema sul collettore di ingresso, buttare via con `HTTP 400` i messaggi che falliscono la validazione senza salvarli in una tabella di quarantena nasconde i bug di rilascio e causa perdita di dati. Se un nuovo rilascio dell'app Android invia per sbaglio `revenue_eur` come stringa `"29.90"` invece che come numero `29.90`, la tabella di quarantena (`events_quarantine`) deve catturare l'intero evento grezzo, far scattare un allarme immediato per il team mobile e permettere di riversare gli eventi recuperati nella tabella principale non appena corretto il tipo.
+Il file è la sorgente unica: da lì si genera il JSON Schema usato dal collettore, la documentazione per gli sviluppatori e i controlli nei test automatici. Quando un team vuole aggiungere un campo apre una modifica al piano, non rilascia nulla di nascosto.
 
-## Ingestione Validata con Quarantena, Deduplicazione Ibrida e Quadratura ERP in ClickHouse
+## Validazione e deduplicazione alla fonte
 
-Per implementare un'architettura di raccolta dati ad alta fedeltà in ClickHouse, applicate questi quattro criteri in ordine di priorità:
+Il tracking plan serve solo se qualcuno lo applica. Il collettore di ingresso valida ogni payload contro lo schema: i conformi entrano nella tabella principale, i non conformi finiscono in una **Dead Letter Queue**, una tabella di quarantena che conserva l'evento grezzo con il motivo del rifiuto. Scartare con un errore HTTP senza salvare nulla nasconde i bug di rilascio e fa perdere dati.
 
-1. Definite il **Tracking Plan** standardizzando i nomi in `object_action` (`order_completed`) e imponendo su ogni evento l'invio di: `event_id` (UUID oppure chiave deterministica `sha256('order_completed:' || order_id)`), `occurred_at` (UTC), `anonymous_id` e `user_id`.
-2. Emettete gli eventi di navigazione dal client e gli eventi transazionali (`order_completed`) **dal backend server-side** (passando anche alle Conversion API pubblicitarie lo stesso `event_id` per la deduplicazione browser/server).
-3. In ClickHouse smistate i payload in arrivo: quelli che rispettano il contratto tipizzato finiscono in `events_valid` (`ReplacingMergeTree` ordinata su `event_id`), mentre quelli con campi obbligatori mancanti o malformati finiscono in `events_quarantine`.
-4. Eseguite ogni giorno la query di **Quadratura alla Fonte** che confronta gli ordini tracciati con il database transazionale ERP/PostgreSQL (tolleranza $< 1\%$).
+```python
+# Validazione alla fonte: i payload non conformi vanno in quarantena con il motivo
+from jsonschema import Draft202012Validator
 
-Ecco l'implementazione SQL completa in ClickHouse dello smistamento validato con Quarantena e della query di quadratura contro il database degli ordini:
+SCHEMA_ORDER = {
+    "type": "object",
+    "required": ["event_id", "occurred_at", "anonymous_id", "order_id", "revenue_eur", "currency"],
+    "properties": {
+        "event_id": {"type": "string"},
+        "revenue_eur": {"type": "number", "minimum": 0},
+        "currency": {"type": "string", "enum": ["EUR"]},
+    },
+}
+validatore = Draft202012Validator(SCHEMA_ORDER)
+
+def smista(payload, scrivi_valido, scrivi_quarantena):
+    errori = [e.message for e in validatore.iter_errors(payload)]
+    if errori:
+        # il payload grezzo non si perde: serve per riversarlo dopo la correzione
+        scrivi_quarantena({"violation_reason": "; ".join(errori), "raw_payload": payload})
+    else:
+        scrivi_valido(payload)
+```
+
+La deduplicazione si appoggia su `event_id`, che può essere un UUID oppure una chiave deterministica derivata dai dati, per esempio un hash di `'order_completed:' || order_id`. La seconda forma ha un vantaggio: lo stesso ordine emesso due volte da due componenti produce lo stesso identificativo. Lo stesso `event_id` va inviato anche alle API di conversione delle piattaforme pubblicitarie, così il pixel del browser e la chiamata server-side si deduplicano tra loro.
+
+In ClickHouse la tabella principale usa `ReplacingMergeTree` ordinata su `event_id` e una seconda tabella raccoglie le violazioni.
 
 ```sql
--- 1. Tabella principale degli eventi validati e deduplicati alla fonte su event_id:
+-- Tabella principale: eventi validati, deduplicati su event_id durante i merge
 CREATE TABLE raw_tracking.events_valid
 (
     event_date Date,
@@ -104,7 +144,7 @@ CREATE TABLE raw_tracking.events_valid
     event_id String,
     occurred_at DateTime64(3, 'UTC'),
     ingested_at DateTime64(3, 'UTC') DEFAULT now64(3),
-    channel_source LowCardinality(String), -- 'client_web', 'client_app', 'server_backend'
+    channel_source LowCardinality(String), -- client_web, client_app, server_backend
     anonymous_id String,
     user_id String,
     order_id String,
@@ -115,7 +155,7 @@ ENGINE = ReplacingMergeTree(ingested_at)
 PARTITION BY toYYYYMM(event_date)
 ORDER BY (event_name, event_date, event_id);
 
--- 2. Tabella di Quarantena (Dead Letter Queue) per i payload che violano il Tracking Plan:
+-- Quarantena: payload che violano il tracking plan, con motivo e testo grezzo
 CREATE TABLE raw_tracking.events_quarantine
 (
     quarantined_at DateTime DEFAULT now(),
@@ -127,17 +167,21 @@ CREATE TABLE raw_tracking.events_quarantine
 ENGINE = MergeTree
 PARTITION BY toYYYYMM(quarantined_at)
 ORDER BY (quarantined_at, platform, event_name);
+```
 
--- 3. Query di Audit Qualità alla Fonte & Quadratura Tracking vs Database ERP:
--- Verifica: (a) scarto < 1% tra Tracking Server-Side ed ERP, (b) quanto avrebbe perso il solo Client,
--- (c) eventuali violazioni finite in quarantena nell'ultima ora:
+Con un nuovo rilascio Android che invia `revenue_eur` come stringa `"29.90"` invece del numero `29.90`, la tabella di quarantena cattura l'evento, un allarme avvisa il team mobile e gli eventi recuperati si riversano nella tabella principale appena il tipo è corretto.
+
+## La quadratura giornaliera contro l'ERP
+
+La prova che l'architettura funziona è un confronto automatico, ogni giorno, tra gli ordini tracciati e quelli del database transazionale. Lo scarto accettabile è sotto l'1%, e vicino a zero sugli eventi emessi dal server. La stessa query misura anche quanto avrebbe perso il solo client, il suo punto cieco.
+
+```sql
+-- Quadratura giornaliera: tracking vs ERP, punto cieco del client e violazioni di schema
 WITH tracking_orders AS (
     SELECT
         event_date,
         uniqExact(order_id) AS tracked_unique_orders,
-        uniqExactIf(order_id, channel_source = 'server_backend') AS server_tracked_orders,
-        uniqExactIf(order_id, channel_source LIKE 'client_%') AS client_only_tracked_orders,
-        sum(revenue_eur) AS tracked_revenue_eur
+        uniqExactIf(order_id, channel_source LIKE 'client_%') AS client_only_orders
     FROM raw_tracking.events_valid FINAL
     WHERE event_name = 'order_completed'
       AND event_date = today() - 1
@@ -146,8 +190,7 @@ WITH tracking_orders AS (
 erp_orders AS (
     SELECT
         toDate(created_at) AS order_date,
-        uniqExact(order_id) AS erp_true_orders,
-        sum(net_amount_eur) AS erp_true_revenue_eur
+        uniqExact(order_id) AS erp_true_orders
     FROM raw_erp.orders_cdc FINAL
     WHERE toDate(created_at) = today() - 1
       AND status = 'paid'
@@ -157,34 +200,74 @@ SELECT
     e.order_date,
     e.erp_true_orders,
     t.tracked_unique_orders,
-    round((t.tracked_unique_orders - e.erp_true_orders) * 100.0 / e.erp_true_orders, 2) AS tracking_vs_erp_discrepancy_pct,
-    round((e.erp_true_orders - t.client_only_tracked_orders) * 100.0 / e.erp_true_orders, 1) AS client_side_blind_spot_pct,
-    (SELECT count() FROM raw_tracking.events_quarantine WHERE quarantined_at >= now() - INTERVAL 24 HOUR) AS quarantine_violations_24h
+    round((t.tracked_unique_orders - e.erp_true_orders) * 100.0 / e.erp_true_orders, 2) AS discrepanza_pct,
+    round((e.erp_true_orders - t.client_only_orders) * 100.0 / e.erp_true_orders, 1) AS punto_cieco_client_pct,
+    (SELECT count() FROM raw_tracking.events_quarantine
+      WHERE quarantined_at >= now() - INTERVAL 24 HOUR) AS violazioni_24h
 FROM erp_orders AS e
-LEFT JOIN tracking_orders AS t
-    ON e.order_date = t.event_date;
+LEFT JOIN tracking_orders AS t ON e.order_date = t.event_date;
 ```
 
-I numeri restituiti dalla query di quadratura dimostrano perché l'architettura ibrida con validazione alla fonte è indispensabile: mentre il solo tracciamento client-side (`client_only_tracked_orders`) avrebbe perso il `27,8%` degli ordini (`client_side_blind_spot_pct`), grazie all'emissione server-side e alla deduplicazione deterministica su `event_id` lo scarto tra `tracked_unique_orders` e la contabilità `erp_true_orders` scende a **`0,00%`**, e qualsiasi deviazione dal Tracking Plan introdotta da un nuovo rilascio app compare immediatamente in `quarantine_violations_24h` con l'indicazione della piattaforma colpevole.
+Con i numeri dello scenario, il giorno tipo ha 10.000 ordini nell'ERP. Con l'emissione server-side e la deduplicazione su `event_id` gli ordini tracciati sono 10.000, quindi lo scarto è (10.000 − 10.000) / 10.000 = 0,00%. Gli ordini visti dal solo client sono 7.200, quindi il punto cieco è (10.000 − 7.200) / 10.000 = 28,0%. Il confronto rende visibile in una colonna il valore economico del canale server.
 
-## Scelta del Canale per Evento: Client-Side, Server-Side o Database CDC
+## Come scegliere il canale per un nuovo evento
 
-Per ogni nuovo evento che aggiungete al vostro Tracking Plan, dovete decidere da quale sorgente fisica emetterlo: **SDK Client-Side (Browser/App)**, **Backend Server-Side** o **Database CDC**.
+Per ogni evento che entra nel tracking plan la decisione è una domanda: chi può osservare con certezza questo fatto? Se esiste solo sul dispositivo, come una visualizzazione di pagina, un banner o un filtro applicato, parte dal client. Se è un passaggio del funnel transazionale o autenticato, come `user_registered`, `lead_submitted`, `checkout_started`, `order_completed`, `subscription_renewed`, parte dal server. Se è lo stato corrente di un'entità di business, o un rimborso successivo, lo porta il CDC.
 
-Il criterio di scelta è netto: **usate il Client-Side esclusivamente per i segnali di esperienza utente e acquisizione che esistono solo sul dispositivo (`page_viewed`, `banner_impression`, `product_clicked`, `filter_applied`, cattura iniziale di `utm_source`/`gclid` in un cookie first-party), usate il Server-Side per tutti gli eventi del funnel transazionale e autenticato (`user_registered`, `lead_submitted`, `checkout_started`, `order_completed`, `subscription_renewed`) allegando l'`anonymous_id` letto dal cookie first-party per non spezzare l'attribuzione di marketing, e usate il Database CDC per sincronizzare lo stato corrente e completo delle entità di business e i resi/rimborsi successivi.**
+L'errore tipico del passaggio al server è dimenticare di inoltrare dal browser al backend l'`anonymous_id` e i parametri della campagna. Se il server emette `order_completed` con `user_id = 42` ma senza l'identificativo anonimo che quell'utente aveva cinque minuti prima, mentre cliccava sull'annuncio, il 100% degli ordini è contato bene e lo 0% è attribuibile a una campagna. Il browser raccoglie identità anonima e sorgente di traffico, il server legge la stessa identità dalla richiesta HTTP e certifica la transazione.
 
-La confusione comune consiste nel passare al Server-Side dimenticandosi di inoltrare dal browser al backend l'`anonymous_id` (o il `client_id` e i parametri della campagna): se il server emette `order_completed` con `user_id = 42` ma senza l'`anonymous_id` che quell'utente aveva cinque minuti prima mentre cliccava sull'annuncio pubblicitario, avete il 100% degli ordini contati bene ma lo **0% di attribuzione alle campagne di marketing**. Il browser raccoglie l'identità anonima e la sorgente di traffico; il server raccoglie quella stessa identità dalla richiesta HTTP e certifica la transazione.
+## Errori che rendono inutilizzabili i dati alla fonte
 
-Questo articolo getta le basi dell'architettura di raccolta dati; nella prossima lezione (`event-tracking`, già affrontata tra le lezioni flagship) e nelle successive vedremo nel dettaglio il confronto tra gli strumenti (Snowplow, RudderStack, Segment, custom), la conformità GDPR e la risoluzione delle identità.
+Una raccolta senza tracking plan, affidata al solo client e senza validazione mostra tutti i sintomi insieme: tre nomi per lo stesso evento, prezzi in formati diversi e conteggi che divergono dal database. Chi prova a ripararli a valle scrive query piene di `OR` e di funzioni di pulizia, e le rifà a ogni nuova versione dell'app.
 
-## Cinque domande prima di scrivere una sola riga di codice di tracking
+### Tracciare ordini e pagamenti solo con un pixel nel browser
 
-1. Ogni evento che state per implementare è registrato nel **Tracking Plan** con nome standard `oggetto_verbo_passato` in `snake_case`, proprietà obbligatorie tipizzate e un team `owner` responsabile?
-2. Tutte le conversioni di business (`lead_submitted`, `order_completed`, `payment_succeeded`) vengono emesse **lato server** (e non solo dalla Thank You Page nel browser)?
-3. Quando il server emette un evento transazionale, legge e allega l'`anonymous_id` (e i dati di sessione/campagna first-party) del client così da preservare il legame con il canale di acquisizione?
-4. Ogni evento possiede un `event_id` deterministico o UUID usato sia dal vostro data warehouse (`ReplacingMergeTree`) sia dalle Conversion API pubblicitarie per eliminare i duplicati da retry o doppio invio browser+server?
-5. Il collettore di ingresso valida i payload contro lo schema del Tracking Plan deviando i messaggi malformati in una tabella di **Quarantena (DLQ)** monitorata, ed eseguite una quadratura giornaliera contro il database ERP?
+Il sintomo è una perdita costante tra il 15% e il 35% degli incassi reali. Sembra ragionevole perché il pixel è facile da installare e il marketing lo conosce. Succede perché i pagamenti moderni (3D Secure, wallet, bonifico, buy-now-pay-later) portano spesso l'utente su un'app esterna: se il pagamento riesce ma l'utente non torna sul sito, quell'acquisto per il client non è mai esistito. I rinnovi automatici di un abbonamento avvengono a computer spento e sono invisibili al browser al 100%. La correzione è emettere dal backend ogni conversione di business.
 
-La metrica regina per certificare l'affidabilità della vostra strategia di data collection è la **Transaction Reconciliation Accuracy** tra sistema di tracking e database contabile: lo scarto giornaliero sugli ordini e sui ricavi deve rimanere stabilmente **inferiore all'1%** (e vicino allo 0% sugli eventi server-side), con **0% di eventi senza schema nel warehouse**.
+### Lasciare che ogni sviluppatore scelga nomi e tipi senza uno schema
 
-Di tutta questa prima lezione sulla raccolta dati, custodite un solo principio: non si ripara mai a valle con query SQL contorte ciò che è stato rotto o perso alla fonte. Progettate il Tracking Plan prima del codice, usate il server per i soldi e il client per i clic, e validate ogni singolo evento all'ingresso.
+Il sintomo è un campo che si chiama `orderId` su web, `order_id` su iOS e `id_ordine` su Android, con tipi diversi. Succede perché dire di tracciare un evento quando l'utente compra, senza consegnare la specifica del payload, lascia a ciascuno l'interpretazione. Rattoppare con `coalesce()` ed espressioni regolari in dbt rallenta le query e si rompe a ogni versione. La correzione è un tracking plan con JSON Schema, usato sia dagli sviluppatori sia dal collettore.
+
+### Scartare in silenzio gli eventi non validi invece di metterli in quarantena
+
+Il sintomo è un calo di volume dopo un rilascio, senza alcun errore visibile. Succede perché il collettore risponde con un rifiuto e il messaggio sparisce: sembra pulizia, ma nasconde il bug e perde il dato. La correzione è la tabella di quarantena con il motivo della violazione, un allarme sul numero di righe e una procedura per riversare gli eventi recuperati.
+
+## Verifica sulla strategia di raccolta
+
+La metrica che certifica l'affidabilità è la riconciliazione delle transazioni tra tracking e database contabile: scarto giornaliero sotto l'1% su ordini e ricavi, vicino a zero sugli eventi server-side, e nessun evento senza schema nel warehouse.
+
+1. Un sito registra 6.000 ordini nell'ERP e il suo pixel ne conta 4.320. Quanto vale il punto cieco del client e quale canale lo copre?
+
+<details>
+<summary>Mostra risposta</summary>
+
+Il punto cieco è (6.000 − 4.320) / 6.000 = 1.680 / 6.000 = 28%. Lo copre l'emissione server-side dal backend, che scrive l'evento al momento della conferma del pagamento. Il CDC dell'ERP serve poi come controllo contabile indipendente.
+
+</details>
+
+2. Perché `event_id` deve essere generato all'origine e non assegnato dal collettore al momento dell'arrivo?
+
+<details>
+<summary>Mostra risposta</summary>
+
+Perché un ritentativo di rete o un refresh produce un secondo messaggio con contenuto identico: se la chiave nascesse all'arrivo, ogni copia riceverebbe un identificativo diverso e sarebbe indistinguibile da un secondo acquisto. Con una chiave creata alla nascita dell'evento, o derivata da `order_id`, le copie coincidono e `ReplacingMergeTree` ne tiene una.
+
+</details>
+
+3. Un rilascio Android invia `revenue_eur` come stringa. Che cosa deve succedere a quei payload e chi ne viene informato?
+
+<details>
+<summary>Mostra risposta</summary>
+
+Il validatore li rifiuta dalla tabella principale e li scrive in `events_quarantine` con il motivo della violazione e il testo grezzo. Un allarme sul numero di violazioni avvisa il team mobile indicato come owner nel tracking plan. Corretto il tipo, gli eventi si riversano nella tabella principale senza perdere dati.
+
+</details>
+
+4. Il server emette `order_completed` con `user_id` ma senza `anonymous_id`. Il conteggio degli ordini è corretto. Che cosa si rompe?
+
+<details>
+<summary>Mostra risposta</summary>
+
+Si rompe l'attribuzione: senza l'identificativo anonimo non si può collegare l'ordine alle pagine viste e al clic sull'annuncio, quindi nessuna campagna riceve il credito della vendita. La correzione è far inviare dal browser l'`anonymous_id` nella richiesta di acquisto e riportarlo nell'evento server-side.
+
+</details>

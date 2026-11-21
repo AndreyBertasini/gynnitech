@@ -1,7 +1,9 @@
 ---
 title: "Progetto: un mini analytics stack completo"
 description: >-
-  Progetto finale: un mini analytics stack completo. Laboratorio integrativo del modulo.
+  Progetto finale del modulo: tre sorgenti grezze (Stripe, HubSpot, eventi prodotto)
+  trasformate in un grafo dbt su ClickHouse con staging, intermediate, mart incrementale,
+  test di quadratura e modello di attivazione, fino a una dashboard con baseline e rischio residuo.
 module: "Modulo 16: Analytics engineering con dbt"
 order: 13
 category: Lab
@@ -9,87 +11,79 @@ headerImage: /course-headers/analytics-engineering-caso-studio-ginnytech-ad.webp
 headerImageAlt: >-
   Progetto finale Analytics Engineering - immagine ufficiale della lezione su GinnyTech
 difficulty: advanced
-duration: 28 min
+duration: 40 min
 prerequisites:
   - analytics-engineering/cheat-sheet
 learningObjectives:
-  - Costruire un mini analytics stack da sorgenti grezze a marts testati
-  - Documentare definizioni e lineage di ogni modello del progetto
-  - Consegnare una dashboard con baseline, rischio residuo e prossimo passo operativo
+  - Costruire un mini analytics stack da sorgenti grezze a marts testati con dbt su ClickHouse
+  - Evitare il fan-out pre-aggregando gli eventi al grano account-giorno prima del join con il canone
+  - Verificare la quadratura dell'MRR con un test singolare e leggere la distribuzione per stato di salute
+  - Consegnare la dashboard con baseline numerica, rischio residuo e prossimo passo operativo misurabile
 binario: "ml-tabellare"
-formato: "articolo"
-autore: "Hermes"
-controllatoDa: "Argo"
-autorizzatoDa: "Giano"
+formato: "didattica-v2"
 draft: false
-dateModified: 2026-11-13
+dateModified: 2026-11-17
 ---
 
-# Progetto: un mini analytics stack completo
+Una scale-up B2B italiana ha tre sorgenti grezze disallineate in ClickHouse: gli abbonamenti da Stripe (`raw_stripe.subscriptions`), le trattative da HubSpot (`raw_hubspot.deals`) e gli eventi di utilizzo prodotto (`raw_app.feature_events`). Questo è uno scenario costruito con numeri di esempio che riunisce le competenze del modulo in un solo progetto.
 
-Una scale-up B2B italiana ha tre sorgenti grezze disallineate in ClickHouse: gli abbonamenti da Stripe (`raw_stripe.subscriptions`), le trattative commerciali da HubSpot (`raw_hubspot.deals`) e gli eventi di utilizzo prodotto (`raw_app.feature_events`). Fino a ieri i numeri venivano estratti con query manuali: gli importi Stripe in centesimi venivano sommati agli euro di HubSpot, i retry dei webhook generavano il 7% di abbonamenti duplicati e il Customer Success non sapeva quali aziende paganti avessero smesso di usare la piattaforma negli ultimi 14 giorni. In questo progetto finale costruiamo da zero il **mini analytics stack completo in dbt** (`sources -> staging -> intermediate -> marts -> activation + semantic metrics`), certificato da test, lineage e pronto per alimentare sia la dashboard direzionale sia il Reverse ETL.
+Fino a ieri i numeri uscivano da query manuali. Gli importi Stripe in centesimi venivano sommati agli euro di HubSpot, i retry dei webhook producevano abbonamenti duplicati e il Customer Success non sapeva quali aziende paganti avessero smesso di usare la piattaforma da 14 giorni. L'obiettivo è costruire il grafo `sources`, `staging`, `intermediate`, `marts` e attivazione, certificato da test e pronto per alimentare dashboard e CRM.
 
-## Centesimi sommati agli euro, webhook duplicati e clienti a rischio invisibili
+> **Idea chiave:** un mini analytics stack è completo solo se isola la pulizia nello staging, porta gli eventi al grano giusto prima di ogni join, dimostra la quadratura dei totali con un test e consegna sia i KPI sia l'azione operativa.
 
-Questo è un caso ricostruito con numeri di esempio che integra in un unico progetto end-to-end tutte le competenze del Modulo 16. L'azienda conta 2.400 aziende clienti B2B (`accounts`) e vuole unificare finanza, vendite e utilizzo del prodotto per governare la crescita e prevenire gli abbandoni (*churn*).
+## Centesimi sommati agli euro e clienti a rischio invisibili
 
-Nelle tre tabelle grezze di partenza si annidano le trappole tipiche del mondo reale:
-1. `raw_stripe.subscriptions` esprime il canone mensile in **centesimi** (`mrr_cents = 49900` per `499,00 €`), contiene account di test interni (`@nostraazienda.it`) e presenta righe duplicate quando il webhook di Stripe ritenta la consegna dello stesso aggiornamento.
-2. `raw_hubspot.deals` contiene i contratti firmati espressi in **euro** (`deal_amount_eur`), ma l'email del referente ha spazi bianchi e maiuscole incoerenti (`" Mario.Rossi@Cliente.it "`).
-3. `raw_app.feature_events` registra 50 milioni di azioni mensili nel software, ma non è collegata al canone pagato: un cliente enterprise che paga 2.000 €/mese può smettere completamente di fare login per tre settimane senza che nessun account manager riceva un avviso in HubSpot.
+L'azienda ha 2.400 account clienti e vuole unificare finanza, vendite e utilizzo per governare la crescita e prevenire l'abbandono. Le tre tabelle di partenza nascondono le trappole tipiche. `raw_stripe.subscriptions` esprime il canone in centesimi (`mrr_cents = 49900` per 499,00 euro), contiene account di test interni e righe duplicate quando il webhook ritenta la consegna. `raw_hubspot.deals` ha gli importi in euro ma le email con spazi e maiuscole incoerenti.
 
-L'obiettivo del laboratorio è trasformare queste tre sorgenti grezze in un'architettura dbt pulita, testata, documentata e azionabile in quattro passi.
+`raw_app.feature_events` registra 50 milioni di azioni al mese ma non è collegata al canone pagato. Un cliente enterprise da 2.000 euro al mese può non fare login per tre settimane senza che nessun account manager riceva un avviso. Il progetto trasforma le tre sorgenti in un'architettura dbt in quattro passi: pulire, pre-aggregare, unire con un contratto, attivare.
 
-## Architettura del Mini Stack: Staging, Intermediate, Marts (Fct/Dim/Act) e Metriche
+## L'architettura del mini stack
 
-Il progetto implementa l'intero grafo (DAG) seguendo lo standard aureo dell'Analytics Engineering su ClickHouse:
+Il grafo ha quattro livelli con compiti separati. Lo staging pulisce ogni sorgente 1:1, l'intermediate porta gli eventi al grano `(account_id, activity_date)`, il mart unisce canone e utilizzo e assegna lo stato di salute, il livello di attivazione prepara le righe per il CRM.
 
-Il primo strato è **Sources & Staging (`stg_`)**. Dichiarate le tre sorgenti in `_sources.yml` con controllo di `freshness` a 6 ore, i tre modelli `stg_stripe__subscriptions`, `stg_hubspot__deals` e `stg_app__feature_events` (materializzati come `view`) eseguono la bonifica 1-a-1: deduplicano i webhook con `LIMIT 1 BY subscription_id` ordinato per `_ingested_at DESC`, convertono `mrr_cents / 100.0 AS mrr_eur`, normalizzano le email con `lower(trim(...))` ed eliminano i domini di test interni.
-
-Il secondo strato è **Intermediate (`int_`)**. Il modello `int_product__account_usage_rolling_14d` aggrega gli eventi applicativi per `account_id` e giorno calcolando gli utenti attivi negli ultimi 14 giorni (`active_users_14d`), le azioni chiave completate e i giorni trascorsi dall'ultimo login (`days_since_last_activity`).
-
-Il terzo e quarto strato sono i **Marts (`dim_accounts`, `fct_mrr_health_daily`, `act_hubspot__churn_alerts`)** e la **Dashboard Direzionale con analisi del rischio residuo**. La tabella `fct_mrr_health_daily` (incrementale con lookback di 3 giorni e contratto `enforced: true`) unisce il canone `mrr_eur` di Stripe con la salute di utilizzo prodotto, classificando ogni cliente attivo come `'HEALTHY'`, `'AT_RISK'` o `'CRITICAL_DORMANT'` (quando un cliente pagante ha `active_users_14d = 0`). Sopra di essa, il modello di attivazione `act_hubspot__churn_alerts` alimenta il CRM con `payload_hash`.
-
-**Un mini analytics stack è completo solo se isola la pulizia delle sorgenti nello staging, certifica l'assenza di duplicati nei marts con `dbt build`, documenta il lineage fino alle exposures e consegna sia i KPI direzionali sia l'attivazione operativa.**
-
-## Tre errori che farebbero fallire il progetto durante la verifica finale
-
-Il blocco SQL qui sotto mostra cosa succede se si tenta di risolvere il progetto con un'unica query monolitica senza staging, senza pre-aggregazione degli eventi prima del join e senza deduplicazione dei webhook:
-
-```sql
--- ERRORE 1: JOIN diretto tra gli abbonamenti non deduplicati e i 50 milioni di eventi grezzi
--- (senza pre-aggregare gli eventi per account_id), generando un prodotto cartesiano esplosivo!
--- ERRORE 2: mrr_cents sommato senza dividere per 100.0 e moltiplicato per ogni singolo evento!
-SELECT
-    s.account_id,
-    count(e.event_id) AS eventi,
-    -- DISASTRO MATEMATICO: se l'account ha fatto 1.000 clic, il suo MRR viene sommato 1.000 volte!
-    sum(s.mrr_cents) AS mrr_completamente_falso
-FROM raw_stripe.subscriptions AS s
-LEFT JOIN raw_app.feature_events AS e
-    ON s.account_id = e.account_id
-GROUP BY s.account_id;
+```mermaid
+flowchart LR
+    S1["raw_stripe.subscriptions"] --> A["stg_stripe__subscriptions"]
+    S2["raw_hubspot.deals"] --> B["stg_hubspot__deals"]
+    S3["raw_app.feature_events"] --> C["stg_app__feature_events"]
+    C --> D["int_product__account_usage_daily"]
+    A --> E["fct_mrr_health_daily (incremental)"]
+    D --> E
+    E --> F["act_hubspot__churn_alerts"]
+    E --> G["Dashboard direzionale"]
 ```
 
-### Fare JOIN tra tabelle a grano diverso (Abbonamenti vs Eventi) senza pre-aggregare
+| Modello | Livello | Grano | Materializzazione | Test principali |
+|---|---|---|---|---|
+| `stg_stripe__subscriptions` | Staging | Una riga per `subscription_id` | `view` | `unique`, `not_null` |
+| `int_product__account_usage_daily` | Intermediate | Una riga per account e giorno | `table` | `unique` su coppia |
+| `fct_mrr_health_daily` | Mart | Una riga per giorno e account | `incremental` | `unique`, `accepted_values`, quadratura |
+| `act_hubspot__churn_alerts` | Attivazione | Una riga per account a rischio | `table` | `unique`, `not_null` |
 
-Unire direttamente la tabella degli abbonamenti (1 riga per `account_id`) con la tabella degli eventi di utilizzo prodotto (migliaia di righe per `account_id`) e calcolare `sum(s.mrr_eur)` nella stessa query è l'errore di modellazione più distruttivo (*chasm trap / fan-out*). Se un cliente paga `500 €` al mese e i suoi dipendenti generano `2.000` eventi nel software, il `LEFT JOIN` ripete la riga dell'abbonamento `2.000` volte e `sum(mrr_eur)` restituisce **`1.000.000 €`** invece di `500 €`. Gli eventi devono **sempre** essere pre-aggregati al grano `(account_id, activity_date)` in un modello `intermediate` prima di essere uniti al canone finanziario.
+## Staging: dichiarare le sorgenti e ripulirle
 
-### Lasciare la conversione di valuta/centesimi nei Marts invece che nello Staging
+Le tre sorgenti si dichiarano in un file YAML con controllo di freschezza a 6 ore sulla colonna di ingestione. Il controllo segnala quando il caricamento si è fermato prima che qualcuno veda un numero vecchio.
 
-Dividere `mrr_cents / 100.0` in alcuni modelli finali e dimenticarsene in altri porta inevitabilmente a report che sovrastimano i ricavi di cento volte. La regola dell'Analytics Engineering è tassativa: nessuna colonna espressa in centesimi (`_cents`) o con timestamp unix interi deve mai uscire viva dallo strato di `staging`. Già in `stg_stripe__subscriptions` la colonna viene convertita in `toDecimal64(mrr_cents / 100.0, 2) AS mrr_eur`.
+```yaml
+# models/staging/_sources.yml
+version: 2
 
-### Consegnare i modelli SQL senza test di quadratura, documentazione e prossimo passo operativo
+sources:
+  - name: stripe
+    schema: raw_stripe
+    loaded_at_field: _ingested_at
+    freshness:
+      warn_after: {count: 6, period: hour}
+      error_after: {count: 12, period: hour}
+    tables:
+      - name: subscriptions
+```
 
-Limitarsi a scrivere i file `.sql` senza aggiungere in `_marts__models.yml` le descrizioni delle colonne, l'`exposure` della dashboard, il test singolare che confronta l'MRR totale con Stripe e la lettura critica del risultato (baseline attuale, rischio residuo sui dati e azione raccomandata al business) lascia il lavoro a metà. Un Analytics Engineer consegna una soluzione di business verificata, non solo una tabella nel database.
-
-## Implementazione completa: Staging, Intermediate, Mart Incrementale, Activation e Dashboard Query
-
-Ecco il codice SQL completo dei quattro livelli del progetto in dbt + ClickHouse (pronto per superare `dbt build`):
+Il modello di staging per Stripe fa quattro cose: deduplica i retry dei webhook tenendo l'ultima versione di ogni `subscription_id`, converte i centesimi in euro, normalizza l'email ed esclude i domini di test interni. Dopo questo modello nessuna colonna in centesimi deve circolare nel progetto.
 
 ```sql
--- LIVELLO 1 (Staging): models/staging/stripe/stg_stripe__subscriptions.sql
--- Deduplica i retry dei webhook, converte centesimi -> euro ed esclude i test interni:
+-- models/staging/stripe/stg_stripe__subscriptions.sql
+-- Deduplica i retry dei webhook, converte centesimi in euro ed esclude i test interni.
 SELECT
     subscription_id,
     account_id,
@@ -100,12 +94,22 @@ SELECT
     toDate(started_at) AS started_date,
     toDateTime(updated_at, 'UTC') AS updated_at_utc
 FROM {{ source('stripe', 'subscriptions') }}
-WHERE billing_email NOT LIKE '%@nostraazienda.it%'
+WHERE billing_email NOT LIKE '%@nostraazienda.it'
 ORDER BY _ingested_at DESC
 LIMIT 1 BY subscription_id;
+```
 
--- LIVELLO 2 (Intermediate): models/intermediate/product/int_product__account_usage_daily.sql
--- Pre-aggrega i 50M di eventi al grano esatto (account_id, activity_date) per evitare fan-out nei join:
+## Intermediate: pre-aggregare gli eventi prima del join
+
+Unire direttamente gli abbonamenti, una riga per account, con gli eventi, migliaia di righe per account, e sommare il canone è l'errore di modellazione più distruttivo, noto come fan-out. Un esempio numerico lo rende evidente. Un cliente paga 500 euro al mese e i suoi utenti generano 2.000 eventi: il `LEFT JOIN` ripete la riga dell'abbonamento 2.000 volte, e `sum(mrr_eur)` restituisce 500 × 2.000 = 1.000.000 euro invece di 500 euro, cioè 2.000 volte il valore vero.
+
+La correzione è un modello intermedio che riduce gli eventi al grano `(account_id, activity_date)` prima di ogni join. I 50 milioni di eventi al mese diventano al più una riga per account e giorno, quindi non più di 2.400 × 30 = 72.000 righe al mese.
+
+```sql
+-- models/intermediate/product/int_product__account_usage_daily.sql
+-- Pre-aggrega gli eventi al grano esatto (account_id, activity_date) per evitare fan-out nei join.
+{{ config(materialized='table', order_by='(account_id, activity_date)') }}
+
 SELECT
     account_id,
     toDate(occurred_at_utc) AS activity_date,
@@ -114,15 +118,21 @@ SELECT
     max(occurred_at_utc) AS last_event_at_utc
 FROM {{ ref('stg_app__feature_events') }}
 GROUP BY account_id, activity_date;
+```
 
--- LIVELLO 3 (Mart Incrementale): models/marts/core/fct_mrr_health_daily.sql
--- Unisce MRR e utilizzo 14gg al grano (snapshot_date, account_id) con lookback di 3 giorni:
+## Il mart: canone e salute d'uso nella stessa riga
+
+Il mart `fct_mrr_health_daily` ha una riga per giorno e account. Somma il canone degli abbonamenti attivi, legge l'uso degli ultimi 14 giorni dal modello intermedio e assegna uno stato: `CRITICAL_DORMANT` se l'ultimo giorno di attività risale ad almeno 14 giorni fa o manca del tutto, `AT_RISK` se i flussi completati nella finestra sono meno di 5, altrimenti `HEALTHY`.
+
+```sql
+-- models/marts/core/fct_mrr_health_daily.sql
+-- Una riga per (snapshot_date, account_id). Una riesecuzione nello stesso giorno sostituisce le righe.
 {{
     config(
         materialized = 'incremental',
         engine = 'MergeTree()',
         unique_key = '(snapshot_date, account_id)',
-        incremental_strategy = 'delete+insert',
+        incremental_strategy = 'delete_insert',
         partition_by = 'toYYYYMM(snapshot_date)',
         order_by = '(snapshot_date, health_status, account_id)'
     )
@@ -139,16 +149,17 @@ WITH active_subs AS (
     WHERE subscription_status = 'active'
     GROUP BY account_id
 ),
+
 usage_14d AS (
     SELECT
         account_id,
         sum(core_workflows_completed) AS workflows_last_14d,
-        max(daily_active_users) AS peak_dau_14d,
         dateDiff('day', max(activity_date), today()) AS days_since_last_active
     FROM {{ ref('int_product__account_usage_daily') }}
     WHERE activity_date >= today() - 14
     GROUP BY account_id
 )
+
 SELECT
     s.snapshot_date,
     s.account_id,
@@ -164,10 +175,78 @@ SELECT
     ) AS health_status
 FROM active_subs AS s
 LEFT JOIN usage_14d AS u
-    ON s.account_id = u.account_id;
+    ON s.account_id = u.account_id
+SETTINGS join_use_nulls = 1;
+```
 
--- LIVELLO 4 (Query Dashboard Esecutiva & Reverse ETL Summary):
--- Restituisce Baseline MRR, MRR a rischio per fascia di salute e lista account per Customer Success:
+In ClickHouse un `LEFT JOIN` senza corrispondenza restituisce per impostazione predefinita il valore di default del tipo e non `NULL`, quindi un account senza eventi avrebbe `days_since_last_active` pari a 0 e finirebbe tra i sani. L'impostazione `join_use_nulls = 1` ripristina il comportamento standard, così `coalesce` assegna 999 e l'account senza attività nella finestra diventa `CRITICAL_DORMANT`.
+
+## Test, quadratura e consegna
+
+Il contratto del mart dichiara chiave, valori ammessi e tipi. A fianco, un test singolare confronta l'MRR totale del mart con la somma di Stripe dopo la deduplicazione: se la differenza supera mezzo centesimo, il test restituisce una riga e `dbt build` si ferma.
+
+```yaml
+# models/marts/core/_core__models.yml
+version: 2
+
+models:
+  - name: fct_mrr_health_daily
+    description: "Una riga per giorno e account attivo, con canone e stato di salute d'uso."
+    config:
+      contract:
+        enforced: true
+    tests:
+      - dbt_utils.unique_combination_of_columns:
+          combination_of_columns: [snapshot_date, account_id]
+    columns:
+      - name: snapshot_date
+        data_type: Date
+      - name: account_id
+        data_type: String
+        tests: [not_null]
+      - name: billing_email_clean
+        data_type: String
+      - name: plan_tier
+        data_type: String
+      - name: total_mrr_eur
+        data_type: Decimal(18, 2)
+      - name: workflows_last_14d
+        data_type: UInt64
+      - name: days_since_last_active
+        data_type: Int32
+      - name: health_status
+        data_type: String
+        tests:
+          - accepted_values:
+              values: ['HEALTHY', 'AT_RISK', 'CRITICAL_DORMANT']
+```
+
+```sql
+-- tests/assert_mrr_matches_stripe.sql
+-- Fallisce se l'MRR del mart di oggi differisce da Stripe deduplicato di oltre mezzo centesimo.
+WITH mart AS (
+    SELECT sum(total_mrr_eur) AS mrr FROM {{ ref('fct_mrr_health_daily') }} WHERE snapshot_date = today()
+),
+stripe AS (
+    SELECT sum(mrr_eur) AS mrr FROM {{ ref('stg_stripe__subscriptions') }} WHERE subscription_status = 'active'
+)
+SELECT mart.mrr AS mart_mrr, stripe.mrr AS stripe_mrr
+FROM mart CROSS JOIN stripe
+WHERE abs(mart.mrr - stripe.mrr) > 0.005;
+```
+
+```bash
+# Controllo di freschezza delle sorgenti, poi build completa del grafo con test
+dbt source freshness
+dbt build --select +fct_mrr_health_daily+
+```
+
+## I conti della dashboard: baseline, esposizione e azione
+
+La query finale della dashboard restituisce, per stato di salute, il numero di account, l'MRR esposto e la quota sul totale.
+
+```sql
+-- Query dashboard direzionale: MRR per stato di salute con quota sul totale.
 SELECT
     health_status,
     count() AS active_accounts,
@@ -180,26 +259,79 @@ GROUP BY health_status
 ORDER BY mrr_exposed_eur DESC;
 ```
 
-L'esecuzione di `dbt build` compila l'intero grafo in 6,4 secondi superando tutti i test (`unique` su `(snapshot_date, account_id)`, `not_null`, `accepted_values` su `health_status` e quadratura al centesimo dell'MRR totale con `stg_stripe__subscriptions`). La query finale della dashboard consegna alla direzione una fotografia nitida e immediatamente azionabile. La **baseline certificata** mostra `2.400` account attivi per un MRR totale certificato di **`480.000,00 €`** (`0 €` di scarto rispetto a Stripe dopo la rimozione del 7% di webhook duplicati). Sul fronte dell'**esposizione al rischio rilevata**, mentre l'`81,5%` dell'MRR (`391.200 €`) è in stato `'HEALTHY'`, l'`11,0%` (`52.800 €`) è `'AT_RISK'` e il **`7,5%` (`36.000 €`, distribuiti su 145 aziende clienti)** si trova in stato `'CRITICAL_DORMANT'` (zero accessi negli ultimi 14 giorni). Come **azione attivata**, i 145 account `'CRITICAL_DORMANT'` vengono sincronizzati dal modello `act_hubspot__churn_alerts` nel CRM aprendo automaticamente un task prioritario per il team Customer Success.
+Con numeri di esempio, la baseline certificata è di 2.400 account attivi per un MRR di 480.000 euro, con scarto di 0 euro rispetto a Stripe. Senza la deduplicazione dei webhook, se i duplicati valessero il 7% del canone, lo staging mostrerebbe 480.000 × 1,07 = 513.600 euro, cioè 33.600 euro di ricavo inesistente.
 
-## Sintesi Architetturale: Monolite dbt Unico o Architettura Multi-Progetto (dbt Mesh)
+La distribuzione è questa: `HEALTHY` pesa 81,5% pari a 391.200 euro, `AT_RISK` pesa 11,0% pari a 52.800 euro e `CRITICAL_DORMANT` pesa 7,5% pari a 36.000 euro su 145 clienti. La somma torna: 391.200 + 52.800 + 36.000 = 480.000 euro e 81,5 + 11,0 + 7,5 = 100%. Il canone medio dei 145 clienti dormienti è 36.000 / 145 = 248,3 euro al mese, contro una media generale di 480.000 / 2.400 = 200 euro. Il valore è più alto di 48,3 euro, quindi il rischio si concentra su clienti più grandi della media, un'informazione che il numero aggregato non mostra.
 
-Una volta messo in produzione questo stack completo per i primi domini aziendali (Finanza, Vendite, Prodotto), l'ultima decisione evolutiva riguarda come scalare il repository al crescere dell'azienda: conviene mantenere **un unico repository dbt monolitico (`monorepo`)** oppure dividere i domini in più progetti indipendenti collegati tra loro (**`dbt Mesh`**)?
+Come azione, i 145 clienti dormienti passano dal modello `act_hubspot__churn_alerts` al CRM, deduplicati sulla chiave e filtrati per consenso, e aprono un task prioritario per il Customer Success. Ogni consegna alla direzione include anche il rischio residuo, per esempio il 3% dei clienti enterprise che usa un modulo via API non ancora tracciato e che potrebbe risultare dormiente senza esserlo, e il prossimo passo: integrare i log API in `int_product__account_usage_daily` entro lo sprint e misurare il tasso di salvataggio a 30 giorni sui 145 contattati.
 
-Il criterio di scelta è netto: **mantenete un unico progetto dbt monolitico (`monorepo`) finché il team dati conta meno di 15–20 analytics engineer e meno di 600–800 modelli totali (perché avere un unico DAG, un'unica CI e ref diretti senza attriti tra finanza, prodotto e marketing è un vantaggio competitivo enorme), passate invece a `dbt Mesh` (progetti separati per dominio con modelli `access: public` e dipendenze cross-project) solo in grandi gruppi enterprise dove team autonomi in nazioni o business unit diverse hanno cicli di rilascio e permessi di accesso al codice fisicamente incompatibili.**
+## Un solo progetto dbt o più progetti con dbt Mesh
 
-La confusione comune consiste nello spezzare un team di 4 persone in 4 micro-repository dbt separati ("uno per il marketing, uno per le vendite, uno per la finanza, uno per il prodotto"): ogni volta che serve aggiungere una colonna da `stg_stripe` fino alla dashboard di marketing, lo sviluppatore è costretto ad aprire e coordinare tre pull request in tre repository diversi. Nel 95% delle aziende italiane ed europee, un singolo progetto dbt ben organizzato in sottocartelle (`marts/finance/`, `marts/marketing/`, `marts/product/`) con regole `CODEOWNERS` su GitHub offre tutta la governance necessaria con zero burocrazia.
+Dopo la messa in produzione per finanza, vendite e prodotto resta una decisione di scala: un repository unico oppure più progetti collegati, la configurazione chiamata dbt Mesh. La regola pratica è restare su un progetto unico finché il team conta meno di 15-20 analytics engineer e i modelli sono meno di 600-800. Un solo grafo, una sola CI e `ref()` diretti tra finanza, prodotto e marketing hanno un valore alto in quelle dimensioni.
 
-Nella consegna finale alla direzione (come richiesto dagli obiettivi del laboratorio), accompagniamo sempre la dashboard con il **Rischio Residuo** (es. il 3% degli utenti enterprise utilizza un modulo offline via API non ancora tracciato in `stg_app__feature_events`, che potrebbe classificare come dormienti clienti puramente API) e il **Prossimo Passo Operativo** (integrare i log delle chiamate API B2B in `int_product__account_usage_daily` entro il prossimo sprint e misurare il tasso di salvataggio a 30 giorni sui 145 account contattati dal Customer Success).
+Si passa a più progetti, con modelli `access: public` e dipendenze tra progetti, solo quando team autonomi in paesi o business unit diverse hanno cicli di rilascio e permessi sul codice incompatibili. L'errore tipico è spezzare un team di 4 persone in 4 repository, uno per area: ogni colonna aggiunta in `stg_stripe` e consumata dal marketing richiede tre pull request coordinate. Un unico progetto con sottocartelle `marts/finance/`, `marts/marketing/`, `marts/product/` e regole `CODEOWNERS` dà la governance necessaria senza quel costo.
 
-## Cinque domande di collaudo finale del vostro progetto di Analytics Engineering
+## Tre errori che fanno fallire la verifica finale
 
-1. Il grafo completo (`sources -> stg_ -> int_ -> fct_/dim_/act_`) compila ed esegue con **`dbt build`** restituendo `0 errori` su tutti i test generici e sul test singolare di quadratura finanziaria?
-2. Avete pre-aggregato tutte le tabelle di eventi ad alta frequenza nello strato `intermediate` al grano esatto di unione prima di fare `LEFT JOIN` con le tabelle finanziarie, evitando qualsiasi *fan-out*?
-3. Ogni modello e ogni colonna esposta nei `marts` possiede una descrizione chiara nel file YAML, un `contract: {enforced: true}`, un `owner` assegnato e un nodo `exposure` che punta alla dashboard o al job di Reverse ETL?
-4. Il modello di attivazione (`act_`) è deduplicato sulla chiave primaria del CRM, filtra i consensi GDPR e calcola il `payload_hash` per inviare solo le variazioni reali?
-5. La consegna finale al business include non solo il link al grafico ma anche la **baseline numerica certificata**, i **rischi/limiti residui del dato** (es. canali non ancora tracciati) e il **prossimo passo operativo misurabile**?
+Questi tre errori sono quelli che una revisione trova più spesso nel progetto finale. Ciascuno produce un numero plausibile ma sbagliato, che è la condizione peggiore.
 
-La metrica conclusiva che certifica il completamento del Modulo 16 è la consegna di una pipeline **`dbt build` 100% verde**, con **0% di discrepanza tra i Marts e i sistemi contabili sorgente** e **100% di tracciabilità dal dato grezzo all'azione nel CRM**.
+### Unire tabelle a grano diverso senza pre-aggregare
 
-Di tutto il percorso sull'Analytics Engineering con dbt, portate con voi una sola bussola: il vostro compito non è scrivere query SQL più lunghe, ma trasformare il caos delle sorgenti grezze in un sistema di tabelle così limpide, testate e affidabili che tutta l'azienda possa prendere decisioni e azionare i propri strumenti guardando un'unica verità condivisa.
+Il sintomo è un MRR di milioni di euro per un cliente da 500, come nell'esempio di 1.000.000 euro. Sembra ragionevole perché una sola query risponde alla domanda. Succede perché il join ripete la riga dell'abbonamento per ogni evento. Si corregge con il modello intermedio al grano account-giorno e con il test `unique` sulla chiave del mart.
+
+### Lasciare la conversione dei centesimi fuori dallo staging
+
+Il sintomo è un report che sovrastima i ricavi di 100 volte in alcuni modelli e non in altri. Sembra ragionevole perché la divisione per 100 si può fare dove serve. Succede che qualcuno dimentica di dividere in un modello e il valore sbagliato si propaga. Si corregge con una regola netta: nessuna colonna `_cents` o con timestamp interi esce viva dallo strato di staging.
+
+### Consegnare i modelli senza quadratura, documentazione e prossimo passo
+
+Il sintomo è un lavoro accettato che nessuno sa difendere quando un numero viene contestato. Sembra ragionevole perché i file `.sql` funzionano. Succede che mancano descrizioni di colonna, l'exposure della dashboard, il test che confronta l'MRR con Stripe e la lettura critica con baseline, rischio residuo e azione. Si corregge consegnando la soluzione di business verificata, non solo la tabella.
+
+## Collaudo finale del progetto
+
+La metrica che chiude il modulo è una pipeline `dbt build` verde, con 0 euro di discrepanza tra i marts e Stripe e la tracciabilità completa dal dato grezzo all'azione nel CRM.
+
+1. Il grafo completo compila ed esegue con `dbt build` restituendo zero errori sui test generici e sul test di quadratura?
+
+<details>
+<summary>Mostra risposta</summary>
+
+Sì, quando `dbt build --select +fct_mrr_health_daily+` termina senza errori e il test `assert_mrr_matches_stripe` restituisce zero righe. Un test fallito deve interrompere i modelli a valle, compreso quello di attivazione, e non va silenziato con un `warn`.
+
+</details>
+
+2. Un account paga 800 euro al mese e produce 1.500 eventi in un mese. Quanto vale il suo MRR se unisci gli eventi grezzi senza pre-aggregare, e quale modello lo evita?
+
+<details>
+<summary>Mostra risposta</summary>
+
+Vale 800 × 1.500 = 1.200.000 euro, cioè 1.500 volte il valore reale. Lo evita `int_product__account_usage_daily`, che riduce gli eventi a una riga per account e giorno prima del join con il canone.
+
+</details>
+
+3. La distribuzione mostra `AT_RISK` al 11,0% di un MRR da 480.000 euro. Quanti euro sono esposti e quale controllo verifichi sulla somma?
+
+<details>
+<summary>Mostra risposta</summary>
+
+Sono 480.000 × 0,11 = 52.800 euro. Si verifica che le tre fasce sommino al totale certificato: 391.200 + 52.800 + 36.000 = 480.000 euro, e che le quote sommino al 100%.
+
+</details>
+
+4. Il modello `act_hubspot__churn_alerts` deve rispettare tre condizioni prima di alimentare il CRM. Quali?
+
+<details>
+<summary>Mostra risposta</summary>
+
+Deve avere una sola riga per la chiave usata dal CRM, con test `unique` e `not_null`, deve escludere gli account senza consenso privacy e deve calcolare un `payload_hash` per inviare solo le variazioni reali. Un circuit breaker sul volume del delta completa la protezione.
+
+</details>
+
+5. Quando passeresti da un progetto dbt unico a più progetti collegati?
+
+<details>
+<summary>Mostra risposta</summary>
+
+Quando il team supera 15-20 analytics engineer e i modelli superano 600-800, e soprattutto quando team autonomi hanno cicli di rilascio e permessi di accesso al codice incompatibili. Con 4 persone resta preferibile un solo progetto con sottocartelle e `CODEOWNERS`.
+
+</details>

@@ -1,108 +1,152 @@
 ---
 title: "Modellazione dimensionale: fact e dimension table"
-description: >-
-  Progettare modelli dimensionali, gestire gerarchie e slow changing dimensions.
+description: "Dichiarare il grain, classificare le misure e storicizzare le dimensioni con SCD Tipo 2 in ClickHouse, così che il fatturato di gennaio resti lo stesso anche dopo una riorganizzazione dei territori."
 module: "Modulo 9: Data warehouse e modellazione analitica"
 order: 2
 category: Tecnico
 headerImage: /course-headers/data-warehousing-data-modeling-ginnytech-ad.webp
 headerImageAlt: "Modellazione dimensionale: fact e dimension table - immagine ufficiale della lezione su GinnyTech, creata da AD"
 difficulty: advanced
-duration: 22 min
-learningObjectives:
-  - Fissare il grain scrivendo cosa rappresenta una riga della fact table senza ambiguità
-  - Distinguere fact transazionali, snapshot periodici e snapshot cumulativi in base alla domanda di business
-  - Classificare le misure in additive, semi-additive e non additive e gestire le slowly changing dimensions
+duration: "45 min"
 prerequisites:
   - data-warehousing/fondamenti
+learningObjectives:
+  - "Dichiarare il grain di una fact table in una frase e ripartire pro-quota uno sconto di testata sulle righe senza alterarne il totale"
+  - "Classificare misure additive, semi-additive e non additive e scegliere l'aggregazione corretta lungo il tempo"
+  - "Implementare una dimensione SCD Tipo 2 in ClickHouse e ricostruire la regione storica di una vendita con una join sulla chiave surrogata o con ASOF JOIN"
 binario: "ml-tabellare"
-formato: "articolo"
-autore: "Hermes"
-controllatoDa: "Argo"
-autorizzatoDa: "Giano"
 draft: false
-dateModified: 2026-11-13
+dateModified: 2026-11-17
+formato: "didattica-v2"
 ---
 
-# Modellazione dimensionale: fact e dimension table
+Un distributore di componenti meccanici riorganizza i territori commerciali a ottobre. Il lunedì dopo, il cruscotto del controllo di gestione mostra che il fatturato di gennaio-settembre della zona `NORD-OVEST` è sceso di 1,4 milioni di euro, e che lo stesso importo è comparso sotto `LOMBARDIA-EST`. Con una provvigione del 10% sul fatturato di zona, sono 140.000 euro di premi che cambiano mano senza che nessuno abbia venduto niente. È uno scenario costruito con numeri di esempio. Il calcolo è corretto: ciò che manca è un modello che ricordi com'era il mondo quando la vendita è avvenuta.
 
-Un distributore industriale italiano migra il database gestionale nel data warehouse e mette gli analisti a interrogare una tabella unica degli ordini unita all'anagrafica corrente dei clienti. Quando un venditore viene spostato dal Piemonte alla Lombardia a ottobre, i report riassegnano l'intero fatturato da gennaio a settembre alla nuova regione, alterando i premi di produzione di 140.000 euro. La causa non è un bug di calcolo: è non aver separato la tabella dei fatti dalle dimensioni storiche e aver sovrascritto gli attributi mutevoli senza tracciamento temporale.
+> **Idea chiave:** una tabella dei fatti registra eventi a un grain dichiarato, le dimensioni descrivono il contesto, e ogni attributo che può cambiare va storicizzato con una chiave surrogata, altrimenti il passato si riscrive a ogni anagrafica aggiornata.
 
-## Centoquarantamila euro di provvigioni spostate per un cambio di regione
+## Come si è rotto il cruscotto
 
-Questo è un caso ricostruito con numeri di esempio su quanto accade nelle aziende B2B quando si interrogano tabelle transazionali appiattite senza modellazione dimensionale. L'azienda vende componenti meccanici a 3.200 officine in tutta Italia e paga la rete vendita in base al margine trimestrale generato nella zona geografica assegnata al momento dell'emissione della fattura.
+Nel database gestionale la tabella `customers` ha una riga per cliente e una colonna `sales_region`. La direzione sposta 180 clienti da `NORD-OVEST` a `LOMBARDIA-EST` con un `UPDATE` diretto. Il cruscotto unisce le righe fattura dell'anno all'anagrafica corrente, quindi ogni fattura di gennaio eredita la regione di ottobre. Una seconda query, che unisce testate d'ordine e righe, moltiplica per il numero di righe lo sconto fisso di testata e fa apparire in perdita commesse che erano in utile.
 
-Nel database applicativo la tabella `customers` contiene una sola riga per cliente con la colonna `sales_region`. A inizio ottobre la direzione commerciale riorganizza i territori e sposta 180 clienti dal distretto `NORD-OVEST` al distretto `LOMBARDIA-EST` eseguendo un `UPDATE` diretto sull'anagrafica. Il lunedì successivo il cruscotto del controllo di gestione fa un `JOIN` tra tutte le righe di fattura dell'anno e la tabella `customers` corrente: di colpo il fatturato storico dei primi tre trimestri per `NORD-OVEST` crolla di 1,4 milioni di euro e compare sotto `LOMBARDIA-EST`. Allo stesso tempo, una seconda query che unisce le testate d'ordine alle righe di spedizione moltiplica per tre lo sconto fisso di testata, facendo apparire in perdita commesse in realtà profittevoli.
+Le due anomalie hanno cause diverse. La prima riguarda il tempo: un attributo cambia e nessuno conserva il valore precedente. La seconda riguarda la granularità: un importo che appartiene all'ordine è stato scritto su ogni riga. Il metodo dimensionale di Ralph Kimball ([Kimball e Ross, The Data Warehouse Toolkit](https://www.kimballgroup.com/data-warehouse-business-intelligence-resources/books/data-warehouse-dw-toolkit/)) nasce per prevenire entrambe con regole semplici.
 
-La causa di entrambi gli errori è ignorare i fondamenti della modellazione dimensionale formalizzati da Ralph Kimball ([Kimball & Ross, 2013](https://www.kimballgroup.com/data-warehouse-business-intelligence-resources/books/data-warehouse-dw-toolkit/)): non dichiarare la granularità (*grain*) della tabella dei fatti e non gestire il mutamento nel tempo delle dimensioni (*Slowly Changing Dimensions*, SCD).
+## Fact table, dimension table e il grain
 
-## Grain, misure additive e Slowly Changing Dimensions
+Uno schema a stella ha al centro una tabella dei fatti e intorno le dimensioni. La tabella dei fatti contiene le misure (quantità, ricavo) e le chiavi che puntano alle dimensioni. Le dimensioni contengono gli attributi descrittivi con cui filtri e raggruppi: cliente, prodotto, data, canale.
 
-Un modello a stella (*star schema*) risolve le ambiguità contabili dividendo il mondo in due sole strutture fisiche: le tabelle dei fatti (*fact tables*) al centro e le tabelle delle dimensioni (*dimension tables*) attorno, governate da tre meccanismi rigorosi.
-
-Il primo meccanismo è il contratto di granularità (*grain*). Prima di scegliere una sola colonna della tabella dei fatti, occorre dichiarare in una frase univoca cosa rappresenta fisicamente una singola riga: ad esempio *"una riga per ogni singola linea di prodotto presente su una fattura emessa"*. Da quella dichiarazione discende la forma della tabella: i fatti transazionali registrano un evento puntuale, gli snapshot periodici fotografano lo stato a intervalli regolari (es. saldo magazzino ogni sera a mezzanotte) e gli snapshot cumulativi seguono una pratica che attraversa fasi successive con una colonna timestamp per ogni tappa.
-
-Il secondo meccanismo è la classificazione algebrica delle misure in additive, semi-additive e non additive. Le misure additive (quantità venduta, ricavo netto in euro) possono essere sommate lungo qualsiasi dimensione: tempo, cliente, prodotto o magazzino. Le misure semi-additive (giacenza di magazzino, saldo di un conto corrente) possono essere sommate tra prodotti o filiali nello stesso istante, ma non devono mai essere sommate lungo la dimensione tempo: sommare la merce in scaffale del lunedì a quella del martedì raddoppia fisicamente le scatole. Le misure non additive (prezzo unitario, percentuale di margine) non si sommano mai: vanno ricalcolate nei report come rapporto tra le somme di numeratore e denominatore.
-
-Il terzo meccanismo è la storicizzazione delle dimensioni tramite Slowly Changing Dimensions di Tipo 2 (SCD2). Mentre il Tipo 1 sovrascrive il valore vecchio perdendo la storia, una dimensione SCD2 conserva una chiave naturale immutabile (`customer_id`) ma genera una nuova riga con una nuova chiave surrogata (`customer_sk`) a ogni cambio di attributo rilevante, delimitandone la validità con `valid_from`, `valid_to` e `is_current`: i fatti puntano alla chiave surrogata valida all'istante dell'operazione, congelando per sempre la geografia storica.
-
-**Una tabella dei fatti non mente mai solo se mescola esclusivamente misure della stessa granularità e si lega alle dimensioni tramite chiavi surrogate storicizzate in SCD Tipo 2.**
-
-## Tre errori nella progettazione di fact e dimension table
-
-Il blocco SQL qui sotto mostra lo schema difettoso che mescola testata e righe d'ordine, somma le giacenze nel tempo e sovrascrive l'anagrafica:
-
-```sql
--- ERRORE: sconto di testata ripetuto su ogni riga articolo, giacenza mischiata alle vendite
--- e join diretto sulla chiave naturale del cliente che viene sovrascritta in SCD Tipo 1.
-CREATE TABLE fact_vendite_confusa
-(
-    order_id UInt64,
-    line_id UInt16,
-    order_date Date,
-    customer_id UInt64,
-    line_revenue_eur Decimal(12, 2),
-    order_header_discount_eur Decimal(12, 2),
-    product_stock_eod Int64
-)
-ENGINE = MergeTree
-ORDER BY (order_date, order_id);
-
--- Query che sbaglia tre volte: moltiplica lo sconto di testata, somma lo stock sui giorni
--- e legge solo la regione attuale del cliente cancellando la storia.
-SELECT
-    c.current_sales_region,
-    sum(f.line_revenue_eur) - sum(f.order_header_discount_eur) AS ricavo_netto_errato,
-    sum(f.product_stock_eod) AS giacenza_totale_errata
-FROM fact_vendite_confusa AS f
-INNER JOIN dim_customer_scd1 AS c ON f.customer_id = c.customer_id
-GROUP BY c.current_sales_region;
+```mermaid
+erDiagram
+    DIM_CUSTOMER_SCD2 ||--o{ FCT_INVOICE_LINES : "customer_sk"
+    DIM_PRODUCT ||--o{ FCT_INVOICE_LINES : "product_sk"
+    DIM_DATE ||--o{ FCT_INVOICE_LINES : "invoice_date"
+    DIM_CUSTOMER_SCD2 {
+        UInt64 customer_sk
+        UInt64 customer_id
+        string sales_region
+        date valid_from
+        date valid_to
+        UInt8 is_current
+    }
+    FCT_INVOICE_LINES {
+        date invoice_date
+        UInt64 invoice_id
+        UInt16 line_number
+        UInt64 customer_sk
+        UInt64 product_sk
+        decimal gross_line_eur
+        decimal allocated_discount_eur
+        decimal net_line_eur
+    }
+    DIM_PRODUCT {
+        UInt64 product_sk
+        string category
+    }
+    DIM_DATE {
+        date invoice_date
+        UInt16 year
+        UInt8 month
+    }
 ```
 
-### Mescolare metriche a granularità di testata e di riga nella stessa fact table
+Prima di scegliere una colonna devi scrivere in una frase che cosa rappresenta una riga della tabella dei fatti: "una riga per ogni linea di prodotto di una fattura emessa". Questa frase è il grain. Da lì discende tutto: ogni misura deve valere per quella unità e nessun'altra, e ogni dimensione deve avere un solo valore per quella unità. Se una colonna ha senso solo a livello di ordine, non può stare in una tabella a livello di riga.
 
-Salvare `order_header_discount_eur` (un buono sconto di 50 euro applicato all'intero ordine) su ogni singola riga articolo della tabella dei fatti sembra pratico per avere tutto in un'unica tabella. Non funziona perché viola il grain: se un ordine contiene quattro articoli diversi, il valore `50.00` viene scritto su tutte e quattro le righe e qualsiasi `sum(order_header_discount_eur)` sottrae 200 euro di sconto invece di 50, falsando il margine netto di ogni ordine multi-prodotto.
+Il grain dà anche la forma della tabella. Esistono tre tipi fondamentali, e la domanda di business sceglie quale usare.
 
-### Sommare misure semi-additive lungo la dimensione temporale
+| Tipo di fact table | Cosa rappresenta una riga | Domanda tipica |
+|---|---|---|
+| Transazionale | Un evento puntuale (riga fattura, clic) | Quanto abbiamo venduto per prodotto e regione? |
+| Snapshot periodico | Lo stato a intervalli regolari (giacenza a fine giorno) | Quante scorte avevamo a fine mese? |
+| Snapshot cumulativo | Una pratica che attraversa fasi, con una data per fase | Quanti giorni passano tra ordine e consegna? |
 
-Inserire la giacenza di fine giornata (`product_stock_eod`) accanto alle vendite e calcolarne `sum(product_stock_eod)` su un mese intero sembra un'aggregazione normale a chi guarda solo la sintassi SQL. Dal punto di vista fisico è un assurdo contabile: un magazzino che tiene fermi 100 pezzi per trenta giorni consecutivi risulta avere "3.000 pezzi a magazzino nel mese", trasformando merce invenduta in un'apparente abbondanza di scorte.
+## Misure additive, semi-additive e non additive
 
-### Usare la chiave naturale su una dimensione sovrascritta in SCD Tipo 1
+Non tutte le misure si sommano allo stesso modo. Le additive (quantità venduta, ricavo netto in euro) si sommano lungo qualsiasi dimensione. Le semi-additive, come una giacenza o il saldo di un conto, si sommano tra prodotti o filiali allo stesso istante ma non lungo il tempo. Le non additive (prezzo unitario, percentuale di margine) non si sommano mai: si ricalcolano come rapporto tra la somma del numeratore e quella del denominatore.
 
-Collegare la tabella dei fatti a `dim_customer` usando `customer_id` e aggiornare `sales_region` con un `UPDATE` quando il cliente cambia zona sembra il modo più pulito per mantenere l'anagrafica allineata al CRM. In realtà riscrive il passato: ogni query eseguita dopo l'aggiornamento attribuisce tutte le vendite degli anni precedenti alla nuova regione del cliente, rendendo non riproducibili i bilanci già chiusi.
-
-## Schema a stella con grain a riga fattura, SCD Tipo 2 e allocazione pro-quota
-
-Per modellare un data warehouse che conservi la verità storica e impedisca somme errate, applicate questi quattro criteri in ordine di priorità:
-
-1. Dichiarate un singolo grain per ogni fact table (es. una riga per linea di fattura) e ripartite pro-quota gli importi di testata (sconti, spese di trasporto) sulle singole righe prima dell'inserimento, così che ogni misura diventi pienamente additiva.
-2. Separate i fatti transazionali di vendita dagli snapshot periodici di magazzino in due tabelle distinte, calcolando sulle giacenze la media o l'ultimo valore del periodo (`argMax`) anziché la somma temporale.
-3. Gestite i cambi di territorio, listino o segmento cliente con una dimensione SCD Tipo 2 dotata di chiave surrogata (`customer_sk`) e intervallo `[valid_from, valid_to)`.
-4. Salvate nella tabella dei fatti sia la chiave surrogata storica (`customer_sk`) per l'analisi *as-was* (com'era al momento della vendita), sia la chiave naturale per poter confrontare anche la vista *as-is* (con le regole odierne).
-
-Ecco lo schema a stella corretto e la query di verifica in ClickHouse:
+Il caso più insidioso è la giacenza. Un magazzino ha 100 pezzi di un componente fermi per 30 giorni. Se salvi uno snapshot ogni sera e fai `sum(stock_qty)` sul mese ottieni 100 × 30 = 3.000 pezzi, un valore privo di significato fisico che trasforma merce invenduta in abbondanza di scorte. Per il tempo servono tre operatori: media (100 pezzi di media giornaliera), ultimo valore (100 pezzi a fine mese) o massimo.
 
 ```sql
+-- Snapshot periodico di magazzino: una riga per prodotto e per giorno.
+CREATE TABLE fct_stock_daily
+(
+    snapshot_date Date,
+    product_sk UInt64,
+    warehouse_sk UInt32,
+    stock_qty Int32
+)
+ENGINE = MergeTree
+PARTITION BY toYYYYMM(snapshot_date)
+ORDER BY (product_sk, snapshot_date);
+
+-- Giacenza a fine mese (ultimo valore) e media giornaliera, mai la somma sul tempo.
+SELECT
+    toStartOfMonth(snapshot_date) AS mese,
+    product_sk,
+    argMax(stock_qty, snapshot_date) AS giacenza_fine_mese,
+    round(avg(stock_qty), 1) AS giacenza_media
+FROM fct_stock_daily
+GROUP BY mese, product_sk
+ORDER BY mese, product_sk;
+```
+
+La somma tra magazzini nello stesso giorno resta valida: 60 pezzi a Piacenza e 40 a Verona fanno 100 pezzi. Quello che non puoi fare è sommare i giorni.
+
+## Allocare lo sconto di testata sulle righe
+
+Torniamo al secondo errore del cruscotto. Un ordine ha quattro righe e un buono sconto di 50 euro sull'intero ordine. Se scrivi 50 euro su ciascuna riga, `sum(order_header_discount_eur)` restituisce 200 euro e il margine di ogni ordine multi-prodotto è falsato. La regola è ripartire l'importo di testata pro-quota prima di caricare la fact table, in proporzione al ricavo lordo di ciascuna riga.
+
+### Ripartizione pro-quota, passo per passo
+
+1. Le quattro righe hanno ricavo lordo 400, 300, 200 e 100 euro. Totale lordo: 400 + 300 + 200 + 100 = 1.000 euro.
+2. Lo sconto di testata è 50 euro, quindi il tasso di sconto sull'ordine è 50 / 1.000 = 5%.
+3. Applicato a ogni riga: 400 × 5% = 20 euro, 300 × 5% = 15 euro, 200 × 5% = 10 euro, 100 × 5% = 5 euro.
+4. Verifica: 20 + 15 + 10 + 5 = 50 euro, uguale allo sconto di partenza, e il ricavo netto totale è 1.000 − 50 = 950 euro.
+
+Con importi decimali compaiono resti di arrotondamento al centesimo. La prassi è assegnare il resto alla prima riga, così che la somma delle parti coincida sempre con il totale. In ClickHouse l'allocazione si esprime con una window function sulla testata.
+
+```sql
+-- Allocazione pro-quota dello sconto di testata sulle righe, in fase di trasformazione.
+SELECT
+    l.invoice_id,
+    l.line_number,
+    l.gross_line_eur,
+    round(
+        h.header_discount_eur * l.gross_line_eur / sum(l.gross_line_eur) OVER (PARTITION BY l.invoice_id),
+        2
+    ) AS allocated_discount_eur
+FROM stg_invoice_lines AS l
+INNER JOIN stg_invoice_headers AS h ON l.invoice_id = h.invoice_id;
+```
+
+## Slowly Changing Dimensions: ricordare com'era
+
+Resta il primo errore, quello delle regioni. Hai tre strategie. Il Tipo 1 sovrascrive il valore e perde la storia: va bene per correggere un refuso nel nome di un cliente. Il Tipo 2 conserva la storia aggiungendo una nuova riga a ogni cambio rilevante. Il Tipo 3 aggiunge una colonna con il valore precedente e conserva una sola generazione di storia, quindi serve poco.
+
+In una dimensione di Tipo 2 la chiave naturale (`customer_id`) resta uguale, mentre la chiave surrogata (`customer_sk`) cambia a ogni versione. La validità è delimitata da `valid_from` e `valid_to`, più un flag `is_current`. Le vendite puntano alla chiave surrogata valida il giorno della fattura, e così la geografia storica resta congelata.
+
+ClickHouse non ama gli aggiornamenti puntuali, quindi la chiusura della riga vecchia si fa inserendo una nuova versione della stessa riga con `ReplacingMergeTree`, che tiene l'ultima per chiave di ordinamento.
+
+```sql
+-- Dimensione cliente SCD Tipo 2: una riga per ogni versione dell'attributo.
 CREATE TABLE dim_customer_scd2
 (
     customer_sk UInt64,
@@ -110,11 +154,26 @@ CREATE TABLE dim_customer_scd2
     sales_region LowCardinality(String),
     valid_from Date,
     valid_to Date,
-    is_current UInt8
+    is_current UInt8,
+    version UInt32
 )
-ENGINE = MergeTree
-ORDER BY (customer_id, valid_from);
+ENGINE = ReplacingMergeTree(version)
+ORDER BY customer_sk;
 
+-- Stato iniziale: il cliente 5001 è in NORD-OVEST dal 2025-01-01, senza data di fine.
+INSERT INTO dim_customer_scd2 VALUES
+    (101, 5001, 'NORD-OVEST', '2025-01-01', '9999-12-31', 1, 1);
+
+-- Cambio territorio a ottobre: si chiude la versione 101 e si apre la 102, senza UPDATE.
+INSERT INTO dim_customer_scd2 VALUES
+    (101, 5001, 'NORD-OVEST', '2025-01-01', '2026-09-30', 0, 2),
+    (102, 5001, 'LOMBARDIA-EST', '2026-10-01', '9999-12-31', 1, 1);
+```
+
+La riga 101 inserita due volte ha la stessa chiave di ordinamento, quindi alla prossima fusione in background resta quella con `version` più alta. Finché la fusione non è avvenuta, le query che devono essere esatte leggono con `FINAL`.
+
+```sql
+-- Fact table a grain di riga fattura, con la chiave surrogata storica.
 CREATE TABLE fct_invoice_lines
 (
     invoice_date Date,
@@ -131,38 +190,91 @@ ENGINE = MergeTree
 PARTITION BY toYYYYMM(invoice_date)
 ORDER BY (invoice_date, customer_sk, invoice_id);
 
--- Ripartizione storica esatta (as-was): ogni riga fattura usa la customer_sk valida in quel giorno.
+-- Vista as-was: la regione è quella valida il giorno della fattura.
 SELECT
-    d.sales_region AS regione_storica_al_momento_vendita,
+    d.sales_region AS regione_al_momento_vendita,
     sum(f.gross_line_eur) AS ricavo_lordo_eur,
     sum(f.allocated_discount_eur) AS sconto_allocato_eur,
     sum(f.net_line_eur) AS ricavo_netto_eur
 FROM fct_invoice_lines AS f
-INNER JOIN dim_customer_scd2 AS d
-    ON f.customer_sk = d.customer_sk
-GROUP BY regione_storica_al_momento_vendita;
+INNER JOIN dim_customer_scd2 AS d FINAL ON f.customer_sk = d.customer_sk
+GROUP BY regione_al_momento_vendita;
 ```
 
-Con questo modello lo sconto di testata da 50 euro viene distribuito pro-quota tra le quattro righe dell'ordine (es. 20, 15, 10 e 5 euro), garantendo che `sum(allocated_discount_eur)` restituisca sempre 50 euro anche quando si filtra per singolo prodotto; inoltre le vendite fatte da gennaio a settembre restano ancorate alla riga `customer_sk` con regione `NORD-OVEST`, mentre solo le fatture da ottobre in poi puntano alla nuova `customer_sk` con regione `LOMBARDIA-EST`. Allocare uno sconto in una vista dbt è immediato; accorgersi dopo due anni di aver sovrascritto un'anagrafica in Tipo 1 senza log di audit è invece irreversibile, perché le date esatte dei vecchi passaggi di regione sono andate perdute.
+Se i fatti arrivano senza la chiave surrogata, la ricostruisci con una join per intervallo. ClickHouse offre `ASOF JOIN`, che per ogni fattura cerca la versione del cliente con `valid_from` più vicino senza superare la data.
 
-## Star schema normalizzato o One Big Table denormalizzata sui motori colonnari
+```sql
+-- Assegnazione della chiave surrogata in caricamento: ultima versione valida alla data fattura.
+SELECT
+    s.invoice_id,
+    s.line_number,
+    s.invoice_date,
+    d.customer_sk,
+    d.sales_region
+FROM stg_invoice_lines AS s
+ASOF LEFT JOIN dim_customer_scd2 AS d
+    ON s.customer_id = d.customer_id
+   AND s.invoice_date >= d.valid_from;
+```
 
-Nel data warehousing moderno si confrontano due architetture fisiche per lo strato di consumo: lo schema a stella classico (*star schema*, con fact table centrale e join verso le dimensioni) e la tabella unica completamente denormalizzata (*One Big Table*, OBT, in cui gli attributi delle dimensioni vengono copiati direttamente dentro la tabella dei fatti).
+Con questo modello, le fatture di gennaio-settembre puntano a `customer_sk = 101` con regione `NORD-OVEST`, quelle da ottobre a `customer_sk = 102` con regione `LOMBARDIA-EST`. L'1,4 milioni di euro e i 140.000 euro di provvigioni restano dove sono nati.
 
-Il criterio di scelta è netto: **usate la One Big Table denormalizzata quando lavorate su motori colonnari distribuiti come ClickHouse o BigQuery con compressione dizionario (`LowCardinality`) su flussi di eventi immutabili dove la velocità di scansione singola senza join è prioritaria, usate invece lo star schema con dimensioni separate quando avete dimensioni SCD2 condivise tra cinque o dieci tabelle dei fatti diverse (*conformed dimensions*) o aggiornamenti frequenti sugli attributi anagrafici.**
+## Tre errori di modellazione che sembrano ragionevoli
 
-La confusione comune consiste nel forzare dieci join a stella ad alta cardinalità a ogni query su un motore distribuito senza memoria sufficiente per la hash table, oppure nel copiare ottanta colonne anagrafiche mutevoli dentro cinque tabelle OBT da miliardi di righe ciascuna. Sbagliare questa scelta presenta il conto: eseguire `JOIN` su chiavi di centinaia di milioni di righe a ogni clic del cruscotto rallenta i tempi di risposta da millisecondi a secondi, mentre dover aggiornare la ragione sociale o la gerarchia commerciale di un prodotto riscrivendo cinque tabelle OBT da dieci terabyte trasforma una modifica anagrafica di due secondi in un'operazione pesante su disco. Spesso la soluzione ottimale mantiene lo star schema e gli snapshot SCD2 nello strato intermedio di dbt, materializzando una OBT finale solo per i cruscotti ad altissima frequenza.
+### Misure di testata e di riga nella stessa tabella
 
-Questo articolo non tratta la modellazione Data Vault 2.0 (Hub, Link, Satellite) usata nei contesti bancari ad alta regolamentazione né le gerarchie ricorsive ad albero di profondità variabile. La generazione delle tabelle SCD Tipo 2 in dbt è automatizzabile tramite il comando `dbt snapshot`.
+Il sintomo è un margine che cambia a seconda del numero di righe dell'ordine. Scrivere lo sconto di ordine su ogni riga sembra comodo, perché evita una seconda tabella. Succede perché si è saltata la dichiarazione del grain. Per correggere, ripartisci pro-quota prima del caricamento come mostrato sopra, oppure sposta le misure d'ordine in una fact table a grain d'ordine e collegale con la chiave `invoice_id`.
 
-## Cinque domande prima di approvare il modello di un data mart
+### Sommare una giacenza lungo il tempo
 
-1. Avete scritto nella documentazione della tabella dei fatti una frase esplicita che definisce il grain ("una riga rappresenta...") e verificato che nessuna colonna abbia una granularità più alta o più bassa?
-2. Tutti gli importi di testata (sconti ordine, spese di spedizione, commissioni) sono stati allocati pro-quota sulle singole righe o isolati in una fact table separata a granularità d'ordine?
-3. Avete verificato che nessuna misura semi-additiva (saldi di cassa, giacenze di magazzino, conteggi di abbonati attivi) venga aggregata con `SUM()` lungo l'asse del tempo?
-4. Per ogni attributo dimensionale che può cambiare nel tempo (regione commerciale, fascia cliente, categoria prodotto), avete deciso formalmente con il business se serve la storia SCD Tipo 2 (*as-was*) o la sovrascrittura Tipo 1 (*as-is*)?
-5. Le dimensioni condivise tra più tabelle dei fatti (calendario, cliente, prodotto) usano esattamente le stesse definizioni e le stesse chiavi surrogate (*conformed dimensions*)?
+Il sintomo è un'abbondanza di scorte che nessuno in magazzino riconosce. Succede perché la sintassi SQL non distingue le misure: `sum()` somma qualunque colonna numerica. La correzione è tenere gli snapshot in una tabella separata e documentare, per ogni misura, l'aggregazione ammessa lungo il tempo (ultimo valore, media, massimo).
 
-La metrica di controllo che certifica la solidità di un modello dimensionale è la stabilità retroattiva dei report: eseguendo oggi la query del fatturato per regione del primo trimestre dell'anno scorso, il numero deve coincidere al centesimo con quello pubblicato dodici mesi fa, indipendentemente da quante riorganizzazioni commerciali siano avvenute nel frattempo.
+### Join sulla chiave naturale di una dimensione sovrascritta
 
-Di tutta la disciplina di Kimball, una decisione pesa ordini di grandezza più del resto: fissare il grain alla granularità più atomica disponibile e non mescolare mai fatti di livello diverso nella stessa tabella. Chi rispetta il grain può sempre aggregare verso l'alto; chi parte già aggregato o mischiato non potrà mai più scendere nel dettaglio.
+Il sintomo è il passato che cambia: un bilancio chiuso viene rieseguito e dà un numero diverso. Succede perché l'`UPDATE` del Tipo 1 riscrive l'anagrafica e la join sulla chiave naturale la applica a tutte le fatture. La correzione è un Tipo 2 con chiave surrogata. Cercare il cambio a posteriori, dopo due anni, non è recuperabile: le date esatte dei vecchi passaggi di regione sono andate perse.
+
+## Star schema o One Big Table
+
+Sui motori colonnari come ClickHouse hai due modi di servire le query. Lo star schema mantiene fact e dimensioni separate e le unisce a lettura. La One Big Table copia gli attributi delle dimensioni dentro la tabella dei fatti, così le query non fanno join.
+
+La One Big Table è adatta a flussi di eventi immutabili dove conta la velocità di scansione e la compressione dizionario di `LowCardinality` annulla il costo degli attributi ripetuti. Lo star schema è adatto quando le dimensioni sono condivise tra molte fact table (dimensioni conformi) o cambiano spesso: aggiornare la gerarchia commerciale di un prodotto in cinque OBT da dieci terabyte è un'operazione pesante, in una dimensione sola è una riga.
+
+Un compromesso comune tiene lo star schema e gli snapshot SCD2 nello strato intermedio di dbt e materializza una OBT finale solo per i cruscotti più frequenti. Con dbt, la dimensione di Tipo 2 si genera con `dbt snapshot`. Questa lezione non copre il Data Vault 2.0 né le gerarchie ricorsive di profondità variabile.
+
+## Verifica sul tuo modello dimensionale
+
+1. Un ordine ha tre righe con ricavo lordo 600, 300 e 100 euro e un trasporto di testata di 30 euro. Quanto trasporto allochi su ciascuna riga?
+
+<details>
+<summary>Mostra risposta</summary>
+
+Il totale lordo è 600 + 300 + 100 = 1.000 euro, quindi il tasso è 30 / 1.000 = 3%. Le quote sono 18, 9 e 3 euro, che sommano a 30 euro.
+
+</details>
+
+2. Una giacenza di 80 pezzi resta invariata per 31 giorni. Quale valore riporti per il mese e quale è un errore?
+
+<details>
+<summary>Mostra risposta</summary>
+
+Riporti 80 pezzi come ultimo valore o come media giornaliera. Il valore 80 × 31 = 2.480 ottenuto sommando i giorni è un errore, perché la giacenza è semi-additiva sul tempo.
+
+</details>
+
+3. Un cliente cambia regione il 1 ottobre. Con una SCD Tipo 2, a quale regione appartiene una fattura del 15 settembre e a quale una del 15 ottobre?
+
+<details>
+<summary>Mostra risposta</summary>
+
+La fattura del 15 settembre punta alla chiave surrogata con `valid_from` precedente e `valid_to` del 30 settembre, quindi alla vecchia regione. Quella del 15 ottobre punta alla nuova versione, valida dal 1 ottobre.
+
+</details>
+
+4. Quando scegli una One Big Table al posto di uno star schema su ClickHouse?
+
+<details>
+<summary>Mostra risposta</summary>
+
+Quando i dati sono eventi immutabili, la latenza di scansione è la priorità, gli attributi anagrafici cambiano di rado e non sono condivisi con altre fact table. Se le dimensioni sono conformi tra più processi o cambiano spesso, resta lo star schema.
+
+</details>

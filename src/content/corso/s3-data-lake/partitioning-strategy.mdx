@@ -1,160 +1,206 @@
 ---
 title: "Strategie di partizionamento su data lake"
 description: >-
-  Progettare partizioni ottimali per query engines su S3: trade-off e pattern consolidati.
+  Scegliere la chiave di partizione di una tabella Parquet su S3 partendo dai filtri reali delle query, calcolare la dimensione dei file e correggere il caso dei piccoli file.
 module: "Modulo 10: Data lake e lakehouse su S3"
 order: 2
 category: Tecnico
 headerImage: /course-headers/s3-data-lake-partitioning-strategy-ginnytech-ad.webp
 headerImageAlt: Partitioning strategy - immagine ufficiale della lezione su GinnyTech
-difficulty: advanced
-duration: 18 min
+difficulty: avanzato
+duration: 35 min
 prerequisites:
   - s3-data-lake/introduzione-object-storage
 learningObjectives:
-  - Scegliere la chiave di partizione dai filtri ricorrenti delle query
-  - Dimensionare le partizioni tra 100 e 500 MB in Parquet
-  - Evolvere la granularità con partizioni aggiuntive o compattazione dei dati vecchi
+  - Calcolare dalla crescita giornaliera in MB la granularità temporale che mantiene i file Parquet tra 128 e 512 MB
+  - Stimare numero di file, richieste GET e costo per query di uno schema di partizionamento prima di adottarlo
+  - Riscrivere una tabella con partizione per data e ordinamento interno dei Row Group usando PySpark
+  - Decidere se partizionare una zona del lake per data di evento o per data di ingestione
 binario: "ml-tabellare"
-formato: "articolo"
-autore: "Hermes"
-controllatoDa: "Argo"
-autorizzatoDa: "Giano"
+formato: "didattica-v2"
 draft: false
-dateModified: 2026-11-13
+dateModified: 2026-11-17
 ---
 
-# Strategie di partizionamento su data lake
+Un data engineer deve velocizzare le query su una tabella di eventi marketing da 15 GB al giorno e decide di partizionarla per `dt`, `country`, `device` e `campaign_id`. Un mese dopo il bucket contiene 4,2 milioni di file Parquet, e una query sull'ultima settimana passa quasi tutto il tempo a elencare prefissi e ad aprire connessioni prima di leggere un solo byte utile. Questo è uno scenario costruito con numeri di esempio, ma riproduce un errore che si incontra spesso: la dimensione della tabella non c'entra, il guasto nasce da come le cartelle sono state tagliate.
 
-Un ingegnere dati vuole velocizzare le query sul data lake S3 e decide di partizionare una tabella da 500 GB per `event_date`, `country_code`, `device_type` e `user_id`. Dopo un mese il bucket contiene 4,2 milioni di file Parquet da 120 kilobyte ciascuno: una semplice query su una settimana di traffico impiega tre minuti solo per elencare i prefissi tramite le chiamate API `ListObjectsV2` su S3 prima ancora di leggere un solo byte di dati. La causa non è la dimensione totale di 500 GB: è l'eccesso di partizionamento (*over-partitioning*) su colonne ad alta cardinalità che scatena il problema dei piccoli file (*small file problem*).
+## Quattro milioni di file da 107 KB e una settimana di query
 
-## Quattro milioni di file da 120 kilobyte e tre minuti spesi a fare LIST su S3
+La tabella cresce di 15 GB al giorno in Parquet compresso, quindi circa 450 GB al mese. Il team ragiona così: più colonne metto nel percorso, meno dati dovrà leggere il motore. Il percorso diventa `dt=2026-11-12/country=IT/device=iOS/campaign_id=8841/`, e ogni combinazione di valori produce almeno un file.
 
-Questo è un caso ricostruito con numeri di esempio su quanto accade quando si applica il partizionamento stile Hive (`col=valore/`) senza calcolare il numero di combinazioni risultanti e il peso medio di ogni file. La tabella degli eventi marketing cresce di 15 GB al giorno (circa 450 GB al mese).
+Con 40 paesi, 4 dispositivi e 900 campagne attive le combinazioni teoriche per giorno sono 144.000. Non tutte si popolano, e il conteggio reale dopo un mese è di 4,2 milioni di file, cioè circa 140.000 al giorno. Dividendo 450 GB per 4,2 milioni di file si ottiene un peso medio di circa 107 KB: molto meno della soglia sotto cui un oggetto S3 diventa antieconomico da leggere.
 
-Convinto che "più colonne metto nel percorso di partizione e meno dati leggerà il motore", il team partiziona i prefissi S3 come `dt=YYYY-MM-DD/country=XX/device=YY/campaign_id=ZZZ/`. L'effetto sul motore di query (Athena, Trino o ClickHouse) è paradossale:
-1. Con 30 giorni, 40 paesi, 4 dispositivi e 900 campagne attive, un singolo mese esplode in centinaia di migliaia di prefissi S3 e oltre 4 milioni di micro-file Parquet da 100–150 KB.
-2. Quando un analista lancia una query sugli ultimi 7 giorni senza filtrare per `campaign_id`, il motore deve fare migliaia di chiamate HTTP `ListObjectsV2` (che restituiscono al massimo 1.000 oggetti per pagina) e aprire milioni di connessioni TCP/TLS separate per scaricare file minuscoli: il 92% del tempo della query se ne va in latenza di rete e metadati S3.
-3. I footer dei 4 milioni di file Parquet superano per dimensione i dati stessi e mandano in timeout il catalogo AWS Glue.
+Un analista chiede gli eventi degli ultimi 7 giorni senza filtrare per campagna. Il motore deve ricavare dal catalogo oltre 980.000 file (140.000 × 7) e per ciascuno pagare una richiesta HTTP e un footer Parquet da leggere. La latenza fissa di un GET su S3 è dell'ordine di 30 ms. Eseguite in serie, 980.000 richieste da 30 ms sono 29.400 secondi; con 200 richieste in parallelo restano circa 147 secondi, quasi due minuti e mezzo, solo di latenza. I dati utili sono pochi gigabyte, ma il tempo se ne va nel numero degli oggetti.
 
-La causa del crollo prestazionale è violare la legge aurea del partizionamento su object storage: **poche partizioni allineate ai filtri `WHERE` reali, con file Parquet corposi tra 100 MB e 500 MB**.
+> **Idea chiave:** su un object storage il costo di una query dipende dal numero di file aperti quanto dai byte letti, quindi le cartelle servono a tagliare il tempo in fette grandi, e i filtri secondari si risolvono dentro il file.
 
-## Partition Pruning, regola dei 100–500 MB e ordinamento interno dei Row Group
+## Come una partizione diventa richieste HTTP
 
-Progettare uno schema di partizionamento su S3 che tagli del 95% i byte letti senza annegare il motore nelle chiamate HTTP si basa su tre meccanismi fisici.
+Una partizione in stile Hive è soltanto una convenzione sui nomi degli oggetti: `dt=2026-11-12/` è un prefisso, non una struttura dati. Quando il motore riceve la query, il coordinatore consulta il catalogo (per esempio AWS Glue Data Catalog), individua i prefissi compatibili con il `WHERE` e per ogni prefisso elenca gli oggetti con `ListObjectsV2`, che restituisce al massimo 1.000 chiavi per pagina. Poi distribuisce i file ai worker, che leggono il footer Parquet e solo dopo i Row Group necessari.
 
-Il primo meccanismo è il **Partition Pruning guidato dal carico di lavoro reale**. Quando i file su S3 sono organizzati con prefissi `event_date=2026-11-13/`, un motore SQL che esegue `WHERE event_date BETWEEN '2026-11-10' AND '2026-11-13'` legge dal catalogo solo i 4 prefissi corrispondenti ed evita completamente di elencare o aprire i file degli altri 361 giorni dell'anno. Perché questo funzioni, le chiavi di partizione devono essere **1 o al massimo 2 colonne a bassa cardinalità** presenti in oltre l'80% delle clausole `WHERE` (quasi sempre una granularità temporale: giorno `dt=YYYY-MM-DD` per tabelle grandi, mese `month=YYYY-MM` per tabelle medie).
-
-Il secondo meccanismo è il **dimensionamento del singolo file Parquet tra 100 MB e 500 MB**. Su S3 ogni apertura di file (`GET`) paga una latenza fissa di 15–50 millisecondi per il round-trip HTTP. Se 1 GB di dati è diviso in 4 file da 250 MB, quattro thread paralleli lo scaricano in meno di un secondo; se lo stesso gigabyte è frammentato in 10.000 file da 100 KB, servono 10.000 richieste HTTP che impiegano minuti. Se una partizione giornaliera produce meno di 50 MB di dati, il partizionamento per giorno è troppo fine e va alzato a livello mensile (`year=YYYY/month=MM/`).
-
-Il terzo meccanismo è la sostituzione delle sotto-partizioni fisiche con l'**ordinamento interno del file Parquet (*Row Group Min/Max Statistics*)**. Invece di creare sottocartelle S3 per `country_code` o `campaign_id`, basta **ordinare le righe (`ORDER BY country_code, campaign_id`) prima di scrivere il file Parquet**: ogni *Row Group* interno al file Parquet memorizza nel footer i valori `min` e `max` di ciascuna colonna, permettendo al motore SQL di saltare i blocchi interni al file senza creare un solo file in più su S3.
-
-**Una strategia di partizionamento su S3 è ottimale solo se usa una o due chiavi temporali/categoriche a bassa cardinalità che mantengono ogni file Parquet tra 100 MB e 500 MB, delegando i filtri secondari all'ordinamento interno dei Row Group.**
-
-## Tre errori che distruggono le prestazioni del partizionamento S3
-
-Il blocco SQL qui sotto mostra l'errore di esportare su S3 partizionando per colonne ad alta cardinalità e interrogando poi la colonna di partizione avvolta in una funzione che disabilita il *partition pruning*:
-
-```sql
--- ERRORE 1: esportazione partizionata per giorno + country + user_id (alta cardinalità),
--- che genera centinaia di migliaia di micro-file da pochi kilobyte su S3!
-INSERT INTO FUNCTION s3(
-    'https://s3.eu-central-1.amazonaws.com/acme-lake/bad_events/dt={_partition_id}/part.parquet',
-    'Parquet'
-)
-PARTITION BY concat(toString(event_date), '/country=', country, '/user=', toString(user_id))
-SELECT event_date, country, user_id, revenue_eur
-FROM raw_stream.events;
-
--- ERRORE 2: avvolgere la colonna di partizione dt in una funzione (toYear(dt) = 2026)
--- impedisce al catalogo di fare partition pruning statico e scansiona tutti i prefissi!
-SELECT sum(revenue_eur)
-FROM lake_catalog.events_partitioned
-WHERE toYYYYMM(dt) = 202611;
+```mermaid
+flowchart LR
+    Q["Query con filtro su dt"] --> C["Catalogo Glue (partizioni)"]
+    C --> P["Prefissi selezionati (pruning)"]
+    P --> L["ListObjectsV2 (1.000 chiavi per pagina)"]
+    L --> F["Un GET per footer Parquet"]
+    F --> R["Lettura dei soli Row Group utili"]
 ```
 
-### Partizionare i prefissi S3 su colonne ad alta cardinalità (user_id, order_id, campaign_id)
+Il pruning, cioè lo scarto dei prefissi che non servono, avviene prima del primo `LIST`, ed è il risparmio più economico possibile. Ma ogni livello di partizione moltiplica il numero di prefissi. Il numero di file è, nel caso peggiore, il prodotto delle cardinalità delle colonne di partizione moltiplicato per il numero di scritture per prefisso, e per questo l'aggiunta di una colonna come `campaign_id` o `user_id` fa crescere il conteggio di ordini di grandezza.
 
-Inserire nel percorso S3 una colonna con migliaia o milioni di valori distinti (`user_id`, `session_id`, `product_sku`) garantisce matematicamente il fallimento del data lake. Poiché ogni combinazione distinta di valori di partizione deve produrre almeno un file Parquet separato su S3, il numero di file cresce secondo il prodotto cartesiano $N_{\text{giorni}} \times N_{\text{paesi}} \times N_{\text{utenti}}$, polverizzando i dati in milioni di file minuscoli impossibili da elencare e compattare.
+Tre regole pratiche discendono da qui. La chiave deve comparire nel `WHERE` della grande maggioranza delle query, altrimenti il pruning non scatta. Deve avere bassa cardinalità, e per le tabelle di eventi è quasi sempre una granularità temporale. Deve infine produrre file abbastanza grandi: nel dimensionamento usiamo come riferimento 128-512 MB per file Parquet, valore che bilancia il parallelismo del motore con il costo fisso di ogni richiesta.
 
-### Scegliere la granularità giornaliera o oraria per tabelle a basso volume
+## Dimensionare la partizione partendo dalla crescita giornaliera
 
-Partizionare per `year=YYYY/month=MM/day=DD/hour=HH/` una tabella di anagrafica o di fatturazione B2B che cresce di soli 20 megabyte al giorno significa produrre file da 800 kilobyte l'ora (8.760 piccoli file all'anno). La granularità temporale non si sceglie per abitudine, ma dividendo la crescita giornaliera in MB per l'obiettivo minimo di 128 MB a file: sotto i 3 GB al mese si partiziona per **mese** (`toYYYYMM`), tra 3 GB e 300 GB al mese per **giorno** (`toDate`), e solo oltre centinaia di gigabyte al giorno ha senso scendere all'**ora**.
+La granularità temporale non si sceglie per abitudine ma con un calcolo. Si parte dalla crescita giornaliera della tabella in Parquet compresso, si divide per la dimensione obiettivo del file e si controlla che il risultato abbia senso.
 
-### Applicare funzioni SQL sulla colonna di partizione nella clausola WHERE
+Riprendiamo la tabella da 15 GB al giorno e fissiamo un obiettivo di 256 MB per file. Esempio numerico svolto, con arrotondamento per eccesso:
 
-Scrivere `WHERE date_format(dt, '%Y-%m') = '2026-11'` oppure `WHERE coalesce(dt, '2026-01-01') >= '2026-11-01'` su molti query engine impedisce la risoluzione statica dei prefissi prima dell'esecuzione. Se il predicato non è espresso come confronto diretto sulla colonna di partizione (`WHERE dt >= DATE '2026-11-01' AND dt < DATE '2026-12-01'`), l'ottimizzatore non può potare l'albero delle directory S3 e finisce per leggere tutti i mesi dell'archivio.
+1. Crescita giornaliera: 15 GB × 1.000 = 15.000 MB al giorno.
+2. File per partizione giornaliera: 15.000 MB / 256 MB = 58,6, quindi 59 file al giorno.
+3. File sulla finestra di 7 giorni: 59 × 7 = 413 file, contro i 980.000 dello schema a quattro colonne.
+4. Latenza fissa con 200 richieste in parallelo: 413 × 30 ms = 12,4 secondi in serie, cioè meno di 0,1 secondi con 200 richieste in parallelo.
+5. Costo di richieste GET, con un prezzo indicativo di listino di 0,0004 USD ogni 1.000 richieste (verifica la tariffa della tua regione): lo schema a quattro colonne costa 980.000 / 1.000 × 0,0004 = 0,39 USD a query, lo schema giornaliero 413 / 1.000 × 0,0004 = 0,00017 USD.
 
-## Partizionamento per data + ordinamento Parquet interno e compattazione
+Con 100 query al giorno la differenza è 39 USD contro 1,7 centesimi di dollaro, solo di richieste, senza contare il tempo. Il rapporto tra i due schemi è 980.000 / 413, circa 2.373 volte.
 
-Per progettare e mantenere partizioni S3 ad altissima velocità di scansione, applicate questi quattro criteri in ordine di priorità:
+Lo stesso calcolo vale al contrario per le tabelle piccole. Una tabella di anagrafica fatture che cresce di 20 MB al giorno, partizionata per giorno, produce un file da 20 MB al giorno, sotto la soglia di 128 MB. Si ottiene un file adeguato aggregando per periodo: 128 MB / 20 MB al giorno = 6,4 giorni, quindi la granularità giusta è la settimana o il mese (20 MB × 30 = 600 MB al mese, file in linea con l'obiettivo). Partizionare la stessa tabella per ora produrrebbe 8.760 file da meno di 1 MB all'anno.
 
-1. Calcolate il volume giornaliero compresso in Parquet e scegliete **una sola chiave di partizione temporale** (`dt=YYYY-MM-DD` se $> 100\text{ MB/giorno}$, altrimenti `month=YYYY-MM`) eventualmente affiancata da una sola dimensione macro se e solo se ogni sotto-partizione supera comunque i 100 MB.
-2. Quando scrivete ciascuna partizione su S3, **ordinate le righe (`ORDER BY tenant_id, country_code, event_type`)**: i Row Group del file Parquet permetteranno di saltare i blocchi su disco per tutte quelle colonne senza creare un solo prefisso S3 aggiuntivo.
-3. Scrivete sempre le query usando intervalli espliciti sulla colonna di partizione (`dt >= '2026-11-01' AND dt <= '2026-11-07'`).
-4. Se un flusso streaming deposita su S3 file piccoli ogni 5 minuti, schedulate un job giornaliero di **compattazione (*bin-packing*)** che fonde i micro-file del giorno precedente in file da 256 MB ordinati.
+La regola riassuntiva: sotto circa 4 GB al mese si partiziona per mese, tra 4 GB e 400 GB al mese per giorno, e solo oltre qualche centinaio di GB al giorno ha senso scendere all'ora. Sono soglie ricavate dal vincolo dei 128 MB per file e vanno ricalcolate se cambia il formato o la compressione.
 
-Ecco il pattern completo di scrittura ordinata (compattazione) e lettura con pruning esatto in ClickHouse / S3:
+## Ordinare dentro il file invece di annidare cartelle
+
+Quando si rinuncia a `country` e `campaign_id` come cartelle, resta il problema di filtrare per queste colonne. La soluzione è ordinare le righe prima di scrivere il file. Ogni Row Group Parquet registra nel footer il valore minimo e massimo di ogni colonna; se le righe sono ordinate per `country`, i Row Group di un solo paese hanno un intervallo `[min, max]` stretto e il motore può scartare gli altri senza leggerli. Se invece le righe sono mescolate, ogni Row Group contiene tutti i paesi, gli intervalli coprono l'intero alfabeto e le statistiche non escludono nulla.
+
+La scrittura si fa con un job Spark che partiziona per `dt` e ordina dentro ogni file. Il codice seguente è un job PySpark completo:
+
+```python
+# Compattazione giornaliera: legge i micro-file della zona raw e scrive Parquet ordinato
+from pyspark.sql import SparkSession
+
+spark = SparkSession.builder.appName("compact-marketing-events").getOrCreate()
+
+day = "2026-11-12"
+src = f"s3://acme-lake-prod/raw/marketing_events/ingested_date={day}/"
+dst = "s3://acme-lake-prod/curated/marketing_events/"
+
+df = spark.read.parquet(src)
+
+# 59 file da circa 256 MB: 15.000 MB / 256 MB = 58,6 arrotondato per eccesso
+n_files = 59
+
+(
+    df.repartitionByRange(n_files, "country", "device", "campaign_id")
+      .sortWithinPartitions("country", "device", "campaign_id")
+      .write.mode("overwrite")
+      .option("compression", "zstd")
+      .option("parquet.block.size", 128 * 1024 * 1024)
+      .partitionBy("dt")
+      .parquet(dst)
+)
+```
+
+Nel codice `repartitionByRange` suddivide i dati in intervalli contigui di `country`, `device` e `campaign_id`, e `sortWithinPartitions` ordina le righe dentro ciascun file. Il risultato è che una query su `country = 'IT' AND device = 'iOS'` apre i 59 file del giorno, legge i footer, e scarica solo i Row Group in cui l'intervallo include `IT` e `iOS`. Nessuna cartella aggiuntiva è stata creata.
+
+Il limite dell'ordinamento è che privilegia le prime colonne della lista. Per `campaign_id`, in terza posizione, il beneficio dipende da quanto le prime due colonne spezzano i dati. Se le query filtrano di frequente per `campaign_id` da solo, sulle colonne ad alta cardinalità conviene aggiungere i Bloom filter Parquet, di cui parla la lezione sulle prestazioni.
+
+## Audit di una tabella esistente dalla riga di comando
+
+Prima di cambiare schema si misura lo stato attuale. Il comando `aws s3 ls` con `--summarize` conta oggetti e byte di un prefisso, e basta un piccolo calcolo per ottenere il peso medio dei file:
+
+```bash
+# Conta file e byte di un giorno di dati e calcola il peso medio per file
+PREFIX="s3://acme-lake-prod/curated/marketing_events/dt=2026-11-12/"
+
+aws s3 ls "$PREFIX" --recursive --summarize | tail -n 2 > /tmp/summary.txt
+OBJS=$(grep "Total Objects" /tmp/summary.txt | awk '{print $3}')
+BYTES=$(grep "Total Size" /tmp/summary.txt | awk '{print $3}')
+
+# Peso medio in KB: byte / oggetti / 1024
+echo "oggetti: $OBJS  peso medio KB: $((BYTES / OBJS / 1024))"
+
+# Un valore sotto 51200 (50 MB) segnala un problema di piccoli file
+```
+
+Il confronto con la soglia lavora sui dati reali: sullo schema a quattro colonne il comando riporta circa 140.000 oggetti per giorno e un peso medio di 107 KB; dopo la compattazione, 59 oggetti con peso medio di circa 254 MB (15.000 MB / 59). Lo scan ratio, cioè la frazione dei byte della tabella letta da una query tipica, completa l'audit: una query settimanale su una tabella annuale ben partizionata per data legge circa 7/365, cioè il 1,9% dei file, prima ancora di contare lo skipping dei Row Group.
+
+Il caso del flusso in streaming merita un passaggio a parte. Se un consumer scrive su S3 ogni 5 minuti, nascono 288 batch al giorno (24 × 60 / 5), e 15.000 MB / 288 = 52 MB per file: già sotto l'obiettivo, e la situazione peggiora se il carico è diviso tra più partizioni Kafka, perché ogni scrittore produce il proprio file. La compattazione notturna del giorno precedente, come nel job PySpark sopra, riporta il giorno a 59 file.
+
+## Data di evento o data di ingestione
+
+Su una tabella di eventi esistono due colonne temporali candidate: `event_date`, il momento in cui il fatto è accaduto, e `ingested_date`, il momento in cui il record è arrivato nel lake. La scelta dipende dalla zona del lake.
+
+Nella zona `raw` conviene partizionare per `ingested_date`. Ogni batch scrive in append nella cartella di oggi senza mai riaprire i giorni passati, anche quando arrivano eventi in ritardo. Nelle zone `curated` e `analytics` conviene `event_date`, perché le dashboard e le domande dei manager riguardano quando è avvenuto l'ordine o il clic.
+
+Un esempio numerico spiega il costo del passaggio. Supponiamo che il 2% degli eventi arrivi con un giorno di ritardo: 15.000 MB × 2% = 300 MB di eventi tardivi al giorno. Se la zona curated è partizionata per data di evento, ogni notte il job deve ricalcolare una finestra mobile e non solo il giorno corrente. Con una finestra di 3 giorni si riscrivono 15 GB × 3 = 45 GB al giorno, ma si ottiene che gli ordini del 10 novembre incluso quelli arrivati alle 00:05 dell'11 siano tutti nella partizione `dt=2026-11-10`. Con `ingested_date` anche sulla zona curated si evita la riscrittura, ma una query su `event_date = '2026-11-10'` non trova gli ordini delle 23:58 caricati dopo la mezzanotte, oppure deve scansionare l'intero lake.
+
+Il compromesso è quindi tra costo di riscrittura e completezza dei numeri. Per le tabelle di analisi la completezza vince, e la finestra mobile va dimensionata sulla coda reale del ritardo: se il 99,9% degli eventi arriva entro 3 giorni, 3 giorni bastano. Le tabelle Iceberg trattano questo problema con la partizione nascosta e l'evoluzione della partizione, argomento della lezione dedicata.
+
+## Tre errori che polverizzano la tabella
+
+### Partizionare su colonne ad alta cardinalità
+
+Il sintomo è un conteggio di file che cresce più della tabella e query lente su filtri che non riguardano la colonna di partizione. Sembra ragionevole perché `user_id` o `campaign_id` compaiono in molte query, e si pensa che una cartella per valore elimini i dati inutili. Il motivo del guasto è che ogni valore distinto è un prefisso e ogni prefisso contiene almeno un file: con 900 campagne, 40 paesi e 4 dispositivi, il numero di combinazioni è 900 × 40 × 4 = 144.000 al giorno. La correzione è tenere solo la data come cartella, ordinare per le altre colonne dentro il file e, se serve la ricerca puntuale, aggiungere Bloom filter.
+
+### Scegliere una granularità più fine di quanto la crescita consenta
+
+Il sintomo è un'enorme quantità di file piccoli su una tabella modesta. Sembra ragionevole perché la partizione oraria è un default di molti esempi e dà l'impressione di query più veloci. La causa è l'assenza del calcolo: se la tabella cresce di 20 MB al giorno, ogni ora produce meno di 1 MB. Si corregge con la formula del paragrafo sul dimensionamento: dividere la crescita per l'obiettivo di 128 MB e arrotondare la granularità verso l'alto, ad esempio a mese.
+
+### Avvolgere la colonna di partizione in una funzione
+
+Il sintomo è una query su un mese che scansiona tutto lo storico, con un costo uguale a quello di una query senza filtro. Il codice sembra corretto perché il filtro c'è, ad esempio `WHERE date_format(dt, '%Y-%m') = '2026-11'`. Il motivo è che il motore deve valutare la funzione per ogni partizione, quindi non può decidere dai soli metadati quali prefissi escludere. La correzione è esprimere il filtro come confronto diretto sulla colonna:
 
 ```sql
--- 1. Scrittura/Compattazione ottimale della partizione giornaliera (1 solo prefisso dt=2026-11-12)
--- ordinando internamente il file Parquet per (country_code, device_type, campaign_id)
--- così da attivare il Row Group skipping senza moltiplicare i file su S3:
-INSERT INTO FUNCTION s3(
-    'https://s3.eu-central-1.amazonaws.com/acme-lake-prod/curated/marketing/events/dt=2026-11-12/part_compacted_01.parquet',
-    'Parquet'
-)
-SETTINGS
-    output_format_parquet_compression_method = 'zstd',
-    output_format_parquet_row_group_size = 1000000
-SELECT
-    event_date AS dt,
-    country_code,
-    device_type,
-    campaign_id,
-    event_id,
-    user_id,
-    revenue_eur
-FROM raw_stream.marketing_events
-WHERE event_date = '2026-11-12'
-ORDER BY country_code, device_type, campaign_id;
-
--- 2. Query veloce che combina Partition Pruning sul prefisso S3 (dt)
--- e Row Group Min/Max skipping dentro il file Parquet (country_code = 'IT' AND device_type = 'iOS'):
-SELECT
-    campaign_id,
-    count() AS conversioni,
-    sum(revenue_eur) AS ricavo_totale_eur
-FROM s3(
-    'https://s3.eu-central-1.amazonaws.com/acme-lake-prod/curated/marketing/events/dt=2026-11-{10..12}/*.parquet',
-    'Parquet'
-)
-WHERE country_code = 'IT'
-  AND device_type = 'iOS'
+-- Athena/Trino: confronto diretto su dt, il pruning scarta i prefissi fuori intervallo
+SELECT campaign_id,
+       count(*)        AS conversioni,
+       sum(revenue_eur) AS ricavo_totale_eur
+FROM acme_lake.marketing_events
+WHERE dt >= DATE '2026-11-01'
+  AND dt <  DATE '2026-12-01'
+  AND country = 'IT'
+  AND device  = 'iOS'
 GROUP BY campaign_id
 ORDER BY ricavo_totale_eur DESC;
 ```
 
-Il guadagno prestazionale ed economico è netto: invece di aprire 4,2 milioni di file da 120 KB, per interrogare tre giorni di traffico il motore apre appena **3 file Parquet da 300 MB** (`dt=2026-11-10`, `11`, `12`), legge i metadati del footer in pochi millisecondi e, grazie all'`ORDER BY country_code, device_type, campaign_id` applicato in scrittura, scarica solo i Row Group interni dove risiede il traffico `'IT'` + `'iOS'`, abbattendo il tempo di risposta da 3 minuti a **0,8 secondi**. Ordinare i dati dentro il Parquet al momento della scrittura è gratuito; creare quattro livelli di sottocartelle su S3 condanna il data lake alla paralisi da piccoli file.
+Il filtro su `dt` seleziona i prefissi del mese, mentre `country` e `device` sfruttano le statistiche dei Row Group scritti in ordine dal job PySpark. Il costo di una query di questo tipo su 450 GB mensili dipende dalla selettività, ma i file aperti restano 59 × 30 = 1.770, non milioni.
 
-## Partizionamento per Data di Evento (event_date) o Data di Ingestione (ingested_date)
+## Controllo prima di fissare la chiave di partizione
 
-Ogni volta che si partiziona una tabella di eventi su S3, occorre scegliere tra due colonne temporali: la **data in cui il fatto è avvenuto (`event_date`)** e la **data in cui il file è stato caricato nel data lake (`ingested_date`)**.
+1. Una tabella cresce di 6 GB al giorno in Parquet compresso e il tuo obiettivo è un file da 256 MB: quanti file produce una partizione giornaliera, e la granularità è adeguata?
 
-Il criterio di scelta è netto: **partizionate le zone `curated` e `analytics` per `event_date` (data di business dell'evento) perché il 99% delle query degli analisti e delle dashboard filtra per quando è avvenuto l'ordine o il clic, partizionate invece la zona `raw` di atterraggio per `ingested_date` (data di arrivo del batch) così che ogni job di estrazione scriva in modo puramente append-only nella cartella di oggi senza mai dover riaprire o riscrivere le cartelle dei giorni passati quando arrivano eventi in ritardo (*late-arriving events*).**
+<details>
+<summary>Mostra risposta</summary>
 
-La confusione comune consiste nel partizionare per `ingested_date` anche le tabelle finali esposte agli analisti: quando un manager chiede gli ordini del 10 novembre (`WHERE event_date = '2026-11-10'`), se gli ordini fatti alle 23:58 del 10 novembre sono stati caricati alle 00:05 dell'11 novembre, una query che filtra `ingested_date = '2026-11-10'` perde gli ordini di fine giornata, mentre una query che non filtra `ingested_date` deve scansionare l'intero data lake. Sbagliare questa scelta costringe a scegliere tra numeri incompleti o scansioni complete costosissime.
+6 GB × 1.000 = 6.000 MB al giorno. 6.000 / 256 = 23,4, cioè 24 file al giorno, ciascuno di circa 250 MB. La granularità giornaliera è adeguata: i file sono sopra la soglia minima di 128 MB e non troppo numerosi. Scendere all'ora darebbe 250 MB / 24 = circa 10 MB per file, troppo piccoli.
 
-Questo articolo tratta il partizionamento basato su directory fisiche Hive. Nella lezione su **Apache Iceberg** vedremo come l'*Hidden Partitioning* permetta di cambiare l'evoluzione della granularità (es. passare da partizionamento mensile del 2024 a partizionamento giornaliero del 2026 nella stessa tabella) senza riscrivere i vecchi file e senza che l'utente debba conoscere la struttura fisica delle cartelle.
+</details>
 
-## Cinque domande prima di fissare la chiave di partizione di una tabella S3
+2. Una query settimanale su una tabella annuale partizionata per giorno legge il 12% dei byte totali. Il pruning funziona?
 
-1. La chiave di partizione scelta compare davvero come filtro nel `WHERE` di almeno l'80% delle query previste su quella tabella?
-2. Dividendo il volume di dati per il numero di partizioni create, ogni singola partizione contiene almeno **100 MB** di dati in formato Parquet (altrimenti avete scelto una granularità più ampia come il mese invece del giorno)?
-3. Avete evitato di inserire più di 1 o 2 livelli di partizione nei prefissi S3, delegando le altre colonne di filtro (`country`, `status`, `tenant_id`) all'`ORDER BY` interno dei Row Group Parquet?
-4. Se la tabella riceve scritture frequenti a piccoli lotti (es. ogni 5 minuti da Kafka Connect), esiste un job schedulato di compattazione che fonde i file piccoli in file da 256–512 MB?
-5. Nella transizione da `raw` (partizionata per `ingested_date`) a `curated` (partizionata per `event_date`), il job aggiorna una finestra mobile degli ultimi $N$ giorni per catturare gli eventi arrivati in ritardo?
+<details>
+<summary>Mostra risposta</summary>
 
-La metrica regina per verificare che il partizionamento stia funzionando è il **rapporto tra byte scansionati e byte totali della tabella** (*Scan Ratio*) riportato dal query engine sulle query tipiche: su una tabella storica annuale ben partizionata per data e ordinata in Parquet, una query settimanale deve scansionare meno del **2%** dei byte totali, con zero partizioni composte da file sotto i 50 MB.
+No. Sette partizioni su 365 corrispondono a 7 / 365 = 1,9% dei byte, prima dello skipping dei Row Group. Un 12% indica che il filtro non è riconosciuto dal motore, per esempio perché la colonna di partizione è avvolta in una funzione, oppure che la query non filtra la colonna di partizione e legge molti giorni.
 
-Di tutta la progettazione delle partizioni su data lake, tenete a mente una sola regola: usate le cartelle S3 solo per tagliare il tempo a fette grandi da centinaia di megabyte; per tutto il resto, ordinate le righe dentro il file Parquet.
+</details>
+
+3. Perché partizionare la zona raw per `ingested_date` e la zona curated per `event_date`?
+
+<details>
+<summary>Mostra risposta</summary>
+
+In raw ogni batch scrive in append nella cartella del giorno corrente e non riapre mai i giorni passati, anche con eventi in ritardo. In curated le query degli analisti filtrano per quando l'evento è avvenuto; la partizione per `event_date` evita scansioni complete, al prezzo di riscrivere una finestra mobile di giorni per includere gli eventi tardivi.
+
+</details>
+
+4. Un consumer scrive su S3 ogni 10 minuti 20 GB al giorno. Quanti file nascono per giorno, quanto pesano in media e che cosa fai?
+
+<details>
+<summary>Mostra risposta</summary>
+
+Ci sono 24 × 60 / 10 = 144 scritture al giorno. 20.000 MB / 144 = circa 139 MB per file, già dentro la fascia 128-512 MB, quindi la compattazione è meno urgente, ma resta utile se più scrittori in parallelo moltiplicano i file per batch. Si misura con `aws s3 ls --summarize` e si compatta solo se il peso medio scende sotto circa 50 MB.
+
+</details>

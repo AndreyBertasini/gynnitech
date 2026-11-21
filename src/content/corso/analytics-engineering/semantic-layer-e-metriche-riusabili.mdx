@@ -1,115 +1,74 @@
 ---
 title: "Performance e costi delle trasformazioni dbt"
-description: "Performance e costi delle trasformazioni dbt. Strategie per ottimizzare query e ridurre costi."
+description: "Individuare i cinque modelli dbt che consumano il 90% del tempo di build, riscriverli con filtro e proiezione anticipati, configurare partition_by e order_by su ClickHouse e misurare il risparmio con run_results.json e system.query_log."
 module: "Modulo 16: Analytics engineering con dbt"
 order: 10
 category: Decisione
 headerImage: /course-headers/analytics-engineering-semantic-layer-e-metriche-riusabili-ginnytech-ad.webp
-headerImageAlt: >-
-  Performance dbt - immagine ufficiale della lezione su GinnyTech, creata da AD
-difficulty: advanced
-duration: 18 min
+headerImageAlt: "Performance dbt - immagine ufficiale della lezione su GinnyTech, creata da AD"
+difficulty: avanzato
+duration: "45 min"
 prerequisites:
   - analytics-engineering/documentazione-lineage-exposures-e-governance
 learningObjectives:
-  - Ridurre i dati letti con filtri sulle date e selezione delle colonne prima dei join
-  - Applicare clustering, partizionamento e distribution key del warehouse
-  - Misurare tempo e costo per esecuzione prima e dopo l'ottimizzazione
+  - Individuare i modelli balena di un progetto dbt leggendo i tempi di esecuzione in run_results.json e le righe lette in system.query_log
+  - Riscrivere un modello con filtro sulla data e proiezione delle sole colonne necessarie prima di join e window function, e quantificare byte, RAM e tempo risparmiati
+  - Scegliere tra view, ephemeral, table e incremental in base al fan-out del nodo nel DAG e configurare partition_by e order_by coerenti con i predicati dei modelli figli
 binario: "ml-tabellare"
-formato: "articolo"
-autore: "Hermes"
-controllatoDa: "Argo"
-autorizzatoDa: "Giano"
+formato: "didattica-v2"
 draft: false
-dateModified: 2026-11-13
+dateModified: 2026-11-17
 ---
 
-# Performance e costi delle trasformazioni dbt
+Scenario costruito con numeri di esempio: il job notturno `dbt build` di un e-commerce parte alle 02:00 e a gennaio finisce in 12 minuti. A novembre lo stesso job termina alle 09:40, quando gli uffici sono aperti e le dashboard della direzione leggono tabelle ancora in costruzione. Sono 7 ore e 40 minuti, cioè 460 minuti di esecuzione, e il cluster ClickHouse resta saturo per tutta la mattina. Nessuno ha toccato la logica di business: il progetto conta 140 modelli e il volume degli eventi è cresciuto in modo regolare, non esplosivo. Quello che è cambiato è che alcuni modelli scritti quando la tabella degli eventi pesava pochi gigabyte oggi leggono 142 GB per ogni esecuzione.
 
-Il job notturno `dbt build` di un'azienda e-commerce parte alle 02:00 del mattino e all'inizio dell'anno impiega 12 minuti; dieci mesi dopo lo stesso job finisce alle 09:40 quando gli uffici sono già aperti, consumando l'85% della CPU e della RAM del cluster ClickHouse (o triplicando la bolletta mensile su BigQuery/Snowflake). L'ispezione rivela che tre modelli intermedi fanno `SELECT *` su una tabella di eventi da 2 miliardi di righe **prima** di filtrare gli ultimi 30 giorni, eseguono `COUNT(DISTINCT session_id)` ricalcolato sette volte in sette CTE diverse e lasciano i marts con una chiave `ORDER BY` disallineata dai join. La causa non è la crescita fisiologica del business: è scrivere modelli dbt ignorando l'**early filtering/projection prima dei join**, il **clustering/ordinamento fisico (`order_by` / `partition_by`)** e la **telemetria di tempo e byte per modello**.
+Il problema ha una forma ricorrente. In un grafo di 140 nodi il tempo non si distribuisce in modo uniforme: una manciata di modelli assorbe quasi tutto il costo e gli altri sono trascurabili. Ottimizzare a tappeto è uno spreco di ore, ottimizzare i cinque nodi giusti riporta il build a un tempo ragionevole. La lezione costruisce un metodo in tre mosse: misurare dove va il tempo, ridurre ciò che ogni query deve leggere, scegliere con criterio quali nodi persistere su disco.
 
-## Da dodici minuti a sette ore e quaranta di esecuzione notturna
+> **Idea chiave:** il costo di una trasformazione dbt dipende da quante righe e quante colonne il motore deve toccare prima di poter scartare il superfluo. Ogni riga e ogni colonna che tagli nella prima CTE è un dato che non entra mai nella tabella hash di un join.
 
-Questo è un caso ricostruito con numeri di esempio su come il debito tecnico dentro i modelli SQL di dbt possa far esplodere silenziosamente tempi di esecuzione e costi infrastrutturali. Il grafo dbt conta 140 modelli, ma la regola di Pareto vale sempre: **il 90% del tempo totale di build e dei byte letti è bruciato da soli 5 modelli ("modelli balena")**.
+## Dove va il tempo di un build: pochi modelli balena
 
-Analizzando i 5 modelli più lenti del progetto emergono tre antipattern ricorrenti:
-1. Un modello intermedio `int_sessions_joined` unisce con un `INNER JOIN` la tabella degli eventi web (2 miliardi di righe, 60 colonne) con la tabella degli ordini (20 milioni di righe), portandosi dietro tutte le 60 colonne con `SELECT *`, e solo nell'ultima riga del modello figlio applica `WHERE event_date >= today() - 30`: il database deve caricare in memoria e fare l'hash join di cinque anni di dati inutili per poi buttarne via il 98% alla fine.
-2. Tre modelli a catena sono configurati come `view` e contengono ciascuno tre window function `ROW_NUMBER() OVER (PARTITION BY user_id ORDER BY occurred_at)`: ogni volta che un mart a valle legge quella vista, il motore deve riordinare in RAM l'intera storia degli utenti tre volte di fila.
-3. Le tabelle fisiche create da dbt non specificano `order_by` e `partition_by` nel blocco `config()`, per cui ClickHouse o il warehouse non possono sfruttare gli indici primari né il *partition pruning* durante le trasformazioni incrementali.
+Prima di cambiare una riga di SQL serve una classifica. dbt scrive a ogni esecuzione il file `target/run_results.json`, che contiene per ogni nodo il tempo di esecuzione in secondi. Ordinando quel file si ottiene la lista dei modelli più lenti senza installare nulla. La seconda fonte è la telemetria del motore: su ClickHouse la tabella `system.query_log` registra per ogni query la durata, le righe lette, i byte letti e il picco di memoria. La prima dice quanto ci ha messo ogni modello, la seconda spiega perché.
 
-La causa dello spreco è trattare l'ottimizzatore SQL come una bacchetta magica anziché progettare i modelli dbt attorno alla fisica del motore colonnare.
-
-## Early Filtering & Projection, Allineamento delle Chiavi Fisiche e Telemetria per Modello
-
-Ridurre del 70–90% i tempi e i costi di un progetto dbt richiede di applicare tre tecniche ingegneristiche sui modelli più pesanti del DAG.
-
-Il primo meccanismo è l'**Early Filtering (filtrare le righe nella prima CTE) e l'Early Projection (selezionare solo le 4–6 colonne necessarie) PRIMA di qualsiasi `JOIN`, `GROUP BY` o Window Function**. Nei database colonnari (ClickHouse, BigQuery, Snowflake, Parquet su S3) il costo di lettura dipende dal numero di colonne toccate, mentre il costo di RAM e CPU di un `JOIN` o di un `OVER (PARTITION BY ...)` cresce più che linearmente col numero di righe e con la larghezza in byte di ciascuna riga. Se nella CTE di ingresso (`WITH events_filtered AS (...)`) tagliate subito le date (`WHERE event_date >= ...`), filtrate gli eventi pertinenti (`AND event_name = 'checkout'`) ed estraete solo le 4 colonne che servono al join (lasciando su disco i lunghi campi JSON e `user_agent`), la tabella hash in RAM diventa cento volte più piccola.
-
-Il secondo meccanismo è l'**allineamento tra la configurazione fisica del modello (`partition_by`, `order_by` / `cluster_by`) e i predicati usati dai modelli figli**. Quando un modello dbt viene materializzato come `table` o `incremental`, definire in `{{ config(...) }}` `partition_by = 'toYYYYMM(occurred_date)'` permette a tutti i modelli figli incrementali che filtrano gli ultimi 3 giorni di leggere solo 1 partizione su 60, mentre impostare `order_by = '(tenant_id, occurred_date, user_id)'` ordina fisicamente i dati su disco per le chiavi di filtro e di join, trasformando join e aggregazioni pesanti in letture sequenziali veloci con consumo minimo di RAM.
-
-Il terzo meccanismo è la **rottura delle catene di viste pesanti** e la **misurazione sistematica Prima/Dopo**. Se un modello `intermediate` contiene una deduplicazione o una window function costosa ed è letto da 4 marts diversi, lasciarlo come `view` esegue quel calcolo pesante 4 volte: materializzarlo come `table` (o `incremental`) lo calcola **una volta sola**.
-
-**Le trasformazioni dbt restano veloci ed economiche al crescere dei dati solo se filtrano righe e colonne nella prima CTE prima dei join, configurano `partition_by` e `order_by` su ogni tabella fisica e materializzano i nodi intermedi condivisi da più rami.**
-
-## Tre errori SQL in dbt che bruciano RAM, CPU e budget cloud
-
-Il blocco SQL qui sotto mostra il classico modello "balena" in dbt: `SELECT *` su tabelle enormi prima del join, filtro temporale messo solo alla fine dopo una window function su tutto lo storico, e uso di `DISTINCT` per rattoppare un join impreciso:
-
-```sql
--- ERRORE 1: SELECT * nelle CTE iniziali tira su da disco tutte le 60 colonne (inclusi payload JSON)!
--- ERRORE 2: il JOIN e la window function ROW_NUMBER() girano su tutti i 5 anni di storico
--- perché il filtro "WHERE e.occurred_date >= today() - 30" è stato messo solo in fondo!
-WITH all_events AS (
-    SELECT * FROM {{ ref('stg_tracking__events') }}
-),
-all_orders AS (
-    SELECT * FROM {{ ref('stg_shop__orders') }}
-),
-joined_everything AS (
-    SELECT
-        e.*,
-        o.order_id,
-        o.net_amount_eur,
-        row_number() OVER (PARTITION BY e.user_id ORDER BY e.occurred_at DESC) AS rn
-    FROM all_events AS e
-    INNER JOIN all_orders AS o
-        ON e.session_id = o.session_id
-)
-SELECT DISTINCT
-    user_id,
-    order_id,
-    net_amount_eur
-FROM joined_everything
-WHERE occurred_date >= today() - 30
-  AND rn = 1;
+```bash
+# Classifica dei 10 modelli piu lenti dell'ultimo build, letta da run_results.json
+dbt build --target prod
+jq -r '.results
+  | sort_by(-.execution_time)
+  | .[0:10][]
+  | "\(.execution_time | floor)s\t\(.unique_id)"' target/run_results.json
 ```
 
-### Eseguire JOIN o Window Function prima di aver filtrato le date e le colonne
+Nello scenario la classifica mostra cinque modelli che da soli valgono il 90% dei 460 minuti. Il calcolo è diretto: 460 minuti × 0,90 = 414 minuti per i cinque modelli balena, e 460 − 414 = 46 minuti per gli altri 135 modelli, cioè circa 20 secondi ciascuno in media. È la regola di Pareto applicata a un grafo: se tutti i nodi pesassero uguale, ogni nodo varrebbe lo 0,7% del tempo, mentre qui ciascuno dei cinque vale in media il 18%.
 
-Scrivere `WITH all_events AS (SELECT * FROM ...)` seguita da un `JOIN` e da `row_number() OVER (PARTITION BY user_id ...)` e mettere `WHERE occurred_date >= today() - 30` solo nella `SELECT` finale costringe il motore a un lavoro immane e inutile. Poiché il valore di `row_number()` su tutto lo storico potrebbe teoricamente dipendere dalle righe più vecchie di 30 giorni, l'ottimizzatore SQL **non ha il permesso matematico di spingere il filtro `occurred_date >= today() - 30` sopra la window function** (*predicate pushdown bloccato*): deve quindi leggere, unire e ordinare in RAM tutti i 2 miliardi di righe di cinque anni per poi scartarne il 98% all'ultimo passaggio.
+La struttura del problema si vede meglio nel grafo. I modelli balena sono quasi sempre nodi intermedi con due caratteristiche: leggono una tabella di fatti molto larga e sono letti da più modelli a valle.
 
-### Concatenare quattro o cinque livelli di View con aggregazioni e join
+```mermaid
+flowchart LR
+    A["stg_tracking__events (2 miliardi di righe, 60 colonne)"] --> B["int_sessions_joined (view)"]
+    C["stg_shop__orders (20 milioni di righe)"] --> B
+    B --> D["fct_orders"]
+    B --> E["fct_sessions"]
+    B --> F["fct_attribution"]
+    B --> G["fct_funnel"]
+    B --> H["fct_retention"]
+```
 
-Configurare come `view` non solo lo `staging`, ma anche tre livelli successivi di modelli `intermediate` che eseguono join e `GROUP BY`, e poi puntare a quella vista da cinque marts diversi moltiplica per cinque il carico sul database. Una `view` non memorizza alcun risultato: quando `dbt build` costruisce in parallelo i cinque marts finali, il database esegue cinque volte da zero l'intera piramide di join sottostante. Qualsiasi modello intermedio che esegue un calcolo pesante ed è referenziato da $\ge 2$ modelli a valle (`fan-out >= 2` nel DAG) deve essere materializzato come `table` o `incremental`.
+Il nodo `int_sessions_joined` è una view letta da cinque marts. Ogni volta che dbt costruisce uno dei cinque marts, il motore esegue da capo l'intera piramide di join. Cinque letture della stessa view equivalgono a cinque esecuzioni del lavoro più pesante del progetto, con i marts costruiti in parallelo che si contendono la stessa RAM.
 
-### Usare SELECT DISTINCT in fondo al modello per nascondere un join moltiplicativo
+## Filtrare e proiettare prima del join
 
-Aggiungere `SELECT DISTINCT` alla prima riga di un modello dbt perché "dopo aver aggiunto il join comparivano dei duplicati" è un antipattern doppiamente dannoso: sul piano logico maschera un errore di modellazione del grano senza risolverlo; sul piano delle prestazioni obbliga il database a fare un'operazione di hash/ordinamento globale su tutte le colonne di tutte le righe restituite dal join. Bisogna invece pre-aggregare o deduplicare la tabella di destra sulla sola chiave di join **prima** di eseguire l'`INNER/LEFT JOIN`.
+Il primo intervento riguarda ciò che entra nella query. In un database colonnare come ClickHouse, BigQuery, Snowflake o in una tabella Parquet su S3, il costo di lettura cresce con il numero di colonne toccate. Il costo di RAM e CPU di un join o di una window function cresce più che linearmente con il numero di righe e con la larghezza in byte di ciascuna. Chi scrive `SELECT *` in una CTE iniziale carica tutte e 60 le colonne, compresi i campi JSON e `user_agent` che il modello non userà mai.
 
-## Rifattorizzazione con Early Filtering/Projection, Configurazione Fisica e Benchmark
+Il secondo punto è l'ordine del filtro. Una window function come `row_number() OVER (PARTITION BY user_id ORDER BY occurred_at DESC)` calcola un numero che dipende da tutte le righe della stessa partizione. Se il filtro sulla data è scritto solo nella `SELECT` finale, l'ottimizzatore non può spostarlo sopra la window function senza cambiare il risultato, perché il valore di `row_number()` potrebbe dipendere dalle righe più vecchie. Il predicate pushdown resta bloccato e il motore ordina in memoria l'intero storico per scartarne la quasi totalità all'ultimo passaggio.
 
-Per ottimizzare un modello dbt lento e certificare il taglio di tempi e costi in ClickHouse, applicate questi quattro passi in ordine di priorità:
+Il calcolo dell'effetto si fa in tre passaggi sui numeri dello scenario. La tabella degli eventi copre 5 anni, cioè 1.825 giorni, e contiene 2.000.000.000 di righe per 142 GB. Una finestra di 30 giorni vale 30 / 1.825 = 1,64% dello storico, quindi circa 32,9 milioni di righe e, a parità di larghezza di riga, 142 × 0,0164 = 2,33 GB. Tenere 3 colonne su 60 riduce ancora di un fattore 20, perché 3 / 60 = 5%, e porta la stima teorica a 2,33 × 0,05 = 0,12 GB. La misura reale è più alta, 0,95 GB, perché `session_id` è una stringa lunga e pesa più della media delle colonne. La stima dice comunque l'ordine di grandezza giusto: da 142 GB a meno di 1 GB.
 
-1. Spostate nella primissima CTE (`events_30d`) sia il **filtro di partizione/data** (`WHERE occurred_date >= today() - 30`) sia la **proiezione stretta delle sole colonne indispensabili** (`SELECT session_id, user_id, occurred_at`), eliminando qualsiasi `SELECT *`.
-2. Deduplicate o aggregate le chiavi su set già filtrati prima del `JOIN`, eliminando `SELECT DISTINCT` finali.
-3. Configurate nel blocco `{{ config(...) }}` del modello la partizione fisica (`partition_by = 'toYYYYMM(occurred_date)'`), l'ordinamento (`order_by = '(occurred_date, user_id)'`) e convertite in `incremental` o `table` i modelli intermedi condivisi.
-4. Misurate in `system.query_log` la durata (`query_duration_ms`), i gigabyte letti (`read_bytes`) e il picco di RAM (`memory_usage`) prima e dopo la modifica.
-
-Ecco il modello dbt rifattorizzato seguito dalla query di telemetria su ClickHouse che misura tempo, RAM e byte risparmiati:
+Il modello riscritto applica entrambe le regole nella prima CTE e dichiara la configurazione fisica della tabella risultante.
 
 ```sql
--- 1. Modello dbt Ottimizzato: Early Filtering + Early Projection PRIMA del Join e della deduplicazione
--- più configurazione fisica esplicita di partizione e ORDER BY per i modelli a valle:
+-- models/marts/fct_orders_sessions.sql
+-- Early filtering e early projection prima del join, con configurazione fisica esplicita (dbt-clickhouse)
 {{
     config(
         materialized = 'table',
@@ -120,7 +79,7 @@ Ecco il modello dbt rifattorizzato seguito dalla query di telemetria su ClickHou
 }}
 
 WITH events_30d_slim AS (
-    -- Legge SOLO la partizione degli ultimi 30 giorni e SOLO le 3 colonne necessarie (niente SELECT *):
+    -- Solo la finestra di 30 giorni e solo 3 colonne: niente SELECT *
     SELECT
         session_id,
         user_id,
@@ -130,6 +89,7 @@ WITH events_30d_slim AS (
       AND session_id != ''
     GROUP BY session_id, user_id
 ),
+
 orders_30d_slim AS (
     SELECT
         order_id,
@@ -140,6 +100,7 @@ orders_30d_slim AS (
     WHERE toDate(occurred_at_utc) >= today() - 30
       AND status = 'completed'
 )
+
 SELECT
     o.order_date,
     e.user_id,
@@ -148,12 +109,62 @@ SELECT
     e.last_session_event_at
 FROM orders_30d_slim AS o
 INNER JOIN events_30d_slim AS e
-    ON o.session_id = e.session_id;
+    ON o.session_id = e.session_id
+```
 
--- 2. Query di Telemetria Costi & Performance dei modelli dbt su ClickHouse (system.query_log):
--- Individua i 5 modelli più costosi e confronta durata, GB letti e picco RAM Prima vs Dopo:
+Nota che la `GROUP BY session_id, user_id` nella prima CTE rende la chiave di join unica sul lato destro: ogni sessione compare una sola volta, quindi il join non può moltiplicare gli ordini. Questa pre-aggregazione sostituisce il `SELECT DISTINCT` finale che il modello originale usava per nascondere i duplicati.
+
+## Partition_by e order_by come contratto fisico con i modelli figli
+
+La seconda leva è la configurazione fisica. Quando un modello è materializzato come `table` o `incremental`, ClickHouse lo scrive su disco con un ordinamento e un partizionamento che dbt può controllare dal blocco `config()`. Questi due parametri decidono quanta parte della tabella un modello figlio deve leggere.
+
+`partition_by = 'toYYYYMM(order_date)'` divide la tabella in una partizione per mese. Un modello figlio incrementale che filtra gli ultimi 3 giorni tocca una partizione su 60, se la tabella copre 5 anni, e ignora le altre 59 senza nemmeno aprirle. `order_by = '(order_date, user_id, order_id)'` ordina fisicamente le righe su disco, e l'indice primario di MergeTree salta i blocchi di righe che non contengono la data o l'utente cercati.
+
+Il punto delicato è la coerenza. Le colonne dell'`order_by` hanno senso solo se coincidono con i predicati e le chiavi di join dei modelli che leggeranno quella tabella. Un `order_by` su `order_id` quando tutti i figli filtrano per data e poi per utente non salta quasi nulla. Per questo conviene scrivere la configurazione guardando il DAG a valle: si elencano i `WHERE` e gli `ON` dei figli, e si ordinano le colonne dalla più selettiva e più usata verso la meno usata, con la data in testa quando i filtri temporali sono comuni.
+
+Un modello incrementale spinge il ragionamento oltre, perché non ricostruisce tutta la tabella. Nel progetto i modelli intermedi condivisi si configurano per cartella, così la regola è scritta una volta sola.
+
+```yaml
+# dbt_project.yml (estratto): materializzazione per livello del DAG
+models:
+  martech_analytics:
+    staging:
+      +materialized: view          # un solo figlio, nessun calcolo pesante
+    intermediate:
+      +materialized: table         # nodi condivisi da piu marts: calcolati una volta
+      +engine: MergeTree()
+      +order_by: "(occurred_date, user_id)"
+      +partition_by: "toYYYYMM(occurred_date)"
+    marts:
+      +materialized: table
+      +engine: MergeTree()
+      +partition_by: "toYYYYMM(order_date)"
+```
+
+## Calcolo passo-passo: quanto costa e quanto si risparmia
+
+Il confronto numerico prima e dopo è la parte che convince chi approva le modifiche. Ecco la misura sul modello `int_sessions_joined`, preso da `system.query_log`.
+
+La versione originale, con `SELECT *` e filtro dopo la window function, legge 2.000.000.000 di righe e 142,0 GB, usa un picco di 28,4 GB di RAM e impiega 184.000 ms, cioè 184 secondi. La versione riscritta legge circa 32.000.000 di righe e 0,95 GB, usa 0,62 GB di RAM e impiega 1.850 ms. I rapporti si calcolano così:
+
+1. Byte letti: (142,0 − 0,95) / 142,0 = 0,9933, quindi una riduzione del 99,3%.
+2. Memoria di picco: (28,4 − 0,62) / 28,4 = 0,9782, quindi una riduzione del 97,8%.
+3. Durata: 184.000 / 1.850 = 99,5, quindi la query è circa 99 volte più veloce.
+
+Passando al build intero, i cinque modelli balena valevano 414 minuti. Se ciascuno scende di circa 100 volte, il loro contributo diventa 414 / 100 = 4,1 minuti, arrotondati a 4. Gli altri 135 modelli restano a 46 minuti. Il build totale passa da 460 a 46 + 4 = 50 minuti, con una riduzione di (460 − 50) / 460 = 89%. Il job notturno delle 02:00 finisce alle 02:50 e non più alle 09:40.
+
+Questo calcolo contiene un'indicazione utile: dopo l'intervento il 92% del tempo residuo (46 su 50 minuti) è nei modelli piccoli. Per scendere ancora bisogna cambiare approccio, per esempio passare i modelli di grandi dimensioni a incrementali o ridurre i test, non rifare la stessa ottimizzazione.
+
+Il costo in euro segue lo stesso ragionamento, usando numeri di esempio per un warehouse che fattura la scansione, 5 euro per terabyte letto. Il modello originale legge 142 GB = 0,142 TB, quindi costa 0,142 × 5 = 0,71 euro per esecuzione. Con un build orario sono 24 esecuzioni al giorno: 0,71 × 24 = 17,04 euro al giorno e 17,04 × 30 = 511 euro al mese per questo solo modello. La versione riscritta legge 0,95 GB, cioè 0,00095 TB, e costa 0,00095 × 5 = 0,00475 euro a esecuzione, pari a 0,114 euro al giorno e 3,42 euro al mese. Su ClickHouse autogestito il costo non è per byte ma per core e memoria occupati, e il risparmio si traduce nel poter ridurre il cluster o nel liberare la mattina.
+
+## Misurare prima e dopo con la telemetria del motore
+
+Un'ottimizzazione senza misura è una convinzione. La tabella `system.query_log` permette di confrontare le esecuzioni prima e dopo la modifica sulle stesse metriche, e di scoprire quali modelli sono ancora costosi.
+
+```sql
+-- Telemetria dei modelli dbt su ClickHouse: i 5 CREATE TABLE piu costosi di oggi
 SELECT
-    extract(query, 'CREATE OR REPLACE TABLE (\\S+)') AS dbt_model_target,
+    extract(query, 'CREATE (?:OR REPLACE )?TABLE (\\S+)') AS dbt_model_target,
     query_duration_ms,
     round(read_bytes / 1073741824.0, 2) AS gb_read_from_disk,
     round(memory_usage / 1073741824.0, 2) AS peak_ram_gb,
@@ -161,31 +172,80 @@ SELECT
 FROM system.query_log
 WHERE type = 'QueryFinish'
   AND event_date = today()
-  AND query LIKE '%CREATE OR REPLACE TABLE%fct_%'
+  AND query LIKE '%CREATE%TABLE%'
 ORDER BY query_duration_ms DESC
 LIMIT 5;
 ```
 
-Il confronto registrato da `system.query_log` mostra la portata dell'ottimizzazione sul modello preso in esame. Nella **versione non ottimizzata (`SELECT *` + filtro dopo window function)**, la query leggeva `2.000.000.000` di righe e `142,0 GB` da disco, consumava `28,4 GB` di picco RAM e impiegava **`184.000 ms` (oltre 3 minuti)**. Nella **versione ottimizzata (Early Filtering 30gg + 3 colonne + pre-aggregazione per `session_id`)**, la query legge solo `32.000.000` di righe e **`0,95 GB`** da disco (-99,3% di I/O), consuma **`0,62 GB`** di RAM (-97,8%) e termina in **`1.850 ms` (1,8 secondi, $100\times$ più veloce)**. Applicando questo intervento ai 5 modelli più pesanti del grafo, il run notturno complessivo di `dbt build` scende da 7 ore e 40 minuti a **11 minuti totali**.
+Il filtro `type = 'QueryFinish'` esclude le query fallite e quelle ancora in corso, e `event_date = today()` sfrutta la partizione della tabella di log, così la telemetria stessa è leggera. Per una misura riproducibile conviene annotare in un file di progetto le tre cifre di ogni modello balena prima dell'intervento: durata, byte letti e picco di RAM. La stessa query, rilanciata dopo il merge, produce la riga del dopo.
 
-## CTE Intermedie / Ephemeral o Tabelle Materializzate per i nodi condivisi
+L'esecuzione dei test va tenuta fuori dal conto del build di produzione quando pesa. I test generici su tabelle da miliardi di righe vanno limitati alla finestra recente con la configurazione `where`, altrimenti ogni build ricontrolla anni di dati che non cambiano.
 
-Durante il tuning di un grafo dbt, una decisione fondamentale riguarda come trattare le trasformazioni intermedie (`int_`): conviene tenerle leggere come **CTE / `ephemeral` / `view`** (zero costo di scrittura durante `dbt build`) oppure persisterle fisicamente come **`table` / `incremental`**?
+## View, ephemeral, table o incremental: il criterio del fan-out
 
-Il criterio di scelta è netto: **usate `view` o `ephemeral` quando il modello intermedio esegue trasformazioni leggere per singola riga ed è letto da un solo modello figlio (`fan-out = 1`) così da evitare scritture su disco inutili, cambiate invece la materializzazione in `table` (o `incremental`) ogni volta che un modello intermedio contiene un'aggregazione/`JOIN` pesante ed è referenziato da 2 o più modelli a valle (`fan-out >= 2`), in modo da calcolare il risultato una sola volta su disco e farlo rileggere istantaneamente da tutti i modelli figli.**
+Quando si ottimizza un grafo emerge una domanda ricorrente: i modelli intermedi vanno tenuti leggeri, come CTE o view, oppure persistiti? La risposta dipende da due proprietà del nodo: quanto lavoro contiene e da quanti modelli è letto. Il numero di modelli a valle si chiama fan-out.
 
-La confusione comune consiste nell'impostare l'intera cartella `intermediate/` come `ephemeral` per "non creare tabelle intermedie nel database". Quando avete una catena di 4 modelli `ephemeral` uno dentro l'altro letta da 6 marts, dbt inietta ricorsivamente migliaia di righe di CTE duplicate dentro ciascuno dei 6 marts, generando query mostruose da 5.000 righe che mettono in ginocchio il parser e l'ottimizzatore del database. Materializzare il nodo centrale di snodo come `table` taglia in due la complessità del grafo.
+| Tipo di nodo | Fan-out | Costo del calcolo | Materializzazione consigliata |
+| --- | --- | --- | --- |
+| Rinomina e cast di colonne | 1 | Basso | `view` oppure `ephemeral` |
+| Join leggero usato da un solo mart | 1 | Medio | `ephemeral` o `view` |
+| Join o aggregazione pesante | 2 o più | Alto | `table` |
+| Tabella di fatti molto grande, aggiornata a righe nuove | qualsiasi | Alto | `incremental` |
 
-Questo articolo non tratta il dimensionamento dei thread paralleli di esecuzione (`threads: 4` vs `threads: 16` in `profiles.yml`). Ricordate che alzare `threads` da 4 a 32 su un cluster ClickHouse già al 90% di CPU o memoria non accelera il run, ma manda le query concorrenti in errore `MEMORY_LIMIT_EXCEEDED`: su ClickHouse un valore tra **4 e 8 thread dbt** è quasi sempre l'ottimo perché ogni singola query dentro ClickHouse usa già tutti i core della macchina in parallelo.
+La regola è netta: un nodo che esegue un'aggregazione o un join pesante ed è letto da due o più modelli va materializzato, così il lavoro si paga una volta e viene riletto da tutti i figli come una tabella già pronta. Un nodo leggero con un solo figlio resta una view, perché scrivere su disco un risultato che nessun altro riusa è un costo senza beneficio.
 
-## Cinque domande per l'audit di performance e costi di un progetto dbt
+Il caso opposto si verifica quando l'intera cartella `intermediate/` viene impostata come `ephemeral` per non creare tabelle nel database. Una catena di 4 modelli `ephemeral` annidati e letta da 6 marts fa sì che dbt copi ricorsivamente tutte le CTE dentro ciascuno dei 6 marts. Ogni mart diventa una query di migliaia di righe che il parser deve analizzare e che l'ottimizzatore fatica a pianificare. Materializzare il nodo di snodo dimezza la complessità del grafo e rende le query leggibili.
 
-1. Avete estratto da `system.query_log` (o dai metadati di esecuzione `run_results.json`) la classifica della **Top 10 dei modelli dbt per tempo di esecuzione, GB letti e picco di RAM**?
-2. Nei modelli più pesanti, i filtri temporali (`WHERE dt >= ...`) e la selezione esplicita delle sole colonne necessarie (`Early Projection`, zero `SELECT *`) avvengono nella **prima CTE** prima di qualsiasi `JOIN` o Window Function?
-3. Tutte le tabelle fisiche (`table` e `incremental`) dichiarano esplicitamente nel blocco `config()` un `partition_by` temporale e un `order_by` / `cluster_by` allineato alle colonne usate nei `JOIN` e nei `WHERE` dei modelli figli?
-4. I modelli `intermediate` pesanti che vengono letti da due o più modelli a valle sono materializzati come `table` / `incremental` invece di essere ricalcolati più volte come `view` o `ephemeral`?
-5. Avete eliminato l'uso di `SELECT DISTINCT` su tabelle larghe, sostituendolo con una pre-aggregazione sulla chiave prima del join?
+C'è poi il parametro `threads` nel `profiles.yml`. Alzarlo da 4 a 32 su un cluster ClickHouse già al 90% di CPU non accelera il build, perché ogni singola query usa già tutti i core della macchina. Aggiunge soltanto query concorrenti che si contendono la memoria e finiscono in errore `MEMORY_LIMIT_EXCEEDED`. Un valore tra 4 e 8 è quasi sempre il migliore su un nodo singolo.
 
-La metrica di efficienza complessiva della pipeline di trasformazione è il **costo/tempo totale di un ciclo di `dbt build` rapportato al volume di nuovi dati giornalieri**: un grafo dbt ben ottimizzato su ClickHouse completa il build incrementale orario in **meno di 3–5 minuti** con zero query che superano il 50% della RAM massima del nodo.
+## Errori tipici nell'ottimizzazione dei modelli dbt
 
-Di tutta l'ottimizzazione delle performance in dbt, ricordate sempre una sola regola fisica: ogni colonna e ogni riga storica che tagliate via nella prima CTE è una colonna e una riga che non dovrete mai mettere in RAM durante il `JOIN`. Filtrate subito, selezionate poche colonne e ordinate su disco per le chiavi di accesso.
+### SELECT * in una CTE iniziale e filtro sulla data solo alla fine
+
+Il sintomo è un modello che rallenta con il crescere dello storico anche se il report usa sempre gli ultimi 30 giorni: la durata cresce in proporzione ai 5 anni e non ai 30 giorni. Succede perché la query è stata scritta quando la tabella era piccola e il filtro finale produceva il risultato corretto, quindi nessun test lo ha mai segnalato. Il difetto è invisibile a livello logico e visibile solo a livello fisico. La correzione è spostare filtro e proiezione nella prima CTE, come nel modello riscritto sopra, e verificare con `system.query_log` che `read_rows` sia sceso di conseguenza.
+
+### Catene di view con join e aggregazioni lette da più marts
+
+Il sintomo è un build in cui, ingrandendo il grafo, i tempi di marts apparentemente semplici sono altissimi e non spiegabili con le loro query. La causa è che una view non memorizza nulla: ogni mart che la legge ripete l'intera piramide di join sottostante. Sembra ragionevole perché la view è stata introdotta per evitare duplicazione di codice, ma riusa il codice e non il calcolo. La correzione è materializzare come `table` ogni nodo pesante con fan-out pari o superiore a 2 e lasciare view solo gli strati leggeri.
+
+### SELECT DISTINCT finale per nascondere un join che moltiplica le righe
+
+Il sintomo è un `SELECT DISTINCT` alla prima riga di un modello, aggiunto perché dopo un join comparivano duplicati. Sul piano logico non risolve la causa, cioè una chiave non unica sul lato destro. Sul piano delle prestazioni costringe il motore a un'operazione globale di hash o ordinamento su tutte le colonne di tutte le righe prodotte dal join già moltiplicato. La correzione è pre-aggregare o deduplicare la tabella di destra sulla sola chiave di join prima del join, e proteggere quella chiave con un test `unique`.
+
+## Controllo prima di approvare una modifica di performance
+
+1. Hai una classifica dei 10 modelli più lenti, estratta da `run_results.json`, e per ciascuno le righe lette e il picco di RAM in `system.query_log`?
+
+<details>
+<summary>Mostra risposta</summary>
+
+Senza la classifica non sai dove intervenire. Con 140 modelli, i cinque più lenti possono valere il 90% del tempo: nello scenario 414 minuti su 460. Il comando `jq` su `target/run_results.json` ordina i modelli per `execution_time`, e la query su `system.query_log` aggiunge righe, byte e memoria per capire la causa. Se l'estrazione non esiste ancora, è il primo lavoro da fare, prima di qualunque riscrittura.
+
+</details>
+
+2. Un modello legge una tabella di eventi da 2 miliardi di righe su 1.825 giorni e il report usa gli ultimi 30 giorni: quante righe dovrebbe leggere dopo un filtro corretto nella prima CTE?
+
+<details>
+<summary>Mostra risposta</summary>
+
+La finestra vale 30 / 1.825 = 1,64% dello storico, quindi circa 32,9 milioni di righe su 2.000.000.000. Se `read_rows` in `system.query_log` resta vicino a 2 miliardi, il filtro non viene applicato prima della window function o del join. Un valore vicino a 33 milioni conferma che il pruning di partizione o di indice funziona.
+
+</details>
+
+3. Un modello intermedio contiene una aggregazione pesante ed è letto da 4 marts, ed è configurato come `view`: quale materializzazione scegli e perché?
+
+<details>
+<summary>Mostra risposta</summary>
+
+Scegli `table`, o `incremental` se la sorgente è molto grande e cresce per righe nuove. Il fan-out è 4, quindi una view ripeterebbe il calcolo pesante 4 volte a ogni build, mentre una tabella lo esegue una sola volta e lo fa rileggere ai marts. Un modello con fan-out 1 e solo rinomina di colonne, invece, resta una view.
+
+</details>
+
+4. Il build di un modello passa da 28,4 GB a 0,62 GB di picco di RAM: quale riduzione percentuale hai ottenuto e perché controlli anche i byte letti?
+
+<details>
+<summary>Mostra risposta</summary>
+
+La riduzione è (28,4 − 0,62) / 28,4 = 97,8%. I byte letti vanno controllati a parte perché RAM e I/O non si muovono sempre insieme: un modello può ridurre la memoria con una pre-aggregazione e continuare a leggere tutte le colonne. Il confronto prima e dopo su durata, byte letti e RAM, sulla stessa query di telemetria, evita di dichiarare vittoria su una sola metrica.
+
+</details>

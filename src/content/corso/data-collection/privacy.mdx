@@ -1,101 +1,133 @@
 ---
 title: "Privacy e GDPR nella raccolta dati"
-description: >-
-  GDPR, CCPA e come raccogliere dati rispettando la normativa senza uccidere l'analisi.
+description: "Progettare la raccolta in modo che consenso, scrubbing degli URL, pseudonimizzazione con HMAC e Identity Vault rendano possibile la cancellazione Art. 17 senza riscrivere miliardi di righe."
 module: "Modulo 2: Raccolta dati e sistemi di tracking"
 order: 4
 category: Decisione
 headerImage: /course-headers/data-collection-privacy-ginnytech-ad.webp
 headerImageAlt: "Privacy e GDPR nella raccolta dati - immagine ufficiale della lezione su GinnyTech, creata da AD"
-difficulty: advanced
-duration: 18 min
+difficulty: avanzato
+duration: "45 min"
 learningObjectives:
-  - Assegnare base giuridica, owner e tempo di conservazione a ogni campo personale
-  - Sostituire identificativi diretti con pseudonimi prima dello storage analitico
-  - Testare cancellazione e accesso su tutti i sistemi prima dell'audit
+  - Assegnare a ogni campo del tracking plan una classe di dato, una base giuridica, un proprietario e un tempo di conservazione
+  - Implementare scrubbing degli URL e pseudonimizzazione con HMAC segreto prima che l'evento raggiunga lo storage analitico
+  - Eseguire e verificare una cancellazione Art. 17 tramite Identity Vault senza alterare i totali di fatturato storici
 prerequisites:
   - data-collection/framework
 binario: "ml-tabellare"
-formato: "articolo"
-autore: "Hermes"
-controllatoDa: "Argo"
-autorizzatoDa: "Giano"
 draft: false
-dateModified: 2026-11-13
+dateModified: 2026-11-17
+formato: "didattica-v2"
 ---
 
-# Privacy e GDPR nella raccolta dati
+Un portale B2C italiano invia nell'URL della pagina di conferma i dati del cliente in chiaro, per esempio `?email=mario.rossi@esempio.it&cf=RSSMRA80A01H501U`. Lo script di tracking cattura in automatico `page_url` e `referrer`, e così email e codice fiscale si disperdono nelle tabelle di clickstream, nei log di Kafka e nei server dei pixel pubblicitari, anche quando l'utente aveva premuto "Rifiuta tutti" sul banner. Questo è un caso ricostruito con numeri di esempio, ma il meccanismo è reale: la privacy si decide nel punto in cui l'evento nasce, non nel banner.
 
-Un portale B2C italiano invia nei parametri dell'URL di conferma (`?email=mario.rossi@esempio.it&cf=RSSMRA80A01H501U`) i dati personali in chiaro del cliente: lo script di tracking cattura automaticamente `page_url` e `referrer` spargendo email e codice fiscale in tutte le tabelle di clickstream, nei log di Kafka e nei server dei pixel pubblicitari anche quando l'utente aveva cliccato "Rifiuta tutti" sul banner dei cookie. Quando un utente invia una richiesta formale di cancellazione (Art. 17 GDPR), il team cancella la riga nel database PostgreSQL ma non sa come rimuovere quei dati sparsi in 2 miliardi di righe analitiche. La causa non è la rigidità del GDPR: è non applicare la **Privacy by Design alla fonte (propagazione del consenso per finalità, scrubbing degli URL, pseudonimizzazione con sale segreto e separazione della Identity Vault per il diritto all'oblio)**.
+## Email negli URL e due miliardi di righe impossibili da ripulire
 
-## Email e codice fiscale finiti negli URL e impossibili da cancellare dal clickstream
+Nello scenario costruito l'azienda raccoglie 60 milioni di eventi web al mese in ClickHouse e su S3, con una conservazione del clickstream di 5 anni, cioè circa 3,6 miliardi di righe a regime (60 milioni × 60 mesi). Durante un audit del Data Protection Officer emergono tre violazioni del Regolamento (UE) 2016/679.
 
-Questo è un caso ricostruito con numeri di esempio su quanto accade quando la conformità privacy viene vista come un "banner da mettere in homepage" anziché come un requisito architetturale della pipeline dati. L'azienda raccoglie 60 milioni di eventi web al mese in ClickHouse e S3.
+La prima riguarda il consenso: il banner compare, ma i tag di marketing partono al caricamento della pagina prima della scelta, oppure le chiamate server-side ignorano `consent_marketing = 0`. La seconda riguarda gli URL: il flusso di registrazione passa l'email in query string e il collettore salva l'URL completo nella tabella immutabile degli eventi, senza alcuna base giuridica per tenere identificativi diretti in un log comportamentale. La terza riguarda i diritti: quando 40 utenti chiedono accesso (Art. 15) e cancellazione (Art. 17), il regolamento impone di rispondere senza ingiustificato ritardo e comunque entro un mese, ma l'azienda scopre che le PII sono copiate in 18 tabelle diverse e che nessun catalogo dice dove.
 
-Durante un audit del Data Protection Officer (DPO) emergono tre violazioni critiche del Regolamento Europeo (GDPR 2016/679):
-1. Il banner di consenso (*Consent Management Platform*, CMP) compare a schermo, ma i tag di tracciamento marketing partono già al caricamento della pagina **prima** che l'utente esprima una scelta, oppure ignorano lo stato `consent_marketing = false` nelle chiamate server-side.
-2. Il flusso di registrazione passa l'email in query string (`https://sito.it/benvenuto?email=nome@dominio.it`): il collettore salva l'URL completo in chiaro dentro la tabella immutabile degli eventi di navigazione (`raw_tracking.events`) che ha una retention di 5 anni, senza alcuna base giuridica per conservare dati identificativi diretti (PII) nel log comportamentale.
-3. Quando 40 utenti esercitano il diritto di cancellazione (Art. 17 GDPR) e di accesso (Art. 15 GDPR), l'azienda supera i 30 giorni di legge e scopre che gli identificativi diretti sono copiati in 18 tabelle diverse del data warehouse senza un catalogo dei campi PII.
+Il rischio sanzionatorio è alto (le violazioni più gravi arrivano a 20 milioni di euro o al 4% del fatturato mondiale annuo, se superiore), ma la radice è tecnica: i dati identificativi diretti non sono stati separati dai dati comportamentali nel punto di ingresso. Quanto segue è un metodo ingegneristico, non una consulenza legale: le decisioni sulla base giuridica spettano al DPO e al consulente dell'azienda.
 
-La causa del rischio sanzionatorio (fino al 4% del fatturato globale annuo) è non aver separato i **dati identificativi diretti (PII)** dai **dati comportamentali pseudonimizzati** fin dal collettore di ingresso.
+## Una base giuridica per ogni campo del tracking plan
 
-## Base Giuridica per Finalità, Pseudonimizzazione con Salt e Architettura Identity Vault
+> **Idea chiave:** una raccolta rispetta il GDPR senza perdere precisione analitica quando ogni campo ha una base giuridica dichiarata, il consenso viene applicato alla fonte e i dati identificativi vivono in un solo posto, separato dagli eventi.
 
-Raccogliere dati analitici ricchi e azionabili rispettando al 100% il GDPR poggia su tre meccanismi ingegneristici che proteggono la privacy senza distruggere la capacità di analisi.
+Il tracking plan diventa lo strumento di conformità se ogni proprietà è classificata come `PII_DIRECT`, `PII_INDIRECT` o `NON_PII` e abbinata a una base giuridica dell'Art. 6. Tre sono quelle che incontri più spesso nella raccolta dati. L'esecuzione del contratto o l'obbligo legale (Art. 6.1.b e 6.1.c) coprono l'ordine pagato e la fattura, che la normativa fiscale impone di conservare per dieci anni. Il legittimo interesse (Art. 6.1.f) può coprire misure tecniche e conteggi aggregati senza identificativi persistenti, sempre nei limiti indicati dal Garante. Il consenso (Art. 6.1.a) serve per la profilazione individuale e per l'invio a piattaforme pubblicitarie: ogni evento porta nel payload il vettore `consent_analytics` e `consent_marketing`, e il collettore scarta alla fonte i campi per cui manca.
 
-Il primo meccanismo è la **Mappatura della Base Giuridica (Art. 6 GDPR), del Consenso Granulare e della Retention per ciascun campo**. Nel Tracking Plan ogni proprietà è classificata (`PII_DIRECT`, `PII_INDIRECT`, `NON_PII`) e associata a una base giuridica precisa:
-1. **Esecuzione del contratto / Obbligo legale** (Art. 6.1.b/c): registrare l'ordine pagato e la fattura nel gestionale e nel mart contabile (conservazione 10 anni per legge fiscale).
-2. **Legittimo interesse / Statistica aggregata strettamente necessaria** (Art. 6.1.f / Linee Guida Garante): misurazione tecnica delle prestazioni del servizio e conteggi aggregati anonimizzati senza identificativi persistenti cross-sito.
-3. **Consenso esplicito ed effettivo** (Art. 6.1.a): tracciamento individuale per profilazione comportamentale e invio a piattaforme pubblicitarie. Ogni evento trasporta nel payload il vettore del consenso (`consent_analytics: 1|0`, `consent_marketing: 1|0`) e il collettore blocca alla fonte i campi per cui manca il consenso.
+| Campo | Classe | Base giuridica | Conservazione | Dove vive |
+|---|---|---|---|---|
+| `email_clean` | PII_DIRECT | Contratto (Art. 6.1.b) | Durata del rapporto | Solo Identity Vault |
+| `user_surrogate_id` | PII_INDIRECT | Consenso o contratto | 13 mesi nel clickstream | Tabelle eventi |
+| `page_path_scrubbed` | NON_PII dopo scrubbing | Legittimo interesse | 13 mesi | Tabelle eventi |
+| `revenue_eur` | NON_PII (fatto contabile) | Obbligo legale (Art. 6.1.c) | 10 anni | Tabelle ordini |
 
-Il secondo meccanismo è lo **Scrubbing automatico delle PII dagli URL e la Pseudonimizzazione con chiave segreta (`HMAC-SHA256`)**. Prima che un evento tocchi il disco di Kafka o ClickHouse, il collettore rimuove qualsiasi parametro sensibile dagli URL (`email`, `token`, `cf`, `phone`), converte l'indirizzo IP nel solo codice geografico (`country_code`, `region`) scartando l'IP grezzo, e sostituisce gli identificativi diretti con un hash crittografico salato (`hex(HMAC_SHA256(email_clean, secret_pepper))`). Un semplice `MD5(email)` o `SHA256(email)` **senza sale segreto non è sicuro**: chiunque può invertire l'hash in un secondo con una tabella arcobaleno (*rainbow table*) delle email note.
+La tabella mostra la regola che regge tutta l'architettura: una colonna contenente dati personali ha una sola casa. Tutto ciò che sta altrove usa una chiave surrogata opaca e un tempo di conservazione scritto sulla tabella, non in un documento.
 
-Il terzo meccanismo è il pattern **Identity Vault (PII Table isolata) per l'esecuzione istantanea del Diritto all'Oblio (Art. 17)**. Invece di scrivere nome, cognome, email e telefono dentro le 50 tabelle di eventi da miliardi di righe, le tabelle di eventi contengono **solo** un identificativo opaco interno (`user_surrogate_id`). Tutte le PII vivono in **un'unica tabella isolata e cifrata (`privacy_vault.user_pii_lookup`)**: quando un utente chiede la cancellazione GDPR, basta svuotare **quella singola riga** nella tabella `user_pii_lookup`. Istantaneamente i miliardi di eventi storici in `fct_events` diventano per sempre non riconducibili a nessuna persona fisica, mantenendo intatti al 100% i conteggi aggregati di fatturato e conversione storica dell'azienda.
-
-**Una raccolta dati rispetta il GDPR senza perdere precisione analitica solo se applica il filtro di consenso alla fonte, rimuove IP e PII dagli URL e isola tutti i dati identificativi diretti in un unico Identity Vault separato dalle tabelle di eventi.**
-
-## Tre errori che espongono il data warehouse a violazioni GDPR e perdita di metriche
-
-Il blocco SQL qui sotto mostra l'audit di privacy che rivela i tre errori più gravi: salvataggio di email in chiaro dentro `page_url` e di indirizzi IP completi nella tabella di clickstream, e invio di eventi marketing per utenti con `consent_marketing = 0`:
-
-```sql
--- Audit di conformità GDPR sulla tabella grezza degli eventi:
--- ERRORE 1: page_url contiene email e codici fiscali in chiaro passati in query string!
--- ERRORE 2: client_ip_full conservato in chiaro per anni senza necessità di sicurezza!
--- ERRORE 3: eventi con user_id e marketing properties registrati anche quando consent_marketing = 0!
-SELECT
-    countIf(match(page_url, '[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}')) AS url_con_email_in_chiaro_leak,
-    countIf(client_ip_full != '' AND event_date < today() - 30) AS ip_completi_conservati_oltre_limite,
-    countIf(consent_marketing = 0 AND ad_click_id != '') AS tracciamento_marketing_senza_consenso
-FROM raw_tracking.events_unfiltered
-WHERE event_date >= today() - 90;
+```mermaid
+flowchart LR
+    A["Browser o app"] --> B["Collettore first-party"]
+    B --> C{"Consenso presente?"}
+    C -->|"sì"| D["Scrubbing URL e rimozione IP"]
+    C -->|"no"| E["Ping cookieless aggregato"]
+    D --> F["Pseudonimizzazione HMAC"]
+    F --> G["Eventi con user_surrogate_id"]
+    F --> H["Identity Vault (PII isolate)"]
+    E --> G
 ```
 
-### Salvare URL completi non bonificati e indirizzi IP grezzi nelle tabelle analitiche
+## Pulire l'evento prima che tocchi il disco
 
-Acquisire `window.location.href` e l'indirizzo IP del visitatore salvandoli in chiaro dentro le tabelle del data warehouse trasforma una tabella di pagine viste in un archivio di dati personali ad alto rischio. Gli sviluppatori web passano spesso token, email e nomi nei parametri GET (`?user=mario@rossi.it`). Se il collettore non applica una *allowlist* dei soli parametri consentiti (`utm_source`, `utm_medium`, `utm_campaign`, `page`) oscurando tutto il resto con `[REDACTED]` prima del salvataggio, vi ritroverete con dati personali impossibili da ripulire sparsi in tutti i backup S3.
+Il primo punto di controllo è il collettore, prima di Kafka e ClickHouse. Qui si applica una allowlist dei parametri ammessi negli URL e si scarta l'indirizzo IP dopo aver ricavato nazione e regione. L'allowlist è più sicura di una blacklist perché cattura anche i parametri che nessuno aveva previsto: lo sviluppatore che domani aggiunge `?token=` all'URL non può rompere la conformità.
 
-### Usare un semplice SHA256(email) senza sale segreto credendo che sia anonimizzazione
+```javascript
+// Scrubbing in ingresso: tiene solo i parametri in allowlist, tutto il resto diventa [REDACTED]
+const ALLOWED_PARAMS = new Set(["utm_source", "utm_medium", "utm_campaign", "page"]);
 
-Sostituire `'mario.rossi@gmail.com'` con `SHA256('mario.rossi@gmail.com')` e dichiarare che "il dato è anonimo e fuori dal perimetro GDPR" è un grave errore sia tecnico sia giuridico. Poiché l'algoritmo SHA-256 è deterministico e pubblico, basta fare il join con una qualsiasi lista di email per ricostruire in pochi millisecondi nome e cognome di ogni riga. Per il GDPR un dato hashato è un **dato pseudonimizzato** (ancora soggetto al GDPR), e per impedire la re-identificazione non autorizzata deve usare una chiave crittografica segreta custodita fuori dal database o essere sostituito da un UUID mappato nell'*Identity Vault*.
+function scrubUrl(rawUrl) {
+  const url = new URL(rawUrl);
+  for (const key of [...url.searchParams.keys()]) {
+    if (!ALLOWED_PARAMS.has(key)) {
+      url.searchParams.set(key, "[REDACTED]");
+    }
+  }
+  // Il valore del path può contenere email: ultima rete di sicurezza con espressione regolare
+  const path = url.pathname.replace(/[\w.%+-]+@[\w.-]+\.[a-zA-Z]{2,}/g, "[EMAIL_REDACTED]");
+  return path + url.search;
+}
 
-### Cancellare le righe degli ordini storici per il GDPR sballando i bilanci passati
+// scrubUrl("https://sito.it/benvenuto?email=a@b.it&utm_source=newsletter")
+// -> "/benvenuto?email=%5BREDACTED%5D&utm_source=newsletter"
+```
 
-Quando non si separa l'*Identity Vault* dalle tabelle dei fatti e arriva una richiesta di cancellazione GDPR, eseguire `DELETE FROM fct_orders WHERE customer_id = 12345` commette due errori opposti: da un lato viola l'obbligo fiscale di conservazione delle scritture contabili (Art. 17.3.b GDPR), dall'altro altera retroattivamente il fatturato dei mesi già chiusi a bilancio. Non si cancellano mai i fatti contabili aggregati: si rimuovono i dati personali identificativi dell'utente nell'*Identity Vault*.
+Dopo lo scrubbing l'evento che entra nel sistema ha questa forma: nessun IP, nessun identificativo diretto, consenso dichiarato e identità sostituita da una chiave opaca.
 
-## Architettura Identity Vault, Scrubbing URL in SQL e verifica di Cancellazione GDPR in ClickHouse
+```json
+{
+  "_comment": "Evento dopo il collettore: nessuna PII diretta, consenso esplicito, chiave surrogata",
+  "event_id": "evt_7c1a",
+  "event": "page_viewed",
+  "occurred_at": "2026-11-12T08:31:07.000Z",
+  "user_surrogate_id": "u_3f9c21ab",
+  "consent": { "analytics": 1, "marketing": 0 },
+  "context": { "page_path_scrubbed": "/benvenuto", "utm_source": "newsletter", "country_code": "IT" }
+}
+```
 
-Per implementare una pipeline di raccolta e modellazione dati pienamente conforme al GDPR su ClickHouse, applicate questi quattro criteri in ordine di priorità:
+## Pseudonimizzare con una chiave segreta, non con un hash nudo
 
-1. In ingresso, applicate lo **scrubbing automatico delle PII dagli URL** e scartate l'indirizzo IP dopo aver risolto nazione e regione; se `consent_analytics = 0`, raccogliete solo un ping aggregato *cookieless* privo di identificativi persistenti per mantenere il conteggio totale delle visite.
-2. Isolate tutti gli attributi identificativi diretti (`email`, `full_name`, `phone`) nell'unica tabella **`privacy_vault.user_pii_lookup`** protetta da permessi ristretti, lasciando nelle tabelle analitiche (`fct_events`, `fct_orders`) solo la chiave surrogata opaca `user_surrogate_id`.
-3. Configurate sulle tabelle di eventi granulari il **TTL automatico di ritenzione** in ClickHouse (es. `TTL event_date + INTERVAL 13 MONTH DELETE` per il clickstream) in linea con l'informativa privacy.
-4. Automatizzate e testate la procedura di **Right to Erasure (Art. 17)** azzerando i campi PII nell'*Identity Vault* e verificando con una query di audit che il soggetto non sia più re-identificabile.
+Per generare `user_surrogate_id` da un identificativo come l'email si usa un HMAC con una chiave segreta custodita fuori dal database, non un semplice SHA-256. L'algoritmo SHA-256 è deterministico e pubblico: chiunque abbia una lista di email note calcola gli hash e li confronta per risalire all'identità in pochi millisecondi. Con HMAC e una chiave segreta, l'attaccante senza la chiave non può rifare il calcolo.
 
-Ecco l'implementazione SQL completa in ClickHouse con separazione tra tabella eventi dotata di TTL e *Identity Vault*, scrubbing URL ed esecuzione di una verifica di cancellazione GDPR:
+```python
+import hmac, hashlib, os
+
+# Chiave segreta (pepper) letta da un secret manager, mai salvata nel database analitico
+PEPPER = os.environ["TRACKING_PEPPER"].encode("utf-8")
+
+def surrogate_id(email: str) -> str:
+    # Normalizza prima di calcolare, altrimenti Mario@x.it e mario@x.it producono due utenti
+    clean = email.strip().lower().encode("utf-8")
+    digest = hmac.new(PEPPER, clean, hashlib.sha256).hexdigest()
+    return "u_" + digest[:16]
+
+print(surrogate_id("Mario.Rossi@esempio.it"))  # stesso output a ogni esecuzione, irriproducibile senza PEPPER
+```
+
+Va ricordato che un dato pseudonimizzato resta un dato personale: il considerando 26 del GDPR lo chiarisce. L'HMAC riduce il rischio di re-identificazione, non porta il dato fuori dal regolamento. Per questo serve anche l'Identity Vault, che permette di cancellare davvero il legame tra persona e chiave.
+
+## Cancellare un utente senza toccare cinquanta tabelle
+
+Il pattern dell'Identity Vault concentra email, nome e telefono in una sola tabella a accesso ristretto, mentre le tabelle degli eventi contengono solo `user_surrogate_id`. Una richiesta di cancellazione modifica una riga del vault. Da quel momento i miliardi di eventi storici non sono più riconducibili a nessuna persona fisica tramite il collettore, mentre i conteggi aggregati di visite e fatturato restano identici.
+
+Il confronto numerico, con numeri di esempio, rende evidente il vantaggio. Se 40 utenti chiedono la cancellazione e le PII sono sparse in 18 tabelle, servono 40 × 18 = 720 operazioni di cancellazione da pianificare, eseguire e verificare, ciascuna su tabelle da centinaia di milioni di righe. Con il vault le operazioni sono 40, una per utente. Il costo delle verifiche scende della stessa proporzione: da 720 a 40 operazioni è una riduzione di 680 operazioni, pari a 680 / 720 = 94,4%.
+
+Lo stesso ragionamento vale per la conservazione. Con un TTL di 13 mesi sulle tabelle di eventi, il volume a regime è 60 milioni × 13 mesi = 780 milioni di righe, contro 3,6 miliardi di una conservazione di 5 anni: una riduzione di 2,82 miliardi di righe, cioè del 78,3%. Meno dati personali conservati significano meno superficie da proteggere e da cancellare.
+
+L'implementazione in ClickHouse separa vault ed eventi, applica il TTL e verifica la cancellazione.
 
 ```sql
--- 1. Tabella Isolata IDENTITY VAULT (unico posto dove risiedono le PII dirette, accesso ristretto):
+-- 1. Identity Vault: unico posto con PII dirette, accesso ristretto
 CREATE TABLE privacy_vault.user_pii_lookup
 (
     user_surrogate_id String,
@@ -104,13 +136,13 @@ CREATE TABLE privacy_vault.user_pii_lookup
     phone_number String,
     consent_analytics UInt8,
     consent_marketing UInt8,
-    gdpr_status LowCardinality(String), -- 'active', 'erased_art17'
+    gdpr_status LowCardinality(String), -- 'active' oppure 'erased_art17'
     updated_at DateTime64(3, 'UTC') DEFAULT now64(3)
 )
 ENGINE = ReplacingMergeTree(updated_at)
 ORDER BY user_surrogate_id;
 
--- 2. Tabella Analitica Eventi (ZERO PII dirette, URL bonificati da email/CF e TTL automatico a 13 mesi):
+-- 2. Tabella eventi senza PII dirette e con scadenza automatica a 13 mesi
 CREATE TABLE analytics_prod.fct_web_events_gdpr_safe
 (
     event_date Date,
@@ -128,52 +160,88 @@ PARTITION BY toYYYYMM(event_date)
 ORDER BY (event_date, event_name, user_surrogate_id)
 TTL event_date + INTERVAL 13 MONTH DELETE;
 
--- 3. Scrubbing alla fonte durante l'inserimento (rimuove qualsiasi email finita negli URL):
-INSERT INTO analytics_prod.fct_web_events_gdpr_safe
-SELECT
-    toDate(occurred_at) AS event_date,
-    occurred_at,
-    event_id,
-    if(consent_analytics = 1, user_surrogate_id, 'ANONYMOUS_NO_CONSENT') AS user_surrogate_id,
-    event_name,
-    replaceRegexpAll(page_url, '[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}', '[EMAIL_REDACTED]') AS page_path_scrubbed,
-    utm_source,
-    country_code,
-    revenue_eur
-FROM raw_tracking.incoming_stream;
+-- 3. Cancellazione Art. 17: nuova riga con PII vuote e stato erased_art17 (la versione più recente vince)
+INSERT INTO privacy_vault.user_pii_lookup
+    (user_surrogate_id, email_clean, full_name, phone_number, consent_analytics, consent_marketing, gdpr_status)
+VALUES ('u_3f9c21ab', '', '', '', 0, 0, 'erased_art17');
 
--- 4. Test e Audit di Cancellazione GDPR (Art. 17):
--- Verifica che per tutti gli utenti con gdpr_status = 'erased_art17' i campi PII siano stati azzerati
--- mentre il fatturato storico in fct_web_events_gdpr_safe sia rimasto intatto al 100%:
+-- 4. Audit: nessuna PII residua per gli utenti cancellati, nessuna email negli URL, fatturato intatto
 SELECT
-    countIf(gdpr_status = 'erased_art17' AND (email_clean != '' OR full_name != '')) AS violazioni_cancellazione_incompleta,
+    (SELECT countIf(gdpr_status = 'erased_art17' AND (email_clean != '' OR full_name != ''))
+       FROM privacy_vault.user_pii_lookup FINAL) AS cancellazioni_incomplete,
     (SELECT countIf(match(page_path_scrubbed, '[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}'))
-     FROM analytics_prod.fct_web_events_gdpr_safe
-     WHERE event_date >= today() - 30) AS email_residue_negli_url,
+       FROM analytics_prod.fct_web_events_gdpr_safe
+      WHERE event_date >= today() - 30) AS email_residue_negli_url,
     (SELECT sum(revenue_eur)
-     FROM analytics_prod.fct_web_events_gdpr_safe
-     WHERE event_date >= today() - 30) AS fatturato_storico_preservato_eur
-FROM privacy_vault.user_pii_lookup FINAL;
+       FROM analytics_prod.fct_web_events_gdpr_safe
+      WHERE event_date >= today() - 30) AS fatturato_30gg_eur;
 ```
 
-Il risultato risolve il conflitto tra privacy e business: quando l'utente `USR-991` esercita il diritto all'oblio (Art. 17), il sistema aggiorna la sua unica riga in `privacy_vault.user_pii_lookup` azzerando `email_clean = ''`, `full_name = ''`, `phone_number = ''` e impostando `gdpr_status = 'erased_art17'`. In meno di un secondo l'utente è dimenticato e la query di audit certifica `violazioni_cancellazione_incompleta = 0` e `email_residue_negli_url = 0`; allo stesso tempo, poiché le righe in `fct_web_events_gdpr_safe` contengono solo `user_surrogate_id` e l'importo `revenue_eur`, il fatturato storico dell'azienda non perde un solo centesimo.
+L'esito atteso è `cancellazioni_incomplete = 0` e `email_residue_negli_url = 0`, mentre `fatturato_30gg_eur` coincide con il valore calcolato prima della cancellazione. Se invece le PII fossero rimaste anche in altre tabelle, il vault non basterebbe: il catalogo dei campi PII e il registro dei trattamenti (Art. 30) servono proprio a sapere che non è così.
 
-## Gestione degli utenti che rifiutano i cookie: Buio Totale o Misurazione Cookieless Aggregata
+## Utenti che rifiutano il consenso: buio totale o misurazione aggregata
 
-In Italia ed Europa una quota compresa tra il **25% e il 55% dei visitatori** clicca su "Rifiuta" sul banner dei cookie. Come gestire questo traffico senza violare la direttiva ePrivacy / GDPR ma senza diventare ciechi sulle performance delle campagne di acquisizione?
+In molti siti europei una quota consistente di visitatori rifiuta i cookie di profilazione. Con numeri di esempio, il 40% dei 60 milioni di eventi mensili arriva da utenti senza consenso: sono 24 milioni di eventi senza consenso e 36 milioni con consenso, e 24 + 36 = 60 milioni. Spegnere tutta la telemetria per quel 40% significherebbe perdere due eventi su cinque anche nei conteggi anonimi.
 
-Il criterio di scelta è netto: **non installate alcun cookie o identificativo persistente nel browser né inviate dati personali a terze parti quando l'utente rifiuta il consenso, ma inviate dal vostro server first-party un ping tecnico *cookieless* strettamente anonimo e aggregato (contenente solo `timestamp_ora`, `page_path_pulito`, `utm_source`/`utm_campaign` della pagina corrente e `country_code`, con `user_surrogate_id = 'ANONYMOUS_NO_CONSENT'` e senza profilazione cross-pagina) abbinato a conversioni server-side sugli ordini realmente conclusi.**
+La scelta tecnica è separare due cose. Il tracciamento individuale persistente richiede consenso e non parte senza. Il conteggio statistico aggregato first-party, privo di identificatori persistenti, può continuare entro i limiti della normativa ePrivacy e delle indicazioni del Garante: un ping con solo `timestamp`, `page_path_scrubbed`, `utm_source` e `country_code`, con `user_surrogate_id = 'ANONYMOUS_NO_CONSENT'`. Alle conversioni reali si affiancano ordini registrati server-side sulla base del contratto. Il perimetro esatto di ciò che è ammesso senza consenso dipende dal caso e dalla giurisdizione, quindi la configurazione va concordata con il DPO.
 
-La confusione comune consiste nello spegnere il 100% della telemetria del sito quando l'utente rifiuta i cookie di profilazione pubblicitaria, perdendo anche il semplice conteggio anonimo delle pagine viste. Separando il **tracciamento individuale persistente** (che richiede consenso) dal **conteggio statistico aggregato first-party privo di identificatori**, mantenete la visibilità sui volumi reali di ogni canale nel pieno rispetto della scelta dell'utente. Ricordate di documentare ogni tabella nel **Registro dei Trattamenti (Art. 30 GDPR)** indicando finalità, categorie di interessati e TTL configurato.
+## Tre errori che espongono il warehouse
 
-## Cinque domande prima di superare l'audit GDPR sulla raccolta dati
+### URL e indirizzi IP salvati in chiaro
 
-1. Ogni campo del vostro Tracking Plan che contiene dati personali ha una **base giuridica documentata**, un **owner** e una **scadenza di conservazione automatica (`TTL`)** configurata fisicamente sulle tabelle del database?
-2. Il collettore rimuove alla fonte gli indirizzi IP completi e applica uno **scrubbing con espressione regolare** su tutti gli URL e i referrer per impedire che email, nomi o codici fiscali finiscano nel clickstream?
-3. Lo stato del consenso (`consent_analytics`, `consent_marketing`) viene rispettato sia lato client sia nelle pipeline server-side e di Reverse ETL, bloccando l'invio di dati a terze parti per chi ha negato il consenso?
-4. Avete isolato tutti gli identificativi diretti (email, nome, telefono) in un unico **Identity Vault (`user_pii_lookup`)** separato dalle tabelle di eventi, usando nelle tabelle analitiche solo chiavi surrogate opache?
-5. Avete eseguito negli ultimi tre mesi un test reale di **Diritto di Accesso (Art. 15)** e di **Diritto alla Cancellazione (Art. 17)** verificando di poter estrarre o rimuovere i dati di un utente da tutti i sistemi entro i 30 giorni di legge?
+Il sintomo è una tabella di pagine viste che contiene email, token e nomi nei parametri GET e indirizzi IP completi conservati per anni. Succede perché `window.location.href` è la scelta più comoda e perché gli sviluppatori usano la query string per passare dati tra pagine. Se manca l'allowlist, i dati personali finiscono anche nei backup su S3, dove ripulirli è molto più difficile. La correzione è lo scrubbing in ingresso mostrato sopra, con IP scartato dopo la geolocalizzazione.
 
-La metrica di conformità tecnica alla privacy è **`0 PII dirette fuori dall'Identity Vault`** (`email_residue_negli_url = 0`) accompagnata da un **Tempo di Esecuzione della Cancellazione Art. 17 inferiore a 24 ore** senza alterazione dei totali finanziari aggregati.
+### SHA-256 dell'email scambiato per anonimizzazione
 
-Di tutta questa lezione su Privacy e GDPR, portate con voi una sola regola architetturale: il modo migliore per proteggere e cancellare i dati personali da cinquanta tabelle da miliardi di righe è non scriverli mai in quelle cinquanta tabelle. Mettete le PII in una sola cassaforte (`Identity Vault`), usate chiavi surrogate per tutto il resto e lasciate che il `TTL` faccia pulizia puntuale.
+Il sintomo è la dichiarazione "il dato è hashato, quindi è fuori dal GDPR". Sembra ragionevole perché l'hash è illeggibile a occhio, ma un join con una qualsiasi lista di email ricostruisce l'identità di ogni riga. Dal punto di vista del regolamento il dato è pseudonimizzato e resta soggetto alle regole. La correzione è un HMAC con chiave segreta, oppure un identificativo casuale mappato nel vault, accompagnati dal riconoscimento che il dato resta personale.
+
+### DELETE sui fatti contabili per rispondere a una richiesta di cancellazione
+
+Il sintomo è un `DELETE FROM fct_orders WHERE customer_id = 12345` eseguito per rispondere al cliente. Sembra la risposta letterale alla richiesta, ma elimina scritture che la legge fiscale obbliga a conservare (l'Art. 17.3.b prevede proprio questa eccezione) e altera il fatturato di mesi già chiusi a bilancio. La correzione è anonimizzare il collegamento alla persona nel vault e lasciare intatti i fatti aggregati.
+
+## Controllo prima di superare un audit sulla raccolta
+
+1. Un URL di conferma contiene `?email=...` e il collettore salva `page_url` per intero. Quale controllo lo impedisce e dove va applicato?
+
+<details>
+<summary>Mostra risposta</summary>
+
+Una allowlist dei parametri ammessi applicata nel collettore, prima di Kafka e ClickHouse, che sostituisce tutto il resto con `[REDACTED]`. Applicarla dopo, nel warehouse, lascerebbe le email già copiate in log e backup.
+
+</details>
+
+2. Un collega propone di sostituire l'email con `SHA256(email)` e di considerare il dato anonimo. Che cosa gli rispondi e quale alternativa proponi?
+
+<details>
+<summary>Mostra risposta</summary>
+
+L'hash senza chiave si inverte con un join su liste di email note, e comunque il dato resta pseudonimizzato e quindi personale. L'alternativa è un HMAC con chiave segreta custodita in un secret manager, oppure un identificativo casuale conservato nel vault, insieme alla cancellazione del legame quando l'utente la chiede.
+
+</details>
+
+3. Con 40 richieste di cancellazione e PII in 18 tabelle, quante operazioni servono senza vault e quante con il vault?
+
+<details>
+<summary>Mostra risposta</summary>
+
+Senza vault 40 × 18 = 720 operazioni; con il vault 40, una per utente. La differenza è 680 operazioni, il 94,4% in meno.
+
+</details>
+
+4. Un utente cancellato ha ordini per 1.200 euro nei mesi chiusi. Cosa succede ai 1.200 euro dopo la cancellazione Art. 17 e perché?
+
+<details>
+<summary>Mostra risposta</summary>
+
+Restano nel fatturato storico. La cancellazione azzera i dati identificativi nel vault ma non elimina il fatto contabile, che deve essere conservato per obbligo di legge. Le righe degli ordini contengono solo la chiave surrogata, quindi il totale non cambia e l'utente non è più identificabile tramite i sistemi analitici.
+
+</details>
+
+5. Il 40% dei 60 milioni di eventi mensili arriva da utenti che hanno rifiutato il consenso. Quanti eventi sono e che cosa puoi continuare a raccogliere?
+
+<details>
+<summary>Mostra risposta</summary>
+
+Sono 60 milioni × 0,40 = 24 milioni di eventi. Puoi continuare a raccogliere ping aggregati first-party senza identificatori persistenti, con solo pagina pulita, sorgente della campagna e nazione, più gli ordini conclusi registrati server-side. Nessun cookie persistente e nessun invio a terze parti, nei limiti confermati dal DPO.
+
+</details>

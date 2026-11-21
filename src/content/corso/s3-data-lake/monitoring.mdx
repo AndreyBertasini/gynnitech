@@ -1,168 +1,230 @@
 ---
 title: "Monitoring e data quality del data lake"
 description: >-
-  Monitorare freschezza, completezza e qualità dei dati su data lake.
+  Come impedire che un job tecnicamente riuscito pubblichi dati sbagliati: controlli di freschezza, volume rispetto alla media mobile a 7 giorni, chiavi duplicate e dimensione dei file, pattern Write-Audit-Publish e alert con soglia, severità e responsabile.
 module: "Modulo 10: Data lake e lakehouse su S3"
 order: 9
 category: Tecnico
 headerImage: /course-headers/s3-data-lake-monitoring-ginnytech-ad-v3.webp
 headerImageAlt: "Monitoring e data quality del data lake - immagine ufficiale della lezione su GinnyTech, creata da AD"
 difficulty: advanced
-duration: 18 min
+duration: 36 min
 learningObjectives:
-  - Controllare freschezza delle partizioni e volume rispetto alla media mobile a 7 giorni
-  - Verificare schema, dimensione dei file e duplicati prima dei job a valle
-  - Instradare ogni anomalia verso un alert con soglia scritta e responsabile
+  - Calcolare lo scostamento percentuale del volume di una partizione rispetto alla media mobile a 7 giorni e confrontarlo con una soglia scritta
+  - Scrivere una query Athena che verifica volume, chiavi duplicate, valori invalidi e freschezza di una partizione prima della pubblicazione
+  - Controllare con boto3 numero e dimensione dei file di una partizione per intercettare il problema dei file piccoli
+  - Classificare ogni controllo come bloccante o come avviso e instradare l'alert con severità e responsabile
 prerequisites:
   - s3-data-lake/sicurezza
 binario: "ml-tabellare"
-formato: "articolo"
-autore: "Hermes"
-controllatoDa: "Argo"
-autorizzatoDa: "Giano"
+formato: "didattica-v2"
 draft: false
-dateModified: 2026-11-13
+dateModified: 2026-11-17
 ---
 
-# Monitoring e data quality del data lake
+Il job notturno che esporta gli ordini dall'ERP verso il data lake termina alle 03:00 con codice di uscita `0` e scrive regolarmente `dt=2026-11-12/orders.parquet`. L'orchestratore, soddisfatto, avvia i modelli dbt e aggiorna le dashboard. Alle 09:00 l'amministratore delegato apre il report e vede le vendite di ieri crollate dell'82%. Lo scenario è costruito con numeri di esempio, ma ha una dinamica molto comune: una modifica silenziosa sull'ERP ha scartato tutti gli ordini esteri, e nel file sono finite 18.120 righe invece delle consuete 100.000, senza nessun errore tecnico.
 
-Il job notturno che esporta gli ordini dall'ERP verso il data lake S3 termina alle 03:00 con codice di uscita `0 (SUCCESS)` e scrive regolarmente il file `dt=2026-11-12/orders.parquet`, per cui l'orchestratore avvia i modelli dbt e aggiorna le dashboard della direzione. Alle 09:00 l'amministratore delegato apre il report e vede che le vendite di ieri sono crollate dell'82%: una modifica silenziosa sull'ERP aveva filtrato via tutti gli ordini esteri, lasciando nel file Parquet solo 18.000 righe invece delle 100.000 abituali senza sollevare alcun errore tecnico. La causa non è un bug di S3: è confondere il successo del processo tecnico (`exit 0`) con la salute dei dati, omettendo i **gate di Data Quality su freschezza, anomalia di volume rispetto alla media mobile a 7 giorni, integrità delle chiavi e distribuzione dei valori** prima di pubblicare la partizione.
+## Un job verde che pubblica un crollo finto dell'82 per cento
 
-## Un job verde con exit 0 che pubblica un crollo finto dell'ottantadue percento
+Per S3 e per l'orchestratore scrivere un file Parquet da 8 MB invece che da 45 MB è un'operazione perfetta: la risposta è `HTTP 200`. Il successo del processo dice che il codice non è andato in crash, non dice nulla sul contenuto. Nello stesso scenario si possono immaginare altri due incidenti silenziosi. Un connettore, per un errore di retry, scrive due volte lo stesso estratto con nomi diversi (`part-01.parquet` e `part-02.parquet`) nella stessa partizione, e i ricavi del giorno si raddoppiano. Un terzo flusso deposita 4.000 file da 12 KB invece di uno compattato, e le query del mattino rallentano senza che nessuno capisca perché.
 
-Questo è un caso ricostruito con numeri di esempio su quanto accade quando il monitoraggio di un data lake si limita a controllare se lo script Python o Spark è arrivato in fondo senza eccezioni. La pipeline giornaliera deposita ogni notte circa 100.000 righe (45 MB in Parquet) nella zona `raw/` e poi alimenta la zona `curated/`.
+> **Idea chiave:** un data lake è affidabile solo se ogni partizione viene verificata nel contenuto, non solo nell'esecuzione, prima di diventare visibile agli utenti.
 
-Senza controlli automatici sul contenuto dei file depositati su S3 si verificano tre incidenti silenziosi:
-1. L'estrazione dall'ERP restituisce per errore solo un quinto dei record (18.000 righe invece di 100.000): per S3 e per l'orchestratore scrivere un file Parquet da 8 MB invece che da 45 MB è un'operazione tecnicamente perfetta (`HTTP 200 OK`), così il dato monco sovrascrive le tabelle delle dashboard.
-2. Un secondo connettore scrive per un bug di retry due volte lo stesso file con nomi diversi (`part-01.parquet` e `part-02.parquet`) nella stessa partizione giornaliera, raddoppiando i ricavi di quel giorno.
-3. Un terzo flusso deposita 4.000 file da 12 KB invece di un singolo file compattato, rallentando di venti volte le query del mattino senza che nessuno se ne accorga fino alle lamentele degli utenti.
+La causa comune dei tre incidenti è l'assenza di un contratto di osservabilità eseguito tra la scrittura su S3 e l'esposizione ai consumatori. La parte restante della lezione costruisce quel contratto: quali controlli, con quali soglie, in quale punto della pipeline e con quale messaggio quando falliscono.
 
-La causa di questi tre problemi è la mancanza di un **contratto di osservabilità a cinque dimensioni** eseguito automaticamente tra la scrittura su S3 e l'esposizione agli utenti (** pattern Write-Audit-Publish, WAP**).
+## Cinque controlli e il pattern Write-Audit-Publish
 
-## I cinque pilastri della Data Observability e il pattern Write-Audit-Publish (WAP)
+Un sistema industriale di data quality guarda ogni nuova partizione da cinque lati. Il primo è la **freschezza**: non basta che il file esista, serve che sia stato scritto entro la finestra promessa al business, per esempio le 06:30, e che il massimo timestamp di business contenuto dentro i dati, `max(occurred_at)`, arrivi fino a fine giornata. Il secondo è il **volume** rispetto alla storia: righe e megabyte di oggi si confrontano con la media degli ultimi sette giorni, non con una soglia fissa scelta a caso.
 
-Un sistema di monitoraggio e data quality industriale su data lake S3 verifica ogni nuova partizione attraverso cinque controlli quantitativi prima di renderla visibile ([Barr et al., 2021](https://www.oreilly.com/library/view/fundamentals-of-data/9781098108298/)).
+Il terzo controllo riguarda la **qualità semantica**: unicità della chiave primaria, percentuale di `NULL` nelle colonne critiche, validità dei domini come importi positivi. Il quarto è la **salute fisica** dei file: numero di oggetti e dimensione media nella partizione, per riconoscere subito il problema dei file piccoli. Il quinto è l'**instradamento degli allarmi**: ogni anomalia deve arrivare a una persona con la diagnosi pronta.
 
-Il primo controllo è la **Freschezza (*Freshness SLA*)**. Non basta sapere che la partizione `dt = yesterday()` esiste: bisogna verificare che il timestamp dell'ultimo oggetto scritto su S3 (`last_modified`) rispetti la finestra promessa al business (es. entro le 06:30 di ogni mattina) e che il massimo timestamp di business contenuto dentro il file Parquet (`max(occurred_at)`) arrivi fino alle 23:59 del giorno precedente, evitando estrazioni tronche a metà giornata.
+Questi controlli hanno senso solo se bloccano la pubblicazione. Il pattern **Write-Audit-Publish** (scrivi, verifica, pubblica) lo realizza: il job scrive la nuova partizione in un'area isolata, un audit esegue i cinque controlli, e solo se tutti passano la partizione diventa visibile. Con Iceberg l'isolamento si ottiene con un branch o con uno snapshot non ancora promosso; con tabelle Hive si usa un prefisso di staging e una copia verso il prefisso finale.
 
-Il secondo controllo è l'**Anomalia di Volume rispetto alla media mobile storica**. Il numero di righe e i megabyte di oggi non vanno confrontati con una soglia fissa arbitraria, ma con la media (o mediana) degli ultimi 7–28 giorni (o dello stesso giorno della settimana precedente): se il volume di oggi scende sotto il **$-30\%$** o sale oltre il **$+50\%$** rispetto alla baseline mobile a 7 giorni, la partizione è sospetta.
-
-Il terzo, quarto e quinto controllo sono la **Qualità Semantica (Unicità della chiave primaria, Percentuale di `NULL`, Validità dei domini)**, la **Salute Fisica dei file S3** (dimensione media del file Parquet tra 50 MB e 500 MB per intercettare subito lo *small file problem*) e il **routing strutturato degli allarmi**. Grazie alle branch o agli snapshot di Apache Iceberg, si applica il pattern **Write-Audit-Publish (WAP)**: il job scrive la nuova partizione in uno stato di staging isolato, esegue la query di audit sui 5 pilastri e pubblica la partizione in produzione **solo se tutti i controlli danno esito zero errori**; in caso contrario blocca la pubblicazione e invia un alert con soglia violata, severità e team *owner*.
-
-**Un data lake è degno di fiducia solo se applica il pattern Write-Audit-Publish bloccando automaticamente le partizioni che violano freschezza, volume rispetto alla media mobile a 7 giorni, unicità delle chiavi o taglia minima dei file Parquet.**
-
-## Tre errori nel monitoraggio della qualità dati su S3
-
-Il blocco SQL qui sotto mostra un controllo di qualità ingenuo che guarda solo se `count() > 0`, non controlla i duplicati tra file Parquet diversi della stessa partizione e ignora completamente i metadati fisici dei file S3:
-
-```sql
--- ERRORE 1: controllare solo che la partizione non sia vuota (count() > 0) lascia passare
--- un crollo dell'82% dei dati (18.000 righe invece di 100.000) come se fosse tutto regolare!
--- ERRORE 2: nessun controllo su count() vs uniqExact(order_id) (duplicati da doppio file S3).
--- ERRORE 3: nessun controllo sul numero e peso dei file (_size) nella partizione S3.
-SELECT
-    count() AS righe_totali,
-    if(righe_totali > 0, 'OK', 'EMPTY_PARTITION') AS check_status
-FROM s3(
-    'https://s3.eu-central-1.amazonaws.com/acme-lake-prod/curated/sales/orders/dt=2026-11-12/*.parquet',
-    'Parquet'
-);
+```mermaid
+flowchart LR
+    W["Write<br/>partizione in staging"] --> A{"Audit<br/>5 controlli"}
+    A -->|"tutti ok"| P["Publish<br/>promozione a produzione"]
+    A -->|"violazione P1"| Q["Quarantena<br/>alert con soglia e owner"]
+    P --> D["Dashboard e modelli dbt"]
+    Q -.->|"dati certificati del giorno prima"| D
 ```
 
-### Controllare solo che la partizione non sia vuota (row_count > 0)
+Il vantaggio è che la dashboard, in caso di blocco, continua a mostrare i dati certificati del giorno prima con un avviso di ritardo, invece di mostrare un crollo inventato.
 
-Scrivere un test `ASSERT count(*) > 0` (o il solo test `not_null` di base) dà una falsa sensazione di copertura mentre lascia passare i disastri più frequenti in produzione. Nella realtà i sistemi sorgente raramente inviano esattamente zero righe: molto più spesso un filtro sbagliato, un cambio di fuso orario o un timeout a metà paginazione dimezza il volume della giornata. Senza un confronto con la media mobile degli ultimi 7 giorni (`row_count < avg_7d * 0.70`), i cali parziali passano sempre indisturbati.
+## Dalla media mobile alla soglia: il calcolo
 
-### Ignorare la dimensione e il numero dei file Parquet generati nella partizione
+Il controllo di volume è il più utile e il più frainteso. Serve una baseline, una soglia e una regola di decisione. Prendiamo i numeri di esempio dei sette giorni precedenti al 12 novembre: 99.000, 101.000, 100.000, 102.000, 98.000, 100.000 e 100.000 righe. La soglia scelta dal responsabile del dominio è meno 30% e più 50%.
 
-Verificare i valori logici delle colonne dimenticando di ispezionare le colonne virtuali `_file` e `_size` su S3 non protegge dal degrado dell'infrastruttura. Se una modifica alla configurazione di Spark o Kafka Connect fa sì che le 100.000 righe di oggi vengano scritte in 5.000 file Parquet da 9 KB anziché in un singolo file da 45 MB, tutti i test logici su `order_id` e `amount_eur` passano con successo, ma le dashboard a valle rallentano di dieci volte.
+1. La somma dei sette giorni è 99.000 + 101.000 + 100.000 + 102.000 + 98.000 + 100.000 + 100.000 = 700.000 righe.
+2. La media mobile a 7 giorni è 700.000 / 7 = 100.000 righe.
+3. L'intervallo accettato va da 100.000 × 0,70 = 70.000 a 100.000 × 1,50 = 150.000 righe.
+4. Il 12 novembre il file contiene 18.120 righe. Lo scostamento è (18.120 − 100.000) / 100.000 = −0,8188, cioè −81,9%, molto oltre la soglia del −30%: la partizione viene bloccata.
+5. Nel caso del doppio file le righe sono 200.000, quindi lo scostamento è +100%, oltre il +50%: bloccata anche questa. In più le chiavi distinte restano 100.000, e la differenza 200.000 − 100.000 = 100.000 è il numero di chiavi duplicate.
+6. Per i file piccoli, 4.000 file da 12 KB pesano 48.000 KB, circa 47 MB, quindi il volume è normale e il controllo di volume non scatta. Apri però 4.000 file con 30 ms di latenza ciascuno: 4.000 × 0,03 = 120 secondi cumulati, circa 7,5 secondi con 16 lettori in parallelo, contro 0,03 secondi per un solo file.
 
-### Sparare alert generici privi di contesto numerico, severità e owner
+L'ultimo punto spiega perché servono controlli distinti: nessuno dei cinque vede da solo tutti i guasti. Un volume corretto può convivere con duplicati compensati da righe mancanti, e una dimensione media sana può nascondere un filtro sbagliato.
 
-Inviare su Slack un messaggio automatico con scritto `"Data Quality Check Failed on table orders"` senza indicare quale regola è fallita, quale valore è stato osservato rispetto all'atteso e chi sia il responsabile del dominio rallenta di ore la diagnosi. Un buon alert di data quality deve contenere nel testo stesso la diagnosi pronta per l'azione: *"P1 [Owner: Team ERP-Ingestion] Partizione dt=2026-11-12 bloccata: osservate 18.120 righe contro media 7gg di 101.400 (-82,1%)"*.
+La baseline va scelta con attenzione. Una media su sette giorni assorbe bene le oscillazioni normali, ma si sposta in presenza di stagionalità forte: un lunedì dopo un fine settimana di volumi bassi viene confrontato con una media che include i giorni feriali. In quel caso si affianca il confronto con lo stesso giorno della settimana precedente, oppure si mantiene una soglia diversa per giorno. La soglia, inoltre, va scritta nel repository insieme al nome del responsabile, così che ogni modifica passi da una revisione e nessuno possa allargarla di nascosto per far tacere un allarme fastidioso.
 
-## Audit SQL multi-pilastro su S3 (Volume 7gg, Duplicati, NULL e Taglia File)
+Un secondo aspetto riguarda i falsi allarmi. Una soglia troppo stretta fa suonare l'allerta ogni settimana e le persone smettono di guardarla; una troppo larga lascia passare il crollo del 40% che nessuno nota. Dopo le prime settimane conviene rivedere gli scostamenti registrati e fissare la soglia in modo che gli allarmi veri siano rari e sempre azionabili.
 
-Per implementare un gate di controllo completo che certifichi ogni partizione prima del consumo analitico, applicate questi quattro passi in ordine di priorità:
+## L'audit sul contenuto con Athena
 
-1. Calcolate per ciascuna delle ultime 8 partizioni giornaliere (`dt >= today() - 8`) i cinque indicatori: conteggio righe, chiavi distinte (`order_id`), frazione di `NULL` o valori negativi sui campi critici, numero di file fisici su S3 (`uniqExact(_path)`) e dimensione media del file (`avg(_size)`).
-2. Confrontate la partizione di oggi (`dt = yesterday()`) con la media mobile dei 7 giorni precedenti (`avg_rows_7d`) usando le window function SQL.
-3. Definite le regole di blocco: scarto di volume oltre $\pm 30\%$, presenza di qualsiasi `order_id` duplicato (`dup_rows > 0`), tasso di `NULL` oltre lo $0,1\%$, ritardo di freschezza o file medi sotto i 10 MB (quando il volume totale supera 50 MB).
-4. Se la query restituisce una riga di anomalia, bloccate la promozione della partizione e inviate il payload con owner e runbook.
-
-Ecco la query pronta per ClickHouse che ispeziona direttamente i file Parquet su S3 (usando le colonne virtuali `_path` e `_size`) e valuta simultaneamente volume rispetto alla media a 7 giorni, duplicati, valori invalidi e salute dei file:
+La query seguente, scritta per Athena su una tabella `curated_sales.orders` partizionata per `dt`, calcola in un'unica passata volume, chiavi duplicate, record invalidi e ore mancanti a fine giornata per le ultime partizioni, e confronta la partizione di ieri con la media mobile dei sette giorni precedenti.
 
 ```sql
-WITH metriche_giornaliere AS (
+-- Athena: audit di una partizione contro la media mobile a 7 giorni
+WITH daily AS (
     SELECT
         dt,
-        count() AS row_count,
-        count() - uniqExact(order_id) AS duplicate_keys,
-        countIf(amount_eur <= 0 OR customer_id = 0) AS invalid_records,
-        uniqExact(_path) AS s3_files_count,
-        round(sum(_size) / nullIf(uniqExact(_path), 0) / 1048576.0, 2) AS avg_file_size_mb,
-        max(occurred_at) AS max_event_ts
-    FROM s3(
-        'https://s3.eu-central-1.amazonaws.com/acme-lake-prod/curated/sales/orders/dt=2026-11-{05..12}/*.parquet',
-        'Parquet'
-    )
+        count(*)                                         AS row_count,
+        count(*) - count(DISTINCT order_id)              AS duplicate_keys,
+        count_if(amount_eur <= 0 OR customer_id IS NULL) AS invalid_records,
+        max(occurred_at)                                 AS max_event_ts
+    FROM curated_sales.orders
+    WHERE dt BETWEEN date '2026-11-04' AND date '2026-11-12'
     GROUP BY dt
 ),
-confronto_7gg AS (
+cmp AS (
     SELECT
-        dt,
-        row_count,
-        round(avg(row_count) OVER (ORDER BY dt ROWS BETWEEN 7 PRECEDING AND 1 PRECEDING), 0) AS avg_rows_7d,
-        round((row_count - avg_rows_7d) * 100.0 / nullIf(avg_rows_7d, 0), 1) AS volume_delta_pct,
-        duplicate_keys,
-        invalid_records,
-        s3_files_count,
-        avg_file_size_mb,
-        dateDiff('hour', max_event_ts, toDateTime(dt) + INTERVAL 1 DAY) AS hours_missing_at_end_of_day
-    FROM metriche_giornaliere
+        dt, row_count, duplicate_keys, invalid_records, max_event_ts,
+        avg(row_count) OVER (ORDER BY dt ROWS BETWEEN 7 PRECEDING AND 1 PRECEDING) AS avg_rows_7d
+    FROM daily
 )
 SELECT
     dt,
     row_count,
-    avg_rows_7d,
-    volume_delta_pct,
+    round(avg_rows_7d)                                            AS avg_rows_7d,
+    round((row_count - avg_rows_7d) * 100.0 / avg_rows_7d, 1)     AS volume_delta_pct,
     duplicate_keys,
     invalid_records,
-    s3_files_count,
-    avg_file_size_mb,
-    multiIf(
-        duplicate_keys > 0, 'P1 [Owner: DataEng] Duplicati rilevati su order_id nella partizione S3',
-        abs(volume_delta_pct) > 30.0, 'P1 [Owner: Source-ERP] Anomalia volume > 30% vs media mobile 7gg',
-        invalid_records > 0, 'P2 [Owner: DataEng] Record con importo <= 0 o customer_id mancante',
-        s3_files_count > 20 AND avg_file_size_mb < 10.0, 'P2 [Owner: Platform] Small files su S3: eseguire OPTIMIZE',
-        hours_missing_at_end_of_day > 2, 'P1 [Owner: Source-ERP] Estrazione tronca prima di fine giornata',
-        'OK'
-    ) AS alert_routing
-FROM confronto_7gg
-WHERE dt = '2026-11-12'
-  AND alert_routing != 'OK';
+    date_diff('hour', max_event_ts, CAST(dt AS timestamp) + interval '1' day) AS ore_mancanti
+FROM cmp
+WHERE dt = date '2026-11-12';
 ```
 
-Con questo gate automatico inserito tra lo step di scrittura S3 e il lancio di dbt, l'incidente del mattino viene neutralizzato alle 03:01 di notte: la query rileva `row_count = 18.000` contro `avg_rows_7d = 100.000` (`volume_delta_pct = -82.0%`), restituisce `'P1 [Owner: Source-ERP] Anomalia volume > 30% vs media mobile 7gg'` e interrompe la promozione della partizione; le dashboard aziendali continuano a mostrare i dati certificati fino al giorno prima con un banner di avviso sul ritardo di caricamento, invece di mostrare all'amministratore delegato un crollo finto del fatturato. Eseguire una query di audit sui metadati e conteggi Parquet costa una frazione di secondo; pubblicare dati corrotti in produzione distrugge settimane di fiducia nel team dati.
+La query non decide nulla: restituisce i numeri. La decisione sta in un piccolo programma che li legge, li confronta con le soglie, aggiunge il controllo fisico sui file e produce l'esito per l'orchestratore. Lo script seguente usa boto3 per misurare numero e dimensione degli oggetti della partizione e per costruire il messaggio con severità e responsabile.
 
-## Gate Bloccante in Pipeline (Circuit Breaker WAP) o Monitoraggio Passivo Asincrono
+```python
+# audit_gate.py: decisione bloccante o avviso per una partizione
+import sys
+import boto3
 
-Quando si progetta l'architettura dei controlli di qualità sul data lake, occorre decidere quali test debbano **bloccare fisicamente la pipeline (*Circuit Breaker / Hard Gate*)** e quali debbano **inviare solo una notifica passiva (*Soft Warning*)** lasciando proseguire l'aggiornamento.
+OBSERVED = {"row_count": 18120, "avg_rows_7d": 100000, "duplicate_keys": 0, "ore_mancanti": 0}
+s3 = boto3.client("s3", region_name="eu-central-1")
 
-Il criterio di scelta è netto: **configurate come Gate Bloccante (`ERROR` che ferma la pubblicazione WAP) tutte le violazioni strutturali che corromperebbero i numeri di business a valle (chiavi primarie duplicate, crollo o raddoppio anomalo di volume $> 30\text{–}50\%$, estrazione tronca, colonne chiave interamente a `NULL`), configurate invece come Avviso Passivo (`WARN` che invia un ticket al team senza bloccare le dashboard) i degradi non distruttivi come una lieve frammentazione dei file Parquet (`avg_file_size_mb` sceso a 30 MB) o la comparsa di un nuovo codice categoria non ancora mappato nell'anagrafica.**
+def partition_files(bucket: str, prefix: str) -> tuple[int, float]:
+    # numero di oggetti e dimensione media in MB nel prefisso della partizione
+    sizes = []
+    for page in s3.get_paginator("list_objects_v2").paginate(Bucket=bucket, Prefix=prefix):
+        sizes += [o["Size"] for o in page.get("Contents", [])]
+    return len(sizes), (sum(sizes) / len(sizes) / 1048576 if sizes else 0.0)
 
-La confusione comune consiste nel mettere come bloccanti anche cinquanta controlli secondari sulle stringhe descrittive (bloccando tutta l'azienda alle 04:00 di notte perché un fornitore ha inserito uno spazio in più in un indirizzo), oppure nel mettere come semplici avvisi passivi anche i test sui duplicati e sui crolli di volume (per cui l'allarme suona su Slack mentre i dati sbagliati sono già finiti nelle email inviate al consiglio di amministrazione). Sbagliare questa scelta porta o a blocchi continui per falsi allarmi o alla pubblicazione sistematica di numeri errati.
+n_files, avg_mb = partition_files("acme-lake-prod-curated", "sales/orders/dt=2026-11-12/")
+delta = (OBSERVED["row_count"] - OBSERVED["avg_rows_7d"]) / OBSERVED["avg_rows_7d"] * 100
 
-Questo articolo non tratta i framework dichiarativi esterni (come AWS Glue Data Quality basato su Deequ, Great Expectations o Soda Core), i cui controlli si traducono esattamente nelle query SQL aggregate mostrate sopra. Ricordate che su dbt potete combinare nativamente i due livelli impostando `severity: error` sui test `unique` / `not_null` delle chiavi e sulle variazioni drastiche di volume, e `severity: warn` (con `warn_if: "> 10"`, `error_if: "> 1000"`) sulle anomalie minori.
+alerts = []
+if OBSERVED["duplicate_keys"] > 0:
+    alerts.append(("P1", "DataEng", f"{OBSERVED['duplicate_keys']} chiavi duplicate"))
+if abs(delta) > 30:
+    alerts.append(("P1", "Source-ERP", f"volume {OBSERVED['row_count']} vs media 7gg {OBSERVED['avg_rows_7d']} ({delta:+.1f}%)"))
+if OBSERVED["ore_mancanti"] > 2:
+    alerts.append(("P1", "Source-ERP", f"estrazione tronca, mancano {OBSERVED['ore_mancanti']} ore"))
+if n_files > 20 and avg_mb < 10:
+    alerts.append(("P2", "Platform", f"{n_files} file, media {avg_mb:.1f} MB: compattare"))
 
-## Cinque domande per validare il sistema di monitoring del data lake
+for sev, owner, msg in alerts:
+    print(f"{sev} [Owner: {owner}] partizione dt=2026-11-12: {msg}")
+sys.exit(1 if any(a[0] == "P1" for a in alerts) else 0)
+```
 
-1. Verificate la freschezza reale controllando non solo che il file sia stato scritto su S3, ma che il timestamp massimo degli eventi dentro il file (`max(occurred_at)`) copra fino alla fine della finestra prevista?
-2. Il controllo sul volume giornaliero confronta il conteggio righe e i byte con la **media mobile degli ultimi 7 giorni** (o con lo stesso giorno della settimana precedente) anziché limitarsi a `count() > 0`?
-3. Prima di lanciare i modelli a valle, il gate verifica l'assenza di chiavi duplicate (`count() - uniqExact(id) = 0`), la percentuale di `NULL` sulle colonne finanziarie e la dimensione media dei file Parquet su S3?
-4. Avete implementato il pattern **Write-Audit-Publish (WAP)** così che una partizione con errori `P1` venga tenuta in quarantena senza sovrascrivere la tabella letta dalle dashboard?
-5. Ogni regola di allerta genera un messaggio contenente i numeri osservati rispetto alla baseline, il livello di gravità (`P1` bloccante vs `P2` avviso) e il team proprietario responsabile della correzione?
+Con questi due pezzi l'incidente del caso iniziale si chiude alle 03:01. Lo script stampa `P1 [Owner: Source-ERP] partizione dt=2026-11-12: volume 18120 vs media 7gg 100000 (-81.9%)` ed esce con codice 1: l'orchestratore non promuove la partizione e non lancia dbt.
 
-La metrica regina per misurare l'affidabilità del vostro data lake è il **Data Incident Detection Rate pre-produzione**: la percentuale di anomalie dei dati intercettate e fermate dal gate automatico prima che un singolo utente di business le veda in dashboard (obiettivo: **$> 95\%$**).
+## Gate bloccante o avviso: quale controllo ferma la pipeline
 
-Di tutto il monitoraggio sul data lake, scolpite questa regola operativa: un job ETL che termina con `exit 0` dice solo che il codice non è andato in crash, non dice nulla sul fatto che i dati dentro il file Parquet siano veri. Controllate sempre volume, chiavi e freschezza prima di aprire il cancello agli utenti.
+Non tutti i controlli devono fermare l'azienda. Un blocco ha un costo: dati in ritardo, utenti che aspettano, qualcuno sveglio alle quattro di notte. Un avviso ha un altro costo: il dato sbagliato arriva comunque a chi decide. La regola è collegare il blocco al danno, non alla fastidiosità del controllo. Se un errore corrompe i totali che la direzione legge, il blocco è giustificato; se degrada soltanto la velocità, un avviso con un responsabile e una scadenza basta e lascia lavorare tutti gli altri.
+
+| Controllo | Esempio di soglia | Azione | Motivo |
+|---|---|---|---|
+| Chiavi duplicate | più di 0 | Blocca (P1) | Raddoppia i numeri di business |
+| Scostamento di volume | oltre ±30% dalla media a 7 giorni | Blocca (P1) | Estrazione troncata o doppia |
+| Estrazione tronca | oltre 2 ore mancanti a fine giornata | Blocca (P1) | Dato incompleto per il giorno |
+| Valori invalidi | importo minore o uguale a zero | Avviso (P2), blocca sopra 0,1% | Dipende dalla gravità |
+| File piccoli | media sotto 10 MB con più di 20 file | Avviso (P2) | Degrada le prestazioni, non i numeri |
+| Nuovo codice categoria | non ancora mappato | Avviso (P2) | Non corrompe i totali |
+
+La stessa distinzione si esprime nei test di dbt con la proprietà `severity`: errore per le chiavi, avviso con soglie per le anomalie minori.
+
+```yaml
+# models/curated/sales/_orders_quality.yml
+version: 2
+models:
+  - name: orders
+    columns:
+      - name: order_id
+        data_tests:
+          - unique:
+              config: {severity: error}
+          - not_null:
+              config: {severity: error}
+      - name: amount_eur
+        data_tests:
+          - dbt_utils.accepted_range:
+              min_value: 0.01
+              config:
+                severity: warn
+                warn_if: "> 10"
+                error_if: "> 1000"
+```
+
+## Tre errori nel monitoraggio della qualità su S3
+
+### Controllare solo che la partizione non sia vuota
+
+Il sintomo è una dashboard con numeri parziali mentre tutti i test risultano verdi. Succede perché `count(*) > 0` sembra un controllo ragionevole e i sistemi sorgente raramente inviano zero righe: più spesso un filtro sbagliato o un timeout a metà paginazione dimezza la giornata. La correzione è confrontare il conteggio con la media mobile e bloccare gli scostamenti oltre la soglia dichiarata.
+
+### Ignorare numero e dimensione dei file
+
+Il sintomo è un rallentamento delle query senza errori di dati. Succede perché tutti i test logici su chiavi e importi passano anche quando le 100.000 righe sono scritte in 5.000 file da pochi kilobyte. La correzione è misurare gli oggetti del prefisso, come nello script, e assegnare al risultato un avviso con azione di compattazione.
+
+### Inviare alert privi di numeri, severità e responsabile
+
+Il sintomo è un messaggio che dice solo `Data Quality Check Failed on table orders`, e diagnosi che richiedono ore. Succede perché emettere il messaggio generico è la via più breve. Un buon alert contiene la regola violata, il valore osservato rispetto all'atteso, la severità e il team responsabile, come la riga stampata dallo script. Se il messaggio non permette di agire senza aprire altri strumenti, è incompleto.
+
+## Controllo del sistema di monitoring
+
+1. Una partizione contiene 74.000 righe e la media dei sette giorni precedenti è 100.000. Con soglia a meno 30%, viene bloccata?
+
+<details>
+<summary>Mostra risposta</summary>
+
+Lo scostamento è (74.000 − 100.000) / 100.000 = −26%. È dentro la soglia del −30%, quindi la partizione passa il controllo di volume. Il limite inferiore è 70.000 righe: con 69.000 sarebbe stata bloccata. Se il calo del 26% è insolito per quel giorno della settimana, conviene confrontare anche con lo stesso giorno della settimana precedente.
+
+</details>
+
+2. Il job termina con codice 0 e la partizione ha 100.000 righe, ma `max(occurred_at)` è alle 14:00 invece che a fine giornata. Quale controllo lo intercetta e di quale severità?
+
+<details>
+<summary>Mostra risposta</summary>
+
+Lo intercetta il controllo di freschezza sul timestamp di business: mancano circa 10 ore, oltre la soglia di 2. È un P1 bloccante, perché la giornata è incompleta anche se il volume totale non è anomalo, magari per un'estrazione che ha ripreso parte del giorno precedente.
+
+</details>
+
+3. Una partizione di 600 MB è scritta in 3.000 file. Quanto vale la dimensione media e il controllo blocca o avvisa?
+
+<details>
+<summary>Mostra risposta</summary>
+
+La media è 600 / 3.000 = 0,2 MB, cioè circa 200 KB, molto sotto i 10 MB con più di 20 file. È un avviso P2: i numeri di business non sono sbagliati, ma ogni query apre 3.000 oggetti. L'azione è pianificare la compattazione verso file da circa 256 MB, che porterebbero la partizione a 3 file.
+
+</details>
+
+4. Perché un job con exit code 0 non basta come prova che i dati sono corretti?
+
+<details>
+<summary>Mostra risposta</summary>
+
+Perché il codice di uscita misura se il programma è arrivato in fondo senza eccezioni, non che cosa ha scritto. Un filtro errato, un connettore che scrive due volte o un'estrazione troncata producono file validi e risposte `HTTP 200`. Solo i controlli sul contenuto, eseguiti prima della pubblicazione, distinguono un dato corretto da uno semplicemente scritto.
+
+</details>

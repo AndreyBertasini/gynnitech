@@ -1,162 +1,280 @@
 ---
 title: "Alerting e anomaly detection su stream"
 description: >-
-  Rilevare anomalie in tempo reale: pattern statistici e implementazione pratica.
+  Costruire in ClickHouse un allarme su baseline stagionale per piattaforma con mediana, MAD e persistenza su tre minuti, calcolarne i falsi positivi con Poisson e instradarlo con severità, owner e rate limit.
 module: "Modulo 12: Real-time analytics con ClickHouse"
 order: 7
 category: Tecnico
 headerImage: /course-headers/real-time-analytics-anomaly-detection-ginnytech-ad-v3.webp
 headerImageAlt: >-
   Alerting e anomaly detection su stream - immagine ufficiale della lezione su GinnyTech, creata da AD
-difficulty: advanced
-duration: 22 min
+difficulty: avanzato
+duration: 45 min
 prerequisites:
   - real-time-analytics/materialized-views
 learningObjectives:
-  - Costruire baseline adattive per fascia oraria invece di soglie statiche
-  - Scegliere tra soglie, Z-score/IQR e Isolation Forest in base alla metrica
-  - Fissare severità, owner e rate limiting per ridurre i falsi positivi
+  - Costruire una baseline per giorno della settimana e minuto del giorno con mediana e MAD invece di una soglia statica
+  - Calcolare con la distribuzione di Poisson quanti falsi positivi produce una finestra singola e quanti una persistenza su tre minuti
+  - Definire severità, owner, rate limit e deduplicazione di un allarme e scegliere tra regole SQL e modelli multivariati
 binario: "ml-tabellare"
-formato: "articolo"
-autore: "Hermes"
-controllatoDa: "Argo"
-autorizzatoDa: "Giano"
+formato: "didattica-v2"
 draft: false
-dateModified: 2026-11-13
+dateModified: 2026-11-17
 ---
 
-# Alerting e anomaly detection su stream
+Un team di piattaforma configura un allarme che manda un messaggio su Slack e telefona al reperibile ogni volta che gli ordini scendono sotto i 50 al minuto. L'allarme suona tutte le notti alle due, quando la gente dorme. Poi una domenica pomeriggio il checkout su iOS si rompe per quattro ore e l'allarme resta zitto, perché il traffico totale non scende mai sotto i 55 ordini al minuto.
 
-Un team di piattaforma imposta un allarme automatico che invia un messaggio urgente su Slack e telefona al reperibile ogni volta che gli ordini scendono sotto i 50 al minuto. L'allarme suona tutte le notti alle due in punto quando gli utenti vanno a dormire, mentre la domenica pomeriggio non si accorge che il checkout su iOS si è rotto facendo perdere il 35% delle vendite per quattro ore, perché il traffico totale resta comunque a 65 ordini al minuto. La causa non è lo strumento di notifica: è usare soglie statiche globali invece di baseline stagionali per fascia oraria e segmento con persistenza multi-finestra.
+## Chiamate notturne e un guasto iOS di quattro ore
 
-## Chiamate notturne alle due e un blocco iOS invisibile per quattro ore
+Il caso è uno scenario costruito, con numeri di esempio generati dal codice che trovi più sotto e rieseguibili in chDB, il motore ClickHouse in-process per Python. Un e-commerce registra circa 100 ordini al minuto nelle ore centrali e 12 ordini al minuto tra l'una e le cinque di notte. Il 40% degli ordini arriva da iOS, il 60% da web e Android.
 
-Questo è un caso ricostruito con numeri di esempio su quanto accade quando gli allarmi in tempo reale vengono configurati con un singolo numero fisso (*hardcoded threshold*). L'e-commerce registra in media 110 ordini al minuto nelle ore centrali del giorno e 12 ordini al minuto tra l'una e le cinque del mattino.
+Dopo un disservizio precedente un ingegnere aggiunge la regola `ordini_totali < 50`. Le conseguenze sono due, speculari.
 
-Dopo un disservizio passato, un ingegnere configura la regola `ALERT IF orders_per_minute < 50`:
-1. Ogni singola notte, non appena scocca l'01:15 e il traffico fisiologico scende a 48 ordini al minuto, l'allarme inizia a sparare una notifica ogni sessanta secondi fino alle sette del mattino. Dopo quattro notti di falsi positivi (*alert fatigue*), il team silenzia il canale di avviso.
-2. Due settimane dopo, alle 15:00 di domenica, un aggiornamento dell'app mobile rompe il pulsante di conferma ordine su iOS. In quella fascia oraria la piattaforma dovrebbe registrare 100 ordini al minuto (60 da web/Android e 40 da iOS); con iOS azzerato il volume scende a 60 ordini al minuto. Poiché $60 > 50$, la soglia statica globale non scatta mai e l'azienda perde 180.000 euro di ordini prima che il servizio clienti segnali il problema il lunedì mattina.
+Di notte il traffico fisiologico è 12 ordini al minuto, sotto la soglia, quindi la regola scatta ogni minuto dalle 01:00 alle 04:59: 240 notifiche a notte. Dopo quattro notti il team silenzia il canale. Due settimane dopo, domenica alle 15:00, un aggiornamento dell'app rompe il pulsante di conferma su iOS. Il volume atteso in quella fascia è 100 ordini al minuto, 40 da iOS e 60 dagli altri canali. Con iOS a zero restano 60 ordini al minuto, e 60 non è inferiore a 50: la regola non scatta mai.
 
-La causa del doppio fallimento è ignorare la stagionalità intrinseca delle serie storiche umane (ora del giorno e giorno della settimana) e monitorare solo il totale aggregato senza scomporre le dimensioni critiche.
+> **Idea chiave:** un allarme su una serie con ciclo giornaliero deve confrontare il valore osservato con la stessa ora dello stesso giorno della settimana, per ogni segmento, e scattare solo se lo scostamento persiste per più minuti.
 
-## Baseline stagionali, Z-score robusto (MAD) e isteresi multi-finestra
+La perdita del caso costruito si calcola in fretta. iOS vale 40 ordini al minuto, il guasto dura 240 minuti: 40 × 240 = 9.600 ordini mancati. A un valore medio di 42 euro per ordine sono 9.600 × 42 = 403.200 euro, che nessun allarme ha segnalato. Il guasto lo scopre il servizio clienti il lunedì mattina.
 
-Un motore di anomaly detection in tempo reale che cattura i guasti veri senza svegliare il team a vuoto si fonda su tre meccanismi statistici e operativi ([Chandola et al., 2009](https://doi.org/10.1145/1541880.1541882)).
+## Perché una soglia fissa sbaglia due volte
 
-Il primo meccanismo è la **baseline condizionata a giorno della settimana e fascia oraria**. Il volume di traffico alle 03:00 del martedì non è confrontabile con le 11:00 del martedì, ma è direttamente confrontabile con le 03:00 degli ultimi quattro o otto martedì. Per ogni combinazione di `(giorno_settimana, minuto_del_giorno, segmento)` si calcola la distribuzione storica delle ultime $N$ settimane alla stessa identica ora, trasformando una curva fortemente stagionale in residui stazionari.
+La soglia statica commette due errori opposti con lo stesso parametro. Di notte è troppo alta rispetto al normale e produce falsi positivi. Di giorno è troppo bassa rispetto al normale, e un calo del 40% o del 50% resta sopra la soglia. Non è un problema di valore: nessun numero fisso può essere giusto per una serie che varia di un fattore otto nell'arco della giornata.
 
-Il secondo meccanismo è il punteggio di anomalia robusto basato su mediana e scarto assoluto mediano (**MAD**, *Median Absolute Deviation*) o intervallo interquartile (**IQR**) al posto di media e deviazione standard classiche. Nelle serie reali in streaming basta che due settimane fa ci sia stato un Black Friday o un incidente di 20 minuti perché la media aritmetica $\mu$ e la deviazione standard $\sigma$ risultino gonfiate, rendendo lo Z-score classico cieco alle anomalie successive. Lo Z-score robusto confronta il valore corrente $x_t$ con la mediana storica $M$:
-$$Z_{\text{robusto}} = \frac{x_t - M}{1,4826 \cdot \text{median}(|x - M|)}$$
-affiancato da una guardia di volume minimo (es. almeno 20 eventi attesi nella finestra) per non far scattare allarmi su fluttuazioni casuali di piccoli numeri.
+Il secondo errore nasce dall'aggregazione. Il totale mescola segmenti con comportamenti diversi, e un segmento che crolla viene coperto dagli altri. La scomposizione per piattaforma, per gateway di pagamento o per paese è la condizione per vedere il guasto.
 
-Il terzo meccanismo è il **filtro di persistenza (*N-of-M windows*) con rate limiting e deduplicazione**. Un singolo minuto anomalo può dipendere da un micro-ritardo di rete; richiedere che l'anomalia persista per almeno $3$ minuti consecutivi (o $3$ finestre su $5$) abbatte dell'85% i falsi allarmi transitori, mentre il raggruppamento dell'allerta per chiave di incidente evita di mandare 60 messaggi identici in un'ora.
+| Aspetto | Soglia statica | Baseline stagionale per segmento |
+|---|---|---|
+| Riferimento | un numero fisso | mediana della stessa ora e stesso giorno |
+| Di notte | allarme continuo | si adatta ai 12 ordini attesi |
+| Guasto su un segmento | invisibile nel totale | visibile nel segmento |
+| Outlier storici | non pertinente | neutralizzati da mediana e MAD |
+| Rumore da piccoli numeri | alto | filtrato da volume minimo e persistenza |
 
-**Un allarme su stream è azionabile solo se misura lo scostamento dalla mediana della stessa ora e giorno della settimana, richiede persistenza su più minuti consecutivi e tace quando il volume atteso è troppo basso per essere statisticamente significativo.**
+Le soglie statiche hanno senso per invarianti dell'infrastruttura, come disco pieno al 90% o CPU oltre il 95% per quindici minuti. Per i volumi di business, che dipendono dal comportamento umano, servono baseline che conoscano il ciclo.
 
-## Tre errori nella configurazione degli alert in tempo reale
+## Baseline stagionale, MAD e persistenza
 
-Il blocco SQL qui sotto mostra la regola di alerting fragile che usa una soglia statica, scatta su un singolo minuto isolato e ignora la dimensione piattaforma:
+Un rilevatore che cattura i guasti veri senza svegliare nessuno a vuoto si regge su tre meccanismi ([sintesi di Chandola, Banerjee e Kumar sul rilevamento di anomalie](https://doi.org/10.1145/1541880.1541882)).
 
-```sql
--- ERRORE 1: soglia statica (< 50) che ignora la notte e il giorno della settimana.
--- ERRORE 2: valuta un singolo minuto (anche l'ultimo incompleto) senza persistenza su 3 minuti.
--- ERRORE 3: nessuna scomposizione per piattaforma (il crollo di iOS viene coperto da Web).
-SELECT
-    toStartOfMinute(occurred_at) AS minuto,
-    count() AS ordini_totali,
-    'CRITICAL: Ordini sotto soglia 50!' AS messaggio_allarme
-FROM raw_stream.checkout_events
-WHERE occurred_at >= now() - INTERVAL 1 MINUTE
-GROUP BY minuto
-HAVING ordini_totali < 50;
+Il primo è la baseline condizionata. Il traffico delle 03:00 del martedì non è confrontabile con quello delle 11:00 dello stesso giorno, ma lo è con le 03:00 degli ultimi martedì. Per ogni combinazione di giorno della settimana, minuto del giorno e segmento si calcola la distribuzione storica sulle ultime settimane. Il ciclo diventa un riferimento, e la serie un residuo.
+
+Il secondo è la misura robusta dello scostamento. Media e deviazione standard si lasciano gonfiare da un Black Friday o da un incidente di venti minuti, e dopo l'evento la banda di tolleranza è così larga da non scattare più. La mediana $M$ e lo scarto assoluto mediano (MAD, median absolute deviation) restano stabili. Lo Z-score robusto è:
+
+$$Z_{\text{rob}} = \frac{x_t - M}{1.4826 \cdot \operatorname{MAD}}, \qquad \operatorname{MAD} = \operatorname{median}\left(|x_i - M|\right)$$
+
+Il fattore 1.4826 rende il MAD confrontabile con una deviazione standard per dati normali. A questo si aggiunge una guardia di volume: se la mediana storica è sotto una soglia, per esempio 20 eventi nella finestra, non si valuta il calo.
+
+Il terzo è la persistenza. Un singolo minuto anomalo può dipendere da un ritardo di rete. Chiedere che la violazione si ripeta per tre minuti chiusi consecutivi abbatte i falsi positivi di ordini di grandezza, e il costo è un ritardo di rilevazione di tre minuti.
+
+```mermaid
+flowchart LR
+    A["Rollup per minuto e piattaforma"] --> B["Baseline: mediana e MAD (stesso giorno, stesso minuto)"]
+    B --> C{"Mediana storica >= 20?"}
+    C -->|"no"| X["Nessuna valutazione"]
+    C -->|"sì"| D{"Z robusto < -3.5 e calo > 35%?"}
+    D -->|"no"| X
+    D -->|"sì"| E{"3 minuti chiusi consecutivi?"}
+    E -->|"no"| X
+    E -->|"sì"| F["Allarme con owner, severità e runbook"]
 ```
 
-### Usare soglie statiche fisse su metriche soggette a ciclo giorno-notte
+## Quanto rumore produce una finestra singola: il conto con Poisson
 
-Scrivere `HAVING ordini_totali < 50` per una metrica legata al comportamento umano garantisce matematicamente due errori opposti: di notte la soglia è troppo alta e genera falsi positivi continui; nelle ore di punta la soglia è troppo bassa e lascia passare inosservati cali del 40% o 50% finché il totale rimane sopra 50. Le soglie statiche hanno senso solo per invarianti fisici dell'infrastruttura (es. disco pieno al 90% o CPU oltre il 95% per 15 minuti), mai per volumi di business.
+La persistenza non è un'abitudine, si calcola. Prendi un segmento piccolo che fa in media 2 ordini al minuto e modella gli arrivi con una distribuzione di Poisson. La probabilità di vedere zero ordini in un minuto è $e^{-2}$.
 
-### Calcolare media e deviazione standard senza proteggersi dagli outlier passati
+Passo uno: $e^{-2} = 0{,}1353$, cioè 13,5% per minuto. Passo due: in un'ora ci sono 60 minuti, quindi 60 × 0,1353 = 8,1 minuti con zero ordini, senza alcun guasto. Una regola «zero ordini in un minuto» suona otto volte all'ora.
 
-Sostituire la soglia fissa con `avg(ordini) - 3 * stddevPop(ordini)` sulle ultime quattro settimane sembra la soluzione statistica corretta. Fallisce non appena nelle quattro settimane precedenti è presente una giornata di campagna promozionale o un precedente blackout: quel singolo evento estremo moltiplica per quattro la deviazione standard $\sigma$, allargando a tal punto la banda di tolleranza $[\mu - 3\sigma, \mu + 3\sigma]$ che la soglia inferiore diventa negativa e l'allarme non può più scattare per un mese intero.
+Con persistenza su tre minuti consecutivi la probabilità diventa 0,1353³ = 0,00248, cioè 0,25% per finestra. Su 60 finestre l'ora fanno 60 × 0,00248 = 0,15 allarmi falsi all'ora, uno ogni 6,7 ore. La riduzione è 8,1 ÷ 0,15 = 54 volte. E se applichi anche la guardia di volume (mediana storica almeno 20), il segmento da 2 ordini al minuto non viene valutato affatto.
 
-### Sparare una notifica al primo minuto anomalo senza persistenza né guardia di volume
+Il prezzo è il ritardo. Con il guasto iOS di 40 ordini al minuto, tre minuti di attesa significano 3 × 40 = 120 ordini e 120 × 42 = 5.040 euro persi prima dell'allarme. Sono l'1,25% dei 403.200 euro che si perderebbero in quattro ore. Quel costo si accetta, e va scritto nel documento di progetto come tempo di rilevazione di tre minuti.
 
-Valutare l'allarme su un'unica finestra di 60 secondi e su segmenti con soli 2 o 3 ordini al minuto inonda la reperibilità di rumore statistico. Se un segmento fa in media 2 ordini al minuto, ricevere 0 ordini per un minuto ha una probabilità di Poisson $e^{-2} \approx 13,5\%$: accade fisiologicamente otto volte ogni ora senza che ci sia alcun guasto tecnico.
+## Tre errori nella configurazione degli allarmi
 
-## Rilevazione di anomalie in ClickHouse con mediana stagionale, MAD e persistenza 3-su-3
-
-Per implementare un sistema di anomaly detection in SQL direttamente sulle tabelle di rollup in ClickHouse, applicate questi quattro criteri in ordine di priorità:
-
-1. Calcolate la baseline per ogni segmento (`platform`, `payment_method`) raggruppando le ultime 6–8 settimane per lo stesso giorno della settimana (`toDayOfWeek`) e la stessa finestra di 5 minuti, usando `median` e lo scarto mediano `MAD` invece di `avg` e `stddev`.
-2. Imponete una guardia di volume minimo (es. `mediana_storica >= 25` eventi nella finestra) prima di valutare qualsiasi anomalia di calo.
-3. Richiedete che la violazione ($Z_{\text{robusto}} < -3,5$ e calo superiore al $30\%$ rispetto alla mediana) si verifichi per almeno **3 finestre consecutive** prima di emettere l'allerta critica.
-4. Allegati a ogni riga di allerta l'owner del componente, la gravità (`P1` blocco totale, `P2` degrado parziale) e i valori esatti osservati rispetto alla baseline.
-
-Ecco la query pronta per ClickHouse che rileva il blocco di una piattaforma confrontando gli ultimi tre intervalli chiusi con la mediana storica delle 8 settimane precedenti:
+Il blocco seguente costruisce i dati sintetici del caso e applica la regola fragile. Le quattro settimane di storia sono al minuto, per due piattaforme, con un guasto di iOS che parte alle 15:00 del 15 novembre 2026, una domenica.
 
 ```sql
-WITH storico_8_settimane AS (
-    SELECT
-        platform,
-        toDayOfWeek(minuto) AS giorno_settimana,
-        toHour(minuto) * 60 + toMinute(minuto) AS minuto_del_giorno,
-        quantileExact(0.50)(ordini_1m) AS mediana_storica,
-        -- Calcolo approssimato della dispersione robusta tramite range interquartile (IQR):
-        quantileExact(0.75)(ordini_1m) - quantileExact(0.25)(ordini_1m) AS iqr_storico
-    FROM realtime.v_orders_per_minute_by_platform
-    WHERE minuto >= toStartOfMinute(now()) - INTERVAL 56 DAY
-      AND minuto < toStartOfMinute(now()) - INTERVAL 1 DAY
-    GROUP BY platform, giorno_settimana, minuto_del_giorno
-),
-ultimi_3_minuti_chiusi AS (
-    SELECT
-        r.platform,
-        r.minuto,
-        r.ordini_1m AS ordini_osservati,
-        s.mediana_storica,
-        -- Z-score robusto basato su IQR (1.349 * sigma ~ IQR):
-        (r.ordini_1m - s.mediana_storica) / greatest(s.iqr_storico / 1.349, 1.0) AS z_robusto,
-        (r.ordini_1m < s.mediana_storica * 0.65 AND z_robusto < -3.5 AND s.mediana_storica >= 20) AS is_anomalo
-    FROM realtime.v_orders_per_minute_by_platform AS r
-    INNER JOIN storico_8_settimane AS s
-        ON r.platform = s.platform
-       AND toDayOfWeek(r.minuto) = s.giorno_settimana
-       AND (toHour(r.minuto) * 60 + toMinute(r.minuto)) = s.minuto_del_giorno
-    WHERE r.minuto >= toStartOfMinute(now()) - INTERVAL 3 MINUTE
-      AND r.minuto < toStartOfMinute(now())
+-- Tabella dei rollup per minuto e piattaforma.
+CREATE TABLE ordini_minuto
+(
+    piattaforma LowCardinality(String),
+    minuto DateTime('UTC'),
+    ordini UInt32
 )
+ENGINE = MergeTree
+ORDER BY (piattaforma, minuto);
+
+-- 4 settimane di storia al minuto + la domenica del guasto fino alle 15:02, due piattaforme.
+-- Notte (01-04): 12 ordini attesi; resto: 100. Quota iOS 40%, web 60%. Da 15:00 iOS crolla.
+INSERT INTO ordini_minuto
 SELECT
-    platform,
-    countIf(is_anomalo) AS minuti_anomali_su_3,
-    round(avg(ordini_osservati), 1) AS media_osservata_3m,
-    round(avg(mediana_storica), 1) AS baseline_attesa_mediana,
-    round(min(z_robusto), 2) AS peggior_z_robusto,
-    'On-Call Mobile/Checkout — Verificare release e gateway per platform' AS runbook_action
-FROM ultimi_3_minuti_chiusi
-GROUP BY platform
+    p.1 AS piattaforma,
+    m AS minuto,
+    toUInt32(greatest(0,
+        round((if(toHour(m) BETWEEN 1 AND 4, 12, 100)) * p.2)
+        + (cityHash64(p.1, m) % 7) - 3
+        - if(p.1 = 'ios' AND m >= toDateTime('2026-11-15 15:00:00', 'UTC'), 100, 0)
+    )) AS ordini
+FROM
+(
+    SELECT toDateTime('2026-10-18 00:00:00', 'UTC') + number * 60 AS m
+    FROM numbers(28 * 1440 + 15 * 60 + 3)
+)
+ARRAY JOIN [('ios', 0.4), ('web', 0.6)] AS p;
+
+-- 82.446 righe: 2 piattaforme x 41.223 minuti.
+SELECT count() AS righe FROM ordini_minuto;
+
+-- Regola fragile: totale sotto 50 per minuto. Risultato: 6.720 minuti in allarme, tutti di notte.
+SELECT countIf(tot < 50) AS minuti_in_allarme, countIf(tot < 50 AND toHour(minuto) BETWEEN 1 AND 4) AS di_notte
+FROM (SELECT minuto, sum(ordini) AS tot FROM ordini_minuto WHERE minuto < toDateTime('2026-11-15 00:00:00', 'UTC') GROUP BY minuto);
+
+-- Il totale durante il guasto: 59, 57, 63 ordini, tutti sopra 50, nessun allarme.
+SELECT minuto, sum(ordini) AS tot FROM ordini_minuto WHERE minuto >= toDateTime('2026-11-15 15:00:00', 'UTC') GROUP BY minuto ORDER BY minuto;
+```
+
+I minuti in allarme sono 6.720, cioè 28 notti × 240 minuti, e coincidono con tutti i minuti notturni. Durante il guasto il totale vale 59, 57 e 63 ordini al minuto: sempre sopra 50.
+
+### Usare soglie fisse su metriche con ciclo giorno-notte
+
+Sintomo: allarmi continui di notte e silenzio nel guasto reale. Sembra ragionevole perché la soglia nasce da un incidente passato e protegge da quel caso. Il rimedio è sostituire il numero con un confronto con la stessa ora degli stessi giorni della settimana, per segmento.
+
+### Calcolare media e deviazione standard senza proteggersi dagli outlier
+
+Sintomo: dopo una campagna promozionale l'allarme smette di scattare per settimane. Sembra la soluzione statistica corretta, `avg(ordini) - 3 * stddevPop(ordini)`, ma un solo giorno estremo nelle quattro settimane di storia moltiplica la deviazione standard e fa scendere il limite inferiore sotto zero. L'allarme non può più scattare. La correzione è usare mediana e MAD, che un evento isolato non sposta.
+
+### Sparare al primo minuto anomalo senza persistenza né volume minimo
+
+Sintomo: decine di notifiche su segmenti piccoli, ignorate dal team. Succede perché con pochi eventi la fluttuazione casuale è grande, come mostra il conto con Poisson: 8,1 minuti vuoti all'ora a 2 ordini al minuto. La correzione sono due condizioni insieme: persistenza su tre minuti e mediana storica minima prima di valutare un calo.
+
+## La query di rilevazione su mediana, MAD e tre minuti
+
+Il criterio di costruzione, in ordine:
+
+1. Calcola la baseline per piattaforma, giorno della settimana e minuto del giorno, con `median` e MAD, escludendo il giorno corrente.
+2. Imponi il volume minimo: mediana storica almeno 20 ordini.
+3. Marca un minuto come anomalo se Z robusto è sotto -3,5 e il valore osservato è sotto il 65% della mediana.
+4. Emetti l'allarme solo se i tre minuti chiusi più recenti sono tutti anomali.
+
+```sql
+-- Rilevazione: tre minuti chiusi consecutivi anomali rispetto alla stessa ora dei giorni passati.
+-- "adesso" è fissato per rendere il risultato riproducibile; in produzione è toStartOfMinute(now()).
+WITH
+    toDateTime('2026-11-15 15:03:00', 'UTC') AS adesso,
+    storico AS
+    (
+        SELECT piattaforma, toDayOfWeek(minuto) AS dow, toHour(minuto) * 60 + toMinute(minuto) AS mdg, ordini
+        FROM ordini_minuto
+        WHERE minuto < toStartOfDay(adesso)
+    ),
+    mediane AS
+    (
+        SELECT piattaforma, dow, mdg, median(ordini) AS mediana
+        FROM storico GROUP BY piattaforma, dow, mdg
+    ),
+    mad AS
+    (
+        -- MAD = mediana degli scarti assoluti dalla mediana.
+        SELECT s.piattaforma AS piattaforma, s.dow AS dow, s.mdg AS mdg, any(m.mediana) AS mediana, median(abs(s.ordini - m.mediana)) AS mad
+        FROM storico AS s
+        INNER JOIN mediane AS m ON s.piattaforma = m.piattaforma AND s.dow = m.dow AND s.mdg = m.mdg
+        GROUP BY piattaforma, dow, mdg
+    ),
+    ultimi AS
+    (
+        SELECT
+            o.piattaforma AS piattaforma,
+            o.minuto AS minuto,
+            o.ordini AS osservati,
+            b.mediana AS attesi,
+            (o.ordini - b.mediana) / greatest(1.4826 * b.mad, 1) AS z_robusto
+        FROM ordini_minuto AS o
+        INNER JOIN mad AS b ON o.piattaforma = b.piattaforma AND toDayOfWeek(o.minuto) = b.dow AND toHour(o.minuto) * 60 + toMinute(o.minuto) = b.mdg
+        WHERE o.minuto >= adesso - INTERVAL 3 MINUTE AND o.minuto < adesso
+    )
+SELECT
+    piattaforma,
+    countIf(attesi >= 20 AND z_robusto < -3.5 AND osservati < attesi * 0.65) AS minuti_anomali_su_3,
+    round(avg(osservati), 1) AS media_osservata,
+    round(avg(attesi), 1) AS media_attesa,
+    round(min(z_robusto), 1) AS peggior_z
+FROM ultimi
+GROUP BY piattaforma
 HAVING minuti_anomali_su_3 = 3;
 ```
 
-Con questa query le chiamate notturne alle due di mattina spariscono per sempre perché di notte `mediana_storica` scende sotto la guardia di volume o si adatta automaticamente ai 12 ordini attesi; al contrario, domenica pomeriggio alle 15:03, dopo tre minuti consecutivi in cui `platform = 'iOS'` registra 0 ordini contro una `mediana_storica` di 40 ordini al minuto ($Z_{\text{robusto}} = -12,4$), ClickHouse restituisce la riga di allarme indicando esattamente la piattaforma colpevole e il runbook da seguire. Sostituire una soglia statica con una query su mediana stagionale e persistenza 3-su-3 richiede venti righe di SQL; lasciare che il team ignori gli allarmi per stanchezza rende cieca l'intera infrastruttura di monitoraggio.
+La query restituisce una sola riga, `ios`, con tre minuti anomali su tre, media osservata 0 contro una media attesa di circa 40 ordini e uno Z robusto peggiore di -43. La piattaforma `web`, che in quei tre minuti segue la propria baseline con Z tra -2 e 2,7, non compare. Alle due di notte `attesi` vale 12, il calo richiesto è sotto 7,8 ordini e un traffico normale non lo raggiunge: le telefonate notturne spariscono.
 
-## Regole statistiche trasparenti in SQL o modelli Machine Learning multivariati
+Il pavimento `greatest(1.4826 * mad, 1)` evita divisioni per zero quando la serie storica è molto stabile, e fissa a 1 ordine la dispersione minima. Senza di esso un MAD nullo produrrebbe Z infiniti.
 
-Quando si progetta il sistema di rilevazione anomalie, il team deve scegliere tra due famiglie di algoritmi: le **regole statistiche parametriche/non-parametriche in SQL** (mediana stagionale, IQR/MAD, Z-score con guardia di volume) e i **modelli di Machine Learning non supervisionati o di forecasting** (Isolation Forest, Prophet, autoencoder su più metriche correlate).
+## Severità, owner e rate limit
 
-Il criterio di scelta è netto: **usate lo Z-score robusto con baseline stagionale in SQL dentro ClickHouse per il 95% degli allarmi operativi su metriche di business e infrastruttura (ordini, ricavi, latenza, tasso di errore per canale), riservate invece algoritmi multivariati come Isolation Forest in Python solo quando l'anomalia non è visibile su nessuna singola metrica presa da sola ma emerge dalla combinazione anomala di dieci feature contemporanee (es. rilevamento frodi su comportamenti di account o attacchi bot distribuiti).**
+Una query che trova l'anomalia è metà del lavoro. L'altra metà decide chi viene svegliato e quante volte. La configurazione sta di solito nello strumento di alerting, ma le regole sono le stesse in qualunque strumento.
 
-La confusione comune consiste nell'addestrare una rete neurale o un modello Isolation Forest opaco per monitorare il numero di ordini al minuto in sala controllo. Sbagliare questa scelta distrugge l'operatività durante gli incidenti: quando alle tre di notte suona un allarme generato da una "scatola nera" che restituisce `anomaly_score = 0.87` senza dire quale metrica è scesa e di quanto rispetto a martedì scorso, l'ingegnere di turno perde mezz'ora solo per capire perché l'algoritmo si è attivato. Con mediana e IQR in SQL, il messaggio di allerta dice immediatamente: *"iOS: osservati 2 ordini/min contro 40 attesi (-95%) per 3 minuti consecutivi"*.
+```yaml
+# Regola di alerting per il calo di ordini per piattaforma.
+alert: calo_ordini_piattaforma
+expr_sql: query/anomalia_ordini_3m.sql        # la query della sezione precedente
+every: 1m
+severity:
+  P1: "calo > 80% su una piattaforma per 3 minuti"   # chiamata al reperibile
+  P2: "calo tra 35% e 80% per 3 minuti"              # messaggio sul canale, nessuna chiamata
+owner: team-checkout-mobile
+runbook: https://wiki.esempio.interno/runbook/calo-ordini-piattaforma
+group_by: [piattaforma]                       # un solo incidente per piattaforma
+repeat_interval: 30m                          # rate limit: un promemoria ogni 30 minuti
+suppress_when:
+  - calendario: dim_promo_events              # giorni di campagna con baseline scalata
+payload: "{{piattaforma}}: {{media_osservata}} ordini/min contro {{media_attesa}} attesi"
+```
 
-Questo articolo non tratta la soppressione manuale delle finestre durante i calendari di festività mobili (Pasqua, Black Friday) né l'instradamento delle notifiche su PagerDuty o Opsgenie. Per i giorni di campagna straordinaria nota in anticipo, è buona norma inserire una tabella di calendario `dim_promo_events` che moltiplica la baseline attesa per un fattore di scala o sospende i controlli di eccesso di traffico mantenendo attivi solo quelli sul tasso di errore percentuale.
+Il raggruppamento per piattaforma ha un effetto che si calcola: un guasto che dura 240 minuti con una notifica ogni minuto produce 240 messaggi. Con `repeat_interval` di 30 minuti ne produce 240 ÷ 30 = 8, più il primo, cioè 9. Ogni messaggio dice quanto manca e rispetto a quale riferimento, per esempio «ios: 0 ordini al minuto contro 40 attesi per 3 minuti consecutivi». Questa frase è il vantaggio operativo di una regola trasparente.
 
-## Cinque domande prima di attivare un nuovo alert in produzione
+La metrica per giudicare il sistema è la quota di avvisi azionabili: notifiche seguite da un incidente reale o da un'azione correttiva, diviso notifiche totali. Un sistema sano resta sopra l'80%. Un allarme a cui non corrisponde un'azione umana immediata è rumore che coprirà il prossimo incidente vero.
 
-1. La soglia confronta il valore corrente con la baseline storica della stessa ora e giorno della settimana anziché usare un numero statico valido sia di giorno sia di notte?
-2. Il calcolo della baseline usa stimatori robusti agli outlier passati (`median` e `IQR` / `MAD`) invece di media e deviazione standard semplici?
-3. L'allarme richiede una persistenza su più finestre consecutive (es. 3 minuti chiusi su 3) e una guardia di volume minimo prima di inviare una notifica?
-4. La query scompone il flusso per le dimensioni critiche di guasto (`platform`, `payment_gateway`, `country`) così che il crollo di un segmento non resti nascosto dietro la media globale?
-5. Ogni alert ha un proprietario chiaro, un livello di severità distinto (chiamata telefonica solo se richiede intervento umano immediato) e un link diretto al runbook di diagnosi?
+## Regole in SQL o modelli multivariati
 
-La metrica regina per misurare la qualità del vostro sistema di alerting è la **precisione operativa degli avvisi** (*Actionable Alert Ratio*), ovvero la percentuale di notifiche ricevute a cui corrisponde un incidente reale o un'azione correttiva eseguita: un sistema sano mantiene questo rapporto sopra l'80%, eliminando alla radice la stanchezza da falsi allarmi.
+Le famiglie sono due: regole statistiche in SQL (mediana stagionale, MAD, guardia di volume) e modelli non supervisionati o di forecasting come Isolation Forest, Prophet o autoencoder su più metriche.
 
-Di tutta l'ingegneria dell'anomaly detection, un solo principio merita di essere scolpito nel team: un allarme a cui non corrisponde un'azione umana immediata non è un allarme, è solo rumore che coprirà il prossimo incidente vero.
+Il criterio: **regola SQL con baseline stagionale per le metriche di business e di infrastruttura osservabili una per una (ordini, ricavi, latenza, tasso di errore per canale); modello multivariato solo quando l'anomalia non è visibile su nessuna metrica da sola ma emerge dalla combinazione di molte feature, come nelle frodi o negli attacchi bot distribuiti.**
+
+Quando suona un allarme che dice solo `anomaly_score = 0.87`, il reperibile perde mezz'ora per capire quale metrica si è mossa e rispetto a quando. Con mediana e MAD il messaggio indica metrica, valore osservato e valore atteso. Per questo si parte dalla regola, e si passa a un modello solo con una ragione.
+
+La soppressione nei giorni di campagna nota va gestita con una tabella di calendario, come `dim_promo_events`, che scala la baseline o sospende i controlli di eccesso di traffico mantenendo quelli sul tasso di errore. L'instradamento verso PagerDuty o Opsgenie dipende dallo strumento scelto e resta fuori da questo schema.
+
+## Controllo prima di attivare un allarme
+
+1. Un segmento fa in media 4 ordini al minuto. Una regola scatta con zero ordini in un minuto: quanti falsi positivi attendi in un'ora, e come li riduci?
+
+<details>
+<summary>Mostra risposta</summary>
+
+Con Poisson, $e^{-4} = 0{,}0183$, cioè 1,8% per minuto. In un'ora sono 60 × 0,0183 = 1,1 falsi positivi. Con persistenza su tre minuti la probabilità diventa 0,0183³ = 0,0000061 per finestra, circa 0,0004 allarmi all'ora. In più la guardia di volume (mediana almeno 20) esclude del tutto un segmento da 4 ordini al minuto.
+
+</details>
+
+2. Perché la query di rilevazione esclude il giorno corrente dalla baseline e il minuto aperto dai tre minuti valutati?
+
+<details>
+<summary>Mostra risposta</summary>
+
+Il giorno corrente contiene il guasto: includerlo sposta la mediana e il MAD verso i valori anomali e attenua l'allarme. Il minuto aperto è incompleto, perché a metà minuto ha contato solo una parte degli ordini e sembrerebbe un calo. Per questo la finestra valuta solo minuti chiusi, con `minuto < adesso`.
+
+</details>
+
+3. Il guasto iOS vale 40 ordini al minuto a 42 euro per ordine. Quanto costa rilevarlo dopo 3 minuti e quanto dopo 10?
+
+<details>
+<summary>Mostra risposta</summary>
+
+Dopo 3 minuti: 3 × 40 × 42 = 5.040 euro. Dopo 10 minuti: 10 × 40 × 42 = 16.800 euro. La differenza è 11.760 euro: ogni minuto di ritardo costa 1.680 euro. Una persistenza più lunga riduce i falsi positivi ma ha un costo diretto sul guasto vero.
+
+</details>
+
+4. Quando passeresti da una regola SQL a un modello multivariato?
+
+<details>
+<summary>Mostra risposta</summary>
+
+Solo quando nessuna metrica singola, scomposta per segmento, mostra l'anomalia, e questa emerge dalla combinazione di più feature, per esempio nelle frodi su comportamenti di account. Anche allora conviene accompagnare il punteggio con le feature che lo hanno determinato, altrimenti il reperibile non può agire.
+
+</details>

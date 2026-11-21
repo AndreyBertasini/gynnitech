@@ -1,195 +1,206 @@
 ---
 title: "Cheat sheet: real-time analytics"
-description: Scheda operativa rapida per architetture di real-time analytics con Kafka e ClickHouse.
+description: >-
+  Mappa operativa del modulo real-time analytics: quale lezione risolve quale guasto, un budget di latenza svolto passo per passo e i controlli di review su ingestion, rollup, CDC e alert.
 module: "Modulo 12: Real-time analytics con ClickHouse"
 order: 8
 category: Sintesi Operativa
 headerImage: /course-headers/real-time-analytics-cheat-sheet-ginnytech-ad.webp
 headerImageAlt: "Cheat sheet: real-time analytics - immagine ufficiale della lezione su GinnyTech, creata da AD"
-difficulty: advanced
-duration: 10 min
+difficulty: avanzato
+duration: 30 min
 prerequisites:
   - real-time-analytics/anomaly-detection
 learningObjectives:
-  - Applicare i cinque controlli di review su ingestion, viste, dashboard e alert
-  - Scegliere l'ORDER BY ottimale in base alla query dominante
-  - Bloccare in review anti-pattern come SELECT *, soglie statiche e alert senza azione
+  - Individuare in una review quale lezione del modulo copre un sintomo di produzione (part, scansioni, conteggi gonfiati, ritardo, allarmi rumorosi)
+  - Costruire un budget di latenza end-to-end sommando le fasi e verificare che stia dentro l'obiettivo di freschezza
+  - Applicare i controlli di review su ingestion, chiave ORDER BY, rollup con stati, CDC e alert
 binario: "ml-tabellare"
-formato: "articolo"
-autore: "Hermes"
-controllatoDa: "Argo"
-autorizzatoDa: "Giano"
+formato: "didattica-v2"
 draft: false
-dateModified: 2026-11-13
+dateModified: 2026-11-17
 ---
 
-# Cheat sheet: real-time analytics
+Una piattaforma di scommesse sportive rilascia il nuovo motore di telemetria alla vigilia della domenica di campionato. In staging, con 50 messaggi al secondo, ogni pannello risponde in 10 millisecondi. Alle 15:00, quando il flusso sale a 30.000 messaggi al secondo, le scritture vengono rifiutate, le dashboard rallentano e i conteggi degli utenti sono gonfiati.
 
-Un'architettura real-time costruita su Kafka e ClickHouse supera tutti i test funzionali in ambiente di sviluppo con cento eventi al secondo, ma al primo picco di produzione a 30.000 eventi al secondo accumula un'ora di ritardo di ingestione, restituisce conteggi gonfiati del 18% nelle viste materializzate e blocca i nodi con `Too many parts`. La causa non è un limite di ClickHouse: è andare in produzione senza verificare i cinque vincoli fisici dell'architettura streaming (batching di inserimento, chiave `ORDER BY` per cardinalità, separazione `-State`/`-Merge`, deduplicazione CDC e taglio del bucket aperto).
+## Un test locale perfetto e un picco che non perdona
 
-## Dal test locale perfetto al blocco totale a trentamila eventi al secondo
+Lo scenario è costruito, con numeri di esempio che riassumono i guasti di messa in produzione più frequenti su pipeline Kafka e ClickHouse. A basso volume i tre problemi non si vedono, e per questo i test funzionali non li trovano.
 
-Questo è un caso ricostruito con numeri di esempio che riassume i guasti di messa in produzione più frequenti sulle pipeline Kafka + ClickHouse. Una piattaforma di gaming e scommesse sportive rilascia il nuovo motore di telemetria in tempo reale alla vigilia della domenica di campionato.
+Il consumer scrive in ClickHouse con un `INSERT` per messaggio, e ogni `INSERT` crea una parte sul disco. A 30.000 messaggi al secondo sarebbero 30.000 parti al secondo: ben prima di arrivare a 3.000 parti attive in una partizione il motore rifiuta le scritture con l'errore `TOO_MANY_PARTS`. La chiave `ORDER BY (event_uuid, occurred_at)` mette in testa un valore casuale, quindi il filtro per sport e intervallo di tempo scansiona l'intera tabella a ogni refresh. Una vista materializzata salva `uniqExact(user_id)` come numero, e quando la dashboard somma i minuti per ottenere l'ora conta sessanta volte lo stesso spettatore.
 
-In ambiente di staging, con 50 messaggi al secondo, tutto rispondeva in 10 millisecondi. Alle 15:00 di domenica, quando il flusso sale a 30.000 messaggi al secondo, emergono simultaneamente tre colli di bottiglia che non potevano vedersi a basso volume:
-1. Il consumatore scrive in ClickHouse facendo un `INSERT` sincrono per ogni singolo messaggio letto da Kafka: poiché ogni `INSERT` crea una cartella fisica (*data part*) su disco, dopo tre minuti ClickHouse supera le 3.000 part attive per partizione e rifiuta tutte le nuove scritture con l'errore `Too many parts (300)`.
-2. La tabella raw ha `ORDER BY (event_uuid, occurred_at)`: le dashboard che filtrano `WHERE sport_type = 'calcio' AND occurred_at >= now() - INTERVAL 15 MINUTE` non possono usare l'indice primario perché la prima colonna della chiave è un UUID casuale, e scansionano l'intera tabella a ogni refresh.
-3. Una Materialized View calcola gli utenti unici al minuto salvando un intero `UInt64` con `uniqExact(user_id)` invece di uno stato `AggregateFunction(uniq, UInt64)`: quando la dashboard raggruppa i minuti per mostrare l'ora intera, somma gli utenti dei sessanta minuti contando sessanta volte lo stesso spettatore collegato per tutta la partita.
+> **Idea chiave:** in una pipeline Kafka e ClickHouse i guasti di produzione nascono da quattro vincoli fisici, cioè dimensione dei lotti, ordine delle colonne nella chiave, stati componibili nei rollup e confronto con una baseline stagionale. Una review serve a controllarli uno per uno, prima del picco.
 
-La causa di questi tre incidenti è non aver applicato la lista di controllo architetturale prima del rilascio in produzione.
+Questa scheda fa da indice del modulo. Non spiega i meccanismi da capo: indica dove sono spiegati, a quali sintomi corrispondono e quali controlli applicare. Ognuna delle lezioni citate ha il proprio caso numerico completo.
 
-## I cinque meccanismi fisici di una pipeline Kafka + ClickHouse
+## La mappa del modulo, dal sintomo alla lezione
 
-Questa scheda operativa condensa i cinque meccanismi che governano la stabilità e l'esattezza di uno stack real-time in produzione.
+Il diagramma mostra il percorso di un evento e dove ogni lezione interviene.
 
-Il primo meccanismo è il **micro-batching di scrittura** per proteggere il motore `MergeTree`. ClickHouse non è un database OLTP a righe: ogni blocco inserito genera una *part* immutabile su disco che i thread di background devono poi fondere (*merge*). Gli inserimenti da stream devono sempre raggruppare da **10.000 a 100.000 righe per batch** (o fare flush ogni 1–5 secondi), mai un `INSERT` per messaggio.
-
-Il secondo meccanismo è il **disegno della chiave `ORDER BY` da bassa ad alta cardinalità**. L'indice sparso di ClickHouse salta i blocchi di 8.192 righe solo se le colonne presenti nel `WHERE` compaiono come prefisso dell'`ORDER BY`: la sequenza aurea per le tabelle di streaming è `(dimensione_filtro_bassa_cardinalita, toStartOfHour(occurred_at), chiave_dedup_alta_cardinalita)`.
-
-Il terzo meccanismo è l'accoppiamento tra **Materialized View incrementali e combinatori `-State` / `-Merge`** su `AggregatingMergeTree`. La Materialized View si attiva solo sul blocco di righe appena inserito, non sull'intera tabella storica: per misure non additive (utenti unici, quantili di latenza, ultimo stato `argMax`) la tabella di destinazione deve salvare lo stato binario intermedio con `uniqState` / `quantileState` in scrittura e fonderlo con `uniqMerge` / `quantileMerge` in lettura.
-
-Il quarto e quinto meccanismo sono la **deduplicazione CDC con versione monotona** (`ReplacingMergeTree(lsn_version)` interrogata con `argMax` o `FINAL` circoscritto) e la **disciplina di lettura sulle dashboard** (fermare le serie temporali a `< toStartOfMinute(now())` e confrontare i tassi con una baseline stagionale robusta).
-
-**Una pipeline real-time regge qualsiasi picco di traffico solo se scrive a blocchi di decine di migliaia di righe, ordina su disco per cardinalità crescente e separa gli stati binari `-State` in scrittura dai `-Merge` in lettura.**
-
-## Tre antipattern da bloccare immediatamente in code review
-
-Il blocco SQL qui sotto raccoglie i tre errori da respingere sempre durante la revisione del codice di una pipeline real-time:
-
-```sql
--- ANTIPATTERN 1: chiave di ordinamento che inizia con un UUID ad altissima cardinalità
--- e partizionamento per singolo giorno/ora che fa esplodere il numero di part su disco.
-CREATE TABLE raw_stream.events_bad
-(
-    event_uuid UUID,
-    tenant_id LowCardinality(String),
-    occurred_at DateTime,
-    user_id UInt64,
-    latency_ms UInt32
-)
-ENGINE = MergeTree
-PARTITION BY toYYYYMMDDhhmmss(occurred_at)
-ORDER BY (event_uuid, tenant_id, occurred_at);
-
--- ANTIPATTERN 2: Materialized View che salva un numero finito invece di -State per metriche non additive.
-CREATE MATERIALIZED VIEW raw_stream.mv_users_bad
-ENGINE = SummingMergeTree
-ORDER BY (tenant_id, minuto)
-AS SELECT
-    tenant_id,
-    toStartOfMinute(occurred_at) AS minuto,
-    uniqExact(user_id) AS utenti_unici_non_sommabili,
-    quantile(0.95)(latency_ms) AS p95_non_mediabile
-FROM raw_stream.events_bad
-GROUP BY tenant_id, minuto;
+```mermaid
+flowchart LR
+    A["Sorgente: app o database operativo"] --> B["Kafka (streaming)"]
+    A -->|"CDC (cdc-pattern)"| B
+    B --> C["Ingestion a lotti (clickhouse-ottimizzazione)"]
+    C --> D["Tabella raw MergeTree (clickhouse-fondamenti)"]
+    D --> E["Rollup con -State (materialized-views)"]
+    E --> F["Dashboard (dashboards)"]
+    E --> G["Alert (anomaly-detection)"]
+    F --> H["Progetto end-to-end (caso-studio)"]
+    G --> H
 ```
 
-### Partizionare per ora o minuto e mettere un UUID al primo posto dell'ORDER BY
+La tabella seguente è lo strumento di consultazione vero e proprio. Parte da quello che si osserva in produzione.
 
-Scrivere `PARTITION BY toYYYYMMDD(occurred_at)` (o peggio per ora) e `ORDER BY (event_uuid, ...)` distrugge sia le scritture sia le letture. In ClickHouse la clausola `PARTITION BY` serve per la gestione del ciclo di vita dei dati (TTL ed eliminazione veloce dei mesi vecchi), non per accelerare le query puntuali: creare migliaia di partizioni moltiplica i file su disco e scatena `Too many parts`, mentre mettere `event_uuid` all'inizio dell'`ORDER BY` impedisce qualsiasi salto dei blocchi quando le dashboard filtrano per `tenant_id` e intervallo orario.
+| Sintomo osservato | Causa tipica | Lezione | Controllo rapido |
+|---|---|---|---|
+| Errore `TOO_MANY_PARTS`, insert lenti | un insert per messaggio | ingestion in tempo reale | righe per insert e parti attive per partizione |
+| Query per cliente legge milioni di righe | `ORDER BY ts` con filtro su altra colonna | ClickHouse e MergeTree | `EXPLAIN indexes = 1`, granuli letti su totali |
+| Totale della replica diverso dalla sorgente | colonna mutabile nella chiave, lettura senza `FINAL` | CDC | differenza di righe e di somma con la sorgente |
+| Utenti unici gonfiati su finestre larghe | `uniqExact` salvato come numero | materialized view | tipo `AggregateFunction` e lettura con `-Merge` |
+| Dashboard lenta o con ultimo minuto che cala | lettura della raw e minuto aperto incluso | dashboard real-time | tabella letta e filtro `minuto < toStartOfMinute(now())` |
+| Allarme notturno continuo, guasto non visto | soglia fissa sul totale | alerting e anomaly detection | baseline per giorno, minuto e segmento |
+| Ricavi doppi dopo un retry di Kafka | somma diretta nella vista | progetto end-to-end | deduplica con `uniqState(event_id)` |
 
-### Salvare conteggi distinti o percentili come numeri semplici in SummingMergeTree
+Usa la tabella da sinistra a destra: nella review non si parte dalla tecnica ma dal numero che non torna. Un conteggio troppo alto rimanda a deduplica e stati, una query lenta rimanda alla chiave, un allarme rumoroso rimanda alla baseline.
 
-Calcolare `uniqExact(user_id)` o `quantile(0.95)(latency_ms)` dentro una Materialized View che alimenta una `SummingMergeTree` produce numeri completamente falsi non appena arrivano due blocchi nello stesso minuto o si raggruppa per ora. Poiché la Materialized View vede solo il singolo batch di inserimento (es. 5 secondi di traffico), salvare l'intero `120` impedisce al motore di sapere quali `user_id` erano già comparsi nei 5 secondi precedenti dello stesso minuto: sommare i conteggi distinti dei micro-batch moltiplica gli utenti reali.
+## Il budget di latenza, calcolato fase per fase
 
-### Eseguire SELECT ... FINAL sull'intera tabella storica ad ogni refresh della dashboard
+Dire «real-time» non basta, perché ogni fase aggiunge ritardo e qualcuno deve sommarlo. Il budget di latenza è il calcolo che trasforma un obiettivo di freschezza in vincoli per ogni componente. Lo scenario è costruito: la dashboard operativa deve mostrare un evento entro 5 secondi dalla sua generazione, al caso peggiore.
 
-Aggiungere la parola chiave `FINAL` a una query su `ReplacingMergeTree` senza restringere strettamente le partizioni e il prefisso dell'`ORDER BY` costringe ClickHouse a leggere e ordinare in RAM tutte le versioni storiche dei record prima di applicare le aggregazioni. Su una tabella da miliardi di righe interrogata da venti dashboard contemporanee, un `FINAL` non filtrato satura la CPU e porta le query in timeout per superamento del limite di memoria.
+Passo uno: elenca le fasi e il ritardo massimo di ciascuna. Il producer accumula messaggi per 0,5 secondi prima di inviarli (`linger`). Il broker Kafka conferma in 0,1 secondi. Il consumer fa il flush ogni 1,0 secondi. L'insert in ClickHouse, con la vista materializzata che aggiorna il rollup, impiega 0,3 secondi. La dashboard si aggiorna ogni 2,0 secondi, e al caso peggiore l'evento arriva subito dopo un refresh. La query sul rollup richiede 0,05 secondi.
 
-## Template di riferimento pronto per la produzione in ClickHouse
+Passo due: somma. 0,5 + 0,1 + 1,0 + 0,3 + 2,0 + 0,05 = 3,95 secondi.
 
-Quando progettate o revisionate una nuova pipeline real-time, applicate in ordine questi quattro blocchi standardizzati:
+Passo tre: confronta con l'obiettivo. 5,0 − 3,95 = 1,05 secondi di margine, pari al 21% del budget. Il margine serve a coprire i picchi, per esempio un merge più lento o un ritardo di rete, e non va speso in anticipo.
 
-1. Configurate la tabella raw con partizionamento mensile (`toYYYYMM(occurred_at)`), TTL automatico di ritenzione e chiave `ORDER BY (tenant_id, toStartOfHour(occurred_at), event_id)` alimentata a batch di 10.000–50.000 righe.
-2. Costruite la tabella di rollup al minuto con motore `AggregatingMergeTree`, salvando colonne `AggregateFunction` per ogni metrica non additiva.
-3. Collegate la `MATERIALIZED VIEW ... TO` usando i combinatori `-State` in scrittura.
-4. Interrogate la tabella di rollup dalle dashboard e dagli alert usando i combinatori `-Merge` e tagliando sempre il minuto corrente incompleto (`minuto < toStartOfMinute(now())`).
+Passo quattro: verifica la scelta del lotto. A 200 righe al secondo, un consumer che aspetta un lotto di 10.000 righe prima di scrivere attende 10.000 ÷ 200 = 50 secondi, dieci volte l'intero budget. Per questo la regola è doppia: flush quando il lotto raggiunge la dimensione target o quando scade un tempo massimo, e il tempo massimo vince nei flussi lenti. Con flush a 1 secondo il lotto contiene 200 righe: 1 parte al secondo, cioè 60 parti al minuto. Con un insert per riga sarebbero 200 parti al secondo, 12.000 al minuto, e il rapporto è 12.000 ÷ 60 = 200 volte in più.
 
-Ecco il template completo di riferimento da copiare e adattare per i vostri progetti:
+Il budget indica anche dove intervenire per guadagnare tempo. Il peso maggiore è il refresh della dashboard: 2,0 secondi su 3,95, cioè il 51%. Portarlo a 1,0 secondo recupera un secondo e porta il totale a 2,95 secondi, ma moltiplica per due le query sul rollup. Un rollup piccolo regge la cosa, la tabella raw no.
+
+## Controlli minimi in SQL
+
+Il blocco seguente crea una raw con chiave per cardinalità crescente, un rollup con stati componibili e la query che li fonde, più il controllo delle parti attive. È lo scheletro che la review dovrebbe riconoscere.
 
 ```sql
--- 1. TABELLA DI ATTERRAGGIO STREAM (partizione mensile + ORDER BY per cardinalità crescente)
-CREATE TABLE realtime.events_raw
+-- Raw: chiave dal filtro più selettivo al dettaglio; partizione mensile solo per il ciclo di vita.
+CREATE TABLE eventi_raw
 (
     tenant_id LowCardinality(String),
-    occurred_at DateTime64(3, 'UTC'),
-    ingested_at DateTime64(3, 'UTC'),
+    occorso DateTime('UTC'),
     event_id String,
-    user_id UInt64,
-    amount_eur Decimal(12, 2),
-    latency_ms UInt32
+    utente UInt64,
+    latenza_ms UInt32
 )
-ENGINE = ReplacingMergeTree(ingested_at)
-PARTITION BY toYYYYMM(occurred_at)
-ORDER BY (tenant_id, toStartOfHour(occurred_at), event_id)
-TTL toDateTime(occurred_at) + INTERVAL 90 DAY DELETE;
+ENGINE = MergeTree
+PARTITION BY toYYYYMM(occorso)
+ORDER BY (tenant_id, toStartOfHour(occorso), event_id);
 
--- 2. TABELLA DI ROLLUP AL MINUTO (AggregatingMergeTree con stati binari componibili)
-CREATE TABLE realtime.events_rollup_1m
+-- Rollup al minuto: somme semplici e stati binari per le misure non additive.
+CREATE TABLE rollup_1m
 (
     tenant_id LowCardinality(String),
     minuto DateTime('UTC'),
-    eventi_state SimpleAggregateFunction(sum, UInt64),
-    ricavo_state SimpleAggregateFunction(sum, Decimal(18, 2)),
-    utenti_unici_state AggregateFunction(uniq, UInt64),
-    latenza_p95_state AggregateFunction(quantile(0.95), UInt32),
-    ultimo_ingest_state SimpleAggregateFunction(max, DateTime64(3, 'UTC'))
+    eventi SimpleAggregateFunction(sum, UInt64),
+    utenti_state AggregateFunction(uniq, UInt64),
+    p95_state AggregateFunction(quantile(0.95), UInt32)
 )
 ENGINE = AggregatingMergeTree
-PARTITION BY toYYYYMM(minuto)
 ORDER BY (tenant_id, minuto);
 
--- 3. MATERIALIZED VIEW INCREMENTALE (scrive gli stati -State a ogni blocco inserito)
-CREATE MATERIALIZED VIEW realtime.mv_events_rollup_1m
-TO realtime.events_rollup_1m
-AS SELECT
-    tenant_id,
-    toStartOfMinute(occurred_at) AS minuto,
-    count() AS eventi_state,
-    sum(amount_eur) AS ricavo_state,
-    uniqState(user_id) AS utenti_unici_state,
-    quantileState(0.95)(latency_ms) AS latenza_p95_state,
-    max(ingested_at) AS ultimo_ingest_state
-FROM realtime.events_raw
-GROUP BY tenant_id, minuto;
-
--- 4. QUERY PER DASHBOARD / ALERT (fonde con -Merge su qualsiasi finestra ed esclude il minuto aperto)
+-- La vista scrive gli stati a ogni blocco inserito.
+CREATE MATERIALIZED VIEW mv_rollup_1m TO rollup_1m AS
 SELECT
     tenant_id,
-    toStartOfFifteenMinutes(minuto) AS finestra_15m,
-    sum(eventi_state) AS eventi_totali,
-    sum(ricavo_state) AS ricavo_totale_eur,
-    uniqMerge(utenti_unici_state) AS utenti_unici_esatti_15m,
-    round(quantileMerge(0.95)(latenza_p95_state), 1) AS latenza_p95_ms,
-    dateDiff('second', max(ultimo_ingest_state), now()) AS freshness_lag_sec
-FROM realtime.events_rollup_1m
-WHERE tenant_id = 'acme-it'
-  AND minuto >= toStartOfMinute(now()) - INTERVAL 6 HOUR
-  AND minuto < toStartOfMinute(now())
-GROUP BY tenant_id, finestra_15m
-ORDER BY finestra_15m DESC;
+    toStartOfMinute(occorso) AS minuto,
+    count() AS eventi,
+    uniqState(utente) AS utenti_state,
+    quantileState(0.95)(latenza_ms) AS p95_state
+FROM eventi_raw
+GROUP BY tenant_id, minuto;
+
+-- 10 insert da 20.000 righe ciascuno.
+-- ripeti: 10
+INSERT INTO eventi_raw
+SELECT
+    ['acme', 'beta'][1 + cityHash64(number) % 2],
+    toDateTime('2026-11-15 15:00:00', 'UTC') + intDiv(number, 500),
+    concat(toString(rand64()), '-', toString(number)),
+    cityHash64(number) % 5000,
+    50 + cityHash64(number, 7) % 400
+FROM numbers(20000);
+
+-- Utenti distinti reali sulla raw: 4.902 su 200.000 righe.
+SELECT count() AS righe, uniqExact(utente) AS utenti FROM eventi_raw;
+
+-- Lettura dal rollup con -Merge, escludendo il minuto aperto.
+SELECT
+    tenant_id,
+    toStartOfFifteenMinutes(minuto) AS finestra,
+    sum(eventi) AS eventi,
+    uniqMerge(utenti_state) AS utenti_unici,
+    round(quantileMerge(0.95)(p95_state)) AS p95_ms
+FROM rollup_1m
+WHERE minuto < toDateTime('2026-11-15 15:41:00', 'UTC')
+GROUP BY tenant_id, finestra
+ORDER BY tenant_id, finestra;
+
+-- Controllo di salute: parti attive per tabella. Il numero dipende da quando passano i merge.
+SELECT table, count() AS parti_attive FROM system.parts WHERE active AND table IN ('eventi_raw', 'rollup_1m') GROUP BY table ORDER BY table;
 ```
 
-Questo schema a quattro blocchi risolve simultaneamente tutti i problemi visti nel caso di apertura: il partizionamento mensile mantiene poche decine di part attive su disco; l'ordinamento per `(tenant_id, toStartOfHour(occurred_at), event_id)` permette a ClickHouse di saltare il 99,9% dei blocchi in lettura; e grazie a `uniqState` / `uniqMerge` è possibile aggregare la tabella al minuto in finestre da 15 minuti, un'ora o un giorno intero ottenendo sempre il conteggio esatto degli utenti unici senza mai toccare i miliardi di righe di `events_raw`. Impostare fin dall'inizio `AggregatingMergeTree` con `-State` costa cinque righe di DDL; dover ricostruire sei mesi di storico aggregato male perché si era usato `SummingMergeTree` su un conteggio distinto richiede di riscansionare da zero tutti i dati grezzi.
+Il risultato dei due tenant, 2.447 e 2.455 utenti unici, somma a 4.902, che coincide con gli utenti distinti calcolati direttamente sulla raw: dieci insert separati non hanno moltiplicato nulla, perché `uniqMerge` fonde stati e non somma numeri. Il 95° percentile della latenza esce 429 millisecondi su valori uniformi tra 50 e 449, coerente con 50 + 0,95 × 400 = 430.
 
-## Scelta rapida del motore MergeTree in base al caso d'uso
+Nota che `eventi` è una `SimpleAggregateFunction(sum, UInt64)` e non un `UInt64` semplice: ClickHouse rifiuta la creazione di un `AggregatingMergeTree` con una colonna che non sia nella chiave né una misura aggregata, perché i merge la lascerebbero con un valore arbitrario.
 
-Quando create una tabella in ClickHouse per uno stream in tempo reale, la scelta dell'engine della famiglia `MergeTree` dipende dal tipo di flusso e dalla semantica di aggiornamento.
+## Tre antipattern da respingere in code review
 
-Il criterio di scelta è netto: **usate `MergeTree` standard per log ed eventi immutabili append-only già deduplicati a monte, usate `ReplacingMergeTree(version_col)` per flussi CDC da database relazionali o stream *at-least-once* dove serve conservare solo l'ultima versione di ciascuna entità o `event_id`, e usate `AggregatingMergeTree` (abbinato a una Materialized View con `-State`) per tutte le tabelle di pre-aggregazione che alimentano dashboard e sistemi di alerting ad alta concorrenza.**
+### Partizione per ora e UUID in testa alla chiave
 
-La confusione comune consiste nell'usare `ReplacingMergeTree` aspettandosi che la deduplicazione su disco avvenga istantaneamente al momento dell'`INSERT` senza bisogno di `argMax` o `FINAL` in lettura, oppure nell'usare `SummingMergeTree` per metriche che non sono semplici somme additive. Sbagliare questa scelta porta a leggere righe duplicate nei primi minuti dopo l'inserimento (prima che il merge di background compatti i blocchi su disco) o a corrompere i percentili e i conteggi distinti nei report aggregati.
+Sintomo: `TOO_MANY_PARTS` anche con lotti ragionevoli, scansioni complete sulle dashboard. Succede perché la partizione viene letta come un acceleratore di query, mentre serve per il ciclo di vita dei dati, e perché un UUID in testa alla chiave impedisce all'indice sparso di scartare granuli. Si corregge con partizione mensile e chiave per cardinalità crescente, con l'identificativo in coda.
 
-Questo articolo di sintesi non sostituisce la documentazione operativa dei singoli connettori (Kafka Engine nativo vs Kafka Connect HTTP Sink) né il dimensionamento della RAM per i join distribuiti. Ricordate che in una Materialized View con `JOIN`, ClickHouse reagisce solo ai nuovi inserimenti sulla tabella di sinistra (`FROM`): gli aggiornamenti sulla tabella di destra (`JOIN`) non ricalcolano retroattivamente le righe già scritte nella vista.
+### Distinti e percentili salvati come numeri
 
-## Cinque controlli finali di pull request per architetture real-time
+Sintomo: utenti unici sulla finestra oraria più alti della somma reale, percentili che non tornano. Un conteggio distinto per minuto non è additivo: lo stesso utente compare in minuti diversi e la somma lo conta più volte. Si corregge con `AggregateFunction` e combinatori `-State` in scrittura, `-Merge` in lettura, come nel blocco qui sopra.
 
-1. Il processo di ingestione scrive a blocchi di almeno 10.000 righe (o ogni 1–5 secondi) e la tabella è partizionata per mese (`toYYYYMM`) anziché per ora o minuto?
-2. La clausola `ORDER BY` della tabella elenca le colonne da cardinalità più bassa (es. `tenant_id`, `status`) a cardinalità più alta (timestamp troncato, `event_id`), senza mai iniziare con un UUID casuale?
-3. Tutte le metriche non additive nelle Materialized Views (utenti unici, percentili, ultimo valore) usano i combinatori `-State` su `AggregatingMergeTree` e vengono lette con `-Merge`?
-4. Le query sulle tabelle CDC in `ReplacingMergeTree` deduplicano esplicitamente in lettura (con `argMax(..., version)` o `FINAL` filtrato per partizione) e filtrano i record cancellati (`__deleted = 0`)?
-5. Tutte le query di dashboard e di anomaly detection leggono dalle tabelle di rollup, escludono il minuto corrente incompleto (`< toStartOfMinute(now())`) e confrontano il dato con una baseline stagionale robusta?
+### FINAL su tutta la tabella a ogni refresh
 
-La metrica di salute complessiva del cluster in produzione è il **numero massimo di part attive per partizione** (`SELECT max(active_parts) FROM system.parts GROUP BY table`) affiancato dal **lag di freschezza in secondi** (`now() - max(ingested_at)`): se le part attive restano sotto 50 e il lag sotto i 10 secondi, la pipeline è dimensionata e progettata a regola d'arte.
+Sintomo: CPU satura e timeout con venti dashboard aperte. `FINAL` su una `ReplacingMergeTree` senza filtro sulla chiave costringe il motore a ordinare tutte le versioni. Si corregge filtrando sulle colonne della chiave, oppure costruendo un rollup che le dashboard leggano al posto della raw.
 
-Di tutta questa scheda operativa, tenete sempre a mente una sola legge fisica: in ClickHouse le scritture vogliono blocchi grandi e poche partizioni, le letture vogliono una chiave `ORDER BY` ordinata per cardinalità crescente e le viste incrementali vogliono stati `-State` componibili. Rispettate questi tre vincoli e un singolo nodo consumerà decine di migliaia di eventi al secondo senza mai rallentare.
+## Controllo prima del rilascio
+
+1. Un consumer scrive 120 righe al secondo con flush ogni 2 secondi. Quante righe ha ogni parte e quante parti al minuto produce?
+
+<details>
+<summary>Mostra risposta</summary>
+
+Ogni parte contiene 120 × 2 = 240 righe. Le parti al minuto sono 60 ÷ 2 = 30. Con un insert per riga sarebbero 120 al secondo, cioè 7.200 al minuto, 240 volte di più. Il budget di latenza assorbe 2 secondi di flush solo se l'obiettivo di freschezza li prevede.
+
+</details>
+
+2. Il budget di freschezza è 3 secondi. Le fasi sommano 0,4 + 0,1 + 1,5 + 0,3 + 1,0 + 0,05 secondi. Il budget regge?
+
+<details>
+<summary>Mostra risposta</summary>
+
+La somma è 0,4 + 0,1 + 1,5 + 0,3 + 1,0 + 0,05 = 3,35 secondi, quindi supera l'obiettivo di 0,35 secondi. Si recupera ridimensionando la fase più pesante, il flush a 1,5 secondi: portarlo a 1,0 secondo riduce il totale a 2,85 secondi, con 0,15 secondi di margine, il 5%. Il margine è sottile e conviene intervenire anche su un'altra fase.
+
+</details>
+
+3. Una dashboard mostra utenti unici orari più alti della somma reale di circa il 18%. Quale controllo fai per primo?
+
+<details>
+<summary>Mostra risposta</summary>
+
+Il tipo della colonna nel rollup. Se è un intero salvato con `uniqExact` per minuto, la somma sull'ora conta più volte gli stessi utenti. Deve essere `AggregateFunction(uniq, UInt64)`, alimentata con `uniqState` e letta con `uniqMerge`.
+
+</details>
+
+4. Perché un allarme sul totale degli ordini non basta, e quale scomposizione aggiungi?
+
+<details>
+<summary>Mostra risposta</summary>
+
+Il totale mescola segmenti, e il crollo di uno viene coperto dagli altri. Si scompone per le dimensioni di guasto, come piattaforma, gateway di pagamento o paese, confrontando ogni segmento con la mediana della stessa ora dello stesso giorno della settimana e richiedendo tre minuti chiusi consecutivi.
+
+</details>

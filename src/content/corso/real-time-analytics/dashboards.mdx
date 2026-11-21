@@ -1,7 +1,7 @@
 ---
 title: Dashboard real-time e monitoring operativo
 description: >-
-  Progettare dashboard che si aggiornano in tempo reale su stream di eventi.
+  Progettare pannelli operativi su ClickHouse che leggono rollup al minuto, nascondono il minuto aperto e confrontano ogni metrica con la baseline di sette giorni prima.
 module: "Modulo 12: Real-time analytics con ClickHouse"
 order: 5
 category: Decisione
@@ -9,99 +9,169 @@ headerImage: /course-headers/real-time-analytics-dashboards-ginnytech-ad.webp
 headerImageAlt: >-
   Dashboard real-time - immagine ufficiale della lezione su GinnyTech
 difficulty: advanced
-duration: 22 min
+duration: 40 min
 prerequisites:
   - real-time-analytics/cdc-pattern
 learningObjectives:
-  - Separare dashboard operative da analitiche per utenti, latenza e sorgenti
-  - Fissare grain, freshness e baseline per ogni pannello prima di disegnarlo
-  - Collegare ogni soglia a un owner, un runbook e un criterio di priorità
+  - Calcolare il carico di query di una dashboard con auto-refresh e ridurlo leggendo da un rollup al minuto
+  - Scrivere la query di un pannello che esclude il minuto aperto, mostra la freschezza e confronta con la baseline a 7 giorni
+  - Distinguere una dashboard operativa da una analitica e collegare ogni soglia a un owner e a un runbook
+formato: "didattica-v2"
 binario: "ml-tabellare"
-formato: "articolo"
-autore: "Hermes"
-controllatoDa: "Argo"
-autorizzatoDa: "Giano"
 draft: false
-dateModified: 2026-11-13
+dateModified: 2026-11-17
 ---
 
-# Dashboard real-time e monitoring operativo
+Durante un Black Friday una dashboard in sala controllo ha sedici pannelli che si aggiornano ogni cinque secondi interrogando direttamente la tabella grezza degli eventi in ClickHouse. Quaranta operatori tengono la pagina aperta sul proprio browser. I nodi arrivano al 100% di CPU, l'ingestione da Kafka rallenta e il grafico degli ordini mostra l'ultimo minuto sempre dimezzato, come un falso crollo delle vendite. È uno scenario costruito, con numeri di esempio: la causa non è il traffico dei clienti, è il modo in cui è stata disegnata la dashboard.
 
-Durante il Black Friday una piattaforma e-commerce proietta in sala controllo una dashboard Grafana con sedici pannelli che si aggiornano ogni cinque secondi interrogando direttamente la tabella grezza degli eventi in ClickHouse. Quaranta operatori tengono la pagina aperta sul proprio browser: il database riceve 192 query pesanti al secondo, la CPU dei nodi sale al 100% rallentando l'ingestione da Kafka e il grafico degli ordini mostra l'ultimo minuto in corso sempre dimezzato, scatenando il panico per un falso crollo delle vendite. La causa non è il picco di traffico dei clienti: è puntare una dashboard ad auto-refresh sulla tabella raw invece che su viste pre-aggregate ed esporre il minuto incompleto senza baseline storica.
+> **Idea chiave:** una dashboard real-time è operativa solo se legge tabelle pre-aggregate al minuto, nasconde il bucket ancora aperto, mostra il ritardo del dato e confronta ogni numero con la stessa ora di sette giorni prima.
 
 ## Quaranta browser aperti e il falso crollo dell'ultimo minuto
 
-Questo è un caso ricostruito con numeri di esempio su quanto accade quando si disegna una dashboard operativa in tempo reale con le stesse query di un report analitico statico. L'azienda incassa 1.200 ordini al minuto durante la giornata di punta e vuole sorvegliare il tasso di errore dei pagamenti e il volume di ordini per gateway bancario.
+Il negozio incassa 1.200 tentativi di pagamento al minuto nell'ora di punta e vuole sorvegliare il tasso di rifiuto per gateway. Il team costruisce sedici pannelli con refresh a 5 secondi, ciascuno con una `SELECT` sulla tabella grezza delle ultime 24 ore.
 
-Il team costruisce una dashboard di sedici grafici con auto-refresh impostato a `5s`. Ogni pannello lancia una `SELECT ... FROM raw_events WHERE occurred_at >= now() - INTERVAL 24 HOUR`:
-1. Con 40 persone collegate contemporaneamente, 16 pannelli diviso 5 secondi per 40 browser generano $3,2 \times 40 = 128$ scansioni al secondo su centinaia di milioni di righe grezze, saturando il pool di thread di ClickHouse.
-2. Il grafico principale a linee raggruppa per `toStartOfMinute(occurred_at)` fino a `now()`. Quando un dirigente guarda lo schermo al secondo `:12` del minuto corrente, l'ultimo punto a destra della curva contiene solo 12 secondi di ordini anziché 60: la linea precipita dell'80% a ogni singolo minuto dando l'illusione ottica di un blocco totale del sito.
-3. Infine, un contatore mostra "42 pagamenti rifiutati nell'ultimo minuto" in rosso acceso, ma nessuno in sala sa se alle 11:00 del venerdì 42 rifiuti su 1.200 tentativi (3,5%) siano un numero fisiologico o un'anomalia rispetto alla settimana precedente.
+Il carico si calcola in tre righe. Ogni browser lancia 16 / 5 = 3,2 query al secondo. Con 40 browser sono 3,2 × 40 = 128 query al secondo. Ogni query scansiona 24 ore × 60 minuti × 1.200 tentativi = 1.728.000 righe, quindi il cluster legge 128 × 1.728.000 = 221.184.000 righe al secondo, solo per tenere aggiornato un monitor.
 
-La causa di questo triplo cortocircuito è violare le tre regole d'oro delle dashboard real-time: leggere esclusivamente da tabelle pre-aggregate al minuto, tagliare il bucket temporale incompleto e affiancare a ogni numero corrente la sua baseline dello stesso giorno e ora.
+Il secondo guasto è visivo. Il grafico raggruppa per minuto fino a `now()`. Quando un dirigente guarda lo schermo al secondo 12 del minuto corrente, l'ultimo punto contiene 12 secondi di ordini invece di 60, cioè il 20% del valore normale: la linea scende dell'80% a ogni minuto, e sembra un blocco del sito.
 
-## Pre-aggregazione di lettura, taglio del bucket aperto e confronto di baseline
+Il terzo guasto è di significato. Un contatore rosso dice «42 pagamenti rifiutati nell'ultimo minuto». Su 1.200 tentativi sono 42 / 1.200 = 3,5%, ma nessuno sa se sia normale per il venerdì alle 11:00 o un'anomalia rispetto alla settimana prima.
 
-Una dashboard operativa che regge centinaia di utenti simultanei con tempi di risposta sotto i 30 millisecondi e guida decisioni immediate poggia su tre meccanismi fisici e visivi.
+## Rollup, minuto aperto, baseline
 
-Il primo meccanismo è il disaccoppiamento tra lo stream di ingestione e le query dei pannelli tramite tabelle di rollup pre-aggregate (alimentate da Materialized Views). Se un evento grezzo produce 20.000 righe al secondo ma il pannello mostra l'andamento al minuto per cinque metodi di pagamento, la tabella di rollup `agg_payments_1m` scrive appena 5 righe al minuto ($7.200$ righe in 24 ore contro $1,7$ miliardi di eventi grezzi): anche se cento operatori aggiornano la pagina ogni cinque secondi, leggere 7.200 righe in RAM su ClickHouse costa meno di 2 millisecondi.
+Tre meccanismi correggono i tre guasti.
 
-Il secondo meccanismo è l'esclusione del bucket temporale ancora aperto (*incomplete bucket clipping*) combinata con l'indicatore di freschezza (*freshness SLA*). In una serie temporale aggregata al minuto, il minuto corrente (`toStartOfMinute(now())`) è per definizione incompleto finché non scocca il minuto successivo più il tempo di watermark dello stream. La query della serie storica deve fermarsi a `finestra_1m < toStartOfMinute(now())`, mentre un pannello separato di stato espone `dateDiff('second', max(ingested_at), now())` per avvisare immediatamente se la pipeline ha smesso di ricevere dati (distinguendo "zero ordini perché il sito è fermo" da "zero ordini perché il connettore Kafka è morto").
+Il primo disaccoppia lo stream dalle query dei pannelli con una tabella di rollup al minuto, alimentata da una materialized view (vedi la lezione precedente su `AggregatingMergeTree`). Il pannello chiede sempre gli stessi raggruppamenti, quindi li calcoliamo una volta sola in ingestione. Nel caso del negozio una giornata passa da 1.728.000 righe grezze a 1.440 righe di rollup, un rapporto di 1.728.000 / 1.440 = 1.200 a 1. Il carico del paragrafo precedente scende a 128 × 1.440 = 184.320 righe al secondo.
 
-Il terzo meccanismo è l'ancoraggio alla baseline stagionale e al runbook operativo. Un numero assoluto in tempo reale senza termine di paragone è rumore visivo: ogni curva del giorno corrente va sovrapposta nello stesso grafico o nella stessa query alla mediana o al valore registrato esattamente $7$ giorni prima alla stessa ora (`now() - INTERVAL 7 DAY`), e ogni soglia di allarme deve riportare nel titolo del pannello il proprietario (*owner*) e l'azione immediata da eseguire (es. *"Se error_rate > 8% per 3 min -> On-Call Checkout: attivare failover su Gateway B"*).
+Il secondo esclude il bucket aperto. Il minuto corrente è incompleto per definizione, quindi la serie si ferma a `minuto < toStartOfMinute(now())`. Un indicatore separato mostra la freschezza, cioè quanti secondi sono passati dall'ultimo evento ricevuto. Così distingui «zero ordini perché il sito è fermo» da «zero ordini perché il connettore Kafka è morto».
 
-**Una dashboard real-time è operativa solo se interroga tabelle pre-aggregate al minuto, nasconde il bucket corrente incompleto, mostra il ritardo del dato e confronta ogni metrica con la baseline di sette giorni prima.**
+Il terzo ancora il numero alla baseline: il valore della stessa ora sette giorni prima, che assorbe l'effetto del giorno della settimana. Ogni soglia riporta nel titolo il proprietario e l'azione, per esempio «se il tasso di rifiuto supera l'8% per 3 minuti, chiama il turno checkout e passa al gateway B».
 
-## Tre errori nella progettazione di dashboard su flussi in tempo reale
-
-Il blocco SQL qui sotto mostra la query tipica di un pannello Grafana mal progettato: interroga la tabella raw, include il minuto corrente parziale e non offre né baseline né controllo di freschezza:
-
-```sql
--- ERRORE 1: interroga la tabella raw da miliardi di righe a ogni auto-refresh di 5 secondi.
--- ERRORE 2: include il minuto corrente incompleto (fino a now()), facendo crollare l'ultimo punto.
--- ERRORE 3: restituisce solo il conteggio grezzo senza tasso percentuale né confronto a -7 giorni.
-SELECT
-    toStartOfMinute(occurred_at) AS minuto,
-    countIf(status = 'failed') AS pagamenti_falliti
-FROM raw_stream.payment_events
-WHERE occurred_at >= now() - INTERVAL 6 HOUR
-  AND occurred_at <= now()
-GROUP BY minuto
-ORDER BY minuto ASC;
+```mermaid
+flowchart LR
+    A["Eventi di pagamento (Kafka)"] --> B["Tabella grezza"]
+    B --> C["Materialized view"]
+    C --> D["Rollup al minuto"]
+    D --> E["Pannelli (refresh 10-30 s)"]
+    B -. "solo analisi ad hoc" .-> F["Query esplorative"]
 ```
 
-### Puntare i pannelli con auto-refresh sulla tabella raw degli eventi
+## Lo scenario in locale
 
-Collegare una dashboard che si aggiorna automaticamente ogni 5 o 10 secondi direttamente alla tabella atomica `raw_stream.payment_events` trasforma lo strumento di monitoraggio in un attacco Denial-of-Service interno contro il proprio database. Poiché i pannelli di monitoraggio chiedono sempre gli stessi raggruppamenti temporali (ultimo minuto, ultimi 5 minuti, ultime 6 ore), ricalcolare l'aggregazione da zero sui dati grezzi per ogni scheda del browser aperta in azienda spreca il 99% della CPU del cluster.
+Per toccare i numeri, il blocco seguente costruisce lo scenario in chDB. Genera otto giorni di storia con 20 tentativi al minuto, per tenere la tabella piccola. Il tasso normale di rifiuto è 1 su 20, cioè 5%; negli ultimi 10 minuti chiusi sale a 4 su 20, cioè 20%; il minuto aperto ha ricevuto solo 4 eventi su 20. Gli istanti sono calcolati rispetto a `now()`, quindi i minuti cambiano a ogni esecuzione, mentre i conteggi restano uguali.
 
-### Includere il minuto o l'ora ancora in corso nel grafico a linee
+```sql
+CREATE DATABASE lab ENGINE = Atomic;
+USE lab;
 
-Terminare il filtro temporale con `WHERE occurred_at <= now()` in un grafico raggruppato per minuto o per quarto d'ora crea il celebre "crollo a scogliera" (*cliff effect*) sull'estremo destro del grafico. Al secondo `:05` di ogni minuto il grafico mostra un dodicesimo del traffico del minuto precedente: chi guarda il monitor in sala operativa non riesce mai a capire a colpo d'occhio se quel crollo verticale sia l'inizio di un incidente vero o semplicemente il fatto che il minuto è appena cominciato.
+CREATE TABLE eventi_pagamento
+(
+    occurred_at DateTime,
+    ingested_at DateTime,
+    gateway LowCardinality(String),
+    esito LowCardinality(String)
+)
+ENGINE = MergeTree
+ORDER BY occurred_at;
 
-### Mostrare contatori assoluti senza tasso relativo, baseline e indicatore di staleness
+CREATE TABLE agg_pagamenti_1m
+(
+    minuto DateTime,
+    tentativi_state AggregateFunction(count),
+    falliti_state AggregateFunction(sum, UInt64),
+    ultimo_ingest_state AggregateFunction(max, DateTime)
+)
+ENGINE = AggregatingMergeTree
+ORDER BY minuto;
 
-Esporre un pannello gigante col numero `"18 errori nell'ultimo minuto"` o `"0 errori nell'ultimo minuto"` senza denominatorie e senza età dell'ultimo evento induce in errore in entrambe le direzioni: 18 errori alle tre di notte su 20 tentativi (90% di fallimento) sono un blocco critico, mentre 18 errori a mezzogiorno del Black Friday su 2.000 pagamenti (0,9%) sono normali; viceversa, leggere `"0 errori"` quando in realtà il connettore si è bloccato venti minuti fa dà una falsa sicurezza mentre il sistema è cieco.
+CREATE MATERIALIZED VIEW agg_pagamenti_1m_mv TO agg_pagamenti_1m AS
+SELECT
+    toStartOfMinute(occurred_at) AS minuto,
+    countState() AS tentativi_state,
+    sumState(toUInt64(esito = 'rifiutato')) AS falliti_state,
+    maxState(ingested_at) AS ultimo_ingest_state
+FROM eventi_pagamento
+GROUP BY minuto;
 
-## Query di dashboard su tabella rollup con taglio del minuto aperto e baseline a 7 giorni
+-- Otto giorni di storia, 20 tentativi al minuto. Un minuto k fa vale toStartOfMinute(now()) - k minuti.
+-- Normale: 1 rifiuto su 20 (5%). Negli ultimi 10 minuti chiusi: 4 su 20 (20%).
+-- Il minuto aperto (k = 0) ha ricevuto solo 4 eventi su 20.
+INSERT INTO eventi_pagamento
+SELECT
+    toStartOfMinute(now()) - toIntervalMinute(intDiv(number, 20)) + toIntervalSecond((number % 20) * 3) AS occurred_at,
+    occurred_at + toIntervalSecond(2) AS ingested_at,
+    if(number % 2 = 0, 'gateway_a', 'gateway_b') AS gateway,
+    if((number % 20) < if(intDiv(number, 20) BETWEEN 1 AND 10, 4, 1), 'rifiutato', 'ok') AS esito
+FROM numbers(8 * 1440 * 20)
+WHERE intDiv(number, 20) > 0 OR (number % 20) < 4;
 
-Per costruire pannelli real-time veloci, leggibili in tre secondi e privi di falsi allarmi visivi, applicate questi quattro criteri in ordine di priorità:
+SELECT count() AS righe_grezze, (SELECT count() FROM agg_pagamenti_1m) AS righe_rollup FROM eventi_pagamento;
+```
 
-1. Alimentate tutte le dashboard operative a refresh frequente (`5s`–`30s`) esclusivamente da tabelle di rollup al minuto mantenute da Materialized Views, vietando le query dirette sulle tabelle raw.
-2. Fermate sempre l'estremo destro dei grafici a linee all'ultimo bucket completamente chiuso (`minuto < toStartOfMinute(now())`), esponendo in un indicatore dedicato i secondi trascorsi dall'ultimo evento ricevuto (`freshness_lag_sec`).
-3. Affiancate nella stessa query la metrica corrente e il valore registrato nella stessa identica finestra di 7 giorni prima (`minuto - INTERVAL 7 DAY`), calcolando sia il tasso percentuale sia lo scostamento dalla baseline.
-4. Limitate la dashboard operativa a 5–7 pannelli essenziali, scrivendo nel sottotitolo di ciascuno la soglia, il team responsabile e il link al runbook di intervento.
+La `SELECT` finale del blocco di setup conta le righe: 230.384 righe grezze contro 11.520 righe di rollup, perché 8 giorni × 1.440 minuti = 11.520 e 11.520 × 20 = 230.400, meno le 16 righe che mancano al minuto aperto (ne ha 4 invece di 20). Il rapporto è circa 20 a 1, che coincide con i tentativi al minuto. Con 1.200 tentativi al minuto sarebbe 1.200 a 1.
 
-Ecco la query corretta in ClickHouse per alimentare il pannello principale di monitoraggio dei pagamenti leggendo dalla tabella pre-aggregata `agg_payments_1m`:
+La tabella di rollup usa tre colonne di stato: il conteggio dei tentativi, la somma dei rifiuti e il massimo del timestamp di ingestione. Sono tutte fondibili, quindi la lettura con `countMerge`, `sumMerge` e `maxMerge` resta corretta anche quando un lotto in ritardo lascia due righe per lo stesso minuto. Il tasso di rifiuto non si memorizza mai come percentuale, perché una percentuale non si somma: si conservano numeratore e denominatore e si divide solo in lettura. È lo stesso principio della lezione sulle materialized view, applicato a un pannello, e spiega perché la query del pannello calcola `falliti * 100.0 / tentativi` solo nell'ultimo passaggio, con `nullIf` per evitare la divisione per zero in un minuto senza traffico.
+
+## Tre errori nella progettazione dei pannelli
+
+Questa è la query di un pannello mal disegnato. Interroga la tabella grezza, include il minuto corrente e non offre né rapporto percentuale né confronto.
+
+```sql
+-- Il pannello costruito male: tabella grezza e minuto aperto fino a now().
+SELECT
+    toStartOfMinute(occurred_at) AS minuto,
+    count() AS tentativi
+FROM eventi_pagamento
+WHERE occurred_at >= now() - INTERVAL 6 HOUR
+GROUP BY minuto
+ORDER BY minuto DESC
+LIMIT 3;
+```
+
+Il risultato mostra 20 tentativi per ogni minuto chiuso e 4 per il minuto aperto: è il crollo a scogliera, 4 / 20 = 20% del valore normale.
+
+### Puntare il refresh automatico sulla tabella grezza
+
+**Sintomo:** CPU al 100% quando la sala controllo apre la pagina, ingestione che rallenta, query che si accodano.
+
+**Perché succede:** i pannelli chiedono sempre gli stessi raggruppamenti, ma ogni browser li ricalcola dai dati grezzi. Con i numeri del primo paragrafo sono 221 milioni di righe al secondo contro 184 mila.
+
+**Come si corregge:** pannelli solo su rollup, tabella grezza riservata all'analisi manuale.
+
+### Includere il minuto ancora in corso
+
+**Sintomo:** l'ultimo punto del grafico crolla all'inizio di ogni minuto e risale dopo.
+
+**Perché succede:** il filtro finisce a `now()` e il bucket contiene solo i secondi trascorsi. Sembra innocuo perché il dato è «il più fresco possibile».
+
+**Come si corregge:** ferma la serie all'ultimo minuto chiuso e mostra a parte la freschezza.
+
+### Contatori assoluti senza denominatore né freschezza
+
+**Sintomo:** squadre che reagiscono a numeri normali o ignorano un blocco.
+
+**Perché succede:** 18 rifiuti su 20 tentativi alle tre di notte sono il 90% e un incidente. 18 rifiuti su 2.000 pagamenti al Black Friday sono lo 0,9% e routine. E «0 errori» non dice se il flusso è fermo da venti minuti.
+
+**Come si corregge:** mostra tasso, baseline e secondi dall'ultimo evento accanto al numero.
+
+## Query di pannello su rollup con baseline a sette giorni
+
+I criteri, in ordine di priorità:
+
+1. Alimenta le dashboard con refresh frequente (da 5 a 30 secondi) solo da rollup al minuto, e vieta le query dirette sulla tabella grezza.
+2. Ferma i grafici all'ultimo bucket chiuso e mostra la freschezza in un indicatore dedicato.
+3. Affianca alla metrica corrente il valore della stessa finestra sette giorni prima, con tasso percentuale e scostamento.
+4. Limita la dashboard operativa a 5-7 pannelli e scrivi in ciascuno soglia, team responsabile e link al runbook.
+
+La query del pannello principale, sul rollup dello scenario:
 
 ```sql
 WITH oggi AS (
     SELECT
         minuto,
-        sumMerge(tentativi_state) AS tentativi_oggi,
+        countMerge(tentativi_state) AS tentativi_oggi,
         sumMerge(falliti_state) AS falliti_oggi,
         maxMerge(ultimo_ingest_state) AS ultimo_ingest
-    FROM realtime.agg_payments_1m
-    -- Escludiamo il minuto corrente incompleto per evitare il falso crollo a destra:
+    FROM agg_pagamenti_1m
     WHERE minuto >= toStartOfMinute(now()) - INTERVAL 3 HOUR
       AND minuto < toStartOfMinute(now())
     GROUP BY minuto
@@ -109,9 +179,9 @@ WITH oggi AS (
 settimana_scorsa AS (
     SELECT
         minuto + INTERVAL 7 DAY AS minuto_allineato,
-        sumMerge(tentativi_state) AS tentativi_7d,
+        countMerge(tentativi_state) AS tentativi_7d,
         sumMerge(falliti_state) AS falliti_7d
-    FROM realtime.agg_payments_1m
+    FROM agg_pagamenti_1m
     WHERE minuto >= toStartOfMinute(now()) - INTERVAL 7 DAY - INTERVAL 3 HOUR
       AND minuto < toStartOfMinute(now()) - INTERVAL 7 DAY
     GROUP BY minuto_allineato
@@ -123,31 +193,96 @@ SELECT
     round(s.falliti_7d * 100.0 / nullIf(s.tentativi_7d, 0), 2) AS error_rate_baseline_7d_pct,
     dateDiff('second', o.ultimo_ingest, now()) AS freshness_lag_sec
 FROM oggi AS o
-LEFT JOIN settimana_scorsa AS s
-    ON o.minuto = s.minuto_allineato
-ORDER BY o.minuto ASC;
+LEFT JOIN settimana_scorsa AS s ON o.minuto = s.minuto_allineato
+ORDER BY o.minuto DESC
+LIMIT 12;
 ```
 
-Il risultato trasforma sia il carico sul server sia l'esperienza in sala controllo: interrogare 180 minuti della tabella `agg_payments_1m` legge poche centinaia di righe in 3 millisecondi anche con cento browser aperti; la linea del grafico resta stabile fino all'ultimo minuto concluso senza mai mostrare falsi crolli; il confronto immediato tra `error_rate_oggi_pct` e `error_rate_baseline_7d_pct` mostra subito se il 3,5% di errori è identico a venerdì scorso; e `freshness_lag_sec` fa scattare un avviso giallo non appena il ritardo dei dati supera i 30 secondi. Aggiungere `AND minuto < toStartOfMinute(now())` richiede dieci secondi; lasciare che il team di reperibilità apra falsi incidenti per un grafico che crolla a ogni inizio minuto brucia fiducia e concentrazione.
+Nello scenario, il rollup restituisce 180 righe al massimo per finestra di tre ore, invece delle 3.600 grezze (180 minuti × 20 tentativi). Il tasso di rifiuto di oggi è 5% per i minuti normali e 20% negli ultimi 10 minuti chiusi, mentre la baseline a sette giorni resta al 5%. Lo scostamento è 20% - 5% = 15 punti percentuali, e per 10 minuti consecutivi: quello che fa scattare la soglia, che il singolo minuto da 4 rifiuti su 20 non farebbe scattare da solo. La colonna `freshness_lag_sec` parte da pochi secondi per l'ultimo minuto chiuso e cresce di 60 per ogni riga più vecchia, perché misura il tempo dall'ultimo ingest di quel minuto.
 
-## Dashboard operativa di sala controllo o dashboard analitica di esplorazione
+Il controllo di freschezza vero è uno solo, sull'ingestione più recente, ed è la regola di allarme. Il file seguente descrive due pannelli e le loro soglie nel formato interno usato come esempio: ogni soglia ha un proprietario e un'azione.
 
-In azienda si tende spesso a creare un unico cruscotto ibrido che cerca di servire contemporaneamente chi gestisce le emergenze in tempo reale e chi analizza i trend di business. In realtà esistono due strumenti incompatibili per architettura e pubblico: la **dashboard operativa real-time** (NOC / war room) e la **dashboard analitica direzionale** (BI esplorativa).
+```yaml
+# Definizione dei pannelli operativi (formato di esempio, non di uno strumento specifico).
+dashboard: pagamenti-operativa
+refresh: 15s            # mai sotto i 5 secondi su rollup
+sorgente: realtime.agg_pagamenti_1m
+pannelli:
+  - nome: tasso-rifiuto
+    metrica: falliti / tentativi
+    finestra: ultimi 180 minuti chiusi
+    baseline: stessa finestra, 7 giorni prima
+    soglia: "> 8% per 3 minuti"
+    owner: turno-checkout
+    runbook: runbook/pagamenti-passa-a-gateway-b
+  - nome: freschezza
+    metrica: secondi dall'ultimo ingest
+    soglia: "> 30 s"
+    owner: piattaforma-dati
+    runbook: runbook/pipeline-kafka-ferma
+```
 
-Il criterio di scelta è netto: **costruite una dashboard operativa real-time su ClickHouse (auto-refresh a 10–30 secondi, zero filtri complessi, massimo 6 pannelli su rollup al minuto con soglie e runbook) solo per chi deve intervenire entro cinque minuti su un'anomalia tecnica o commerciale in corso, costruite invece una dashboard analitica su marts dbt (aggiornamento orario o giornaliero, filtri multi-dimensione per categoria, coorte e campagna) per product manager, marketing e direzione.**
+Aggiungere la condizione sul minuto chiuso costa una riga. Lasciare che il turno di reperibilità apra incidenti per un grafico che crolla a ogni inizio minuto costa fiducia e sonno.
 
-La confusione comune consiste nell'aggiungere venti menu a tendina di filtro (regione, dispositivo, codice sconto, campagna UTM) a una dashboard in tempo reale al secondo, oppure nell'impostare un refresh automatico di 10 secondi su un report finanziario mensile. Sbagliare questa separazione produce cruscotti lenti che nessuno sa come usare durante un incidente e sovraccarica il database con ricalcoli continui di metriche che cambiano una volta al giorno.
+## Operativa o analitica
 
-Questo articolo non tratta la configurazione del caching HTTP sul reverse proxy davanti a Grafana o Superset né il calcolo statistico degli allarmi automatici (trattato nella lezione successiva sull'anomaly detection). Se la dashboard viene esposta direttamente a migliaia di clienti esterni dentro un prodotto SaaS, oltre alle tabelle di rollup è indispensabile interporre un livello di cache applicativa (es. Redis con TTL di 5–10 secondi) o usare le query cache native di ClickHouse (`SET use_query_cache = 1`).
+Un solo cruscotto ibrido non serve né chi gestisce l'emergenza né chi analizza i trend. Il criterio: **costruisci una dashboard operativa su ClickHouse (refresh da 10 a 30 secondi, massimo sei pannelli su rollup al minuto, soglie e runbook) per chi deve intervenire entro cinque minuti, costruisci una dashboard analitica su tabelle modellate (aggiornamento orario o giornaliero, filtri per categoria, coorte e campagna) per prodotto, marketing e direzione.**
 
-## Cinque domande prima di pubblicare una dashboard real-time
+| Caratteristica | Operativa | Analitica |
+|---|---|---|
+| Chi la usa | Turno di reperibilità | Prodotto, marketing, direzione |
+| Refresh | 10-30 secondi | Orario o giornaliero |
+| Sorgente | Rollup al minuto | Tabelle modellate |
+| Filtri | Quasi nessuno | Molti (regione, campagna, coorte) |
+| Domanda | Devo intervenire adesso? | Che cosa è cambiato e perché? |
 
-1. Ogni singolo pannello della dashboard legge da una tabella pre-aggregata (rollup al minuto o all'ora) anziché fare scansioni dirette sulla tabella raw degli eventi?
-2. I grafici a linee escludono il bucket temporale attualmente in corso (`minuto < toStartOfMinute(now())`) così da non mostrare mai l'ultimo punto artificialmente crollato?
-3. È presente in alto nella dashboard un indicatore visibile di freschezza (`now() - max(ingested_at)`) che segnala subito se il flusso dati si è fermato?
-4. Ogni metrica chiave mostra accanto al valore corrente il tasso relativo (percentuale) e la baseline storica dello stesso giorno e ora della settimana precedente (`-7d`)?
-5. Ad ogni pannello di allerta sono associati un proprietario (*owner*) esplicito e l'azione concreta da intraprendere se la curva supera la soglia?
+La confusione comune è aggiungere venti filtri a una dashboard al secondo, o un refresh a 10 secondi a un report mensile. Il primo caso produce un cruscotto che nessuno sa usare durante un incidente, il secondo ricalcola continuamente metriche che cambiano una volta al giorno.
 
-La metrica tecnica che certifica una dashboard real-time ben ingegnerizzata è il **99° percentile del tempo di esecuzione delle query dei pannelli sotto carico concorrente**: leggendo da tabelle `AggregatingMergeTree` al minuto, tutte le query della pagina devono completarsi in meno di 50 millisecondi.
+Restano fuori dalla lezione la cache HTTP davanti a Grafana o Superset e il calcolo statistico degli allarmi, trattato nella lezione sull'anomaly detection. Se la dashboard è esposta a migliaia di clienti dentro un prodotto, oltre al rollup serve una cache applicativa con un TTL di 5-10 secondi, oppure la cache di query di ClickHouse.
 
-Di tutta la progettazione delle dashboard in tempo reale, una sola regola visiva salva le notti di chi è in reperibilità: non disegnare mai un minuto che non è ancora finito, e non mostrare mai il numero di oggi senza la linea di sette giorni fa.
+## Controllo prima di pubblicare un pannello
+
+1. Una dashboard con 25 browser aperti e 12 pannelli con refresh a 10 secondi legge una tabella grezza da 864.000 righe al giorno per pannello. Quante righe al secondo scansiona il cluster, e quante con un rollup al minuto?
+
+<details>
+<summary>Mostra risposta</summary>
+
+Query al secondo: 25 × 12 / 10 = 30. Righe grezze al secondo: 30 × 864.000 = 25.920.000. Il rollup al minuto ha 1.440 righe al giorno, quindi 30 × 1.440 = 43.200 righe al secondo, circa 600 volte meno (864.000 / 1.440 = 600).
+
+</details>
+
+2. Alle 10:05:12 il grafico raggruppato per minuto fino a `now()` mostra l'ultimo punto a 24 ordini, mentre i minuti precedenti ne hanno circa 120. Si tratta di un incidente?
+
+<details>
+<summary>Mostra risposta</summary>
+
+No. Il minuto aperto ha 12 secondi su 60, quindi ne aspetti circa 120 × 12 / 60 = 24. Il filtro deve fermarsi a `minuto < toStartOfMinute(now())`.
+
+</details>
+
+3. Un pannello mostra «9 rifiuti nell'ultimo minuto». Che cosa aggiungi per renderlo decidibile?
+
+<details>
+<summary>Mostra risposta</summary>
+
+Il denominatore, per avere un tasso (9 rifiuti su 20 sono il 45%, su 900 sono l'1%), la baseline della stessa ora sette giorni prima e i secondi dall'ultimo evento, per escludere un flusso fermo.
+
+</details>
+
+4. Per quale dei due pubblici scegli la dashboard operativa, e quando ti serve un filtro per campagna?
+
+<details>
+<summary>Mostra risposta</summary>
+
+Operativa per il turno che interviene entro cinque minuti. Il filtro per campagna appartiene alla dashboard analitica su tabelle modellate, aggiornata a ore, perché la domanda è esplorativa.
+
+</details>
+
+5. Quale metrica certifica che la dashboard è ben progettata?
+
+<details>
+<summary>Mostra risposta</summary>
+
+Il 99° percentile del tempo di esecuzione delle query dei pannelli sotto carico concorrente. Su rollup al minuto deve restare sotto i 50 millisecondi, con tutti i browser aperti.
+
+</details>
