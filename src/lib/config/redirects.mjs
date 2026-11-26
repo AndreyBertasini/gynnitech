@@ -12,7 +12,8 @@ const legacyRedirectEntries = [
   ['/corso/getting-started/terminology', '/course/data-collection/terminology'],
 ];
 
-const englishRedirectEntries = legacyRedirectEntries.map(([source, target]) => [`/en${source}`, `/en${target}`]);
+// Nessuna pagina /en/ del corso: i vecchi URL inglesi puntano direttamente all'italiano (un solo hop).
+const englishRedirectEntries = legacyRedirectEntries.map(([source, target]) => [`/en${source}`, target]);
 
 const redirectEntries = [...legacyRedirectEntries, ...englishRedirectEntries];
 

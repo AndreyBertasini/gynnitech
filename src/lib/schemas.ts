@@ -14,6 +14,13 @@ export const blogSchema = z.object({
     author: z.string().default('Andrii Dyshkantiuk'),
     image: z.string().optional(),
     faqSchema: z.array(faqSchemaEntry).optional(),
+    // Solo blog-en: slug inglese pubblico e stato della revisione umana. Finché
+    // translationReviewed non è true l'articolo non viene pubblicato: /en/blog/<slug-it>/
+    // risponde 301 verso la versione italiana (vedi src/lib/i18n-pages.ts).
+    enSlug: z.string().regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/).optional(),
+    translationReviewed: z.boolean().default(false),
+    reviewedBy: z.string().optional(),
+    reviewedAt: z.coerce.date().optional(),
 });
 
 export const corsoSchema = z.object({

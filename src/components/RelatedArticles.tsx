@@ -130,7 +130,8 @@ function ArticleRow({
   locale: 'it' | 'en';
   copy: { readingTime: string; read: string };
 }) {
-  const slug = post.id.replace(/\.[^/.]+$/, '');
+  const enSlug = (post.data as { enSlug?: string }).enSlug;
+  const slug = locale === 'en' && enSlug ? enSlug : post.id.replace(/\.[^/.]+$/, '');
   const date = post.data.date.toLocaleDateString(locale === 'en' ? 'en-US' : 'it-IT', {
     year: 'numeric',
     month: 'long',
@@ -141,7 +142,7 @@ function ArticleRow({
 
   return (
     <a
-      href={`${basePath.replace(/\/$/, '')}/${slug}`}
+      href={`${basePath.replace(/\/$/, '')}/${slug}/`}
       style={{
         textDecoration: 'none',
         color: 'inherit',
