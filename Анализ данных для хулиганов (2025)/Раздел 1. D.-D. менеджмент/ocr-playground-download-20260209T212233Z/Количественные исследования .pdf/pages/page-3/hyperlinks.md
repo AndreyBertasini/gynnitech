@@ -1,9 +1,0 @@
-https://tidydata.ru/sample-size
-https://tidydata.ru/sample-size
-https://tidydata.ru/sample-size
-https://tidydata.ru/sample-size
-https://tidydata.ru/sample-size
-https://tidydata.ru/sample-size
-https://tidydata.ru/sample-size
-https://tidydata.ru/sample-size
-https://tidydata.ru/sample-size
