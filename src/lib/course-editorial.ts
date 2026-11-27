@@ -49,7 +49,7 @@ const MODULE_EDITORIAL_PROFILES: Record<string, ModuleEditorialProfile> = {
     bridge: "Prepara prodotto, marketing e sperimentazione, perche' le tecniche migliori valgono poco se non entrano in un processo decisionale stabile.",
   },
   'analisi-prodotto': {
-    promise: "Ti fa costruire una lettura piu' precisa del comportamento utente, dall'attivazione alla retention, dalla UX alla crescita di prodotto.",
+    promise: "Ti prepara al lavoro di product analyst: metriche e tracking, funnel e attivazione, retention e monetization, esperimenti, diagnosi e comunicazione.",
     studyTip: "Studialo sempre su un prodotto concreto, cosi' onboarding, churn, aha moment e priorita' di roadmap smettono di restare concetti astratti.",
     workUse: "Serve quando devi capire perche' gli utenti non attivano valore, dove abbandonano e quali cambiamenti meritano davvero attenzione.",
     bridge: "Prepara marketing analytics, data science e A/B test, perche' il comportamento osservato qui verra' poi misurato, previsto e testato.",

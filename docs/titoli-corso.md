@@ -135,21 +135,33 @@
 
 ### 5 · Product analytics e diagnosi della crescita
 
-`analisi-prodotto` · 11 lezioni · 7 titoli da cambiare
+`analisi-prodotto` · 23 lezioni · modulo ristrutturato il 2026-11-27 (11 lezioni riscritte, 12 nuove; slug esistenti invariati). I titoli sotto sono quelli in uso.
 
-| # | File | Attuale | Proposto | Motivo |
-|---|---|---|---|---|
-| 1 | `introduzione-product-analytics` | Introduzione alla product analytics | _(invariato)_ |  |
-| 2 | `retention-framework` | Retention e analisi di coorte nel prodotto | **Misurare la retention: definizioni e curve** | sovrapposto alla lezione 4 sulle coorti |
-| 3 | `customer-development` | Customer development per product analytics | _(invariato)_ |  |
-| 4 | `analisi-coorte` | Analisi di coorte e behavioral cohorts | **Coorti comportamentali e matrici di transizione** | distinto dalla lezione 2 |
-| 6 | `ux-research` | UX research e dati comportamentali | _(invariato)_ |  |
-| 7 | `nps-net-promoter-score` | NPS e soddisfazione: Net Promoter Score senza superstizioni | **NPS, CSAT e CES: misurare la soddisfazione** | più corto, dice cosa confronta |
-| 8 | `ab-testing` | A/B testing per prodotto | **A/B test di prodotto: protocollo e anti-pattern** | angolo del modulo, distinto dal modulo 17 |
-| 9 | `prioritizzazione-feature` | Prioritizzazione feature con dati | **Prioritizzare le feature con i dati** | italiano più naturale |
-| 10 | `product-market-fit` | Product-market fit: segnali, metriche e falsi positivi | _(invariato)_ |  |
-| 11 | `caso-studio` | Caso studio: analisi prodotto completa | **Caso studio: diagnosi completa di un prodotto** | più chiaro |
-| 12 | `cheat-sheet` | Cheat Sheet — Analisi di Prodotto | **Cheat sheet: product analytics** | formato unico "Cheat sheet: <tema>" |
+| # | File | Titolo |
+|---|---|---|
+| 1 | `introduzione-product-analytics` | Introduzione alla product analytics: il mestiere del product analyst |
+| 2 | `north-star-metric-tree` | North Star Metric e metric tree: dalla strategia alle metriche di team |
+| 3 | `tracking-plan-event-model` | Tracking plan e modello a eventi: dati di prodotto di cui fidarsi |
+| 4 | `funnel-analysis` | Funnel analysis: ordine dei passi, finestra e segmenti |
+| 5 | `onboarding-attivazione` | Onboarding e attivazione: trovare l'evento che predice la retention |
+| 6 | `retention-framework` | Misurare la retention: definizioni, curve di coorte e churn |
+| 7 | `analisi-coorte` | Coorti comportamentali, growth accounting e matrici di transizione |
+| 8 | `engagement-metriche` | Metriche di engagement: DAU/MAU, power user curve e adozione delle funzionalità |
+| 9 | `monetization-analytics` | Monetization analytics: ARPU, MRR, NRR, LTV e CAC payback |
+| 10 | `product-market-fit` | Misurare il Product-Market Fit |
+| 11 | `customer-development` | Customer development per product analytics |
+| 12 | `ux-research` | UX research e dati comportamentali |
+| 13 | `nps-net-promoter-score` | NPS, CSAT e CES: misurare la soddisfazione |
+| 14 | `ab-testing` | A/B test di prodotto: dal disegno alla decisione |
+| 15 | `esperimenti-avanzati` | Esperimenti avanzati: varianza, interferenza e test sequenziali |
+| 16 | `inferenza-causale-osservazionale` | Inferenza causale senza esperimento: DiD, synthetic control, RDD e propensity score |
+| 17 | `diagnosi-calo-metrica` | Diagnosi di un calo di metrica: dal grafico rosso alla causa |
+| 18 | `prioritizzazione-feature` | Prioritizzare le feature con i dati: RICE, Kano, Cost of Delay e opportunity sizing |
+| 19 | `strumenti-product-analytics` | Gli strumenti del product analyst: Amplitude, Mixpanel, PostHog, GA4 e warehouse |
+| 20 | `comunicare-insight` | Comunicare un insight: dal brief alla raccomandazione |
+| 21 | `colloquio-product-analyst` | Il colloquio da product analyst: domande tipiche e risposte modello |
+| 22 | `caso-studio` | Caso studio: diagnosi completa di un prodotto |
+| 23 | `cheat-sheet` | Cheat sheet di product analytics: formule, soglie e checklist del modulo |
 
 ### 6 · Marketing analytics e martech
 
