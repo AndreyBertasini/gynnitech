@@ -24,8 +24,8 @@ Fonte: guida di aggiornamento ad Astro v7 e reference di `markdown.processor` (d
 
 - Tutti i blocchi `sql/python/bash/yaml/json/javascript/java/text` vengono renderizzati da Expressive Code (colori, pulsante copia, cornice).
 - Tutti i blocchi `mermaid` vengono renderizzati come diagrammi.
-- KaTeX (1.524 formule) e `rehypeStripCourseH1` continuano a funzionare come oggi.
-- L'aspetto attuale resta: fondo `#13151a`, bordo `#2a2d37`, raggio 0.5rem, font `Geist Mono`, temi `github-dark` / `github-light` guidati da `data-theme`.
+- KaTeX e `rehypeStripCourseH1` continuano a funzionare come oggi (nessuna formula in errore, nessun H1 duplicato).
+- L'aspetto attuale resta: fondo `#13151a`, bordo `#2a2d37`, raggio 0.5rem, font `Geist Mono`. Le pagine `/course` e il blog sono solo scure e non hanno `data-theme` (il selettore di tema non è montato): il codice usa sempre il tema scuro (`useDarkModeMediaQuery: false`); `github-light` esiste solo se un domani compare `data-theme='light'`.
 - Un test di regressione rende impossibile che il problema torni senza che ce ne si accorga.
 
 ## Non-obiettivi
@@ -38,7 +38,7 @@ Fonte: guida di aggiornamento ad Astro v7 e reference di `markdown.processor` (d
 
 - Cambia l'aspetto delle pagine al di fuori dei blocchi di codice.
 - Spariscono le formule KaTeX o ricompare l'H1 duplicato.
-- Su `/course/...` il codice è colorato ma manca il CSS di Expressive Code, oppure il tema chiaro e quello scuro non seguono `ThemeToggle`.
+- Su `/course/...` il codice è colorato ma manca il CSS di Expressive Code, oppure, con il sistema operativo in tema chiaro, il codice esce con i colori del tema chiaro su fondo scuro.
 - Le formule `$...$` dentro i blocchi di codice vengono interpretate.
 
 ## Approcci considerati
@@ -63,7 +63,7 @@ Fonte: guida di aggiornamento ad Astro v7 e reference di `markdown.processor` (d
 4. Test di regressione (vitest su `dist/`, oppure uno script in `npm run build`): falliscono
    - un `<pre><code class="language-*">` in `dist/course/**` diverso da `language-math`;
    - un `language-mermaid` non trasformato;
-   - un numero di blocchi `.expressive-code` più `.mermaid` nelle lezioni inferiore al numero di blocchi recintati nei sorgenti;
+   - una pagina (lezione o articolo del blog) con un numero di blocchi `.expressive-code` o `.mermaid` diverso dai fence del suo sorgente, confrontato pagina per pagina e non sul totale del sito. Il conteggio dei fence segue CommonMark: anche `~~~`, e un wrapper da 4 backtick con dentro un esempio da 3 conta un blocco solo;
    - un numero di `.katex` inferiore al valore di riferimento.
 
 ## Lasciato a chi implementa

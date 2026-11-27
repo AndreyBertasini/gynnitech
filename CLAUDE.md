@@ -10,6 +10,7 @@ npm run build            # Production build (dist/) + Pagefind indexing
 npm run preview          # Serve production build locally
 npm run validate:content # Validate frontmatter, slugs, and lesson quality
 npm run test             # Run Vitest tests
+npm run check:rendered-code # After a build: code/Mermaid/KaTeX of every lesson and blog page rendered as the source promises (runs inside `npm run build`)
 npm run validate:3s      # Rules of the "3 secondi" lesson format (only lessons with formato: "3s")
 npm run validate:articolo # Rules of the "articolo tecnico" format (only lessons with formato: "articolo")
 npm run check            # validate:content + validate:3s + validate:articolo + astro check + vitest (pre-commit)
