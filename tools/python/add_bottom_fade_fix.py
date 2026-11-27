@@ -33,7 +33,7 @@ SUPPORTED_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".avif"}
 
 def parse_args() -> argparse.Namespace:
     script_dir = Path(__file__).resolve().parent
-    repo_root = script_dir.parent
+    repo_root = script_dir.parent.parent
 
     parser = argparse.ArgumentParser(
         description="Add a bottom fade overlay and save each result with `_fix` in the filename.",

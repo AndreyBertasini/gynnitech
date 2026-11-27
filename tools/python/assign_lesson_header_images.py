@@ -67,7 +67,7 @@ class Assignment:
 
 def parse_args() -> argparse.Namespace:
     script_dir = Path(__file__).resolve().parent
-    repo_root = script_dir.parent
+    repo_root = script_dir.parent.parent
     parser = argparse.ArgumentParser(
         description="Assign header images to lessons and move them to public/course-headers.",
     )
@@ -492,7 +492,7 @@ def write_console(text: str) -> None:
 
 def main() -> int:
     args = parse_args()
-    repo_root = Path(__file__).resolve().parent.parent
+    repo_root = Path(__file__).resolve().parents[2]
 
     images_dir = args.images_dir.resolve()
     lessons_dir = args.lessons_dir.resolve()

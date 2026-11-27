@@ -5,8 +5,8 @@ Questa guida serve per creare nuove lezioni del corso con header immagine compat
 ## File da usare
 
 - Template lezione: `templates/course-lesson-with-header-template.mdx`
-- Script automatico immagini: `scripts/assign_lesson_header_images.py`
-- Pipeline comando unico per nuove lezioni: `scripts/process_new_lesson_header_images.py`
+- Script automatico immagini: `tools/python/assign_lesson_header_images.py`
+- Pipeline comando unico per nuove lezioni: `tools/python/process_new_lesson_header_images.py`
 
 ## Quando usare il template
 
@@ -66,14 +66,14 @@ Usa il flusso automatico quando hai nuove immagini grezze da assegnare alle futu
 4. Esegui prima un dry-run con il comando unico:
 
    ```bash
-   python scripts/process_new_lesson_header_images.py
+   python tools/python/process_new_lesson_header_images.py
    ```
 
 5. Controlla il report generato a terminale.
 6. Se tutto e corretto, esegui la scrittura reale e la build di verifica:
 
    ```bash
-   python scripts/process_new_lesson_header_images.py --apply --build
+   python tools/python/process_new_lesson_header_images.py --apply --build
    ```
 
 ## Cosa fa il comando unico
@@ -89,7 +89,7 @@ Usa il flusso automatico quando hai nuove immagini grezze da assegnare alle futu
 
 ## Quando usare ancora lo script manuale
 
-Usa `scripts/assign_lesson_header_images.py` solo se vuoi controllare separatamente il passaggio di assegnazione, oppure se lavori fuori dalla cartella inbox.
+Usa `tools/python/assign_lesson_header_images.py` solo se vuoi controllare separatamente il passaggio di assegnazione, oppure se lavori fuori dalla cartella inbox.
 
 ## Cosa fa lo script quando usi `--apply`
 

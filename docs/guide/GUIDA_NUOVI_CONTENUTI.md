@@ -45,8 +45,8 @@ headerImageAlt: 'Titolo Lezione - immagine ufficiale della lezione su GinnyTech,
 Se vuoi assegnare le immagini in modo automatico partendo da una inbox dedicata per le nuove immagini, usa:
 
 ```bash
-python scripts/process_new_lesson_header_images.py
-python scripts/process_new_lesson_header_images.py --apply --build
+python tools/python/process_new_lesson_header_images.py
+python tools/python/process_new_lesson_header_images.py --apply --build
 ```
 
 Flusso consigliato:
@@ -60,8 +60,8 @@ Flusso consigliato:
 Se vuoi usare il flusso manuale avanzato, restano disponibili:
 
 ```bash
-python scripts/assign_lesson_header_images.py
-python scripts/assign_lesson_header_images.py --apply
+python tools/python/assign_lesson_header_images.py
+python tools/python/assign_lesson_header_images.py --apply
 ```
 
 ## 2. Creare un Nuovo Modulo

@@ -151,7 +151,7 @@ def create_ico(output_path, sizes=[16, 32, 48]):
 
 if __name__ == "__main__":
     import os
-    public_dir = os.path.join(os.path.dirname(__file__), '..', 'public')
+    public_dir = os.path.join(os.path.dirname(__file__), '..', '..', 'public')
     
     # Generate favicon PNGs
     create_favicon_png(16, os.path.join(public_dir, 'favicon-16x16.png'))

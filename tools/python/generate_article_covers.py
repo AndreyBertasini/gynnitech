@@ -167,7 +167,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Generate SVG covers for blog articles.")
     parser.add_argument(
         "--repo-root",
-        default=Path(__file__).resolve().parents[1],
+        default=Path(__file__).resolve().parents[2],
         type=Path,
         help="Repository root path.",
     )

@@ -14,8 +14,8 @@ Questo template e compatibile con:
 - `headerImage`
 - `headerImageAlt`
 - meta description SEO della lezione
-- script automatico `scripts/assign_lesson_header_images.py`
-- pipeline comando unico `scripts/process_new_lesson_header_images.py`
+- script automatico `tools/python/assign_lesson_header_images.py`
+- pipeline comando unico `tools/python/process_new_lesson_header_images.py`
 
 ## Novità: Componenti Interattivi
 
@@ -223,4 +223,4 @@ Cosa abbiamo imparato? Qual è la "Call to Action" o il prossimo passo per il le
    - `order`: Usa numeri interi (1, 2, 10, 20) per ordinare le lezioni.
    - `category`: Raggruppa le lezioni visivamente nella pagina del modulo.
 4. **Immagini**: Salva le tue immagini nella cartella `public/images/` e collegale usando il percorso assoluto (es. `/images/mia-foto.jpg`).
-5. **Header immagine per lezioni**: Per nuove lezioni del corso usa `headerImage` e `headerImageAlt`. Il flusso consigliato e mettere solo le nuove immagini in `images/inbox/` e lanciare `python scripts/process_new_lesson_header_images.py`, poi `python scripts/process_new_lesson_header_images.py --apply --build`. Se vuoi controllare il passaggio manuale separato, restano disponibili `python scripts/assign_lesson_header_images.py` e `python scripts/assign_lesson_header_images.py --apply`.
+5. **Header immagine per lezioni**: Per nuove lezioni del corso usa `headerImage` e `headerImageAlt`. Il flusso consigliato e mettere solo le nuove immagini in `images/inbox/` e lanciare `python tools/python/process_new_lesson_header_images.py`, poi `python tools/python/process_new_lesson_header_images.py --apply --build`. Se vuoi controllare il passaggio manuale separato, restano disponibili `python tools/python/assign_lesson_header_images.py` e `python tools/python/assign_lesson_header_images.py --apply`.

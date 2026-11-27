@@ -2,7 +2,7 @@
 """Riscrive tutte le lezioni placeholder con contenuto reale e dettagliato."""
 import os, re
 
-BASE = os.path.join(os.path.dirname(__file__), '..', 'src', 'content', 'corso')
+BASE = os.path.join(os.path.dirname(__file__), '..', '..', 'src', 'content', 'corso')
 
 def write_lesson(rel_path, content):
     path = os.path.join(BASE, rel_path)

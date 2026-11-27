@@ -45,7 +45,7 @@ class PipelineSummary:
 
 def parse_args() -> argparse.Namespace:
     script_dir = Path(__file__).resolve().parent
-    repo_root = script_dir.parent
+    repo_root = script_dir.parent.parent
 
     parser = argparse.ArgumentParser(
         description="Prepare, assign, and verify future lesson header images with a single command.",
@@ -197,7 +197,7 @@ def build_report(
 
 def main() -> int:
     args = parse_args()
-    repo_root = Path(__file__).resolve().parent.parent
+    repo_root = Path(__file__).resolve().parents[2]
     input_dir = args.input_dir.resolve()
     lessons_dir = args.lessons_dir.resolve()
     public_dir = args.public_dir.resolve()
