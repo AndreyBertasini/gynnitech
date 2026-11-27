@@ -13,6 +13,7 @@ import { getCollection, type CollectionEntry } from 'astro:content';
 import { SITE_URL } from '../consts';
 import { getPublishedEnPosts } from './i18n-pages';
 import { isLessonIndexable, isPostIndexable } from './indexability';
+import { glossaryTerms, termPath } from './glossary';
 
 export type SitemapEntry = { path: string; lastmod?: Date };
 
@@ -22,7 +23,6 @@ const STATIC_IT_PAGES: Array<{ path: string; source: string }> = [
   { path: '/contact/', source: 'src/pages/contact.astro' },
   { path: '/newsletter/', source: 'src/pages/newsletter.astro' },
   { path: '/perche-questo-corso/', source: 'src/pages/perche-questo-corso.astro' },
-  { path: '/glossario/', source: 'src/pages/glossario.mdx' },
   { path: '/progress/', source: 'src/pages/progress.astro' },
   { path: '/privacy/', source: 'src/pages/privacy.astro' },
   { path: '/cookie-policy/', source: 'src/pages/cookie-policy.astro' },
@@ -79,6 +79,8 @@ export const italianSitemapEntries = async (): Promise<SitemapEntry[]> => {
 
   return [
     ...STATIC_IT_PAGES.map((page) => ({ path: page.path, lastmod: gitDate(page.source) })),
+    { path: '/glossario/', lastmod: gitDate('src/data/glossary') },
+    ...glossaryTerms.map((t) => ({ path: termPath(t.slug), lastmod: gitDate('src/data/glossary/bodies') })),
     { path: '/blog/', lastmod: latest(blogPosts.map((p) => p.lastmod)) },
     ...blogPosts,
     { path: '/course/', lastmod: latest(moduleEntries.map((m) => m.lastmod)) },

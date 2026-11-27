@@ -54,10 +54,12 @@ const h1Owners = new Map<string, string>();
 let lessons = 0;
 let modules = 0;
 let posts = 0;
+let terms = 0;
+const glossaryUrls = new Set<string>();
 
 for (const file of (await walkHtml(distDir)).sort()) {
   const rel = path.relative(distDir, file).split(path.sep).join('/');
-  const m = rel.match(/^(course|blog)\/([^/]+)(?:\/([^/]+))?\/index\.html$/);
+  const m = rel.match(/^(course|blog|glossario)\/([^/]+)(?:\/([^/]+))?\/index\.html$/);
   if (!m || (m[1] === 'course' && m[2] === 'learning-path')) continue;
   const html = await fs.readFile(file, 'utf8');
   const page = auditHtml(html, rel);
@@ -86,6 +88,16 @@ for (const file of (await walkHtml(distDir)).sort()) {
       if (!Array.isArray(course.hasPart) || course.hasPart.length === 0) fail(page.path, 'Course senza lezioni (hasPart)');
     }
     checkBreadcrumb(page.path, nodes, page.url, 3);
+  } else if (m[1] === 'glossario' && !m[3]) {
+    terms++;
+    glossaryUrls.add(page.url);
+    if (page.words < 300) fail(page.path, `solo ${page.words} parole (minimo 300)`);
+    if (page.h1.length !== 1) fail(page.path, `${page.h1.length} H1 (atteso 1)`);
+    const term = nodes.find((n) => typeOf(n, 'DefinedTerm'));
+    if (!term || !term.inDefinedTermSet) fail(page.path, 'schema DefinedTerm con inDefinedTermSet assente');
+    checkBreadcrumb(page.path, nodes, page.url, 3);
+    if (!links.includes('/glossario/')) fail(page.path, 'manca il link all\'hub del glossario');
+    if (!links.some((l) => /^\/course\//.test(l))) fail(page.path, 'manca un link a una lezione o a un modulo');
   } else if (m[1] === 'blog' && m[2]) {
     posts++;
     checkBreadcrumb(page.path, nodes, page.url, 3);
@@ -93,7 +105,16 @@ for (const file of (await walkHtml(distDir)).sort()) {
   }
 }
 
-console.log(`[check:content-seo] ${lessons} lezioni, ${modules} moduli, ${posts} articoli indicizzabili controllati`);
+// Hub del glossario: DefinedTermSet che elenca tutte le pagine termine, e solo quelle.
+const hubHtml = await fs.readFile(path.join(distDir, 'glossario', 'index.html'), 'utf8').catch(() => '');
+const hubSet = jsonLdNodes(hubHtml).find((n) => typeOf(n, 'DefinedTermSet'));
+if (!hubSet) errors.push('glossario/: DefinedTermSet assente');
+else {
+  const listed = new Set(((hubSet.hasDefinedTerm as Array<{ url?: string }>) ?? []).map((t) => t.url ?? ''));
+  for (const url of glossaryUrls) if (!listed.has(url)) errors.push(`glossario/: ${url} non è elencato nel DefinedTermSet`);
+  for (const url of listed) if (!glossaryUrls.has(url)) errors.push(`glossario/: ${url} è nel DefinedTermSet ma non è una pagina buildata`);
+}
+console.log(`[check:content-seo] ${lessons} lezioni, ${modules} moduli, ${posts} articoli, ${terms} termini del glossario controllati`);
 if (errors.length > 0) {
   console.error(`[check:content-seo] ${errors.length} errori:\n- ${errors.slice(0, Number(process.env.MAX_ERRORS ?? 200)).join('\n- ')}`);
   process.exit(1);

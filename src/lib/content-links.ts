@@ -56,21 +56,21 @@ export function buildLinkIndex(lessons: LinkDoc[], posts: LinkDoc[]) {
     }
     return shared >= MIN_SHARED ? s : 0;
   };
-  const top = (from: ReturnType<typeof bag>, to: LinkDoc[], toBags: ReturnType<typeof bag>[], limit: number): LinkMatch[] =>
+  const top = (from: ReturnType<typeof bag>, to: LinkDoc[], toBags: ReturnType<typeof bag>[], limit: number, minScore: number): LinkMatch[] =>
     to
       .map((doc, i) => ({ href: doc.href, title: doc.title, score: score(from, toBags[i]) }))
-      .filter((m) => m.score >= MIN_SCORE)
+      .filter((m) => m.score >= minScore)
       .sort((x, y) => y.score - x.score || x.href.localeCompare(y.href))
       .slice(0, limit);
 
   return {
-    postsForLesson: (lessonId: string, limit = 3) => {
+    postsForLesson: (lessonId: string, limit = 3, minScore = MIN_SCORE) => {
       const i = lessons.findIndex((l) => l.id === lessonId);
-      return i < 0 ? [] : top(lessonBags[i], posts, postBags, limit);
+      return i < 0 ? [] : top(lessonBags[i], posts, postBags, limit, minScore);
     },
-    lessonsForPost: (postId: string, limit = 3) => {
+    lessonsForPost: (postId: string, limit = 3, minScore = MIN_SCORE) => {
       const i = posts.findIndex((p) => p.id === postId);
-      return i < 0 ? [] : top(postBags[i], lessons, lessonBags, limit);
+      return i < 0 ? [] : top(postBags[i], lessons, lessonBags, limit, minScore);
     },
   };
 }
