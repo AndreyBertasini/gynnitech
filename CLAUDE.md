@@ -19,9 +19,9 @@ npm run check            # validate:content + validate:3s + validate:articolo + 
 
 ## Architecture
 
-**Astro 5 + Starlight** static site deployed to Cloudflare Pages (`wrangler.toml`).
+**Astro 7 + Starlight** static site deployed to Cloudflare Pages (`wrangler.toml`).
 
-### Content Collections (Astro 5 Content Layer)
+### Content Collections (Astro Content Layer)
 
 Active config: `src/content.config.ts`. The legacy `src/content/config.ts` is empty and ignored.
 
