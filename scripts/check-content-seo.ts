@@ -51,6 +51,9 @@ const checkBreadcrumb = (page: string, nodes: Node[], url: string, minItems: num
 };
 
 const h1Owners = new Map<string, string>();
+// Articoli noindex e link che le pagine indicizzabili puntano a pagine del blog: i primi non vanno raccomandati.
+const noindexBlogPaths = new Set<string>();
+const blogLinks: Array<{ from: string; to: string }> = [];
 let lessons = 0;
 let modules = 0;
 let posts = 0;
@@ -63,7 +66,10 @@ for (const file of (await walkHtml(distDir)).sort()) {
   if (!m || (m[1] === 'course' && m[2] === 'learning-path')) continue;
   const html = await fs.readFile(file, 'utf8');
   const page = auditHtml(html, rel);
-  if (!page.indexable) continue;
+  if (!page.indexable) {
+    if (m[1] === 'blog' && m[2]) noindexBlogPaths.add(page.path);
+    continue;
+  }
   const nodes = jsonLdNodes(html);
   const tree = fromHtml(html);
   const links = selectAll('a[href]', select('main', tree) ?? tree).map(href);
@@ -100,6 +106,10 @@ for (const file of (await walkHtml(distDir)).sort()) {
     if (!links.some((l) => /^\/course\//.test(l))) fail(page.path, 'manca un link a una lezione o a un modulo');
   } else if (m[1] === 'blog' && m[2]) {
     posts++;
+    for (const l of new Set(links)) {
+      const t = l.match(/^\/blog\/([^/]+)\/?$/);
+      if (t && `/blog/${t[1]}/` !== page.path) blogLinks.push({ from: page.path, to: `/blog/${t[1]}/` });
+    }
     checkBreadcrumb(page.path, nodes, page.url, 3);
     if (!nodes.some((n) => typeOf(n, 'Article'))) fail(page.path, 'schema Article assente');
   }
@@ -113,6 +123,9 @@ else {
   const listed = new Set(((hubSet.hasDefinedTerm as Array<{ url?: string }>) ?? []).map((t) => t.url ?? ''));
   for (const url of glossaryUrls) if (!listed.has(url)) errors.push(`glossario/: ${url} non è elencato nel DefinedTermSet`);
   for (const url of listed) if (!glossaryUrls.has(url)) errors.push(`glossario/: ${url} è nel DefinedTermSet ma non è una pagina buildata`);
+}
+for (const l of blogLinks) {
+  if (noindexBlogPaths.has(l.to)) errors.push(`${l.from}: linka l'articolo noindex ${l.to} (togliere dalle raccomandazioni)`);
 }
 console.log(`[check:content-seo] ${lessons} lezioni, ${modules} moduli, ${posts} articoli, ${terms} termini del glossario controllati`);
 if (errors.length > 0) {
