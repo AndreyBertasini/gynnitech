@@ -576,8 +576,8 @@ async function validateCollection(collection: "blog" | "corso"): Promise<Validat
         if (COURSE_TRACKS.length !== 3) {
             result.errors.push(buildMessage(path.join(process.cwd(), "src/data/course-program.ts"), "course-program", "expected exactly 3 final tracks"));
         }
-        if (expectedCoreLessonCount !== 236) {
-            result.errors.push(buildMessage(path.join(process.cwd(), "src/data/course-program.ts"), "course-program", `expected V2 blueprint to define 236 core lessons (received: ${expectedCoreLessonCount})`));
+        if (expectedCoreLessonCount !== 248) {
+            result.errors.push(buildMessage(path.join(process.cwd(), "src/data/course-program.ts"), "course-program", `expected V2 blueprint to define 248 core lessons (received: ${expectedCoreLessonCount})`));
         }
         if (totalCoreLessons !== expectedCoreLessonCount) {
             pushEditorialIssue(result, path.join(process.cwd(), "src/content/corso"), "core-lessons", `expected ${expectedCoreLessonCount} ordered core lessons, found ${totalCoreLessons}`);

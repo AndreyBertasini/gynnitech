@@ -21,7 +21,7 @@ describe('readEntryBody', () => {
         checked += 1;
       }
     }
-    expect(checked).toBe(236);
+    expect(checked).toBe(248);
   });
 
   test('fails loudly when the file does not exist', async () => {

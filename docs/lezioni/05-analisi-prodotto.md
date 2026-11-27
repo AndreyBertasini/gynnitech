@@ -1,61 +1,91 @@
-# Modulo 5 · Analisi di prodotto (analisi-prodotto)
+# Modulo 5 · Product analytics e diagnosi della crescita (analisi-prodotto)
 
-> Riscritto nel formato «3 secondi» (spec: `docs/superpowers/specs/2026-10-15-lezioni-3-secondi-design.md`, §12a). Questa scheda dice che cosa è cambiato e quali fatti vanno verificati. Per le lezioni di questo modulo non c'è stato un piano approvato lezione per lezione: l'autore ha chiesto di riscrivere tutti i moduli.
+> Ristrutturato il 2026-11-27 nel formato `didattica-v2` (profilo `analytical`). Design: `modulo-5-product-analytics-design.md` (spec condivisa del coordinatore); standard: `docs/superpowers/specs/2026-11-17-standard-didattico-v2-236-lezioni-design.md`. Questa scheda sostituisce quella della versione «3 secondi».
+
+## Obiettivo
+
+Chi legge il modulo dall'inizio alla fine deve poter lavorare come product analyst e rispondere alle domande tipiche del mestiere e dei colloqui: metriche, tracking, funnel, attivazione, retention, engagement, monetization, ricerca utenti, esperimenti, inferenza causale, diagnosi, strumenti, comunicazione.
 
 ## Lezioni (ordine del modulo)
 
-| # | File | Sezioni | Schemi | Quiz |
-|---|---|---|---|---|
-| 1 | `introduzione-product-analytics` | 5 | 2: Il loop in quattro caselle, Sei passi dalla dashboard all'azione | 5 |
-| 2 | `retention-framework` | 4 | 2: Sei passi per la retention di coorte, Come smontiamo una media stabile | 5 |
-| 3 | `customer-development` | 4 | 2: Sei domande su fatti passati, Sei passi dalla nota alla roadmap | 5 |
-| 4 | `analisi-coorte` | 5 | 2: Sei passi per le coorti comportamentali, Cinque transizioni, cinque owner | 5 |
-| 6 | `ux-research` | 4 | 2: Quattro cause dell'abbandono, Sei passi dalla falla alla causa | 5 |
-| 7 | `nps-net-promoter-score` | 4 | 2: Sei passi per costruire il segnale, Il loop di Stripe in tre passi | 5 |
-| 8 | `ab-testing` | 4 | 2: Il protocollo in sei passi, Sei anti-pattern da riconoscere | 5 |
-| 9 | `prioritizzazione-feature` | 5 | 2: Sei passi per ordinare il backlog, Cinque errori, cinque sintomi | 5 |
-| 10 | `product-market-fit` | 4 | 2: Sei passi per riconoscere il fit, Tre falsi positivi classici | 5 |
-| 11 | `caso-studio` | 5 | 2: Il metodo in sei passi, Tre orizzonti di intervento | 5 |
-| 12 | `cheat-sheet` | 4 | 2: Sei mosse prima di ogni decisione, Tre controlli sui conteggi | 5 |
+Le 11 lezioni esistenti sono state riscritte da zero con gli stessi slug (URL invariati); 12 sono nuove. Totale: 23 lezioni, e il corso passa da 236 a 248 lezioni core.
 
-Le undici lezioni non avevano un quiz: i 5 quesiti di ciascuna sono nuovi. Il numero d'ordine 5 non esiste nel modulo.
+| # | File | Titolo | Stato |
+|---|---|---|---|
+| 1 | `introduzione-product-analytics` | Introduzione alla product analytics: il mestiere del product analyst | riscritta |
+| 2 | `north-star-metric-tree` | North Star Metric e metric tree: dalla strategia alle metriche di team | nuova |
+| 3 | `tracking-plan-event-model` | Tracking plan e modello a eventi: dati di prodotto di cui fidarsi | nuova |
+| 4 | `funnel-analysis` | Funnel analysis: ordine dei passi, finestra e segmenti | nuova |
+| 5 | `onboarding-attivazione` | Onboarding e attivazione: trovare l'evento che predice la retention | nuova |
+| 6 | `retention-framework` | Misurare la retention: definizioni, curve di coorte e churn | riscritta |
+| 7 | `analisi-coorte` | Coorti comportamentali, growth accounting e matrici di transizione | riscritta |
+| 8 | `engagement-metriche` | Metriche di engagement: DAU/MAU, power user curve e adozione delle funzionalità | nuova |
+| 9 | `monetization-analytics` | Monetization analytics: ARPU, MRR, NRR, LTV e CAC payback | nuova |
+| 10 | `product-market-fit` | Misurare il Product-Market Fit | riscritta |
+| 11 | `customer-development` | Customer development per product analytics | riscritta |
+| 12 | `ux-research` | UX research e dati comportamentali | riscritta |
+| 13 | `nps-net-promoter-score` | NPS, CSAT e CES: misurare la soddisfazione | riscritta |
+| 14 | `ab-testing` | A/B test di prodotto: dal disegno alla decisione | riscritta |
+| 15 | `esperimenti-avanzati` | Esperimenti avanzati: varianza, interferenza e test sequenziali | nuova |
+| 16 | `inferenza-causale-osservazionale` | Inferenza causale senza esperimento: DiD, synthetic control, RDD e propensity score | nuova |
+| 17 | `diagnosi-calo-metrica` | Diagnosi di un calo di metrica: dal grafico rosso alla causa | nuova |
+| 18 | `prioritizzazione-feature` | Prioritizzare le feature con i dati: RICE, Kano, Cost of Delay e opportunity sizing | riscritta |
+| 19 | `strumenti-product-analytics` | Gli strumenti del product analyst: Amplitude, Mixpanel, PostHog, GA4 e warehouse | nuova |
+| 20 | `comunicare-insight` | Comunicare un insight: dal brief alla raccomandazione | nuova |
+| 21 | `colloquio-product-analyst` | Il colloquio da product analyst: domande tipiche e risposte modello | nuova |
+| 22 | `caso-studio` | Caso studio: diagnosi completa di un prodotto | riscritta |
+| 23 | `cheat-sheet` | Cheat sheet di product analytics: formule, soglie e checklist del modulo | riscritta |
 
-## Cosa è stato tolto o spostato
+Sei sessioni hanno scritto le lezioni in parallelo (blocchi 1–3, 4–6, 7–9, 10–13, 14–16, 17–23 escluso il caso studio). La sessione di integrazione ha unito i branch, riscritto `caso-studio` e fatto la revisione di coerenza.
 
-- I blocchi «Cosa imparerai» e «Collegamenti», le etichette «Percorso collegato» e «Collegamento tematico»: tolti, link intatti.
-- Le tabelle generiche ripetute («Passaggio | Domanda da fare | Output atteso», «Evidenza osservata | Lettura prudente | Azione consigliata», «Elemento | Definizione operativa | Controllo minimo»): tolte, tranne la lettura prudente, che resta in `introduzione-product-analytics` (come slide) e in `cheat-sheet`.
-- I blocchi SQL e Python sono stati tenuti solo dove spiegano la decisione: le soglie dei segmenti, la matrice di transizione e l'LTV per segmento (`analisi-coorte`), il funnel con `LAG` (`ux-research`), il calcolo del campione e il confronto per segmento (`ab-testing`), il funnel di onboarding (`caso-studio`) e la retention di coorte (`cheat-sheet`). Sono stati tolti: la query di retention settimanale e quella sulle coorti del primo mese (`analisi-coorte`), lo stickiness trend e la retention D30 per canale (`caso-studio`), la regressione con SHAP (`caso-studio`), le tre query di retention, activation e LTV (`cheat-sheet`).
-- Tre errori nel codice originale, corretti o tolti:
-  - `ab-testing`: il testo diceva «circa 1.500 utenti per variante» per baseline 34%, effetto minimo +4 punti, alfa 5%, potenza 80%. Il calcolo corretto è circa 2.260 (con la formula standard per due proporzioni); la durata cambia di conseguenza (basta un ciclo settimanale con 5.000 utenti a settimana, non tre settimane).
-  - `cheat-sheet`: la query di retention usava una colonna `retention_rate` mai definita e un denominatore sbagliato. Riscritta con la dimensione iniziale della coorte al denominatore e il filtro sulle coorti mature.
-  - `caso-studio`: la query dello stickiness calcolava un DAU senza senso; è stata tolta.
-- `prioritizzazione-feature`: i conti dell'esempio RICE e WSJF sono stati ricontrollati e sono corretti (10.200, 1.620, 2.700; 5.000 e 2.000).
-- Gli esempi di Google (41 sfumature di blu) ricorrevano in tre lezioni: restano in `ab-testing` e `prioritizzazione-feature`; nel `cheat-sheet` è stato tolto.
-- I «Verdetto: …» finali sono stati assorbiti dalle frasi ★ del Riepilogo; le «Domande per verificare» sono diventate le `<Domanda>` di fine sezione e il quiz.
-- Le frasi «Il binario di questa lezione è **ml-tabellare**…» restano come inciso nell'apertura; il campo `binario` nel frontmatter non cambia.
+## Schema dati comune
 
-## Fatti da verificare con la fonte
+Tutte le query del modulo usano lo stesso schema (Postgres/DuckDB; le differenze con BigQuery sono indicate nei commenti):
 
-- Facebook e i sette amici in dieci giorni (`introduzione-product-analytics`): attribuito al growth team guidato da Chamath Palihapitiya, «centinaia di milioni di account».
-- Netflix 2012, «22 percento dei power user» che diventano regular in due mesi e «9 percento» dopo sei mesi (`retention-framework`, `analisi-coorte`): cifra e anno **non verificati**; la lezione li presenta come «secondo la lezione originale». Da confermare o togliere.
-- Revolut, da cambio valuta monouso a super-app (`retention-framework`): aneddoto non verificato, presentato come «secondo la lezione originale».
-- Dropbox, 5.000 → 75.000 indirizzi in una notte (`customer-development`): il testo originale diceva «su Hacker News»; la piattaforma non è nominata perché le ricostruzioni divergono (Digg o Hacker News).
-- Airbnb 2009, foto professionali, prenotazioni «da due a tre volte» (`ux-research`): da confermare con la fonte originale.
-- Spotify, Discover Weekly e Daily Mixes (`ux-research`): la causalità dei dati sulla ricerca è della lezione originale.
-- Reichheld 2003, Harvard Business Review, con Bain and Company (`nps-net-promoter-score`). Nel testo originale c'erano anche un'affermazione su Netflix (promotori che abbandonano il 10-25% in meno) e una su Apple: sono state tolte perché non verificabili.
-- Stripe e il workflow su feedback CSAT delle pagine di documentazione (`nps-net-promoter-score`): dalla lezione originale.
-- Kohavi e i titoli di Bing, +12% di revenue per ricerca (`ab-testing`); Google, 41 sfumature di blu, circa 200 milioni di dollari l'anno, New York Times 2009 (`ab-testing`, `prioritizzazione-feature`).
-- Intercom e il framework RICE (`prioritizzazione-feature`): il testo originale indicava il 2013; l'anno è stato tolto perché la formalizzazione pubblica di RICE è successiva.
-- Superhuman, test di Sean Ellis, soglia del 40%, First Round Review 2018 (`product-market-fit`).
-- Strava, oltre 100 milioni di atleti nel 2022 (`caso-studio`).
-- FitTrack (`caso-studio`): è un caso didattico inventato; tutti i suoi numeri sono illustrativi e il testo lo dichiara.
-- Benchmark delle transizioni B2C (20-40%, 30-50%, 10-25%, 5-15%, 3-8%) in `analisi-coorte`: indicazioni della lezione originale, non attribuite a una fonte.
+- `events(user_id, event_name, event_time, properties)`
+- `users(user_id, signup_time, channel, country, platform)`
+- `subscriptions(subscription_id, user_id, plan, mrr, start_date, end_date)`: una riga per periodo di piano, `end_date` NULL se attivo
+- `survey_responses(user_id, survey, score, responded_at)`
+- `assignments(experiment_id, user_id, variant, assigned_at)`
+- `raw_events(...)` e `identity_map(...)` solo in `tracking-plan-event-model`, per la parte di pulizia; `orders(order_id, user_id, created_at, amount)` solo in `strumenti-product-analytics`, come esempio di fonte transazionale
 
-## Correzioni dopo la revisione (2026-10-16)
+Armonizzazione fatta in integrazione: `subscriptions` dichiarata con `subscription_id` in `nps-net-promoter-score`, `product-market-fit` e `prioritizzazione-feature`; in `prioritizzazione-feature` `started_at`/`ended_at` sono diventati `start_date`/`end_date`.
 
-- `ux-research`: la query del funnel contava gli utenti distinti per evento senza l'ordine, quindi un tasso poteva superare il 100%. Ora parte dagli iscritti e conta uno step solo se segue il precedente (prima occorrenza di ogni evento).
-- `caso-studio`: la query del funnel di onboarding aveva perso gli stadi intermedi e non poteva più produrre il 54% → 42% citato. Reinseriti `goal_selected` e `workout_start`; le percentuali sono sulla coorte di chi ha aperto l'app, con l'ordine dei passi.
+## Caso studio (lezione 22)
+
+Scenario costruito, dichiarato nel testo: Agenda Pro, SaaS di prenotazioni per piccoli studi. Il percorso usa tutto il modulo: North Star e metric tree → verifica del tracking (duplicati iOS, +12% che diventa +6%) → scomposizione logaritmica del nuovo MRR (iscritti × conversione × ARPA) e controllo dell'effetto mix → funnel di attivazione ordinato (passo «profilo → pagina pubblicata» da 63,4% a 37,0%) → controlli su retention, NRR ed engagement → session replay, interviste e difference-in-differences web/app (−14 punti) → opportunity sizing e confronto delle opzioni → A/B test (campione 471 per braccio, SRM, +10,5 punti, IC 95% +5,3/+15,7, guardrail) → memo.
+
+Verifiche: la query del funnel è stata eseguita con DuckDB su un dataset sintetico costruito con i conteggi del caso (3.500/2.870/1.820/1.295 e 3.710/3.005/1.113/816, più eventi fuori ordine e fuori finestra) e restituisce esattamente le percentuali della tabella. Il blocco Python è stato eseguito e il suo output è riportato nella lezione.
+
+## Link interni e prerequisiti
+
+- Aggiunti i rimandi segnalati dai blocchi (per esempio introduzione → funnel, diagnosi, A/B test, inferenza causale; retention → coorti, PMF, A/B test, inferenza causale, engagement). Il `cheat-sheet` rimanda a tutte le altre 22 lezioni; il `caso-studio` alle lezioni usate in ogni passo.
+- `prerequisites` puntano solo a lezioni precedenti nel nuovo ordine. Modifiche in integrazione: `funnel-analysis` (+ `tracking-plan-event-model`), `customer-development` (→ `product-market-fit`), `strumenti-product-analytics` (→ `tracking-plan-event-model`), `comunicare-insight` (→ `ab-testing`, `diagnosi-calo-metrica`), `ab-testing` (+ `north-star-metric-tree`), `caso-studio` (→ `diagnosi-calo-metrica`, `ab-testing`, `comunicare-insight`).
+
+## Revisione di coerenza
+
+- `cheat-sheet`: LTV e CAC payback con ARPA, come in `monetization-analytics`; conversione free → paid con gli iscritti della coorte al denominatore; intervallo di Wilson per il test di Sean Ellis, come in `product-market-fit`.
+- `analisi-coorte`: il nome «quick ratio» è attribuito a Mamoon Hamid, come scrive lo stesso Jonathan Hsu nell'articolo citato (verificato: Hsu, «Diligence at Social Capital, Part 1», 2015; i valori «poco sopra 1» e «1,5–2 molto buono per un consumer» sono nel testo).
+- Nomi delle metriche (tasso di attivazione, MRR, NRR, ARPU/ARPA, SRM, MDE, guardrail, stickiness) già coerenti tra le lezioni; nessun aneddoto famoso raccontato per intero in più di una lezione.
+
+## Fatti e fonti
+
+- Ogni lezione dichiara «scenario costruito» o «numeri di esempio» dove i numeri non sono reali.
+- Verificati in integrazione: Andrew Chen e Li Jin, «The Power User Curve» (a16z, 2018), con il nome L30 attribuito al growth team di Facebook (`engagement-metriche`); Jonathan Hsu sul quick ratio (`analisi-coorte`).
+- Citati con fonte nelle lezioni e non ricontrollati in integrazione: Kohavi e i titoli di Bing (`ab-testing`), Sean Ellis a Dropbox ed Eventbrite (`product-market-fit`).
+- I fatti «da verificare» della scheda precedente (Netflix 2012, Revolut, Strava, FitTrack) non compaiono più nelle lezioni riscritte. Facebook e i «7 amici in 10 giorni» resta in `onboarding-attivazione`, presentato con i suoi limiti causali.
 
 ## Traduzione inglese
 
-1165 stringhe nuove, aggiunte a mano a `src/data/i18n/en-static-cache.json`. Dopo la build completa: 0 stringhe introdotte e scoperte, URL invariati (778 pagine).
+Non più applicabile. Dalla fase 1 SEO (`docs/seo/i18n.md`) le pagine `/en/course/*` non esistono: rispondono 301 verso l'italiano e `src/data/i18n/en-static-cache.json` è stato rimosso dal repository. Una versione inglese del modulo richiederebbe un nuovo flusso di traduzione rivista, fuori dallo scopo di questa ristrutturazione.
+
+## File condivisi aggiornati
+
+- `src/data/course-program.ts`: 23 `coreLessons` del modulo nell'ordine nuovo; descrizione e `seoDescription` del modulo.
+- `scripts/validation.ts` e `src/lib/entry-body.test.ts`: totale lezioni core da 236 a 248.
+- `src/content/corso/learning-path.mdx` e `src/content/corso/panoramica/mappe-concettuali.mdx`: 248 lezioni; nell'esempio di stima dei tempi il modulo 5 conta 23 lezioni (53 lezioni, 26,5 ore, 6 settimane a 5 ore, 9 a 3 ore).
+- `src/lib/config/sidebar-sections.mjs`: sezione «Analisi di Prodotto» con le 23 lezioni.
+- `src/data/glossary/lesson-links.ts`: termini collegati alle lezioni nuove (north-star-metric, funnel-analysis, conversion-rate, tracking-plan, onboarding, activation-rate, time-to-value, cohort-analysis, dau-mau-ratio, mrr, arpu, ltv, cac).
+- `src/lib/course-editorial.ts`: promessa del modulo.
+- `docs/titoli-corso.md`: sezione del modulo 5 con i titoli in uso.
+- `public/llms-full.txt`: rigenerato dalla build.
