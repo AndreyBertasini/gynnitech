@@ -4,7 +4,6 @@ import tailwindcss from '@tailwindcss/vite';
 import starlight from '@astrojs/starlight';
 import mdx from '@astrojs/mdx';
 import react from '@astrojs/react';
-import sitemap from '@astrojs/sitemap';
 import { unified } from '@astrojs/markdown-remark';
 
 import fs from 'node:fs';
@@ -195,11 +194,14 @@ export default defineConfig({
     }),
   },
   integrations: [
+    // Le sitemap sono endpoint generati dalle content collections (src/pages/sitemap-*.xml.ts).
+    // Starlight aggiunge @astrojs/sitemap da solo se non lo trova: questo segnaposto con lo
+    // stesso nome lo impedisce, altrimenti sitemap-index.xml verrebbe sovrascritta.
+    { name: '@astrojs/sitemap', hooks: {} },
     react(),
     withMarkdownProcessorCompat(mermaid({
       theme: 'dark',
     })),
-    sitemap(),
     withMarkdownProcessorCompat(starlight({
       title: 'GinnyTech',
       logo: {

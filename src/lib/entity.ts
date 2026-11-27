@@ -133,6 +133,13 @@ export function organizationNode(
   };
 }
 
+/** URL canonico del sito: path assoluto con slash finale (gli URL senza slash fanno 308). */
+export function canonicalSiteUrl(urlOrPath: string): string {
+  const url = new URL(urlOrPath, SITE_URL);
+  if (!url.pathname.endsWith('/') && !/\.[a-z0-9]+$/i.test(url.pathname)) url.pathname += '/';
+  return url.href;
+}
+
 export function breadcrumbListNode(
   items: readonly { name: string; url: string }[],
 ): Record<string, unknown> {
@@ -142,7 +149,7 @@ export function breadcrumbListNode(
       '@type': 'ListItem',
       position: index + 1,
       name: item.name,
-      item: item.url,
+      item: canonicalSiteUrl(item.url),
     })),
   };
 }

@@ -60,6 +60,10 @@ export interface CourseModule {
   seoTitle?: string;
   seoDescription?: string;
   seoKeywords?: string[];
+  /** H1 della pagina modulo quando deve contenere la query di ricerca (altrimenti `title`). */
+  seoH1?: string;
+  /** Descrizione del programma, in prosa, mostrata sopra l'elenco delle lezioni. */
+  programIntro?: { heading: string; paragraphs: string[]; outcomes: string[] };
   icon: string;
   color: string;
   completionPack: CompletionPack;
@@ -494,10 +498,25 @@ export const COURSE_MODULES: CourseModule[] = [
     objective: 'Costruire dashboard che fanno decidere, non solo guardare.',
     phase: 'application',
     prerequisites: ['Moduli 3 e 6 consigliati: metriche e marketing analytics.', 'Capacita base di leggere grafici e report tabellari.'],
-    seoTitle: 'Dashboard e visualizzazione dei dati | GinnyTech',
+    seoTitle: 'Corso data visualization: dashboard, SQL e storytelling',
     seoDescription:
-      'Decision-first dashboard design, storytelling, alerting e navigabilita per trasformare report in interfacce decisionali.',
+      'Corso di data visualization gratuito: percezione visiva, SQL e Python per i dati, dashboard executive e storytelling, con un caso studio completo.',
     seoKeywords: ['dashboard design', 'decision interface', 'data visualization', 'storytelling dati', 'alerting'],
+    seoH1: "Corso di data visualization: dashboard che fanno decidere",
+    programIntro: {
+          "heading": "Il programma del corso di data visualization",
+          "paragraphs": [
+                "Il corso parte dai principi che rendono leggibile un grafico: come l'occhio raggruppa gli elementi, quando usare colore e posizione e perché un grafico bello può comunque far capire il contrario di ciò che dicono i dati. Da lì passi agli strumenti per preparare i dati: SQL per analisti, Python per l'analisi e le dashboard, ETL e pipeline che alimentano i cruscotti.",
+                "La seconda parte riguarda il progetto della dashboard come interfaccia per decidere: come progettare per un executive, come strutturare la gerarchia delle informazioni e come raccontare i numeri con una narrativa che porti a una decisione, non solo a un'osservazione. Il corso si chiude con il caso studio di una dashboard executive completa, dalla domanda di business al risultato finale.",
+                "Servono le basi su metriche e marketing analytics e la capacità di leggere grafici e tabelle: il resto lo costruisci lezione dopo lezione, in modo gratuito e con esempi pratici."
+          ],
+          "outcomes": [
+                "scegliere il tipo di grafico e il colore in base alla domanda a cui deve rispondere",
+                "scrivere le query SQL e il codice Python che alimentano una dashboard",
+                "progettare una dashboard executive con una gerarchia chiara e senza numeri inutili",
+                "presentare i dati con una storia che porta a una decisione"
+          ]
+    },
     icon: 'LayoutDashboard',
     color: 'from-cyan-500 to-blue-400',
     completionPack: {
@@ -609,9 +628,9 @@ export const COURSE_MODULES: CourseModule[] = [
     objective: 'Far capire davvero come si progetta un sistema analitico scalabile.',
     phase: 'stack',
     prerequisites: ['Moduli 2-3 consigliati: tracking e metriche.', 'Comfort minimo con tabelle, pipeline batch e concetti di modellazione dati.'],
-    seoTitle: 'Data warehouse e modellazione analitica | GinnyTech',
+    seoTitle: 'Corso data warehouse: modellazione dimensionale e SCD',
     seoDescription:
-      'OLTP vs OLAP, dimensional modeling, snapshot, SCD, batch pipelines e trade-off architetturali per warehouse moderni.',
+      'Progetta un data warehouse: OLTP vs OLAP, schema a stella, SCD, snapshot e trade-off di architettura. Lezioni gratuite con esempi e un caso studio.',
     seoKeywords: ['data warehouse', 'analytical architecture', 'dimensional modeling', 'olap', 'scd', 'snapshot'],
     icon: 'Server',
     color: 'from-slate-400 to-zinc-500',
@@ -985,9 +1004,9 @@ export const COURSE_MODULES: CourseModule[] = [
     objective: 'Trasformare i dati grezzi in modelli affidabili, riusabili e governati.',
     phase: 'rigor',
     prerequisites: ['Moduli 9, 10 e 14 consigliati: warehouse, lakehouse e SQL avanzato.', 'Conoscenza base di git, modeling e workflow di trasformazione dati.'],
-    seoTitle: 'Analytics engineering con dbt | GinnyTech',
+    seoTitle: 'Corso analytics engineering con dbt: modelli, test, metriche',
     seoDescription:
-      'Layering, dbt fundamentals, tests, contracts, lineage, semantic layer, deployment e governance per analytics engineering moderno.',
+      'Impara analytics engineering con dbt: staging, marts, test, contratti dati, lineage e semantic layer. Lezioni gratuite con esempi su dati di marketing.',
     seoKeywords: ['analytics engineering', 'dbt', 'semantic layer', 'data contracts', 'lineage', 'reverse etl'],
     icon: 'GitMerge',
     color: 'from-emerald-500 to-blue-500',
@@ -1272,10 +1291,25 @@ export const COURSE_MODULES: CourseModule[] = [
     objective: 'Costruire workflow agentici utili e osservabili per data work professionale.',
     phase: 'direction',
     prerequisites: ['Modulo 20 consigliato: AI-assisted data work e AutoML.', 'Conoscenza di semantic layer, pipeline dati, valutazione modelli e governance.'],
-    seoTitle: 'Agentic AI per il lavoro sui dati | GinnyTech',
+    seoTitle: 'Data engineering con AI agentica: workflow e controlli',
     seoDescription:
-      'Modulo GinnyTech su agentic AI per data work: tool, state, memory, handoff, human approval, agentic SQL, AutoML, observability, eval e cost control.',
+      'Corso di data engineering con AI agentica: pipeline, runbook, SQL e AutoML con agenti, approvazione umana, observability e controllo dei costi.',
     seoKeywords: ['agentic ai data analytics', 'ai agents data engineering', 'agentic automl', 'human in the loop', 'ai workflow governance'],
+    seoH1: "Data engineering con AI agentica: workflow agentici per i dati",
+    programIntro: {
+          "heading": "Cosa copre il corso di data engineering con AI agentica",
+          "paragraphs": [
+                "Questo modulo insegna a usare agenti AI nel lavoro di data engineering e di analytics senza perdere il controllo di ciò che fanno. Parti dalla differenza tra AI assistita e AI agentica, cioè tra un modello che risponde e un agente che sceglie strumenti, compie azioni e ne risponde.",
+                "Poi costruisci i pezzi che rendono un agente affidabile: strumenti con permessi, stato, memoria, passaggi di consegna tra agenti e guardrail. Li applichi a quattro lavori concreti: SQL su un semantic layer con approvazione umana, analisi dei dati con controlli, pipeline con runbook e gestione degli incidenti, AutoML con pianificazione, addestramento, revisione e rilascio.",
+                "Chiudi con ciò che separa una demo da un sistema in produzione: observability, valutazioni, sicurezza e controllo dei costi, e un caso studio completo di analytics operations. Serve conoscere semantic layer, pipeline dati e valutazione dei modelli."
+          ],
+          "outcomes": [
+                "distinguere un'automazione con AI da un workflow agentico, e sapere quando conviene l'uno o l'altro",
+                "progettare un agente per SQL o per una pipeline con permessi minimi e approvazione umana nei passaggi a rischio",
+                "tracciare e valutare ciò che fa un agente, per sapere dove sbaglia e quanto costa",
+                "scrivere il runbook con cui un agente gestisce, o passa a una persona, un incidente su una pipeline"
+          ]
+    },
     icon: 'GitMerge',
     color: 'from-violet-500 to-cyan-400',
     completionPack: {

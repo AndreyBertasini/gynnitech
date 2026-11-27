@@ -16,8 +16,22 @@ export const withEnglishPrefix = (pathname: string) => {
   return normalized === '/' ? `${EN_PREFIX}/` : `${EN_PREFIX}${normalized}`;
 };
 
+// Solo il blog ha una versione inglese (articoli con traduzione rivista): il resto del sito
+// è italiano e i link /en/<altro> risponderebbero 301. Dalle pagine EN puntiamo all'italiano.
+const hasEnglishSection = (pathname: string) => /^\/blog(\/|$)/.test(stripEnglishPrefix(pathname));
+
 export const localizedPath = (pathname: string, language: SiteLanguage) =>
-  language === 'en' ? withEnglishPrefix(pathname) : stripEnglishPrefix(pathname);
+  language === 'en' && hasEnglishSection(pathname) ? withEnglishPrefix(pathname) : stripEnglishPrefix(pathname);
+
+/** Alternativa linguistica dichiarata nell'head (hreflang): unica fonte per il selettore lingua. */
+export const declaredAlternateHref = (language: SiteLanguage): string | undefined => {
+  if (typeof document === 'undefined') return undefined;
+  const hreflang = language === 'en' ? 'en-US' : 'it-IT';
+  const link = document.querySelector<HTMLLinkElement>(`link[rel="alternate"][hreflang="${hreflang}"]`);
+  if (!link?.href) return undefined;
+  const url = new URL(link.href);
+  return `${url.pathname}${window.location.search}${window.location.hash}`;
+};
 
 export const currentSiteLanguage = (): SiteLanguage => {
   if (typeof window === 'undefined') return 'it';

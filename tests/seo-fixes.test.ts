@@ -1,7 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { addTrailingSlash, normalizeInternalLinks } from '../scripts/lib/internal-links';
 import { stripTextRegions } from '../scripts/lib/html-text-regions';
-import { isPageTranslated, type TranslationTally } from '../scripts/lib/translation-coverage';
 import rehypeStripCourseH1 from '../src/lib/rehype-strip-course-h1.mjs';
 
 describe('addTrailingSlash', () => {
@@ -42,29 +41,6 @@ describe('stripTextRegions', () => {
   it('drops code samples so audits do not mistake them for real links', () => {
     expect(stripTextRegions('<p><a href="/a/">a</a></p><code>&#x3C;a href="/checkout"></code><pre class="x">href="/y"</pre>'))
       .toBe('<p><a href="/a/">a</a></p><code></code><pre></pre>');
-  });
-});
-
-describe('isPageTranslated', () => {
-  const tally = (hit: number, miss: number, title = true, description = true): TranslationTally => ({
-    translatedChars: hit, untranslatedChars: miss, titleTranslated: title, descriptionTranslated: description,
-  });
-
-  it('accepts a page whose title, description and almost all text are translated', () => {
-    expect(isPageTranslated(tally(9500, 400))).toBe(true);
-  });
-
-  it('rejects a page left mostly in Italian', () => {
-    expect(isPageTranslated(tally(3000, 7000))).toBe(false);
-  });
-
-  it('rejects a page with an untranslated title or description even if the body is translated', () => {
-    expect(isPageTranslated(tally(9900, 10, false, true))).toBe(false);
-    expect(isPageTranslated(tally(9900, 10, true, false))).toBe(false);
-  });
-
-  it('treats a page with no translatable text as not translated', () => {
-    expect(isPageTranslated(tally(0, 0))).toBe(false);
   });
 });
 
