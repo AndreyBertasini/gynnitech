@@ -609,9 +609,9 @@ export const COURSE_MODULES: CourseModule[] = [
     objective: 'Far capire davvero come si progetta un sistema analitico scalabile.',
     phase: 'stack',
     prerequisites: ['Moduli 2-3 consigliati: tracking e metriche.', 'Comfort minimo con tabelle, pipeline batch e concetti di modellazione dati.'],
-    seoTitle: 'Data warehouse e modellazione analitica | GinnyTech',
+    seoTitle: 'Corso data warehouse: modellazione dimensionale e SCD',
     seoDescription:
-      'OLTP vs OLAP, dimensional modeling, snapshot, SCD, batch pipelines e trade-off architetturali per warehouse moderni.',
+      'Progetta un data warehouse: OLTP vs OLAP, schema a stella, SCD, snapshot e trade-off di architettura. Lezioni gratuite con esempi e un caso studio.',
     seoKeywords: ['data warehouse', 'analytical architecture', 'dimensional modeling', 'olap', 'scd', 'snapshot'],
     icon: 'Server',
     color: 'from-slate-400 to-zinc-500',
@@ -985,9 +985,9 @@ export const COURSE_MODULES: CourseModule[] = [
     objective: 'Trasformare i dati grezzi in modelli affidabili, riusabili e governati.',
     phase: 'rigor',
     prerequisites: ['Moduli 9, 10 e 14 consigliati: warehouse, lakehouse e SQL avanzato.', 'Conoscenza base di git, modeling e workflow di trasformazione dati.'],
-    seoTitle: 'Analytics engineering con dbt | GinnyTech',
+    seoTitle: 'Corso analytics engineering con dbt: modelli, test, metriche',
     seoDescription:
-      'Layering, dbt fundamentals, tests, contracts, lineage, semantic layer, deployment e governance per analytics engineering moderno.',
+      'Impara analytics engineering con dbt: staging, marts, test, contratti dati, lineage e semantic layer. Lezioni gratuite con esempi su dati di marketing.',
     seoKeywords: ['analytics engineering', 'dbt', 'semantic layer', 'data contracts', 'lineage', 'reverse etl'],
     icon: 'GitMerge',
     color: 'from-emerald-500 to-blue-500',

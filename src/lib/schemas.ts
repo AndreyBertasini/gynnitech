@@ -14,6 +14,8 @@ export const blogSchema = z.object({
     author: z.string().default('Andrii Dyshkantiuk'),
     image: z.string().optional(),
     faqSchema: z.array(faqSchemaEntry).optional(),
+    // Title completo del tag <title> (≤ 60 caratteri). Se manca si usa `${title} | Articoli GinnyTech`.
+    seoTitle: z.string().max(60).optional(),
     // noindex,follow: articolo corto (<800 parole) e quasi duplicato di un altro (vedi docs/seo/fase-2-*.csv).
     // Si toglie quando l'articolo viene ampliato o fuso con quello simile.
     noindex: z.boolean().optional(),
