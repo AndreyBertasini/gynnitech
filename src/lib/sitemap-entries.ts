@@ -12,7 +12,7 @@ import { execFileSync } from 'node:child_process';
 import { getCollection, type CollectionEntry } from 'astro:content';
 import { SITE_URL } from '../consts';
 import { getPublishedEnPosts } from './i18n-pages';
-import { isLessonIndexable } from './indexability';
+import { isLessonIndexable, isPostIndexable } from './indexability';
 
 export type SitemapEntry = { path: string; lastmod?: Date };
 
@@ -73,7 +73,7 @@ export const italianSitemapEntries = async (): Promise<SitemapEntry[]> => {
     modules.set(module, [...(modules.get(module) ?? []), lessonDate(lesson)]);
   }
 
-  const blogPosts = blog.map((post) => ({ path: `/blog/${stripExt(post.id)}/`, lastmod: blogDate(post) }));
+  const blogPosts = blog.filter(isPostIndexable).map((post) => ({ path: `/blog/${stripExt(post.id)}/`, lastmod: blogDate(post) }));
   const lessonEntries = lessons.map((lesson) => ({ path: `/course/${stripExt(lesson.id)}/`, lastmod: lessonDate(lesson) }));
   const moduleEntries = [...modules].map(([module, dates]) => ({ path: `/course/${module}/`, lastmod: latest(dates) }));
 

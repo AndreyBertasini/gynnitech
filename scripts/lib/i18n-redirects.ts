@@ -55,5 +55,9 @@ export const buildI18nRedirects = (posts: EnBlogRecord[], italianTopLevel: strin
   return rules;
 };
 
+/** Lezioni spostate di modulo (stesso slug): src/data/moved-urls.json, vecchio URL → URL attuale. */
+export const movedUrlRules = (moved: Record<string, string>): RedirectRule[] =>
+  Object.entries(moved).flatMap(([from, to]) => both(from, to));
+
 export const formatRedirects = (rules: RedirectRule[]) =>
   rules.map((r) => `${r.from.padEnd(70)} ${r.to.padEnd(60)} 301`).join('\n');
