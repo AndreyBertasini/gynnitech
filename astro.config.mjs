@@ -94,7 +94,14 @@ export default defineConfig({
       },
       expressiveCode: {
         themes: ['github-dark', 'github-light'],
+        // Le pagine /course non hanno data-theme e sono solo scure: senza questo, chi ha il
+        // sistema in tema chiaro riceverebbe i colori github-light su fondo scuro.
+        useDarkModeMediaQuery: false,
         styleOverrides: {
+          // Aspetto storico dei blocchi di codice delle lezioni (prima in custom.css con !important).
+          codeBackground: ({ theme }) => (theme.type === 'dark' ? '#13151a' : theme.bg),
+          borderColor: ({ theme }) => (theme.type === 'dark' ? '#2a2d37' : theme.colors['editor.lineHighlightBorder'] ?? '#d0d7de'),
+          borderRadius: '0.5rem',
           codeFontFamily: "'Geist Mono', 'Menlo', 'Monaco', 'Courier New', monospace",
           uiFontFamily: "'Inter', sans-serif",
         },
